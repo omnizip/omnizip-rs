@@ -25,15 +25,15 @@
 pub const TOP: u32 = 0x0100_0000;
 
 /// Total probability range for bit models (`2^11`).
-pub const BIT_MODEL_TOTAL: u32 = 0x800;
+pub const BIT_MODEL_TOTAL: u16 = 0x800;
 
 /// Number of bits to shift on each probability update. Smaller = faster
 /// adaptation; larger = more stable.
-pub const MOVE_BITS: u32 = 5;
+pub const MOVE_BITS: u8 = 5;
 
 /// Initial probability value for a fresh bit model (`BIT_MODEL_TOTAL / 2`,
 /// i.e. 50% probability).
-pub const INIT_PROBS: u32 = BIT_MODEL_TOTAL >> 1;
+pub const INIT_PROBS: u16 = BIT_MODEL_TOTAL >> 1;
 
 /// Number of bits used in direct-bit encoding.
 pub const NUM_DIRECT_BITS: u32 = 8;

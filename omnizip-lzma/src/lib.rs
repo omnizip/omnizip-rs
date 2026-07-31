@@ -9,17 +9,22 @@
 //!
 //! ## Status
 //!
-//! Phase A in progress. Constants module ported; decoder + range coder +
-//! match finder pending (see TODO.omnizip-rs/10-lzma-phase-a-decoder.md).
+//! Phase A in progress. Constants, state machine, and bit model ported;
+//! range decoder + match finder pending (see TODO.spec/02-lzma-range-coder.md
+//! and TODO.omnizip-rs/10-lzma-phase-a-decoder.md).
 
 #![forbid(unsafe_code)]
 #![warn(clippy::pedantic)]
 
+pub mod bit_model;
 pub mod constants;
+pub mod state;
 
 use std::fmt;
 
+pub use bit_model::{BitModel, BitModelArray};
 pub use constants::{COMPRESSION_LEVEL_MAX, COMPRESSION_LEVEL_MIN};
+pub use state::{LzmaState, LIT_STATES, MATCH_STATES, NUM_STATES, REP_STATES, SHORT_REP_STATES};
 
 /// LZMA compression level 0–9, matching `xz` presets.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
