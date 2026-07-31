@@ -25,6 +25,10 @@ pub enum OmnizipError {
         expected: u32,
         actual: usize,
     },
+    /// Input is structurally invalid before decode even begins (e.g.,
+    /// `expected_len` exceeds `usize`, or a length field is impossibly
+    /// large for the available input).
+    Corrupt { codec: CodecId, reason: String },
 }
 
 impl std::fmt::Display for OmnizipError {
@@ -56,6 +60,9 @@ impl std::fmt::Display for OmnizipError {
                 f,
                 "codec {codec}: length mismatch — expected {expected}, got {actual}"
             ),
+            Self::Corrupt { codec, reason } => {
+                write!(f, "codec {codec}: corrupt — {reason}")
+            }
         }
     }
 }

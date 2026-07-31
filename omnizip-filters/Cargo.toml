@@ -1,0 +1,18 @@
+[package]
+name = "omnizip-filters"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Pure-Rust preprocessing filters — delta and BCJ (executable code) transforms"
+
+[lib]
+name = "omnizip_filters"
+path = "src/lib.rs"
+
+[dependencies]
+omnizip-codecs.workspace = true
+
+[lints]
+workspace = true

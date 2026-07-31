@@ -1,5 +1,14 @@
 [workspace]
-members = ["omnizip-codecs", "omnizip-lzma", "omnizip-zstd"]
+members = [
+    "omnizip-codecs",
+    "omnizip-lzma",
+    "omnizip-zstd",
+    "omnizip-snappy",
+    "omnizip-lz4",
+    "omnizip-deflate",
+    "omnizip-brotli",
+    "omnizip-filters",
+]
 resolver = "2"
 
 [workspace.package]
@@ -16,3 +25,10 @@ unsafe_code = "forbid"
 
 [workspace.lints.clippy]
 pedantic = "warn"
+
+[workspace.dependencies]
+omnizip-codecs = { path = "omnizip-codecs", version = "0.1.0" }
+brotli = "8.0"
+lz4_flex = { version = "0.11", default-features = false, features = ["std"] }
+miniz_oxide = "0.8"
+snap = "1.1"
