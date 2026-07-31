@@ -1,0 +1,15 @@
+[package]
+name = "omnizip-lzma"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Pure-Rust LZMA / LZMA2 / XZ encoder + decoder — port of omnizip's Ruby reference"
+
+[lib]
+name = "omnizip_lzma"
+path = "src/lib.rs"
+
+[lints]
+workspace = true
