@@ -8,12 +8,22 @@
 //!
 //! ## Status
 //!
-//! Skeleton. The decoder port (Phase A) lands first; see PLAN.md.
+//! Phase A in progress. Constants module ported; frame header + FSE
+//! bitstream pending (see TODO.spec/10-zstd-frame.md and
+//! TODO.spec/14-zstd-fse.md).
 
 #![forbid(unsafe_code)]
 #![warn(clippy::pedantic)]
 
+pub mod constants;
+
 use std::fmt;
+
+pub use constants::{
+    BLOCK_HEADER_SIZE, BLOCK_MAX_SIZE, BLOCK_TYPE_COMPRESSED, BLOCK_TYPE_RAW, BLOCK_TYPE_RLE,
+    DEFAULT_LEVEL, FSE_MAX_ACCURACY_LOG, FSE_MIN_ACCURACY_LOG, MAGIC_BYTES, MAGIC_NUMBER,
+    MAX_LEVEL, MIN_LEVEL, WINDOW_LOG_MAX, WINDOW_LOG_MIN,
+};
 
 /// ZSTD compression level. Mirrors the reference `zstd` encoder scale.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
