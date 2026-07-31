@@ -9,12 +9,17 @@
 //!
 //! ## Status
 //!
-//! Skeleton. The decoder port (Phase A) lands first; see PLAN.md.
+//! Phase A in progress. Constants module ported; decoder + range coder +
+//! match finder pending (see TODO.omnizip-rs/10-lzma-phase-a-decoder.md).
 
 #![forbid(unsafe_code)]
 #![warn(clippy::pedantic)]
 
+pub mod constants;
+
 use std::fmt;
+
+pub use constants::{COMPRESSION_LEVEL_MAX, COMPRESSION_LEVEL_MIN};
 
 /// LZMA compression level 0–9, matching `xz` presets.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
@@ -25,10 +30,13 @@ impl LzmaLevel {
     ///
     /// # Panics
     ///
-    /// Panics if `level > 9`.
+    /// Panics if `level > 9` ([`COMPRESSION_LEVEL_MAX`]).
     #[must_use]
     pub fn new(level: u8) -> Self {
-        assert!(level <= 9, "LZMA level must be 0..=9, got {level}");
+        assert!(
+            level <= COMPRESSION_LEVEL_MAX,
+            "LZMA level must be 0..={COMPRESSION_LEVEL_MAX}, got {level}",
+        );
         Self(level)
     }
 
@@ -41,13 +49,13 @@ impl LzmaLevel {
     /// `xz -6` (the `xz` default).
     #[must_use]
     pub const fn default() -> Self {
-        Self(6)
+        Self(constants::COMPRESSION_LEVEL_DEFAULT)
     }
 
     /// `xz -9` (best ratio).
     #[must_use]
     pub const fn best() -> Self {
-        Self(9)
+        Self(COMPRESSION_LEVEL_MAX)
     }
 
     /// Numeric level 0–9.
@@ -112,7 +120,7 @@ mod tests {
     #[test]
     fn level_clamps_and_displays() {
         assert_eq!(LzmaLevel::new(0).to_string(), "lzma-0");
-        assert_eq!(LzmaLevel::default().to_string(), "lzma-6");
+        assert_eq!(LzmaLevel::default().to_string(), "lzma-5");
         assert_eq!(LzmaLevel::best().to_string(), "lzma-9");
     }
 
