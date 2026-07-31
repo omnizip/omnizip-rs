@@ -1,0 +1,19 @@
+[package]
+name = "omnizip-lz4"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Pure-Rust LZ4 codec (fast + HC variants) — wraps lz4_flex behind the omnizip Codec trait"
+
+[lib]
+name = "omnizip_lz4"
+path = "src/lib.rs"
+
+[dependencies]
+omnizip-codecs.workspace = true
+lz4_flex.workspace = true
+
+[lints]
+workspace = true
