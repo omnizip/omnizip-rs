@@ -1,5 +1,5 @@
 [workspace]
-members = ["omnizip-lzma", "omnizip-zstd"]
+members = ["omnizip-codecs", "omnizip-lzma", "omnizip-zstd"]
 resolver = "2"
 
 [workspace.package]

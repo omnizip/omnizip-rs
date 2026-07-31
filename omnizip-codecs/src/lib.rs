@@ -1,0 +1,29 @@
+//! omnizip-codecs — shared `Codec` trait + `CodecRegistry`.
+//!
+//! Every codec crate in the omnizip-rs workspace implements [`Codec`] and
+//! registers it with a [`CodecRegistry`]. consumers (`LimniFS`, others)
+//! either use [`CodecRegistry::default_pure_rust`] or construct a custom
+//! registry with a subset of codecs.
+//!
+//! Adding a codec = one new file + one `register()` call. Dispatch code
+//! never changes. This is the open/closed principle applied to codecs.
+//!
+//! ## Determinism
+//!
+//! Every codec MUST be deterministic: same input + same level ⇒ byte-
+//! identical output across runs, machines, and Rust versions. A codec
+//! that produces non-deterministic output breaks content-addressed
+//! storage (e.g., `LimniFS`'s `DropId = BLAKE3(plaintext)`).
+
+#![forbid(unsafe_code)]
+#![warn(clippy::pedantic)]
+
+mod codec;
+mod error;
+mod level;
+mod registry;
+
+pub use codec::{Codec, CodecId};
+pub use error::OmnizipError;
+pub use level::CompressionLevel;
+pub use registry::CodecRegistry;

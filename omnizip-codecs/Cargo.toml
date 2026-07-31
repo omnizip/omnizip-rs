@@ -1,0 +1,15 @@
+[package]
+name = "omnizip-codecs"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Shared Codec trait + CodecRegistry for the omnizip-rs workspace"
+
+[lib]
+name = "omnizip_codecs"
+path = "src/lib.rs"
+
+[lints]
+workspace = true
