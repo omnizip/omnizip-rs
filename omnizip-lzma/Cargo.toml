@@ -6,6 +6,8 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Pure-Rust LZMA / LZMA2 / XZ encoder + decoder — port of omnizip's Ruby reference"
+keywords = ["compression", "lzma", "xz", "lzip", "lzma2"]
+categories = ["compression"]
 
 [lib]
 name = "omnizip_lzma"

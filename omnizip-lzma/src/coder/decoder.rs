@@ -16,7 +16,6 @@
 //! posSlot - 1 + m` where `SpecPos = -4`).
 
 #![forbid(unsafe_code)]
-#![warn(clippy::pedantic)]
 
 use crate::bit_model::BitModel;
 use crate::LzmaError;

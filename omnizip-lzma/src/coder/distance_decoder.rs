@@ -18,7 +18,6 @@
 //! distance.
 
 #![forbid(unsafe_code)]
-#![warn(clippy::pedantic)]
 
 use crate::bit_model::BitModel;
 use crate::coder::decoder::{decode_reverse_tree, decode_tree};

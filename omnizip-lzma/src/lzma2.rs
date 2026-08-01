@@ -27,7 +27,9 @@
 //! range-coder initialisation).
 
 #![forbid(unsafe_code)]
-#![warn(clippy::pedantic)]
+// `decode_lzma2_stream` is a single-pass state machine over chunk
+// control bytes; splitting it would scatter the reset-level dispatch.
+#![allow(clippy::too_many_lines)]
 
 use crate::decoder::Lzma1Decoder;
 use crate::LzmaError;
@@ -39,13 +41,14 @@ use crate::LzmaError;
 ///
 /// Returns [`LzmaError::Corrupt`] on truncation, invalid control
 /// bytes, or any underlying LZMA1 decode error.
+#[allow(clippy::similar_names)]
 pub fn decode_lzma2_stream(input: &[u8]) -> Result<(Vec<u8>, usize), LzmaError> {
     let mut output = Vec::new();
     let mut cursor = 0usize;
     let mut decoder: Option<Lzma1Decoder> = None;
-    let mut current_lc: u32 = 3;
-    let mut current_lp: u32 = 0;
-    let mut current_pb: u32 = 2;
+    let mut lc: u32 = 3;
+    let mut lp: u32 = 0;
+    let mut pb: u32 = 2;
     let dict_size: u32 = 1 << 24;
 
     loop {
@@ -118,20 +121,22 @@ pub fn decode_lzma2_stream(input: &[u8]) -> Result<(Vec<u8>, usize), LzmaError> 
             }
             let props = u32::from(input[cursor]);
             cursor += 1;
-            let pb_new = props / (9 * 5);
-            let remainder = props - (pb_new * 9 * 5);
-            let lp_new = remainder / 9;
-            let lc_new = remainder - (lp_new * 9);
-            if lc_new + lp_new > 4 {
+            let pb_in = props / (9 * 5);
+            let remainder = props - (pb_in * 9 * 5);
+            // LZMA properties decode: `lc`, `lp`, `pb` are domain names
+            // shared with the outer state, so they intentionally repeat.
+            let lp_in = remainder / 9;
+            let lc_in = remainder - (lp_in * 9);
+            if lc_in + lp_in > 4 {
                 return Err(LzmaError::Corrupt {
                     reason: format!(
-                        "LZMA2 properties lc({lc_new}) + lp({lp_new}) > 4"
+                        "LZMA2 properties lc({lc_in}) + lp({lp_in}) > 4"
                     ),
                 });
             }
-            current_lc = lc_new;
-            current_lp = lp_new;
-            current_pb = pb_new;
+            lc = lc_in;
+            lp = lp_in;
+            pb = pb_in;
         }
 
         if cursor + compressed_size > input.len() {
@@ -162,7 +167,7 @@ pub fn decode_lzma2_stream(input: &[u8]) -> Result<(Vec<u8>, usize), LzmaError> 
             1 => {
                 // Reset state (models + rep distances), keep lc/lp/pb.
                 let d = decoder.get_or_insert_with(|| {
-                    Lzma1Decoder::new(current_lc, current_lp, current_pb, dict_size)
+                    Lzma1Decoder::new(lc, lp, pb, dict_size)
                 });
                 d.reset_state();
                 d.decode_continuation(chunk_data, &mut output, uncompressed_size)?;
@@ -174,7 +179,7 @@ pub fn decode_lzma2_stream(input: &[u8]) -> Result<(Vec<u8>, usize), LzmaError> 
                     output.clear();
                 }
                 let mut d =
-                    Lzma1Decoder::new(current_lc, current_lp, current_pb, dict_size);
+                    Lzma1Decoder::new(lc, lp, pb, dict_size);
                 d.reset_state();
                 d.decode_continuation(chunk_data, &mut output, uncompressed_size)?;
                 decoder = Some(d);

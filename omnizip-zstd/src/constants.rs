@@ -6,7 +6,6 @@
 //! that every ZSTD implementation must agree on.
 
 #![forbid(unsafe_code)]
-#![warn(clippy::pedantic)]
 
 // ── Frame magic ──────────────────────────────────────────────────────────
 
@@ -134,7 +133,7 @@ pub const MATCH_LENGTH_TABLE: [(u32, u8); 64] = [
 // These match the C reference zstd source (lib/decompress/zstd_decompress_block.c).
 // Uses `i16` to support `-1` low-probability sentinels.
 
-/// Predefined literals-length distribution (accuracy_log = 6, table_size = 64).
+/// Predefined literals-length distribution (`accuracy_log` = 6, `table_size` = 64).
 pub const PREDEFINED_LL_DISTRIBUTION: [i16; 36] = [
     4, 3, 2, 2, 2, 2, 2, 2,
     2, 2, 2, 2, 2, 1, 1, 1,
@@ -143,7 +142,7 @@ pub const PREDEFINED_LL_DISTRIBUTION: [i16; 36] = [
     -1, -1, -1, -1,
 ];
 
-/// Predefined match-length distribution (accuracy_log = 6, table_size = 64).
+/// Predefined match-length distribution (`accuracy_log` = 6, `table_size` = 64).
 pub const PREDEFINED_ML_DISTRIBUTION: [i16; 52] = [
     1, 4, 3, 2, 2, 2, 2, 2,
     2, 1, 1, 1, 1, 1, 1, 1,
@@ -154,7 +153,7 @@ pub const PREDEFINED_ML_DISTRIBUTION: [i16; 52] = [
     -1, -1, -1, -1,
 ];
 
-/// Predefined offset distribution (accuracy_log = 5, table_size = 32).
+/// Predefined offset distribution (`accuracy_log` = 5, `table_size` = 32).
 /// 27 positive entries + 5 `-1` sentinels = 32 cells.
 pub const PREDEFINED_OFFSET_DISTRIBUTION: [i16; 32] = [
     1, 1, 1, 1, 1, 1, 2, 2,

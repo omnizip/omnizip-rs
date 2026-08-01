@@ -6,7 +6,6 @@
 //! the LZMA2 / XZ-container encoder; Phase C will add the optimal parser.
 
 #![forbid(unsafe_code)]
-#![warn(clippy::pedantic)]
 
 use omnizip_codecs::{Codec, CodecId, CompressionLevel, OmnizipError};
 
@@ -33,9 +32,9 @@ impl Default for LzmaCodec {
     }
 }
 
-fn map_error(codec: CodecId, e: LzmaError) -> OmnizipError {
+fn map_error(e: &LzmaError) -> OmnizipError {
     OmnizipError::DecodeFailed {
-        codec,
+        codec: CodecId::LZMA,
         reason: e.to_string(),
     }
 }
@@ -63,7 +62,7 @@ impl Codec for LzmaCodec {
     }
 
     fn decompress(&self, compressed: &[u8], expected_len: u32) -> Result<Vec<u8>, OmnizipError> {
-        let decoded = lzma_alone_decompress(compressed).map_err(|e| map_error(CodecId::LZMA, e))?;
+        let decoded = lzma_alone_decompress(compressed).map_err(|e: LzmaError| map_error(&e))?;
         let expected = usize::try_from(expected_len).map_err(|_| OmnizipError::Corrupt {
             codec: CodecId::LZMA,
             reason: format!("expected_len {expected_len} exceeds usize"),

@@ -2,7 +2,6 @@
 //! headers, block headers, and the lzip trailing checksum.
 
 #![forbid(unsafe_code)]
-#![warn(clippy::pedantic)]
 
 use std::sync::OnceLock;
 

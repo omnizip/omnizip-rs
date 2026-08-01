@@ -26,7 +26,6 @@
 //! ```
 
 #![forbid(unsafe_code)]
-#![warn(clippy::pedantic)]
 
 use crate::constants::{MAGIC_BYTES, SKIPPABLE_MAGIC_BASE, SKIPPABLE_MAGIC_MASK};
 use crate::ZstdError;
@@ -110,14 +109,9 @@ impl FrameHeader {
             // When FCS is 1 byte, it's stored directly; 2/4/8 bytes add
             // a 256-byte implied offset for the 1/2/4-byte variants.
             let raw = le_uint(&input[pos..pos + fcs_size]);
-            let adjusted = if fcs_size == 1 {
-                raw
-            } else if fcs_size == 2 {
-                raw.wrapping_add(256)
-            } else if fcs_size == 4 {
-                raw.wrapping_add(256)
-            } else {
-                raw
+            let adjusted = match fcs_size {
+                2 | 4 => raw.wrapping_add(256),
+                _ => raw,
             };
             content_size = Some(adjusted);
             pos += fcs_size;
@@ -160,19 +154,19 @@ fn parse_window_descriptor(byte: u8) -> (u8, u64) {
     (window_log, window_base + window_add)
 }
 
-/// Field size of the Dictionary_ID for a given flag value.
+/// Field size of the `Dictionary_ID` for a given flag value.
 const fn dictionary_id_size(flag: u8) -> usize {
     match flag {
-        0 => 0,
         1 => 1,
         2 => 2,
         3 => 4,
-        // Unreachable: flag is masked to 2 bits on read.
+        // 0 and any out-of-range value contribute no bytes. (The flag
+        // is masked to 2 bits upstream, so the wildcard is unreachable.)
         _ => 0,
     }
 }
 
-/// Field size of Frame_Content_Size, depending on the FCS flag and the
+/// Field size of `Frame_Content_Size`, depending on the FCS flag and the
 /// single-segment bit (RFC 8878 §3.1.1.1.5).
 const fn content_size_size(fcs_flag: u8, single_segment: bool) -> usize {
     if single_segment {
@@ -185,10 +179,10 @@ const fn content_size_size(fcs_flag: u8, single_segment: bool) -> usize {
         }
     } else {
         match fcs_flag {
-            0 => 0,
             1 => 2,
             2 => 4,
             3 => 8,
+            // 0 and any out-of-range value contribute no bytes.
             _ => 0,
         }
     }

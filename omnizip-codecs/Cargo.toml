@@ -6,6 +6,8 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Shared Codec trait + CodecRegistry for the omnizip-rs workspace"
+keywords = ["compression", "codec", "registry", "trait"]
+categories = ["compression", "api-bindings"]
 
 [lib]
 name = "omnizip_codecs"

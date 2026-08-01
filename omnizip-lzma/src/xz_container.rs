@@ -23,7 +23,6 @@
 //! of the trailing check are deferred to a follow-up.
 
 #![forbid(unsafe_code)]
-#![warn(clippy::pedantic)]
 
 use crate::crc32::crc32;
 use crate::lzma2::decode_lzma2_stream;
@@ -191,14 +190,13 @@ fn decode_block(input: &[u8], check_size: usize) -> Result<(Vec<u8>, usize), Lzm
         cursor += props_size as usize;
 
         match filter_id {
-            0x21 => { /* LZMA2 — handled below */ }
+            0x21 | 0x03 => {
+                // LZMA2 (0x21) is handled below by the LZMA2 driver.
+                // Delta (0x03) is accepted but not yet implemented.
+            }
             0x04..=0x0A => {
                 // BCJ filters. Store the ID for post-LZMA2 reverse transform.
                 bcj_filter = Some(filter_id);
-            }
-            0x03 => {
-                // Delta filter. Properties size = 1 (distance byte).
-                // Not yet fully implemented but accepted for decode.
             }
             _ => {
                 return Err(LzmaError::Corrupt {
@@ -296,10 +294,10 @@ fn bcj_x86_reverse(data: &[u8]) -> Vec<u8> {
 /// Number of bytes used by the trailing check, given the check type.
 fn check_size_bytes(check_type: u8) -> usize {
     match check_type {
-        0x00 => 0,                 // None
         0x01 | 0x02 => 4,          // CRC32
         0x03 | 0x04 => 8,          // CRC64
         0x0A => 32,                // SHA-256
+        // 0x00 (None) and any reserved value contribute no check bytes.
         _ => 0,
     }
 }

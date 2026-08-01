@@ -65,7 +65,10 @@ fn run_parity(filename: &str) {
         }
     };
 
-    let rust = decompress(&compressed, oracle.as_ref().map_or(0, Vec::len) as u32);
+    let rust = decompress(
+        &compressed,
+        u32::try_from(oracle.as_ref().map_or(0, Vec::len)).unwrap_or(u32::MAX),
+    );
 
     match (rust, oracle, is_bad) {
         (Ok(rust), Some(oracle), false) => assert_eq!(

@@ -19,7 +19,6 @@
 //! public API.
 
 #![forbid(unsafe_code)]
-#![warn(clippy::pedantic)]
 
 use crate::ZstdError;
 
@@ -68,7 +67,7 @@ impl<'a> BitStream<'a> {
         // Must cast to u32 for leading_zeros to match C's ZSTD_highbit32.
         let last_byte = u32::from(*data.last().unwrap_or(&0));
         let end_mark = if last_byte > 0 {
-            8 - (31 - last_byte.leading_zeros())
+            8 - last_byte.ilog2()
         } else {
             0
         };
@@ -88,6 +87,7 @@ impl<'a> BitStream<'a> {
         (self.data.len() * 8).saturating_sub(self.bits_consumed as usize)
     }
 
+    #[must_use] 
     pub fn bit_position(&self) -> usize {
         self.remaining_bits()
     }

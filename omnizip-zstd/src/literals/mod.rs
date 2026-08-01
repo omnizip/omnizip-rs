@@ -14,7 +14,7 @@
 //!   bits 0-5   Size_Format (encoding depends on block_type; see below)
 //! ```
 //!
-//! Size_Format encodings (RFC 8878 §3.1.1.3.1.1):
+//! `Size_Format` encodings (RFC 8878 §3.1.1.3.1.1):
 //!
 //! ```text
 //! Size_Format | Header_Size | Regen_Size
@@ -30,7 +30,6 @@
 //! 4-byte header shape.
 
 #![forbid(unsafe_code)]
-#![warn(clippy::pedantic)]
 
 use crate::constants::{LITERALS_BLOCK_COMPRESSED, LITERALS_BLOCK_RAW,
                        LITERALS_BLOCK_RLE, LITERALS_BLOCK_TREELESS};
@@ -115,7 +114,7 @@ fn decode_size_format_raw_rle(header0: u8, input: &[u8]) -> Result<(u32, usize),
 
 // ── Per-block-type decoders ─────────────────────────────────────────────
 
-fn decode_raw<'t>(input: &'t [u8]) -> Result<LiteralsSection<'t>, ZstdError> {
+fn decode_raw(input: &[u8]) -> Result<LiteralsSection<'_>, ZstdError> {
     let (regen_size, header_size) = decode_size_format_raw_rle(input[0], input)?;
     let size = regen_size as usize;
     let end = header_size.checked_add(size).ok_or_else(|| ZstdError::Corrupt {
@@ -137,7 +136,7 @@ fn decode_raw<'t>(input: &'t [u8]) -> Result<LiteralsSection<'t>, ZstdError> {
     })
 }
 
-fn decode_rle<'t>(input: &'t [u8]) -> Result<LiteralsSection<'t>, ZstdError> {
+fn decode_rle(input: &[u8]) -> Result<LiteralsSection<'_>, ZstdError> {
     let (regen_size, header_size) = decode_size_format_raw_rle(input[0], input)?;
     let needed = header_size.checked_add(1).ok_or_else(|| ZstdError::Corrupt {
         reason: format!("rle literals header size {header_size} overflows usize"),
@@ -209,7 +208,7 @@ mod tests {
         let header1 = 0x10;
         let (size, hdr) =
             decode_size_format_raw_rle(header0, &[header0, header1]).unwrap();
-        assert_eq!(size, u32::try_from((0x1051u16 >> 4) & 0x0FFF).unwrap());
+        assert_eq!(size, u32::from((0x1051u16 >> 4) & 0x0FFF));
         assert_eq!(hdr, 2);
     }
 
@@ -231,7 +230,7 @@ mod tests {
 
     #[test]
     fn compressed_block_currently_unsupported() {
-        let header0 = (LITERALS_BLOCK_COMPRESSED << 6) | 0;
+        let header0 = LITERALS_BLOCK_COMPRESSED << 6;
         assert!(matches!(
             decode_literals_section(&[header0, 0, 0], None),
             Err(ZstdError::Unsupported { .. })
@@ -240,7 +239,7 @@ mod tests {
 
     #[test]
     fn treeless_block_currently_unsupported() {
-        let header0 = (LITERALS_BLOCK_TREELESS << 6) | 0;
+        let header0 = LITERALS_BLOCK_TREELESS << 6;
         assert!(matches!(
             decode_literals_section(&[header0, 0, 0], None),
             Err(ZstdError::Unsupported { .. })

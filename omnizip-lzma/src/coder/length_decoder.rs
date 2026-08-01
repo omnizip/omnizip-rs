@@ -13,7 +13,6 @@
 //!   shared high tree.
 
 #![forbid(unsafe_code)]
-#![warn(clippy::pedantic)]
 
 use crate::bit_model::BitModel;
 use crate::coder::decoder::decode_tree;

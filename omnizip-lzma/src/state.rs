@@ -12,7 +12,6 @@
 //! next decision — see [`crate::constants::NUM_STATES`].
 
 #![forbid(unsafe_code)]
-#![warn(clippy::pedantic)]
 
 /// Total number of LZMA states.
 pub const NUM_STATES: usize = 12;

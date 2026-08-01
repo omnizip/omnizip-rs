@@ -1,12 +1,22 @@
 //! Sequences section decoder + LZ77 executor (RFC 8878 §3.1.1.3.2 +
 //! §3.1.2.2.3).
 //!
-//! Ported with substantial rework from
-//! `omnizip/lib/omnizip/algorithms/zstandard/sequences.rb` (342 LOC, MIT,
-//! Ribose Inc.). The Ruby has multiple bugs in this code path — see
-//! BUGREPORTs 04 (FSE-from-stream stub), 05 (offset extra bits ignored),
-//! and the executor's repeat-offset rotation. The implementation here
-//! handles them correctly.
+//! Verified against the C reference `ZSTD_decodeSequence` in
+//! `~/src/external/zstd/lib/decompress/zstd_decompress_block.c:1235-1447`.
+//! Key invariants the C source imposes:
+//!
+//! - **State init order**: LL, OF, ML (C lines 1527–1529).
+//! - **Per-sequence decode**: look up LL/OF/ML symbols (no bits consumed),
+//!   then read extra bits in order **OF, ML, LL** (C lines 1393, 1417,
+//!   1427), then update FSE states in order **LL, ML, OF** (C lines
+//!   1437–1440). State updates are skipped for the last sequence.
+//! - **Offset resolution**: depends on `ofBits` (the table entry's
+//!   `nb_add_bits`) and `ll0 = (ll_base == 0)`:
+//!   - `ofBits > 1`: `offset = ofBase + read(ofBits)`; rotate normally.
+//!   - `ofBits == 0`: `offset = prevOffset[ll0]`; conditional slot 1
+//!     shuffle when `ll0 == 1`.
+//!   - `ofBits == 1`: `offset = ofBase + ll0 + read(1)`; complex
+//!     repeat-offset rotation with `prevOffset[0] - 1` special case.
 //!
 //! ## Section layout
 //!
@@ -14,21 +24,12 @@
 //! byte 0..2   number_of_sequences (1-3 bytes; 0 means "no sequences")
 //! byte 3      symbol_compression_modes:
 //!               bits 6-7 LL mode, bits 4-5 OF mode, bits 2-3 ML mode
-//!               (bits 0-1 are reserved)
 //! …           per-mode table data (for FSE / RLE modes)
 //! …           bitstream (consumed in reverse, contains the FSE-coded
 //!             LL / ML / OF symbols + their extra bits)
 //! ```
-//!
-//! ## Phase-A scope
-//!
-//! - PREDEFINED, RLE, and REPEAT modes are handled for all three
-//!   symbol streams.
-//! - FSE-from-stream mode is partially supported (the per-mode table
-//!   reader is not yet ported; falls back to Unsupported).
 
 #![forbid(unsafe_code)]
-#![warn(clippy::pedantic)]
 
 use crate::constants::{DEFAULT_REPEAT_OFFSETS, MODE_PREDEFINED, MODE_REPEAT, MODE_RLE};
 use crate::fse::BitStream;
@@ -36,17 +37,17 @@ use crate::predef_tables::{LL_PREDEF, ML_PREDEF, OF_PREDEF, PredefEntry,
     LL_ACCURACY_LOG, OF_ACCURACY_LOG, ML_ACCURACY_LOG};
 use crate::ZstdError;
 
-/// One decoded sequence: literal length, match length, offset (raw
-/// FSE symbol value; offset_extra_bits are folded in by the executor
-/// when applying repeat-offset rotation).
+/// One decoded sequence. `offset` is the resolved byte distance (the
+/// repeat-offset rotation has already been applied by the decoder).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Sequence {
     pub literal_length: u32,
     pub match_length: u32,
-    pub offset_symbol: u32,
+    pub offset: u32,
 }
 
-/// The decoded sequences section.
+/// The decoded sequences section. `sequences[i].offset` carries the
+/// resolved byte distance; the executor applies them directly.
 #[derive(Debug)]
 pub struct SequencesSection {
     pub sequences: Vec<Sequence>,
@@ -56,7 +57,8 @@ pub struct SequencesSection {
 
 /// Decode the sequences section. `previous_tables` carries the FSE
 /// tables from the previous compressed block in the same frame (for
-/// `MODE_REPEAT`).
+/// `MODE_REPEAT`). `executor` supplies the repeat-offset state and is
+/// updated in place as each sequence resolves its offset.
 ///
 /// # Errors
 ///
@@ -66,6 +68,7 @@ pub struct SequencesSection {
 pub fn decode_sequences_section(
     input: &[u8],
     _previous_tables: &(),
+    executor: &mut SequenceExecutor,
 ) -> Result<SequencesSection, ZstdError> {
     if input.is_empty() {
         return Err(ZstdError::Corrupt {
@@ -105,47 +108,44 @@ pub fn decode_sequences_section(
     // 4. Bitstream: everything left in `cursor` is the FSE bitstream.
     let mut bs = BitStream::new(cursor);
 
-    // 5. Init states in C source order: LL, OF, ML (NOT the RFC's
-    //    OF, ML, LL — the C source at zstd_decompress_block.c:1527-1529
-    //    is authoritative).
+    // 5. Init FSE states in C source order: LL, OF, ML
+    //    (zstd_decompress_block.c:1527-1529).
     let mut ll_state = init_state(&ll_tbl, &mut bs);
     let mut of_state = init_state(&of_tbl, &mut bs);
     let mut ml_state = init_state(&ml_tbl, &mut bs);
 
-    // 6. Decode sequences.
+    // 6. Decode sequences following ZSTD_decodeSequence exactly.
     let mut sequences = Vec::with_capacity(num_sequences as usize);
     for seq_idx in 0..num_sequences {
-        // Per the C reference (ZSTD_decodeSequence), the decode order
-        // for each sequence is:
-        //
-        // 1. Look up symbols from current states (no bits consumed).
-        // 2. Read extra bits in order: LL, OF, ML.
-        // 3. Update states in order: LL, OF, ML (each reads nb_bits
-        //    from the bitstream). For the LAST sequence, state updates
-        //    are skipped (no more symbols follow).
         let is_last = seq_idx == num_sequences - 1;
 
+        // (a) Symbol lookups — no bits consumed.
         let ll_e = lookup(&ll_tbl, ll_state);
         let of_e = lookup(&of_tbl, of_state);
         let ml_e = lookup(&ml_tbl, ml_state);
 
-        // Extra bits (C reference order: LL, OF, ML).
-        let ll_value = ll_e.base_val + bs.read_bits(u32::from(ll_e.nb_add_bits));
-        let of_value = of_e.base_val + bs.read_bits(u32::from(of_e.nb_add_bits));
-        let ml_value = ml_e.base_val + bs.read_bits(u32::from(ml_e.nb_add_bits));
+        // (b) Resolve the offset using the C reference's ofBits/ll0 logic.
+        //     This may read 0, 1, or `nb_add_bits` extra bits from the
+        //     bitstream and updates the executor's repeat-offset slots.
+        let ll0 = ll_e.base_val == 0;
+        let offset = executor.resolve_offset(of_e.base_val, of_e.nb_add_bits, ll0, &mut bs);
 
-        // State updates (C reference order: LL, OF, ML).
-        // Skip for the last sequence — no more symbols to decode.
+        // (c) Read ML extra bits, then LL extra bits (C: mlBits before llBits).
+        let match_length = ml_e.base_val + bs.read_bits(u32::from(ml_e.nb_add_bits));
+        let literal_length = ll_e.base_val + bs.read_bits(u32::from(ll_e.nb_add_bits));
+
+        // (d) State updates — order LL, ML, OF. Skipped for the last
+        //     sequence (no more symbols to decode).
         if !is_last {
             ll_state = u32::from(ll_e.next_state) + bs.read_bits(u32::from(ll_e.nb_bits));
-            of_state = u32::from(of_e.next_state) + bs.read_bits(u32::from(of_e.nb_bits));
             ml_state = u32::from(ml_e.next_state) + bs.read_bits(u32::from(ml_e.nb_bits));
+            of_state = u32::from(of_e.next_state) + bs.read_bits(u32::from(of_e.nb_bits));
         }
 
         sequences.push(Sequence {
-            literal_length: ll_value,
-            match_length: ml_value,
-            offset_symbol: of_value,
+            literal_length,
+            match_length,
+            offset,
         });
     }
 
@@ -196,7 +196,7 @@ fn get_table(
     }
 }
 
-/// Read accuracy_log bits to initialise the FSE state.
+/// Read `accuracy_log` bits to initialise the FSE state.
 fn init_state(tbl: &SeqTable, bs: &mut BitStream<'_>) -> u32 {
     let log = match tbl {
         SeqTable::Predefined(_, log) => *log,
@@ -206,7 +206,7 @@ fn init_state(tbl: &SeqTable, bs: &mut BitStream<'_>) -> u32 {
 }
 
 /// Look up a table entry at the given state.
-fn lookup<'a>(tbl: &'a SeqTable, state: u32) -> PredefEntry {
+fn lookup(tbl: &SeqTable, state: u32) -> PredefEntry {
     match tbl {
         SeqTable::Predefined(entries, _) => {
             let idx = (state as usize).min(entries.len() - 1);
@@ -217,8 +217,6 @@ fn lookup<'a>(tbl: &'a SeqTable, state: u32) -> PredefEntry {
 }
 
 /// Decode the sequence count (1-3 bytes per RFC §3.1.1.3.2.1).
-///
-/// Returns the count and the remaining input slice.
 fn read_sequence_count(input: &[u8]) -> Result<(u32, &[u8]), ZstdError> {
     if input.is_empty() {
         return Err(ZstdError::Corrupt {
@@ -245,6 +243,8 @@ fn read_sequence_count(input: &[u8]) -> Result<(u32, &[u8]), ZstdError> {
 /// slots across the entire frame (reset on each new frame).
 #[derive(Debug, Clone)]
 pub struct SequenceExecutor {
+    /// Repeat-offset slots, indexed as `prevOffset[0..=2]` in the C
+    /// reference. Defaults to `[1, 4, 8]` at frame start.
     pub repeat_offsets: [u32; 3],
 }
 
@@ -269,9 +269,68 @@ impl SequenceExecutor {
         self.repeat_offsets = DEFAULT_REPEAT_OFFSETS;
     }
 
+    /// Resolve an offset using the C reference's `ofBits`/`ll0` logic.
+    /// Updates `self.repeat_offsets` in place.
+    ///
+    /// - `of_base`: the FSE table entry's `base_val`.
+    /// - `of_bits`: the FSE table entry's `nb_add_bits`.
+    /// - `ll_base_is_zero`: `true` iff the LL base value is 0 (i.e. the
+    ///   sequence emits no literals before the match).
+    /// - `bs`: the FSE bitstream, used when `of_bits > 0`.
+    #[allow(clippy::similar_names)]
+    pub fn resolve_offset(
+        &mut self,
+        of_base: u32,
+        of_bits: u8,
+        ll_base_is_zero: bool,
+        bs: &mut BitStream<'_>,
+    ) -> u32 {
+        let ll0 = u32::from(ll_base_is_zero);
+        let prev = &mut self.repeat_offsets;
+
+        if of_bits > 1 {
+            // C: offset = ofBase + read(ofBits); rotate normally.
+            let offset = of_base + bs.read_bits(u32::from(of_bits));
+            prev[2] = prev[1];
+            prev[1] = prev[0];
+            prev[0] = offset;
+            offset
+        } else if of_bits == 0 {
+            // C: offset = prevOffset[ll0]; conditional slot-1 shuffle.
+            let offset = prev[ll0 as usize];
+            if ll0 == 1 {
+                prev[1] = prev[0];
+                prev[0] = offset;
+            }
+            offset
+        } else {
+            // of_bits == 1: offset = ofBase + ll0 + read(1).
+            let mut offset = of_base + ll0 + bs.read_bits(1);
+            let mut temp = match offset {
+                1 => prev[1],
+                3 => prev[0].saturating_sub(1),
+                _ if offset >= 2 => prev[2],
+                _ => prev[0],
+            };
+            if temp == 0 {
+                // C: `temp -= !temp` forces 0 → underflow → caught by executor.
+                temp = u32::MAX;
+            }
+            if offset != 1 {
+                prev[2] = prev[1];
+            }
+            prev[1] = prev[0];
+            prev[0] = temp;
+            offset = temp;
+            offset
+        }
+    }
+
     /// Execute `sequences` against the literal buffer, appending the
-    /// decoded output to `output`. Returns the number of bytes
-    /// appended.
+    /// decoded output to `output`. Returns the number of bytes appended.
+    ///
+    /// Each `Sequence.offset` is already the resolved byte distance
+    /// (the decoder applied repeat-offset rotation during decode).
     ///
     /// # Errors
     ///
@@ -293,16 +352,13 @@ impl SequenceExecutor {
                 let take = ll.min(literals.len().saturating_sub(lit_pos));
                 output.extend_from_slice(&literals[lit_pos..lit_pos + take]);
                 lit_pos += take;
-                // If `ll > remaining_literals`, the stream is technically
-                // corrupt; we silently copy what we have and let the
-                // size-validation step at the end catch the mismatch.
             }
 
-            // 2. Resolve offset: repeat-offset rotation for symbols ≤ 3.
-            let distance = self.resolve_offset(seq.offset_symbol);
-            if distance == 0 {
+            // 2. Validate the resolved offset against the current output.
+            let distance = seq.offset;
+            if distance == 0 || distance == u32::MAX {
                 return Err(ZstdError::Corrupt {
-                    reason: "match distance 0 is invalid".into(),
+                    reason: format!("invalid match distance {distance}"),
                 });
             }
             let distance_us = usize::try_from(distance).map_err(|_| ZstdError::Corrupt {
@@ -335,34 +391,6 @@ impl SequenceExecutor {
 
         Ok(output.len() - start_len)
     }
-
-    /// Resolve an offset symbol against the repeat-offset slots.
-    /// Symbol 0, 1, 2 → repeat_offsets[0, 1, 2] with rotation.
-    /// Symbol ≥ 3 → actual offset value; rotate slots.
-    fn resolve_offset(&mut self, offset_symbol: u32) -> u32 {
-        match offset_symbol {
-            0 => self.repeat_offsets[0],
-            1 => {
-                let r1 = self.repeat_offsets[1];
-                self.repeat_offsets[1] = self.repeat_offsets[0];
-                self.repeat_offsets[0] = r1;
-                r1
-            }
-            2 => {
-                let r2 = self.repeat_offsets[2];
-                self.repeat_offsets[2] = self.repeat_offsets[1];
-                self.repeat_offsets[1] = self.repeat_offsets[0];
-                self.repeat_offsets[0] = r2;
-                r2
-            }
-            actual => {
-                self.repeat_offsets[2] = self.repeat_offsets[1];
-                self.repeat_offsets[1] = self.repeat_offsets[0];
-                self.repeat_offsets[0] = actual;
-                actual
-            }
-        }
-    }
 }
 
 #[cfg(test)]
@@ -385,13 +413,14 @@ mod tests {
 
     #[test]
     fn empty_section_errors() {
-        assert!(decode_sequences_section(&[], &()).is_err());
+        let mut e = SequenceExecutor::new();
+        assert!(decode_sequences_section(&[], &(), &mut e).is_err());
     }
 
     #[test]
     fn zero_sequences_returns_empty() {
-        // byte 0 = 0 → no sequences.
-        let s = decode_sequences_section(&[0x00], &()).expect("decode");
+        let mut e = SequenceExecutor::new();
+        let s = decode_sequences_section(&[0x00], &(), &mut e).expect("decode");
         assert!(s.sequences.is_empty());
     }
 
@@ -411,40 +440,61 @@ mod tests {
     }
 
     #[test]
-    fn executor_handles_rle_match_via_repeat_offset_1() {
-        // Set up: output is "aaaa", then a sequence with LL=0, ML=3,
-        // offset_symbol=0 (repeat offset slot 0, default value 1).
-        // Expected: copy 3 bytes from offset 1 = "aaa" → output is "aaaaaaa".
+    fn resolve_offset_ofbits_zero_uses_prev_offset_zero() {
+        // Default repeat offsets [1, 4, 8]. With ll_base_is_zero=false
+        // (ll0=0), of_bits=0 → offset = prev[0] = 1.
         let mut e = SequenceExecutor::new();
-        let mut out = b"aaaa".to_vec();
-        let seq = Sequence {
-            literal_length: 0,
-            match_length: 3,
-            offset_symbol: 0, // repeat offset slot 0 (value 1)
-        };
-        e.execute(&[], std::slice::from_ref(&seq), &mut out).unwrap();
-        assert_eq!(out, b"aaaaaaa");
+        let mut bs = BitStream::new(&[]);
+        let off = e.resolve_offset(0, 0, false, &mut bs);
+        assert_eq!(off, 1);
+        // No rotation when ll0=0.
+        assert_eq!(e.repeat_offsets, [1, 4, 8]);
     }
 
     #[test]
-    fn executor_rotates_repeat_offsets_on_new_distance() {
+    fn resolve_offset_ofbits_zero_ll0_swaps_slot_0_and_1() {
+        // With ll_base_is_zero=true (ll0=1), of_bits=0 → offset = prev[1];
+        // then prev[1] = prev[0]; prev[0] = offset.
         let mut e = SequenceExecutor::new();
-        let mut out = b"abcdef".to_vec();
+        let mut bs = BitStream::new(&[]);
+        let off = e.resolve_offset(0, 0, true, &mut bs);
+        assert_eq!(off, 4); // prev[1]
+        assert_eq!(e.repeat_offsets, [4, 1, 8]); // slot 0 ← 4, slot 1 ← old slot 0
+    }
+
+    #[test]
+    fn resolve_offset_ofbits_two_reads_two_bits_and_rotates() {
+        // of_bits=2, of_base=5. Bitstream value 0b11 → offset = 5+3 = 8.
+        // After: prev = [8, 1, 4] (rotation pushes slot 0→1, slot 1→2).
+        let mut e = SequenceExecutor::new();
+        // Two-byte input with high bits set; we'll read 2 bits.
+        let mut bs = BitStream::new(&[0xFF, 0xFF]);
+        let off = e.resolve_offset(5, 2, false, &mut bs);
+        assert_eq!(off, 8);
+        assert_eq!(e.repeat_offsets, [8, 1, 4]);
+    }
+
+    #[test]
+    fn executor_rejects_zero_distance() {
+        let mut e = SequenceExecutor::new();
+        let mut out: Vec<u8> = Vec::new();
         let seq = Sequence {
             literal_length: 0,
-            match_length: 2,
-            offset_symbol: 10, // new distance 10
+            match_length: 1,
+            offset: 0,
         };
-        // Distance 10 > output.len() (6) → error.
         let err = e.execute(&[], std::slice::from_ref(&seq), &mut out).unwrap_err();
         assert!(matches!(err, ZstdError::Corrupt { .. }));
     }
 
     #[test]
-    fn of_predef_entry_0_is_repeat_offset() {
-        // The first entry of the OF predefined table must be a repeat
-        // offset (base_val ≤ 2).
-        assert!(crate::predef_tables::OF_PREDEF[0].base_val <= 2);
+    fn of_predef_has_one_zero_addbits_and_one_one_addbits_entry() {
+        // C reference: ofBits==0 (pure repeat) appears once, ofBits==1
+        // (1-bit special) appears once; all other entries have ofBits>1.
+        let zeros = OF_PREDEF.iter().filter(|e| e.nb_add_bits == 0).count();
+        let ones = OF_PREDEF.iter().filter(|e| e.nb_add_bits == 1).count();
+        assert_eq!(zeros, 1, "exactly one ofBits=0 entry");
+        assert_eq!(ones, 1, "exactly one ofBits=1 entry");
     }
 
     #[test]

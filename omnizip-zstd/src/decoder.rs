@@ -30,7 +30,6 @@
 //! The state is reset at the start of every frame.
 
 #![forbid(unsafe_code)]
-#![warn(clippy::pedantic)]
 
 use crate::constants::{MAGIC_NUMBER, SKIPPABLE_MAGIC_BASE, SKIPPABLE_MAGIC_MASK};
 use crate::frame::{BlockHeader, FrameHeader};
@@ -61,8 +60,8 @@ impl ZstdDecoder {
     ///
     /// Returns [`ZstdError::Corrupt`] on structural problems and
     /// [`ZstdError::Unsupported`] on not-yet-implemented features
-    /// (Huffman FSE-compressed weights, MODE_FSE sequence tables,
-    /// real XXHash32 verification).
+    /// (Huffman FSE-compressed weights, `MODE_FSE` sequence tables,
+    /// real `XXHash32` verification).
     pub fn decode_stream(&mut self, input: &[u8]) -> Result<Vec<u8>, ZstdError> {
         let mut output = Vec::new();
         let mut remaining = input;
@@ -226,9 +225,14 @@ impl ZstdDecoder {
         let literals = lit_section.literals;
         let after_literals = &block_input[lit_section.consumed..];
 
-        // 2. Sequences section.
-        let seq_section = decode_sequences_section(after_literals, &self.previous_fse_tables)?;
-        let _ = seq_section.fse_tables;
+        // 2. Sequences section. Pass the executor so offset resolution
+        //    can update repeat-offset slots inline during decode.
+        let seq_section = decode_sequences_section(
+            after_literals,
+            &self.previous_fse_tables,
+            &mut self.executor,
+        )?;
+        let () = seq_section.fse_tables;
 
         // 3. Execute sequences against literals, producing output.
         let mut output = Vec::new();

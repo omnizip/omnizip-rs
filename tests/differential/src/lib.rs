@@ -28,13 +28,30 @@ pub struct OracleOutput {
 /// Decode `fixture_path` with the system `xz --decompress --stdout`.
 ///
 /// Returns `Ok(None)` if `xz` isn't installed (caller should skip the
-/// test). Returns `Err` on invocation failure or non-zero exit.
+/// test).
+///
+/// # Errors
+///
+/// Decode `fixture_path` with the system `xz --decompress --stdout`.
+///
+/// Returns `Ok(None)` if `xz` isn't installed (caller should skip the
+/// test).
+///
+/// # Errors
+///
+/// Returns [`std::io::Error`] if spawning `xz` fails or `xz` exits
+/// non-zero (the fixture is corrupt or not an `.xz` stream).
+///
+/// # Panics
+///
+/// Panics if `which("xz")` returns `Ok(None)` and execution continues
+/// past the early-return guard. (The guard prevents this in practice.)
 pub fn xz_oracle_decode(fixture_path: &Path) -> std::io::Result<Option<OracleOutput>> {
     let xz = which("xz")?;
-    if xz.is_none() {
+    let Some(xz_path) = xz else {
         return Ok(None);
-    }
-    let output = Command::new(xz.unwrap())
+    };
+    let output = Command::new(xz_path)
         .arg("--decompress")
         .arg("--stdout")
         .arg(fixture_path)

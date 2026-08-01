@@ -12,7 +12,6 @@
 //! The trade-off is more careful index arithmetic at access time.
 
 #![forbid(unsafe_code)]
-#![warn(clippy::pedantic)]
 
 use crate::LzmaError;
 

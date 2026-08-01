@@ -21,7 +21,6 @@
 //! cells across equal-sized ranges of the next-state space.
 
 #![forbid(unsafe_code)]
-#![warn(clippy::pedantic)]
 
 use super::bitstream::BitStream;
 use crate::ZstdError;
@@ -123,8 +122,8 @@ impl Table {
 
         // Phase 3: Build decode table.
         let mut states = Vec::with_capacity(table_size);
-        for u in 0..table_size {
-            let symbol = u8::try_from(table_symbol[u]).unwrap_or(0);
+        for &symbol_u16 in &table_symbol {
+            let symbol = u8::try_from(symbol_u16).unwrap_or(0);
             let next_state = symbol_next[usize::from(symbol)];
             symbol_next[usize::from(symbol)] += 1;
 
@@ -147,6 +146,11 @@ impl Table {
     /// Build from one of the RFC 8878 §4.1.3 predefined distributions.
     /// Normalizes the raw distribution to sum to `1 << accuracy_log`
     /// before building the table.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ZstdError::Corrupt`] if the normalised distribution
+    /// fails to fill the table exactly (delegates to [`Self::build`]).
     pub fn build_predefined(distribution: &[i16], accuracy_log: u8) -> Result<Self, ZstdError> {
         let normalized = normalize_distribution(distribution, accuracy_log);
         Self::build(&normalized, accuracy_log)
@@ -188,7 +192,7 @@ fn highbit(x: u32) -> u32 {
     if x == 0 {
         return 0;
     }
-    31 - x.leading_zeros()
+    x.ilog2()
 }
 
 /// Stateful FSE decoder.
@@ -227,9 +231,9 @@ impl<'t> FseDecoder<'t> {
 
 /// Normalize a raw probability distribution to sum to `1 << accuracy_log`.
 ///
-/// Ported from the C reference `FSE_normalizeCount` (lib/common/entropy_common.c).
+/// Ported from the C reference `FSE_normalizeCount` (`lib/common/entropy_common.c`).
 /// The algorithm:
-/// 1. Compute scale = (1 << 62) / raw_sum.
+/// 1. Compute scale = (1 << 62) / `raw_sum`.
 /// 2. For each entry: scaled = (entry * scale) >> (62 - tableLog).
 /// 3. Distribute the remainder (tableSize - sum(scaled)) one per entry
 ///    to those with the largest rounding error, breaking ties by symbol order.
@@ -362,8 +366,8 @@ mod tests {
         for i in 0..table.size() {
             seen[table.state(i).symbol as usize] = true;
         }
-        for s in 0..6 {
-            assert!(seen[s], "symbol {s} not found in table");
+        for (idx, &present) in seen.iter().enumerate() {
+            assert!(present, "symbol {idx} not found in table");
         }
     }
 

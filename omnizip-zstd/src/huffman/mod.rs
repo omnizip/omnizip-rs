@@ -24,7 +24,6 @@
 //! `max_bits = 11` for ZSTD, so the table is 2048 × 2 bytes = 4 KiB.
 
 #![forbid(unsafe_code)]
-#![warn(clippy::pedantic)]
 
 use crate::constants::HUFFMAN_MAX_BITS;
 use crate::fse::ForwardBitStream;
@@ -35,7 +34,7 @@ use crate::ZstdError;
 const MAX_BITS: u8 = HUFFMAN_MAX_BITS;
 
 /// One decode-table slot: the symbol the code maps to, and how many
-/// bits the code actually occupies in the bitstream (≤ MAX_BITS).
+/// bits the code actually occupies in the bitstream (≤ `MAX_BITS`).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct DecodeEntry {
     pub symbol: u8,
@@ -146,11 +145,20 @@ impl<'t, 'b> HuffmanDecoder<'t, 'b> {
     }
 
     /// Decode one symbol. See [`HuffmanTable::decode`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ZstdError::Corrupt`] if the bitstream ends mid-symbol
+    /// or the next bits don't match any table entry.
     pub fn decode_one(&mut self) -> Result<u8, ZstdError> {
         self.table.decode(&mut self.bitstream)
     }
 
-    /// Decode `count` symbols into `out`. Stops early on error.
+    /// Decode `out.len()` symbols into `out`. Stops early on error.
+    ///
+    /// # Errors
+    ///
+    /// Returns the first error encountered (see [`Self::decode_one`]).
     pub fn decode_into(&mut self, out: &mut [u8]) -> Result<(), ZstdError> {
         for slot in out.iter_mut() {
             *slot = self.decode_one()?;

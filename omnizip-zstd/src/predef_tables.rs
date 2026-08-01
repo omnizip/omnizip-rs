@@ -10,7 +10,9 @@
 //! - `base_val`: base value for LL/ML/OF computation
 
 #![forbid(unsafe_code)]
-#![warn(clippy::pedantic)]
+// Values are copied verbatim from the C source; preserving the unbroken
+// digit form makes line-by-line verification against the C source easier.
+#![allow(clippy::unreadable_literal)]
 
 /// One entry in a predefined FSE decode table. Matches the C source's
 /// `ZSTD_seqSymbol` layout.
@@ -22,7 +24,7 @@ pub struct PredefEntry {
     pub base_val: u32,
 }
 
-/// Predefined Literal Length table (accuracy_log = 6, 64 entries).
+/// Predefined Literal Length table (`accuracy_log` = 6, 64 entries).
 /// Source: zstd v1.5.7 `LL_defaultDTable`.
 pub const LL_PREDEF: [PredefEntry; 64] = [
     PredefEntry { next_state:  0, nb_add_bits: 0, nb_bits: 4, base_val:    0 },
@@ -91,7 +93,7 @@ pub const LL_PREDEF: [PredefEntry; 64] = [
     PredefEntry { next_state:  0, nb_add_bits: 13, nb_bits: 6, base_val:  8192 },
 ];
 
-/// Predefined Offset Code table (accuracy_log = 5, 32 entries).
+/// Predefined Offset Code table (`accuracy_log` = 5, 32 entries).
 /// Source: zstd v1.5.7 `OF_defaultDTable`.
 pub const OF_PREDEF: [PredefEntry; 32] = [
     PredefEntry { next_state:  0, nb_add_bits: 0, nb_bits: 5, base_val:        0 },
@@ -128,7 +130,7 @@ pub const OF_PREDEF: [PredefEntry; 32] = [
     PredefEntry { next_state:  0, nb_add_bits: 24, nb_bits: 5, base_val:  16777213 },
 ];
 
-/// Predefined Match Length table (accuracy_log = 6, 64 entries).
+/// Predefined Match Length table (`accuracy_log` = 6, 64 entries).
 /// Source: zstd v1.5.7 `ML_defaultDTable`.
 pub const ML_PREDEF: [PredefEntry; 64] = [
     PredefEntry { next_state:  0, nb_add_bits: 0, nb_bits: 6, base_val:      3 },

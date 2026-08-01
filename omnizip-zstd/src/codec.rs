@@ -6,7 +6,6 @@
 //! `zstd` chooses not to compress). Encode is Phase B.
 
 #![forbid(unsafe_code)]
-#![warn(clippy::pedantic)]
 
 use omnizip_codecs::{Codec, CodecId, CompressionLevel, OmnizipError};
 
@@ -46,15 +45,14 @@ impl Codec for ZstdCodec {
         Err(OmnizipError::Unsupported {
             codec: CodecId::ZSTD,
             reason: format!(
-                "encode at level {} not yet ported (ZSTD Phase B — see TODO.omnizip-rs/14)",
-                level
+                "encode at level {level} not yet ported (ZSTD Phase B — see TODO.omnizip-rs/14)"
             ),
         })
     }
 
     fn decompress(&self, compressed: &[u8], expected_len: u32) -> Result<Vec<u8>, OmnizipError> {
-        let mut decoder = ZstdDecoder::new();
-        let decoded = decoder.decode_stream(compressed).map_err(|e| match e {
+        let mut dec = ZstdDecoder::new();
+        let out = dec.decode_stream(compressed).map_err(|e| match e {
             crate::ZstdError::Unsupported { reason } => OmnizipError::Unsupported {
                 codec: CodecId::ZSTD,
                 reason,
@@ -68,14 +66,14 @@ impl Codec for ZstdCodec {
             codec: CodecId::ZSTD,
             reason: format!("expected_len {expected_len} exceeds usize"),
         })?;
-        if decoded.len() != expected {
+        if out.len() != expected {
             return Err(OmnizipError::LengthMismatch {
                 codec: CodecId::ZSTD,
                 expected: expected_len,
-                actual: decoded.len(),
+                actual: out.len(),
             });
         }
-        Ok(decoded)
+        Ok(out)
     }
 }
 

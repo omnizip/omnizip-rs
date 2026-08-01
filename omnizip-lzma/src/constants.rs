@@ -16,7 +16,6 @@
 //! See `LICENSE-NOTICE.md` at the workspace root.
 
 #![forbid(unsafe_code)]
-#![warn(clippy::pedantic)]
 
 // ── Range coder ──────────────────────────────────────────────────────────
 

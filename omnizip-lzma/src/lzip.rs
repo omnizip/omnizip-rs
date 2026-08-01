@@ -19,7 +19,6 @@
 //! The uncompressed size comes from the trailer.
 
 #![forbid(unsafe_code)]
-#![warn(clippy::pedantic)]
 
 use crate::decoder::Lzma1Decoder;
 use crate::LzmaError;
@@ -33,6 +32,14 @@ const LZIP_LC: u32 = 3;
 const LZIP_LP: u32 = 0;
 const LZIP_PB: u32 = 2;
 
+/// Decompress a `.lz` (lzip) container. The LZMA parameters are fixed
+/// at lc=3, lp=0, pb=2; the dictionary size is encoded in the lzip
+/// header, and the uncompressed size is read from the trailer.
+///
+/// # Errors
+///
+/// Returns [`LzmaError::Corrupt`] on truncation, invalid magic, or
+/// any underlying LZMA1 decode failure.
 pub fn lzip_decompress(input: &[u8]) -> Result<Vec<u8>, LzmaError> {
     if input.len() < LZIP_HEADER_SIZE + LZIP_TRAILER_SIZE {
         return Err(LzmaError::Corrupt {

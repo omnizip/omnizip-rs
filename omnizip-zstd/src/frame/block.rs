@@ -17,7 +17,6 @@
 //! content is a single byte that gets repeated).
 
 #![forbid(unsafe_code)]
-#![warn(clippy::pedantic)]
 
 use crate::constants::{
     BLOCK_HEADER_SIZE, BLOCK_TYPE_COMPRESSED, BLOCK_TYPE_RAW, BLOCK_TYPE_RESERVED, BLOCK_TYPE_RLE,

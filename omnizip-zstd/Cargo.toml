@@ -6,6 +6,8 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Pure-Rust Zstandard encoder + decoder — port of omnizip's Ruby reference"
+keywords = ["compression", "zstd", "zstandard", "fse", "huffman"]
+categories = ["compression"]
 
 [lib]
 name = "omnizip_zstd"

@@ -25,7 +25,6 @@
 //! versions; both must change together.
 
 #![forbid(unsafe_code)]
-#![warn(clippy::pedantic)]
 
 use crate::bit_model::BitModel;
 use crate::constants::TOP;
@@ -95,6 +94,11 @@ impl<'a> RangeDecoder<'a> {
     /// This is the LZMA decoder's hottest method. Normalisation and the
     /// probability-model update are inlined; the inline update must stay
     /// byte-for-byte equivalent to [`BitModel::update`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LzmaError::Corrupt`] if the underlying byte stream is
+    /// exhausted before decode completes.
     #[inline]
     pub fn decode_bit(&mut self, model: &mut BitModel) -> Result<u32, LzmaError> {
         // Inline normalise. Equivalent to: if range < TOP { range <<= 8;
@@ -195,6 +199,10 @@ impl<'a> RangeDecoder<'a> {
 
     /// Renormalise after decoding a symbol with a known frequency. `PPMd`
     /// companion to [`Self::decode_freq`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LzmaError::Corrupt`] if `total_freq == 0`.
     pub fn normalize_freq(
         &mut self,
         cum_freq: u32,
@@ -229,6 +237,11 @@ impl<'a> RangeDecoder<'a> {
 
     /// Public normalise (parity with Ruby API). Used by `decode_freq`
     /// and other non-hot-path callers.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LzmaError::Corrupt`] if the underlying byte stream is
+    /// exhausted during renormalisation.
     pub fn normalise(&mut self) -> Result<(), LzmaError> {
         self.normalise_hot()
     }
@@ -256,7 +269,11 @@ impl<'a> RangeDecoder<'a> {
     /// Construct a fresh decoder bound to `input` with the same lifecycle
     /// as [`Self::new`]. Provided as a named alternative so call sites
     /// read as "reset and rebind".
-    #[must_use]
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LzmaError::Corrupt`] if `input` is shorter than the
+    /// 5-byte range-coder init prefix.
     pub fn reset_rebind(input: &'a [u8]) -> Result<Self, LzmaError> {
         Self::new(input)
     }

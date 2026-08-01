@@ -47,5 +47,7 @@ license. See [`LICENSE-NOTICE.md`](LICENSE-NOTICE.md) for full attribution.
 
 ## Status
 
-Skeleton. See [`PLAN.md`](PLAN.md) for the phased delivery plan with the
-Ruby → Rust module mapping and per-phase acceptance criteria.
+**Phase A (decode) ships for LZMA and ZSTD.** Both crates decode their
+respective formats against the reference `xz -d` / `zstd -d` oracles on
+every fixture under `tests/fixtures/`. Encoders and optimal parsers
+(Phases B/C) per [`PLAN.md`](PLAN.md).

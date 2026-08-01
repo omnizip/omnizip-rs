@@ -17,7 +17,6 @@
 //! EOPM, even when the size is known).
 
 #![forbid(unsafe_code)]
-#![warn(clippy::pedantic)]
 
 use crate::decoder::Lzma1Decoder;
 use crate::LzmaError;

@@ -21,7 +21,6 @@
 //! outcome.
 
 #![forbid(unsafe_code)]
-#![warn(clippy::pedantic)]
 
 use crate::constants::{BIT_MODEL_TOTAL, INIT_PROBS, MOVE_BITS};
 

@@ -6,7 +6,6 @@
 //! them, but [`Match`] still appears in shared types and in tests.
 
 #![forbid(unsafe_code)]
-#![warn(clippy::pedantic)]
 
 use crate::constants::{DICT_SIZE_MAX, MATCH_LEN_MIN};
 

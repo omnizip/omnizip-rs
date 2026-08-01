@@ -15,7 +15,6 @@
 //! triple — match the Ruby order, or the model indices drift.
 
 #![forbid(unsafe_code)]
-#![warn(clippy::pedantic)]
 
 use crate::bit_model::BitModel;
 use crate::LzmaError;

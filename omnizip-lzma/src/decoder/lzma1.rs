@@ -37,7 +37,6 @@
 //! ```
 
 #![forbid(unsafe_code)]
-#![warn(clippy::pedantic)]
 
 use crate::bit_model::BitModel;
 use crate::coder::{DistanceDecoder, LengthDecoder};
@@ -519,9 +518,9 @@ impl Lzma1Decoder {
             });
         }
 
-        length = self.clamp_length(length, output.len(), cfg);
+        length = Self::clamp_length(length, output.len(), cfg);
 
-        self.copy_match(output, dist_us, length);
+        Self::copy_match(output, dist_us, length);
 
         self.state.on_match();
         // Rotate rep distances: rep3 ← rep2 ← rep1 ← rep0; rep0 = distance
@@ -601,8 +600,8 @@ impl Lzma1Decoder {
             });
         }
 
-        let length = self.clamp_length(length, output.len(), cfg);
-        self.copy_match(output, dist_us, length);
+        let length = Self::clamp_length(length, output.len(), cfg);
+        Self::copy_match(output, dist_us, length);
         // Position-state changes already applied above.
         let _ = MATCH_LEN_MAX; // pin the import; future clamp may use it.
 
@@ -610,7 +609,7 @@ impl Lzma1Decoder {
     }
 
     /// Cap `length` so it doesn't overshoot the declared uncompressed size.
-    fn clamp_length(&self, length: u32, current_len: usize, cfg: DecodeConfig) -> u32 {
+    fn clamp_length(length: u32, current_len: usize, cfg: DecodeConfig) -> u32 {
         if let Some(target) = cfg.uncompressed_size {
             let produced = current_len - cfg.start_output_len;
             let remaining = target.saturating_sub(u64::try_from(produced).unwrap_or(u64::MAX));
@@ -623,7 +622,7 @@ impl Lzma1Decoder {
 
     /// Copy `length` bytes from `distance+1` back in the output. Handles
     /// overlapping ranges (RLE-style).
-    fn copy_match(&self, output: &mut Vec<u8>, distance: usize, length: u32) {
+    fn copy_match(output: &mut Vec<u8>, distance: usize, length: u32) {
         let len = length as usize;
         let src_start = output.len() - distance - 1;
         // Reserve up-front so push doesn't reallocate mid-copy.
