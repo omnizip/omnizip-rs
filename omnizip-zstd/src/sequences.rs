@@ -30,13 +30,10 @@
 #![forbid(unsafe_code)]
 #![warn(clippy::pedantic)]
 
-use crate::constants::{
-    DEFAULT_REPEAT_OFFSETS, LITERAL_LENGTH_TABLE, MATCH_LENGTH_TABLE,
-    MATCH_LENGTH_ACCURACY_LOG, LITERALS_LENGTH_ACCURACY_LOG, OFFSET_ACCURACY_LOG,
-    PREDEFINED_LL_DISTRIBUTION, PREDEFINED_ML_DISTRIBUTION, PREDEFINED_OFFSET_DISTRIBUTION,
-    MODE_FSE, MODE_PREDEFINED, MODE_REPEAT, MODE_RLE,
-};
-use crate::fse::{BitStream, FseDecoder, Table};
+use crate::constants::{DEFAULT_REPEAT_OFFSETS, MODE_FSE, MODE_PREDEFINED, MODE_REPEAT, MODE_RLE};
+use crate::fse::BitStream;
+use crate::predef_tables::{LL_PREDEF, ML_PREDEF, OF_PREDEF, PredefEntry,
+    LL_ACCURACY_LOG, OF_ACCURACY_LOG, ML_ACCURACY_LOG};
 use crate::ZstdError;
 
 /// One decoded sequence: literal length, match length, offset (raw
@@ -54,19 +51,7 @@ pub struct Sequence {
 pub struct SequencesSection {
     pub sequences: Vec<Sequence>,
     pub consumed: usize,
-    /// Updated FSE tables for use as the previous-table source on the
-    /// next `MODE_REPEAT` block. (Currently always empty: predefined
-    /// and RLE tables are not stored. FSE-mode will populate this.)
-    pub fse_tables: FseTables,
-}
-
-/// Per-frame cache of the most recently used FSE tables. Filled when
-/// a block uses `MODE_FSE`; reused by the next block's `MODE_REPEAT`.
-#[derive(Default, Debug, Clone)]
-pub struct FseTables {
-    pub ll: Option<Table>,
-    pub ml: Option<Table>,
-    pub of: Option<Table>,
+    pub fse_tables: (),
 }
 
 /// Decode the sequences section. `previous_tables` carries the FSE
@@ -80,7 +65,7 @@ pub struct FseTables {
 /// (the per-mode table reader is not yet ported).
 pub fn decode_sequences_section(
     input: &[u8],
-    previous_tables: &FseTables,
+    _previous_tables: &(),
 ) -> Result<SequencesSection, ZstdError> {
     if input.is_empty() {
         return Err(ZstdError::Corrupt {
@@ -95,7 +80,7 @@ pub fn decode_sequences_section(
         return Ok(SequencesSection {
             sequences: Vec::new(),
             consumed: input.len() - after_count.len(),
-            fse_tables: previous_tables.clone(),
+            fse_tables: (),
         });
     }
 
@@ -111,57 +96,130 @@ pub fn decode_sequences_section(
     let ml_mode = (modes >> 2) & 0x03;
     let mut cursor = &after_count[1..];
 
-    // 3. Per-mode table data + table construction.
-    let ll_table = build_table_for_mode(ll_mode, StreamKind::LiteralLength, previous_tables.ll.as_ref(), &mut cursor)?;
-    let of_table = build_table_for_mode(of_mode, StreamKind::Offset, previous_tables.of.as_ref(), &mut cursor)?;
-    let ml_table = build_table_for_mode(ml_mode, StreamKind::MatchLength, previous_tables.ml.as_ref(), &mut cursor)?;
+    // 3. Per-mode: for PREDEFINED, use hardcoded tables. RLE reads
+    //    one byte. FSE/REPEAT unsupported for now.
+    // Each stream gets a table (slice of PredefEntry) and accuracy_log.
+    enum SeqTable {
+        Predefined(&'static [PredefEntry], u8),
+        Rle(PredefEntry),
+    }
+
+    let ll_tbl = get_table(ll_mode, &LL_PREDEF, LL_ACCURACY_LOG, &mut cursor)?;
+    let of_tbl = get_table(of_mode, &OF_PREDEF, OF_ACCURACY_LOG, &mut cursor)?;
+    let ml_tbl = get_table(ml_mode, &ML_PREDEF, ML_ACCURACY_LOG, &mut cursor)?;
 
     // 4. Bitstream: everything left in `cursor` is the FSE bitstream.
-    //    It is consumed in reverse direction.
-    let mut bitstream = BitStream::new(cursor);
+    let mut bs = BitStream::new(cursor);
 
-    // 5. Initialise decoder states: OF first, then ML, then LL (per
-    //    RFC 8878 §3.1.2.3.2 — init order is the inverse of decode
-    //    order, and the bitstream reads happen in reverse bit order).
-    let mut of_dec = FseDecoder::new(&of_table);
-    let mut ml_dec = FseDecoder::new(&ml_table);
-    let mut ll_dec = FseDecoder::new(&ll_table);
-    of_dec.init_state(&mut bitstream);
-    ml_dec.init_state(&mut bitstream);
-    ll_dec.init_state(&mut bitstream);
+    // 5. Init states in C source order: LL, OF, ML (NOT the RFC's
+    //    OF, ML, LL — the C source at zstd_decompress_block.c:1527-1529
+    //    is authoritative).
+    let mut ll_state = init_state(&ll_tbl, &mut bs);
+    let mut of_state = init_state(&of_tbl, &mut bs);
+    let mut ml_state = init_state(&ml_tbl, &mut bs);
 
-    // 6. Decode `num_sequences` triples.
+    // 6. Decode sequences.
     let mut sequences = Vec::with_capacity(num_sequences as usize);
-    for i in 0..num_sequences {
-        // Decode order per RFC 8878 §3.1.2.3.3: LL, then ML, then OF,
-        // then read extra bits for LL, ML, OF (in that order).
-        let ll_sym = u32::from(ll_dec.decode(&mut bitstream));
-        let ml_sym = u32::from(ml_dec.decode(&mut bitstream));
-        let of_sym = u32::from(of_dec.decode(&mut bitstream));
+    for seq_idx in 0..num_sequences {
+        // Per the C reference (ZSTD_decodeSequence), the decode order
+        // for each sequence is:
+        //
+        // 1. Look up symbols from current states (no bits consumed).
+        // 2. Read extra bits in order: LL, OF, ML.
+        // 3. Update states in order: LL, OF, ML (each reads nb_bits
+        //    from the bitstream). For the LAST sequence, state updates
+        //    are skipped (no more symbols follow).
+        let is_last = seq_idx == num_sequences - 1;
 
-        let ll_value = decode_literal_length(ll_sym, &mut bitstream);
-        let ml_value = decode_match_length(ml_sym, &mut bitstream);
-        let of_value = decode_offset_value(of_sym, &mut bitstream);
+        let ll_e = lookup(&ll_tbl, ll_state);
+        let of_e = lookup(&of_tbl, of_state);
+        let ml_e = lookup(&ml_tbl, ml_state);
+
+        // Extra bits (C reference order: LL, OF, ML).
+        let ll_value = ll_e.base_val + bs.read_bits(u32::from(ll_e.nb_add_bits));
+        let of_value = of_e.base_val + bs.read_bits(u32::from(of_e.nb_add_bits));
+        let ml_value = ml_e.base_val + bs.read_bits(u32::from(ml_e.nb_add_bits));
+
+        // State updates (C reference order: LL, OF, ML).
+        // Skip for the last sequence — no more symbols to decode.
+        if !is_last {
+            ll_state = u32::from(ll_e.next_state) + bs.read_bits(u32::from(ll_e.nb_bits));
+            of_state = u32::from(of_e.next_state) + bs.read_bits(u32::from(of_e.nb_bits));
+            ml_state = u32::from(ml_e.next_state) + bs.read_bits(u32::from(ml_e.nb_bits));
+        }
 
         sequences.push(Sequence {
             literal_length: ll_value,
             match_length: ml_value,
             offset_symbol: of_value,
         });
-        // After the last sequence, the bitstream's remaining bits are
-        // padding and may be discarded.
-        let _ = i;
     }
 
     Ok(SequencesSection {
         sequences,
         consumed: input.len(),
-        fse_tables: FseTables {
-            ll: Some(ll_table),
-            ml: Some(ml_table),
-            of: Some(of_table),
-        },
+        fse_tables: (),
     })
+}
+
+/// Table type for sequence decoding — either a reference to a
+/// predefined table or an RLE single-entry table.
+enum SeqTable {
+    Predefined(&'static [PredefEntry], u8),
+    Rle(PredefEntry),
+}
+
+/// Build a table for the given mode.
+fn get_table(
+    mode: u8,
+    predef: &'static [PredefEntry],
+    accuracy_log: u8,
+    cursor: &mut &[u8],
+) -> Result<SeqTable, ZstdError> {
+    match mode {
+        MODE_PREDEFINED => Ok(SeqTable::Predefined(predef, accuracy_log)),
+        MODE_RLE => {
+            if cursor.is_empty() {
+                return Err(ZstdError::Corrupt {
+                    reason: "RLE mode: missing symbol byte".into(),
+                });
+            }
+            let symbol = cursor[0];
+            *cursor = &cursor[1..];
+            Ok(SeqTable::Rle(PredefEntry {
+                next_state: 0,
+                nb_add_bits: symbol,
+                nb_bits: 0,
+                base_val: 0,
+            }))
+        }
+        MODE_REPEAT => Err(ZstdError::Unsupported {
+            reason: "MODE_REPEAT not yet supported".into(),
+        }),
+        MODE_FSE | _ => Err(ZstdError::Unsupported {
+            reason: "MODE_FSE not yet supported".into(),
+        }),
+    }
+}
+
+/// Read accuracy_log bits to initialise the FSE state.
+fn init_state(tbl: &SeqTable, bs: &mut BitStream<'_>) -> u32 {
+    let log = match tbl {
+        SeqTable::Predefined(_, log) => *log,
+        SeqTable::Rle(_) => 0,
+    };
+    bs.read_bits(u32::from(log))
+}
+
+/// Look up a table entry at the given state.
+fn lookup<'a>(tbl: &'a SeqTable, state: u32) -> PredefEntry {
+    match tbl {
+        SeqTable::Predefined(entries, _) => {
+            let idx = (state as usize).min(entries.len() - 1);
+            entries[idx]
+        }
+        SeqTable::Rle(entry) => *entry,
+    }
 }
 
 /// Decode the sequence count (1-3 bytes per RFC §3.1.1.3.2.1).
@@ -185,138 +243,6 @@ fn read_sequence_count(input: &[u8]) -> Result<(u32, &[u8]), ZstdError> {
     let b1 = u32::from(input[1]);
     let count = ((b0 - 128) << 8) + b1 + 128;
     Ok((count, &input[2..]))
-}
-
-/// Which of the three sequence streams a table belongs to.
-#[derive(Clone, Copy, Debug)]
-enum StreamKind {
-    LiteralLength,
-    MatchLength,
-    Offset,
-}
-
-impl StreamKind {
-    fn accuracy_log(self) -> u8 {
-        match self {
-            Self::LiteralLength => LITERALS_LENGTH_ACCURACY_LOG,
-            Self::MatchLength => MATCH_LENGTH_ACCURACY_LOG,
-            Self::Offset => OFFSET_ACCURACY_LOG,
-        }
-    }
-
-    fn predefined_distribution(self) -> &'static [u8] {
-        match self {
-            Self::LiteralLength => &PREDEFINED_LL_DISTRIBUTION,
-            Self::MatchLength => &PREDEFINED_ML_DISTRIBUTION,
-            Self::Offset => &PREDEFINED_OFFSET_DISTRIBUTION,
-        }
-    }
-}
-
-/// Build an FSE table for the given mode. Consumes bytes from
-/// `*cursor` only for the RLE and FSE modes.
-fn build_table_for_mode(
-    mode: u8,
-    kind: StreamKind,
-    previous: Option<&Table>,
-    cursor: &mut &[u8],
-) -> Result<Table, ZstdError> {
-    match mode {
-        MODE_PREDEFINED => Table::build_predefined(kind.predefined_distribution(), kind.accuracy_log()),
-        MODE_RLE => {
-            if cursor.is_empty() {
-                return Err(ZstdError::Corrupt {
-                    reason: "truncated RLE mode: missing symbol byte".into(),
-                });
-            }
-            let symbol = cursor[0];
-            *cursor = &cursor[1..];
-            Ok(Table::build_rle(symbol, kind.accuracy_log()))
-        }
-        MODE_REPEAT => previous.cloned().ok_or_else(|| ZstdError::Corrupt {
-            reason: "MODE_REPEAT but no previous FSE table in scope".into(),
-        }),
-        MODE_FSE | _ => {
-            // MODE_FSE (and any unexpected value) currently unsupported.
-            Err(ZstdError::Unsupported {
-                reason: "MODE_FSE for sequence streams not yet ported".into(),
-            })
-        }
-    }
-}
-
-/// Convert an LL symbol into a literal-length value, reading any
-/// extra bits the symbol's table entry requires.
-fn decode_literal_length(symbol: u32, bitstream: &mut BitStream<'_>) -> u32 {
-    let Ok(idx) = usize::try_from(symbol) else { return 0 };
-    if idx >= LITERAL_LENGTH_TABLE.len() {
-        return 0;
-    }
-    let (baseline, extra_bits) = LITERAL_LENGTH_TABLE[idx];
-    if extra_bits == 0 {
-        return baseline;
-    }
-    let extra = bitstream.read_bits(u32::from(extra_bits));
-    baseline + extra
-}
-
-/// Convert an ML symbol into a match-length value.
-fn decode_match_length(symbol: u32, bitstream: &mut BitStream<'_>) -> u32 {
-    let Ok(idx) = usize::try_from(symbol) else { return 3 };
-    if idx >= MATCH_LENGTH_TABLE.len() {
-        return 3;
-    }
-    let (baseline, extra_bits) = MATCH_LENGTH_TABLE[idx];
-    if extra_bits == 0 {
-        return baseline;
-    }
-    let extra = bitstream.read_bits(u32::from(extra_bits));
-    baseline + extra
-}
-
-/// ZSTD offset code base values (RFC 8878 §3.1.2.3.3.2.1).
-/// Index = FSE-decoded offset symbol. `OF_BASE[N] + read_bits(OF_BITS[N])`
-/// gives the raw offset for codes ≥ 3. Codes 0–2 are repeat offsets.
-const OF_BASE: [u32; 32] = [
-    1, 2, 3, 4, 6, 8, 12, 16, 24, 32, 48, 64, 96, 128, 192, 256, 384, 512, 768, 1024, 1536, 2048,
-    3072, 4096, 6144, 8192, 12288, 16384, 24576, 32768, 49152, 65536,
-];
-
-/// Number of extra bits per offset code (RFC 8878 §3.1.2.3.3.2.1).
-const OF_BITS: [u8; 32] = [
-    0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13, 13,
-    14, 14, 15,
-];
-
-/// Convert an OF symbol into a raw offset value. Repeat-offset codes
-/// (symbols 0–2) are left as-is — the executor recognises them and
-/// resolves them against its repeat-offset state.
-///
-/// For symbols ≥ 3: `offset = OF_BASE[symbol] + read_bits(OF_BITS[symbol])`.
-/// This produces values ≥ 4, which never collide with the repeat-offset
-/// indicators (0, 1, 2).
-///
-/// **Bug fix:** the previous formula used `n = symbol - 2` as both the
-/// shift and the bit count, which is incorrect. The correct table is
-/// from the C reference (`zstd/lib/common/zstd_internal.h`) and
-/// RFC 8878 §3.1.2.3.3.2.1.
-fn decode_offset_value(symbol: u32, bitstream: &mut BitStream<'_>) -> u32 {
-    if symbol <= 2 {
-        return symbol;
-    }
-    let Ok(idx) = usize::try_from(symbol) else {
-        return u32::MAX;
-    };
-    if idx >= OF_BASE.len() {
-        return u32::MAX;
-    }
-    let base = OF_BASE[idx];
-    let bits = OF_BITS[idx];
-    if bits == 0 {
-        return base;
-    }
-    let extra = bitstream.read_bits(u32::from(bits));
-    base + extra
 }
 
 // ── Sequence executor (RFC 8878 §3.1.2.2.3) ─────────────────────────────
@@ -465,13 +391,13 @@ mod tests {
 
     #[test]
     fn empty_section_errors() {
-        assert!(decode_sequences_section(&[], &FseTables::default()).is_err());
+        assert!(decode_sequences_section(&[], &()).is_err());
     }
 
     #[test]
     fn zero_sequences_returns_empty() {
         // byte 0 = 0 → no sequences.
-        let s = decode_sequences_section(&[0x00], &FseTables::default()).expect("decode");
+        let s = decode_sequences_section(&[0x00], &()).expect("decode");
         assert!(s.sequences.is_empty());
     }
 
@@ -521,20 +447,20 @@ mod tests {
     }
 
     #[test]
-    fn offset_value_decode_handles_repeat_codes() {
-        // Symbols 0, 1, 2 are pass-through repeat-offset codes (0-indexed).
-        let mut bs = BitStream::new(&[0xFF; 4]);
-        assert_eq!(decode_offset_value(0, &mut bs), 0);
-        assert_eq!(decode_offset_value(1, &mut bs), 1);
-        assert_eq!(decode_offset_value(2, &mut bs), 2);
+    fn of_predef_entry_0_is_repeat_offset() {
+        // The first entry of the OF predefined table must be a repeat
+        // offset (base_val ≤ 2).
+        assert!(crate::predef_tables::OF_PREDEF[0].base_val <= 2);
     }
 
     #[test]
-    fn offset_value_decode_reads_extra_bits() {
-        // symbol = 3 → n = 3-2 = 1 extra bit. Value = (1 << 1) + bit.
-        // LSB-first reverse bitstream: first bit = LSB of last byte.
-        // byte 0x01 = 0b00000001, bit 0 (first read) = 1.
-        let mut bs = BitStream::new(&[0x01]);
-        assert_eq!(decode_offset_value(3, &mut bs), 3);
+    fn ll_predef_entry_0_has_base_val_0() {
+        assert_eq!(crate::predef_tables::LL_PREDEF[0].base_val, 0);
+    }
+
+    #[test]
+    fn ml_predef_entry_0_has_base_val_3() {
+        // ML base starts at 3 (MATCH_LEN_MIN).
+        assert_eq!(crate::predef_tables::ML_PREDEF[0].base_val, 3);
     }
 }
