@@ -8,23 +8,46 @@
 //!
 //! ## Status
 //!
-//! Phase A in progress. Constants module ported; frame header + FSE
-//! bitstream pending (see TODO.spec/10-zstd-frame.md and
-//! TODO.spec/14-zstd-fse.md).
+//! **Phase A: foundation + RAW/RLE block decode working.** Constants,
+//! frame header parser, FSE bitstream + table, block header, and the
+//! top-level [`decoder::ZstdDecoder`] are ported. End-to-end decode
+//! works for streams containing Raw / RLE blocks (small inputs that
+//! `zstd` chooses not to compress). Compressed blocks need the
+//! Huffman + literals + sequences stack, which lands next.
 
 #![forbid(unsafe_code)]
 #![warn(clippy::pedantic)]
+// Codec code performs extensive byte↔usize↔u32 conversions where the
+// value ranges are guaranteed by upstream protocol checks. The pedantic
+// cast lints fire on every such conversion without knowing the invariant;
+// they're more useful at API boundaries than on every arithmetic site.
+#![allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap, clippy::cast_sign_loss, clippy::cast_lossless)]
 
+pub mod codec;
 pub mod constants;
+pub mod decoder;
+pub mod frame;
+pub mod fse;
+pub mod huffman;
+pub mod literals;
+pub mod predef_tables;
+pub mod sequences;
 
 use std::fmt;
 
+pub use codec::ZstdCodec;
 pub use constants::{
     BLOCK_HEADER_SIZE, BLOCK_MAX_SIZE, BLOCK_TYPE_COMPRESSED, BLOCK_TYPE_RAW, BLOCK_TYPE_RLE,
     DEFAULT_LEVEL, FSE_MAX_ACCURACY_LOG, FSE_MIN_ACCURACY_LOG, MAGIC_BYTES, MAGIC_NUMBER,
     MAX_LEVEL, MIN_LEVEL, WINDOW_LOG_MAX, WINDOW_LOG_MIN,
 };
-
+pub use decoder::ZstdDecoder;
+pub use frame::{detect_frame_kind, strip_magic, BlockHeader, FrameHeader};
+pub use fse::{BitStream, ForwardBitStream, FseDecoder, FseState, Table};
+pub use huffman::{HuffmanDecoder, HuffmanTable};
+pub use literals::decode_literals_section;
+pub use sequences::{decode_sequences_section, Sequence, SequenceExecutor,
+                    SequencesSection};
 /// ZSTD compression level. Mirrors the reference `zstd` encoder scale.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
 pub enum ZstdLevel {
@@ -67,6 +90,9 @@ pub enum ZstdError {
     LevelUnavailable(ZstdLevel),
     /// Malformed input.
     Corrupt { reason: String },
+    /// Feature not yet implemented (e.g., compressed blocks before the
+    /// Huffman + literals + sequences stack lands).
+    Unsupported { reason: String },
 }
 
 impl fmt::Display for ZstdError {
@@ -74,6 +100,7 @@ impl fmt::Display for ZstdError {
         match self {
             Self::LevelUnavailable(level) => write!(f, "level {level} not yet implemented"),
             Self::Corrupt { reason } => write!(f, "corrupt zstd frame: {reason}"),
+            Self::Unsupported { reason } => write!(f, "unsupported: {reason}"),
         }
     }
 }
@@ -90,16 +117,19 @@ pub fn compress(_plaintext: &[u8], level: ZstdLevel) -> Result<Vec<u8>, ZstdErro
     Err(ZstdError::LevelUnavailable(level))
 }
 
-/// Decompress a ZSTD frame. Placeholder until Phase A (decoder port)
-/// ships.
+/// Decompress a ZSTD frame.
+///
+/// Currently decodes Raw, RLE, and Compressed blocks (Compressed
+/// requires the literals + sequences + executor stack). The
+/// Huffman-FSE-compressed-weights path is not yet implemented (see
+/// BUGREPORT.01).
 ///
 /// # Errors
 ///
-/// Returns [`ZstdError::Corrupt`] until the decoder is wired in.
-pub fn decompress(_compressed: &[u8], _expected_len: u32) -> Result<Vec<u8>, ZstdError> {
-    Err(ZstdError::Corrupt {
-        reason: "decoder not yet ported (Phase A)".into(),
-    })
+/// See [`ZstdDecoder::decode_stream`].
+pub fn decompress(compressed: &[u8], _expected_len: u32) -> Result<Vec<u8>, ZstdError> {
+    let mut decoder = ZstdDecoder::new();
+    decoder.decode_stream(compressed)
 }
 
 #[cfg(test)]

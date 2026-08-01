@@ -105,6 +105,64 @@ pub const DEFAULT_LEVEL: u8 = 3;
 /// Default streaming buffer size (128 KiB).
 pub const BUFFER_SIZE: usize = 128 * 1024;
 
+// ── Length-code tables (RFC 8878 §3.1.2.3.1 / §3.1.2.3.2) ───────────────
+
+/// `(baseline, extra_bits)` for each of the 36 literal-length codes.
+pub const LITERAL_LENGTH_TABLE: [(u32, u8); 36] = [
+    (0, 0), (1, 0), (2, 0), (3, 0), (4, 0), (5, 0), (6, 0), (7, 0),
+    (8, 0), (9, 0), (10, 0), (11, 0), (12, 0), (13, 0), (14, 0), (15, 0),
+    (16, 1), (18, 1), (20, 1), (22, 1), (24, 1), (28, 1), (32, 1), (40, 1),
+    (48, 1), (64, 1), (128, 2), (256, 2), (512, 2), (1024, 2), (2048, 2),
+    (4096, 2), (8192, 2), (16384, 3), (32768, 3), (65536, 3),
+];
+
+/// `(baseline, extra_bits)` for each of the 64 match-length codes.
+pub const MATCH_LENGTH_TABLE: [(u32, u8); 64] = [
+    (3, 0), (4, 0), (5, 0), (6, 0), (7, 0), (8, 0), (9, 0), (10, 0),
+    (11, 0), (12, 0), (13, 0), (14, 0), (15, 0), (16, 0), (17, 0), (18, 0),
+    (19, 0), (20, 0), (21, 0), (22, 0), (23, 0), (24, 0), (25, 0), (26, 0),
+    (27, 0), (28, 0), (29, 0), (30, 0), (31, 0), (32, 0), (33, 0), (34, 0),
+    (35, 1), (37, 1), (39, 1), (41, 1), (43, 1), (47, 1), (51, 1), (59, 1),
+    (67, 1), (83, 1), (99, 1), (131, 2), (195, 2), (259, 2), (323, 2),
+    (387, 2), (451, 2), (515, 2), (579, 2), (643, 2), (707, 2), (771, 2),
+    (835, 2), (899, 2), (963, 2), (1027, 2), (1283, 2), (1539, 2),
+    (1795, 2), (2051, 2), (2307, 2), (2563, 2),
+];
+
+// ── Predefined FSE distributions (RFC 8878 §4.1.3 / C reference) ────────
+//
+// These match the C reference zstd source (lib/decompress/zstd_decompress_block.c).
+// Uses `i16` to support `-1` low-probability sentinels.
+
+/// Predefined literals-length distribution (accuracy_log = 6, table_size = 64).
+pub const PREDEFINED_LL_DISTRIBUTION: [i16; 36] = [
+    4, 3, 2, 2, 2, 2, 2, 2,
+    2, 2, 2, 2, 2, 1, 1, 1,
+    1, 1, 1, 1, 1, 1, 1, 1,
+    1, 1, 1, 1, 1, 1, 1, 1,
+    -1, -1, -1, -1,
+];
+
+/// Predefined match-length distribution (accuracy_log = 6, table_size = 64).
+pub const PREDEFINED_ML_DISTRIBUTION: [i16; 52] = [
+    1, 4, 3, 2, 2, 2, 2, 2,
+    2, 1, 1, 1, 1, 1, 1, 1,
+    1, 1, 1, 1, 1, 1, 1, 1,
+    1, 1, 1, 1, 1, 1, 1, 1,
+    1, 1, 1, 1, 1, 1, 1, 1,
+    -1, -1, -1, -1, -1, -1, -1, -1,
+    -1, -1, -1, -1,
+];
+
+/// Predefined offset distribution (accuracy_log = 5, table_size = 32).
+/// 27 positive entries + 5 `-1` sentinels = 32 cells.
+pub const PREDEFINED_OFFSET_DISTRIBUTION: [i16; 32] = [
+    1, 1, 1, 1, 1, 1, 2, 2,
+    2, 1, 1, 1, 1, 1, 1, 1,
+    1, 1, 1, 1, 1, 1, 1, 1,
+    -1, -1, -1, -1, -1, 0, 0, 0,
+];
+
 #[cfg(test)]
 mod tests {
     use super::*;

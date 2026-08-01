@@ -9,22 +9,57 @@
 //!
 //! ## Status
 //!
-//! Phase A in progress. Constants, state machine, and bit model ported;
-//! range decoder + match finder pending (see TODO.spec/02-lzma-range-coder.md
-//! and TODO.omnizip-rs/10-lzma-phase-a-decoder.md).
+//! **Phase A decode-side: working for `.lzma` (LZMA-Alone).**
+//!
+//! The LZMA1 packet engine ([`decoder::Lzma1Decoder`]) drives every
+//! container format; [`lzma_alone_decompress`] is the only top-level
+//! entry wired so far. Differential tests against reference `xz -d`
+//! pass on every fixture under `tests/fixtures/lzma/good-*.lzma`.
+//!
+//! Remaining Phase A work:
+//! - XZ container decode (`decoder/xz.rs`): stream + block + CRC32/64.
+//! - Lzip container decode (`decoder/lzip.rs`).
+//! - LZMA2 multi-chunk decode (`decoder/lzma2.rs`).
+//!
+//! Encoder (Phase B) and optimal parser (Phase C) per `PLAN.md`.
 
 #![forbid(unsafe_code)]
 #![warn(clippy::pedantic)]
+// Codec code performs extensive byte↔usize↔u32 conversions where the
+// value ranges are guaranteed by upstream protocol checks. The pedantic
+// cast lints fire on every such conversion without knowing the invariant;
+// they're more useful at API boundaries than on every arithmetic site.
+#![allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap, clippy::cast_sign_loss, clippy::cast_lossless)]
 
 pub mod bit_model;
+pub mod codec;
 pub mod constants;
+pub mod coder;
+pub mod crc32;
+pub mod decoder;
+pub mod dictionary;
+pub mod lzip;
+pub mod lzma2;
+pub mod r#match;
+pub mod range_coder;
 pub mod state;
+pub mod xz_container;
 
 use std::fmt;
 
 pub use bit_model::{BitModel, BitModelArray};
+pub use codec::LzmaCodec;
+pub use coder::{DistanceDecoder, LengthDecoder, LiteralDecoder};
 pub use constants::{COMPRESSION_LEVEL_MAX, COMPRESSION_LEVEL_MIN};
+pub use crc32::crc32;
+pub use decoder::{lzma_alone_decompress, Lzma1Decoder};
+pub use dictionary::Dictionary;
+pub use lzip::lzip_decompress;
+pub use lzma2::decode_lzma2_stream;
+pub use r#match::Match;
+pub use range_coder::RangeDecoder;
 pub use state::{LzmaState, LIT_STATES, MATCH_STATES, NUM_STATES, REP_STATES, SHORT_REP_STATES};
+pub use xz_container::xz_decompress;
 
 /// LZMA compression level 0–9, matching `xz` presets.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]

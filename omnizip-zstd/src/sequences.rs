@@ -30,7 +30,7 @@
 #![forbid(unsafe_code)]
 #![warn(clippy::pedantic)]
 
-use crate::constants::{DEFAULT_REPEAT_OFFSETS, MODE_FSE, MODE_PREDEFINED, MODE_REPEAT, MODE_RLE};
+use crate::constants::{DEFAULT_REPEAT_OFFSETS, MODE_PREDEFINED, MODE_REPEAT, MODE_RLE};
 use crate::fse::BitStream;
 use crate::predef_tables::{LL_PREDEF, ML_PREDEF, OF_PREDEF, PredefEntry,
     LL_ACCURACY_LOG, OF_ACCURACY_LOG, ML_ACCURACY_LOG};
@@ -96,14 +96,8 @@ pub fn decode_sequences_section(
     let ml_mode = (modes >> 2) & 0x03;
     let mut cursor = &after_count[1..];
 
-    // 3. Per-mode: for PREDEFINED, use hardcoded tables. RLE reads
-    //    one byte. FSE/REPEAT unsupported for now.
-    // Each stream gets a table (slice of PredefEntry) and accuracy_log.
-    enum SeqTable {
-        Predefined(&'static [PredefEntry], u8),
-        Rle(PredefEntry),
-    }
-
+    // 3. Per-mode table: PREDEFINED uses hardcoded tables, RLE reads
+    //    one byte, FSE/REPEAT are not yet ported.
     let ll_tbl = get_table(ll_mode, &LL_PREDEF, LL_ACCURACY_LOG, &mut cursor)?;
     let of_tbl = get_table(of_mode, &OF_PREDEF, OF_ACCURACY_LOG, &mut cursor)?;
     let ml_tbl = get_table(ml_mode, &ML_PREDEF, ML_ACCURACY_LOG, &mut cursor)?;
@@ -196,7 +190,7 @@ fn get_table(
         MODE_REPEAT => Err(ZstdError::Unsupported {
             reason: "MODE_REPEAT not yet supported".into(),
         }),
-        MODE_FSE | _ => Err(ZstdError::Unsupported {
+        _ => Err(ZstdError::Unsupported {
             reason: "MODE_FSE not yet supported".into(),
         }),
     }

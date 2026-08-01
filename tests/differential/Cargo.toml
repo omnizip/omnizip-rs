@@ -1,0 +1,20 @@
+[package]
+name = "omnizip-differential"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Cross-language differential test harness for omnizip-rs codecs"
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[dev-dependencies]
+omnizip-codecs = { workspace = true }
+omnizip-lzma = { workspace = true }
+omnizip-zstd = { workspace = true }
+
+[lints]
+workspace = true
