@@ -234,7 +234,6 @@ mod tests {
     use super::*;
 
     #[test]
-    #[ignore]
     fn empty_tree_lookup() {
         let t = ContextTree::new(4);
         let (node, depth) = t.walk(b"");
@@ -243,7 +242,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     fn add_and_lookup() {
         let mut t = ContextTree::new(4);
         // After "th", observe 'e' twice and 'a' once.
@@ -262,7 +260,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     fn escape_slot_nonzero() {
         let mut t = ContextTree::new(4);
         t.add_symbol(b"x", b'a');
@@ -275,7 +272,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     fn order_capped() {
         let mut t = ContextTree::new(2);
         // add_symbol(b"abcde", b'f') updates the last 2 bytes ("de") as

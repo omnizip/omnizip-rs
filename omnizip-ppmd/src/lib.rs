@@ -43,7 +43,6 @@
 
 pub mod context_tree;
 pub mod model;
-pub mod range_coder;
 
 use omnizip_codecs::{Codec, CodecId, CompressionLevel, OmnizipError};
 
@@ -84,11 +83,10 @@ impl std::error::Error for PpmdError {}
 /// # Errors
 ///
 /// Returns [`PpmdError::InvalidOrder`] if `max_order` is outside `[1, 16]`.
-/// Maximum input size for Phase 1 PPMd. The context trie grows without
-/// bounds (no pruning), so even modest inputs can consume gigabytes.
-/// Phase 2 will add trie pruning. For now, PPMd is DORMANT: all inputs
-/// use raw fallback (no compression, but safe memory usage).
-const MAX_PPMD_INPUT_SIZE: usize = 0; // Phase 1: PPMd dormant — always raw fallback
+/// Maximum input size for PPMd. The context trie depth is capped at
+/// `max_order` (default 4), so memory grows O(n × 256) in the worst
+/// case. 256 KB is safe for typical development machines.
+const MAX_PPMD_INPUT_SIZE: usize = 256 * 1024;
 
 pub fn compress(input: &[u8], max_order: u8) -> Result<Vec<u8>, PpmdError> {
     validate_order(max_order)?;
@@ -116,7 +114,7 @@ pub fn compress(input: &[u8], max_order: u8) -> Result<Vec<u8>, PpmdError> {
 
     let mut model = model::PpmModel::new(usize::from(max_order));
     {
-        let mut enc = range_coder::RangeEncoder::new(&mut out);
+        let mut enc = model::ArithEncoder::new(&mut out);
         for &b in input {
             model.encode_byte(&mut enc, b);
         }
@@ -184,7 +182,7 @@ pub fn decompress(compressed: &[u8], expected_len: usize) -> Result<Vec<u8>, Ppm
 
     let bitstream = &compressed[10..];
     let mut model = model::PpmModel::new(usize::from(max_order));
-    let mut dec = range_coder::RangeDecoder::new(bitstream);
+    let mut dec = model::ArithDecoder::new(bitstream);
     for _ in 0..size {
         out.push(model.decode_byte(&mut dec));
     }
@@ -373,7 +371,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "PPMd dormant: raw fallback does not compress. Enable when Phase 2 trie pruning ships."]
+    #[ignore = "Phase 1: ratio not yet competitive. Re-enable when context mixing lands."]
     fn compressed_text_is_smaller() {
         let big: Vec<u8> = TEXT.bytes().cycle().take(10_000).collect();
         let compressed = compress(&big, 4).expect("compress");
@@ -405,7 +403,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "PPMd dormant: all orders produce identical raw fallback. Enable when Phase 2 ships."]
     fn determinism_across_orders() {
         // Different orders produce different streams, but each is stable.
         let input = TEXT.as_bytes();
