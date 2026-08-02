@@ -10,6 +10,10 @@
 //! - **BCJ filters** (Branch / Call / Jump) — convert relative branch
 //!   instructions in executable code to a form that compresses much
 //!   better. One filter per instruction set (x86, ARM, ARM64, ...).
+//! - **Shuffle filters** (byte / bit) — transpose items so that the same
+//!   byte (or bit) lane across items is contiguous, exposing redundancy
+//!   for downstream codecs. Especially effective on arrays of f32/f64
+//!   or other fixed-width records.
 //!
 //! ## Determinism
 //!
@@ -44,6 +48,7 @@ pub mod bcj_powerpc;
 pub mod bcj_sparc;
 pub mod bcj_x86;
 pub mod delta;
+pub mod shuffle;
 
 pub use bcj_arm::BcjArmFilter;
 pub use bcj_arm64::BcjArm64Filter;
@@ -53,6 +58,7 @@ pub use bcj_powerpc::BcjPowerPcFilter;
 pub use bcj_sparc::BcjSparcFilter;
 pub use bcj_x86::BcjX86Filter;
 pub use delta::DeltaFilter;
+pub use shuffle::{BitShuffle, ByteShuffle};
 
 /// Reversible preprocessing transform. `encode` and `decode` are exact
 /// inverses.
