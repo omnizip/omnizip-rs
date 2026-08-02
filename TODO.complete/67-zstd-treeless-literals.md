@@ -1,39 +1,26 @@
 # 67 — ZSTD Treeless literals emission
 
-## Gap
+**Status**: COMPLETED (0.9.3)
 
-When consecutive compressed blocks in a frame share the same Huffman
-table, the ZSTD spec lets the encoder emit them as **Treeless** blocks
-(block_type = 3). This saves the ~60-byte weight table on each
-subsequent block — significant for many-small-block frames.
+## What was done
 
-Currently the encoder always emits Compressed blocks (block_type = 2)
-with a fresh Huffman table per block, even when the table is unchanged.
+Added Treeless (block_type=3) literals emission to the ZSTD encoder.
+When consecutive compressed blocks in a frame produce identical Huffman
+weight tables, the second (and subsequent) blocks emit the Treeless
+literals header instead of re-sending the weights — saving ~60 bytes
+per subsequent block.
 
 ## Implementation
 
-1. **Track the last Huffman table** in `MatchState` (or a new
-   `EncoderState`).
-2. After building a Huffman table for the current block, compare its
-   weights wire encoding against the previous block's.
-3. If identical, emit block_type = 3 (Treeless) and omit the weights
-   section.
-4. The decoder already supports Treeless (see `literals::decode` →
-   `is_repeat = true` path).
+- `huffman/encoder.rs`: new `encode_literals_with_weights` returns
+  both the encoded bytes AND the weight wire bytes, plus an optional
+  `treeless` flag that omits the weights from the output.
+- `encoder/block.rs`: `last_huf_weights: Option<Vec<u8>>` threaded
+  through the frame encoder. `encode_compressed_content` evaluates
+  Treeless, Compressed (block_type=2 with new weights), and Raw, then
+  picks the smallest.
 
-## Wire format difference
+## Test coverage
 
-```
-Compressed (type 2):
-  header (3-5 bytes) | Huffman_Table_Description | jump_table | streams
-
-Treeless (type 3):
-  header (3-5 bytes) | jump_table | streams
-  (reuses previous Huffman table from frame state)
-```
-
-## Test strategy
-
-- Two identical literal distributions in a row → second block should
-  be Treeless.
-- Round-trip via own decoder and reference `zstd -d`.
+- All 133 existing ZSTD tests pass with Treeless enabled.
+- Reference `zstd -d` accepts Treeless output (parity test green).
