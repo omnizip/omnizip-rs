@@ -12,7 +12,9 @@
 #![forbid(unsafe_code)]
 
 use crate::constants::{BLOCK_TYPE_COMPRESSED, BLOCK_TYPE_RAW, BLOCK_TYPE_RLE};
-use crate::encoder::match_finder::{compress_block_with_min_match, MatchState, SeqStore};
+use crate::encoder::match_finder::{
+    compress_block_lazy, compress_block_lazy2, compress_block_with_min_match, MatchState, SeqStore,
+};
 use crate::encoder::sequences::encode_section;
 use crate::xxhash;
 use crate::ZstdError;
@@ -152,7 +154,25 @@ fn write_block(
     let mut seq_store = SeqStore::new();
     seq_store.reset(*rep_offsets);
     let min_match = params.min_match.max(4) as usize;
-    compress_block_with_min_match(chunk, &mut seq_store, ms, min_match);
+
+    // Dispatch to the appropriate parser based on the strategy field.
+    use crate::encoder::cparams::Strategy;
+    match params.strategy {
+        Strategy::Fast | Strategy::DoubleFast => {
+            compress_block_with_min_match(chunk, &mut seq_store, ms, min_match);
+        }
+        Strategy::Greedy => {
+            compress_block_with_min_match(chunk, &mut seq_store, ms, min_match);
+        }
+        Strategy::Lazy => {
+            compress_block_lazy(chunk, &mut seq_store, ms, min_match);
+        }
+        Strategy::Lazy2 | Strategy::Btlazy2 | Strategy::Btopt | Strategy::Btultra | Strategy::Btultra2 => {
+            // Lazy2 gives good results for all higher levels. A full
+            // binary-tree optimal parser would improve L16-22 by ~1-2%.
+            compress_block_lazy2(chunk, &mut seq_store, ms, min_match);
+        }
+    }
     *rep_offsets = seq_store.rep_offsets;
 
     let mut compressed_content = Vec::new();
@@ -397,6 +417,46 @@ mod tests {
         let compressed = encode_frame_compressed(&input, 1).expect("encode");
         let decompressed = decompress(&compressed, input.len() as u32).expect("decode");
         assert_eq!(decompressed, input);
+    }
+
+    #[test]
+    fn strategy_dispatch_round_trips() {
+        // Representative strategies: Fast (L1), Greedy (L5), Lazy (L6),
+        // Lazy2 (L8). Each must produce decodable output.
+        let input: Vec<u8> = (0..2_000)
+            .map(|i| if i % 50 < 40 { b'a' + (i % 3) as u8 } else { (i % 256) as u8 })
+            .collect();
+        for &level in &[1u8, 5, 6, 8] {
+            let compressed = encode_frame_compressed(&input, level)
+                .unwrap_or_else(|e| panic!("encode L{level} failed: {e:?}"));
+            let decompressed = decompress(&compressed, input.len() as u32)
+                .unwrap_or_else(|e| panic!("decode L{level} failed: {e:?}"));
+            assert_eq!(decompressed, input, "round-trip failed at L{level}");
+        }
+    }
+
+    #[test]
+    fn higher_levels_compress_better() {
+        // Mixed content: some repetition, some unique bytes. The lazy
+        // parser's look-ahead should find better match boundaries than
+        // the greedy fast parser.
+        let mut input = Vec::new();
+        for block in 0..50 {
+            // Each block has a shared prefix (repeated) + unique suffix.
+            input.extend_from_slice(b"function process(");
+            input.extend_from_slice(format!("{block}").as_bytes());
+            input.extend_from_slice(b") {{ return data[");
+            input.extend_from_slice(format!("{block}").as_bytes());
+            input.extend_from_slice(b"]; }}\n");
+        }
+        let l1 = encode_frame_compressed(&input, 1).expect("L1");
+        let l9 = encode_frame_compressed(&input, 9).expect("L9");
+        assert!(
+            l9.len() <= l1.len(),
+            "L9 ({}) should be ≤ L1 ({})",
+            l9.len(),
+            l1.len()
+        );
     }
 
     #[test]

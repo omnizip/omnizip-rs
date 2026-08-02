@@ -278,6 +278,234 @@ pub fn compress_block_with_min_match(
     src.len() - anchor
 }
 
+/// Lazy parser (look-ahead-1). At each position with a match, checks
+/// if position+1 has a longer match. If so, emits a literal and defers.
+///
+/// Used for ZSTD levels 6-7 (Lazy strategy).
+pub fn compress_block_lazy(
+    src: &[u8],
+    seq_store: &mut SeqStore,
+    ms: &mut MatchState,
+    min_match: usize,
+) -> usize {
+    if src.len() < min_match.max(4) + 1 {
+        seq_store.literals.extend_from_slice(src);
+        return src.len();
+    }
+
+    let h_bits = ms.hash_log;
+    let mut anchor: usize = 0;
+    let mut ip: usize = 1;
+    let limit = src.len().saturating_sub(min_match.max(4));
+
+    while ip < limit {
+        let m1 = find_best_match(src, ip, h_bits, ms, min_match, limit);
+
+        if let Some((dist1, len1)) = m1 {
+            // Look ahead: check position ip+1 (read-only probe, no hash update).
+            let m2 = if ip + 1 < limit {
+                probe_match(src, ip + 1, h_bits, ms, min_match, limit)
+            } else {
+                None
+            };
+
+            let defer = match m2 {
+                Some((_, len2)) => len2 > len1 + 1,
+                None => false,
+            };
+
+            if defer {
+                // Emit literal, try again at ip+1.
+                ip += 1;
+            } else {
+                // Accept match at ip.
+                let lit_len = (ip - anchor) as u32;
+                seq_store.literals.extend_from_slice(&src[anchor..ip]);
+                let offset = dist1 as u32;
+                seq_store.sequences.push(RawSequence {
+                    literal_length: lit_len,
+                    match_length: len1 as u32,
+                    offset,
+                });
+                rotate_reps(&mut seq_store.rep_offsets, offset);
+                insert_range(ms, src, ip, len1);
+                ip += len1;
+                anchor = ip;
+            }
+        } else {
+            ip += 1;
+        }
+    }
+
+    if anchor < src.len() {
+        seq_store.literals.extend_from_slice(&src[anchor..]);
+    }
+    src.len() - anchor
+}
+
+/// Lazy2 parser (look-ahead-2). Checks positions ip+1 AND ip+2 before
+/// deciding. Used for ZSTD levels 8-12 (Lazy2 strategy) and as a
+/// fallback for higher levels (Btopt/Btultra).
+pub fn compress_block_lazy2(
+    src: &[u8],
+    seq_store: &mut SeqStore,
+    ms: &mut MatchState,
+    min_match: usize,
+) -> usize {
+    if src.len() < min_match.max(4) + 1 {
+        seq_store.literals.extend_from_slice(src);
+        return src.len();
+    }
+
+    let h_bits = ms.hash_log;
+    let mut anchor: usize = 0;
+    let mut ip: usize = 1;
+    let limit = src.len().saturating_sub(min_match.max(4));
+
+    while ip < limit {
+        let m1 = find_best_match(src, ip, h_bits, ms, min_match, limit);
+
+        if let Some((dist1, len1)) = m1 {
+            // Look ahead 2 positions (read-only probes).
+            let m2 = if ip + 1 < limit {
+                probe_match(src, ip + 1, h_bits, ms, min_match, limit)
+            } else {
+                None
+            };
+            let m3 = if ip + 2 < limit {
+                probe_match(src, ip + 2, h_bits, ms, min_match, limit)
+            } else {
+                None
+            };
+
+            // Defer if either look-ahead position has a better match.
+            let defer1 = matches!(m2, Some((_, l)) if l > len1 + 1);
+            let defer2 = matches!(m3, Some((_, l)) if l > len1 + 2);
+
+            if defer1 || defer2 {
+                ip += 1;
+            } else {
+                let lit_len = (ip - anchor) as u32;
+                seq_store.literals.extend_from_slice(&src[anchor..ip]);
+                let offset = dist1 as u32;
+                seq_store.sequences.push(RawSequence {
+                    literal_length: lit_len,
+                    match_length: len1 as u32,
+                    offset,
+                });
+                rotate_reps(&mut seq_store.rep_offsets, offset);
+                insert_range(ms, src, ip, len1);
+                ip += len1;
+                anchor = ip;
+            }
+        } else {
+            ip += 1;
+        }
+    }
+
+    if anchor < src.len() {
+        seq_store.literals.extend_from_slice(&src[anchor..]);
+    }
+    src.len() - anchor
+}
+
+/// Find the best match at `ip` using a single hash probe. Returns
+/// `(distance, length)` or `None`.
+///
+/// This is the shared match-finding core used by all parsers. It:
+/// 1. Hashes 4 bytes at `ip`.
+/// 2. Updates the hash table.
+/// 3. Checks the candidate for a valid match.
+/// 4. Extends the match forward.
+fn find_best_match(
+    src: &[u8],
+    ip: usize,
+    h_bits: u32,
+    ms: &mut MatchState,
+    min_match: usize,
+    limit: usize,
+) -> Option<(usize, usize)> {
+    if ip + MIN_MATCH > src.len() {
+        return None;
+    }
+
+    // Hash probe.
+    let h = hash4(src, ip, h_bits);
+    let candidate = ms.hash_table[h as usize] as usize;
+    ms.hash_table[h as usize] = ip as u32;
+
+    if candidate == 0 || candidate >= ip {
+        return None;
+    }
+
+    let dist = ip - candidate;
+    if dist >= BLOCK_MAX_SIZE {
+        return None;
+    }
+
+    if candidate + MIN_MATCH > src.len() {
+        return None;
+    }
+
+    if src[ip..ip + MIN_MATCH] != src[candidate..candidate + MIN_MATCH] {
+        return None;
+    }
+
+    let mut m_len = MIN_MATCH;
+    m_len += count_match(src, ip + m_len, src, candidate + m_len, limit + MIN_MATCH - ip - m_len);
+
+    if m_len >= min_match {
+        Some((dist, m_len))
+    } else {
+        None
+    }
+}
+
+/// Read-only match probe for look-ahead positions. Does NOT update
+/// the hash table — used by lazy/lazy2 parsers to peek at future
+/// positions without corrupting the hash state.
+fn probe_match(
+    src: &[u8],
+    ip: usize,
+    h_bits: u32,
+    ms: &MatchState,
+    min_match: usize,
+    limit: usize,
+) -> Option<(usize, usize)> {
+    if ip + MIN_MATCH > src.len() {
+        return None;
+    }
+
+    let h = hash4(src, ip, h_bits);
+    let candidate = ms.hash_table[h as usize] as usize;
+
+    if candidate == 0 || candidate >= ip {
+        return None;
+    }
+
+    let dist = ip - candidate;
+    if dist >= BLOCK_MAX_SIZE {
+        return None;
+    }
+
+    if candidate + MIN_MATCH > src.len() {
+        return None;
+    }
+
+    if src[ip..ip + MIN_MATCH] != src[candidate..candidate + MIN_MATCH] {
+        return None;
+    }
+
+    let mut m_len = MIN_MATCH;
+    m_len += count_match(src, ip + m_len, src, candidate + m_len, limit + MIN_MATCH - ip - m_len);
+
+    if m_len >= min_match {
+        Some((dist, m_len))
+    } else {
+        None
+    }
+}
+
 /// Insert hash entries for positions `[start, start+len)` into the hash
 /// table. Matches C's post-match hash filling. Only inserts every other
 /// position (the C fast parser inserts positions `ip` and `ip+2` after
