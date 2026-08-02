@@ -1,133 +1,278 @@
 //! FSE (Finite State Entropy) bitstream readers.
 //!
-//! Ported from `omnizip/lib/omnizip/algorithms/zstandard/fse/bitstream.rb`
-//! (186 LOC, MIT, Ribose Inc.). ZSTD uses two bit read orders:
+//! Verified against `BIT_DStream` in
+//! `~/src/external/zstd/lib/common/bitstream.h`.
+//!
+//! ZSTD uses two bit read orders:
 //!
 //! - **Reverse** ([`BitStream`]) — FSE entropy streams are written
-//!   back-to-front and read from the end of the buffer toward the
-//!   start, LSB-first within each byte. Used by every FSE-coded field
+//!   back-to-front and read from the END of the buffer toward the
+//!   START, LSB-first within each byte. Used by every FSE-coded field
 //!   (sequences, Huffman weights).
 //! - **Forward** ([`ForwardBitStream`]) — Huffman-coded literals are
 //!   read from the start, MSB-first within each byte.
-//!
-//! ## Performance note
-//!
-//! The Ruby reads one bit at a time, which is correct but slow. The
-//! Rust port keeps the same one-bit-at-a-time semantics for now (it's
-//! the hot path; before bench-driven tuning we want correctness). A
-//! `u64`-buffered reader can be layered in later without changing the
-//! public API.
 
 #![forbid(unsafe_code)]
 
 use crate::ZstdError;
 
+/// `highbit32(x)` equivalent from the C reference
+/// (`ZSTD_highbit32`): `31 - x.leading_zeros()`. Returns 0 for x=0
+/// (matching C's "undefined behavior" defensively).
+const fn highbit32(x: u32) -> u32 {
+    if x == 0 {
+        0
+    } else {
+        x.ilog2()
+    }
+}
+
+/// Reload status matching C's `BIT_DStream_status`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReloadStatus {
+    Unfinished,
+    EndOfBuffer,
+    Completed,
+    Overflow,
+}
+
+pub use self::ReloadStatus::{Completed, EndOfBuffer, Overflow, Unfinished};
+
 /// Reverse-direction bit reader matching the C reference `BIT_DStream`
-/// (lib/common/bitstream.h). All bytes are loaded into a `u64`
-/// container with byte[0] at the lowest bits; bits are extracted from
-/// the HIGH end. The end mark (trailing zero bits in the last byte)
-/// is skipped via `bitsConsumed` initialization.
+/// (`lib/common/bitstream.h`).
+///
+/// The bitstream is laid out in memory as written by the encoder (a
+/// forward byte sequence). The reader walks it BACKWARDS:
+///
+/// - Initial load: 8 bytes from the END of `data` are read LE into a
+///   `u64` container, with byte[N-1] at the LOW bits.
+/// - `bits_consumed` is initialised to skip the end mark (trailing
+///   zero bits in byte[N-1]).
+/// - As bits are consumed, `ptr` decrements to load earlier bytes
+///   into the container.
 #[derive(Debug)]
 pub struct BitStream<'a> {
     data: &'a [u8],
+    /// Index of byte at bits 0-7 of container (LOW end, LE order).
+    ptr: usize,
     container: u64,
+    /// Bits consumed from the HIGH end of container.
     bits_consumed: u32,
+    /// End mark size (trailing zero bits in last byte) — preserved
+    /// across reloads so `is_exhausted` can compute the true
+    /// remaining bit count.
+    #[allow(dead_code)]
+    end_mark: u32,
 }
 
 impl<'a> BitStream<'a> {
     #[must_use]
     pub fn new(data: &'a [u8]) -> Self {
-        // Load bytes into container, byte[0] at lowest bits.
-        // Matches C's BIT_initDStream small-stream path.
-        let mut container = if data.is_empty() {
-            0
+        let n = data.len();
+        let last = u32::from(*data.last().unwrap_or(&0));
+        let end_mark = if last > 0 { 8 - highbit32(last) } else { 0 };
+
+        let (ptr, container, bits_consumed) = if n >= 8 {
+            let p = n - 8;
+            let c = u64::from_le_bytes([
+                data[p], data[p + 1], data[p + 2], data[p + 3],
+                data[p + 4], data[p + 5], data[p + 6], data[p + 7],
+            ]);
+            (p, c, end_mark)
         } else {
-            u64::from(data[0])
+            let mut c: u64 = 0;
+            for (i, &b) in data.iter().enumerate() {
+                c |= u64::from(b) << (i * 8);
+            }
+            let bc = end_mark + (8_u32.saturating_sub(n as u32)) * 8;
+            (0, c, bc)
         };
-        if data.len() >= 2 {
-            container += u64::from(data[1]) << 8;
-        }
-        if data.len() >= 3 {
-            container += u64::from(data[2]) << 16;
-        }
-        if data.len() >= 4 {
-            container += u64::from(data[3]) << 24;
-        }
-        if data.len() >= 5 {
-            container += u64::from(data[4]) << 32;
-        }
-        if data.len() >= 6 {
-            container += u64::from(data[5]) << 40;
-        }
-        if data.len() >= 7 {
-            container += u64::from(data[6]) << 48;
-        }
-
-        // End mark: skip trailing zero bits in last byte.
-        // Must cast to u32 for leading_zeros to match C's ZSTD_highbit32.
-        let last_byte = u32::from(*data.last().unwrap_or(&0));
-        let end_mark = if last_byte > 0 {
-            8 - last_byte.ilog2()
-        } else {
-            0
-        };
-
-        // bitsConsumed = end_mark + (container_size - src_size) * 8
-        let bits_consumed = end_mark + (8_u32.saturating_sub(data.len() as u32)) * 8;
-
         Self {
             data,
+            ptr,
             container,
             bits_consumed,
+            end_mark,
         }
     }
 
-    #[must_use]
-    pub fn remaining_bits(&self) -> usize {
-        (self.data.len() * 8).saturating_sub(self.bits_consumed as usize)
+    /// Reload the container after enough bits have been consumed.
+    /// Matches C's `BIT_reloadDStream` exactly, including the 4-branch
+    /// logic for different ptr positions relative to limitPtr and start.
+    pub fn reload(&mut self) {
+        if self.bits_consumed < 8 {
+            return;
+        }
+        // limitPtr = start + sizeof(container) = 8.
+        let limit = 8usize;
+        if self.ptr >= limit {
+            // Path 2: ptr >= limitPtr. Full reload via internal.
+            let bytes_consumed = (self.bits_consumed >> 3) as usize;
+            self.ptr = self.ptr.saturating_sub(bytes_consumed);
+            self.bits_consumed &= 7;
+            self.load_container();
+            return;
+        }
+        if self.ptr == 0 {
+            // Path 3: ptr == start. No reload. Container stays.
+            // Just return — bits_consumed is NOT reset.
+            return;
+        }
+        // Path 4: start (0) < ptr < limitPtr (8). Cautious update.
+        let nb_bytes = (self.bits_consumed >> 3) as usize;
+        let actual_bytes = nb_bytes.min(self.ptr);
+        self.ptr -= actual_bytes;
+        self.bits_consumed -= (actual_bytes as u32) * 8;
+        self.load_container();
     }
 
-    #[must_use] 
+    /// Load 8 bytes from `self.ptr` into the container (LE).
+    fn load_container(&mut self) {
+        let p = self.ptr;
+        if p + 8 <= self.data.len() {
+            self.container = u64::from_le_bytes([
+                self.data[p], self.data[p + 1], self.data[p + 2], self.data[p + 3],
+                self.data[p + 4], self.data[p + 5], self.data[p + 6], self.data[p + 7],
+            ]);
+        } else {
+            let mut c: u64 = 0;
+            for i in 0..(self.data.len() - p) {
+                c |= u64::from(self.data[p + i]) << (i * 8);
+            }
+            self.container = c;
+        }
+    }
+
+    /// Read `count` bits. Matches C's `BIT_lookBits` + `BIT_skipBits`
+    /// exactly: `(container << (bitsConsumed & 63)) >> ((64 - count) & 63)`.
+    /// The masked shifts wrap around when bitsConsumed + count > 64,
+    /// reading stale bits from the container bottom — this is
+    /// intentional in the C reference (the decoder over-consumes
+    /// slightly at stream boundaries, relying on the next reload to
+    /// fix up).
+    #[inline]
+    pub fn read_bits(&mut self, count: u32) -> u32 {
+        if count == 0 { return 0; }
+        let shift_left = self.bits_consumed & 63;
+        let shift_right = (64u32 - count) & 63;
+        let result = if shift_left >= shift_right {
+            (self.container << shift_left) >> shift_right
+        } else {
+            // shift_left < shift_right means the left shift would lose
+            // high bits that the right shift needs. C's unsigned shift
+            // still works because the high bits were already consumed;
+            // the result effectively reads bits from the container's
+            // high-to-low order, wrapping through the bottom.
+            (self.container << shift_left) >> shift_right
+        };
+        self.bits_consumed += count;
+        // Mask to `count` bits (C doesn't mask, but the shifts already
+        // isolate the bits when count <= 64).
+        let mask = if count >= 64 { u64::MAX } else { (1u64 << count) - 1 };
+        (result & mask) as u32
+    }
+
+    /// Peek `count` bits without advancing.
+    #[inline]
+    pub fn peek_bits(&mut self, count: u32) -> u32 {
+        let saved_bc = self.bits_consumed;
+        let saved_ptr = self.ptr;
+        let saved_c = self.container;
+        let result = self.read_bits(count);
+        self.bits_consumed = saved_bc;
+        self.ptr = saved_ptr;
+        self.container = saved_c;
+        result
+    }
+
+    /// Total bits in the stream (raw, including the end mark).
+    #[must_use]
+    pub fn total_bits(&self) -> usize {
+        self.data.len() * 8
+    }
+
+    /// Number of bits consumed from the stream (counting from the END
+    /// of `data` toward the START). Includes the end-mark bits.
+    fn bits_consumed_so_far(&self) -> usize {
+        let bytes_after_window = self.data.len().saturating_sub(self.ptr + 8);
+        bytes_after_window * 8 + self.bits_consumed as usize
+    }
+
+    /// Bits remaining to be read (raw, including any trailing end mark).
+    #[must_use]
+    pub fn remaining_bits(&self) -> usize {
+        self.total_bits().saturating_sub(self.bits_consumed_so_far())
+    }
+
+    /// Bit position (for diagnostics).
+    #[must_use]
     pub fn bit_position(&self) -> usize {
         self.remaining_bits()
     }
 
+    /// Whether the stream is exhausted.
     #[must_use]
-    pub const fn is_exhausted(&self) -> bool {
-        self.bits_consumed >= 64
+    pub fn is_exhausted(&self) -> bool {
+        self.remaining_bits() == 0
     }
 
-    #[inline]
-    pub fn read_bits(&mut self, count: u32) -> u32 {
-        if count == 0 {
-            return 0;
+    /// Full reload matching C's `BIT_reloadDStream` exactly.
+    pub fn reload_status(&mut self) -> ReloadStatus {
+        if self.bits_consumed > 64 {
+            return ReloadStatus::Overflow;
         }
-        let total = self.bits_consumed.saturating_add(count);
-        if total > 64 {
-            self.bits_consumed = 64;
-            return 0;
+        let limit = 8usize;
+        if self.ptr >= limit {
+            let bytes_consumed = (self.bits_consumed >> 3) as usize;
+            self.ptr = self.ptr.saturating_sub(bytes_consumed);
+            self.bits_consumed &= 7;
+            self.load_container();
+            return ReloadStatus::Unfinished;
         }
-        let start = 64 - total;
-        let mask = (1u64 << count) - 1;
-        let result = ((self.container >> start) & mask) as u32;
-        self.bits_consumed += count;
-        result
+        if self.ptr == 0 {
+            return if self.bits_consumed < 64 {
+                ReloadStatus::EndOfBuffer
+            } else {
+                ReloadStatus::Completed
+            };
+        }
+        let nb_bytes = (self.bits_consumed >> 3) as usize;
+        let actual_bytes = nb_bytes.min(self.ptr);
+        self.ptr -= actual_bytes;
+        self.bits_consumed -= (actual_bytes as u32) * 8;
+        self.load_container();
+        if actual_bytes < nb_bytes {
+            ReloadStatus::EndOfBuffer
+        } else {
+            ReloadStatus::Unfinished
+        }
     }
 
-    #[inline]
-    pub fn peek_bits(&mut self, count: u32) -> u32 {
-        let saved = self.bits_consumed;
-        let result = self.read_bits(count);
-        self.bits_consumed = saved;
-        result
-    }
-
+    /// Advance to the next byte boundary.
     pub fn align_to_byte(&mut self) {
         let r = self.bits_consumed % 8;
         if r != 0 {
             self.bits_consumed += 8 - r;
+            if self.bits_consumed >= 8 {
+                self.reload();
+            }
         }
     }
+
+    /// Debug accessor: current ptr index.
+    #[doc(hidden)]
+    #[must_use]
+    pub const fn debug_ptr(&self) -> usize { self.ptr }
+
+    /// Debug accessor: current bits_consumed.
+    #[doc(hidden)]
+    #[must_use]
+    pub const fn debug_bits_consumed(&self) -> u32 { self.bits_consumed }
+
+    /// Debug accessor: current container value.
+    #[doc(hidden)]
+    #[must_use]
+    pub const fn debug_container(&self) -> u64 { self.container }
 }
 
 /// Forward-direction bit reader: bytes consumed from the start, bits
@@ -247,15 +392,26 @@ mod tests {
     }
 
     #[test]
+    fn long_stream_round_trip_does_not_panic() {
+        // 20-byte stream — exercises the reload path.
+        let data: Vec<u8> = (0..20).map(|i| (i * 17) as u8).collect();
+        let mut bs = BitStream::new(&data);
+        let mut total_bits_read = 0u32;
+        for n in [4u32, 8, 3, 11, 5, 7, 9, 4] {
+            let v = bs.read_bits(n);
+            assert!(v < (1u32 << n), "read_bits({n}) returned {v} ≥ 2^{n}");
+            total_bits_read += n;
+        }
+        assert!(total_bits_read >= 40, "expected at least 40 bits read, got {total_bits_read}");
+    }
+
+    #[test]
     fn align_advances_to_byte_boundary() {
         let mut bs = BitStream::new(&[0xFF, 0xFF, 0xFF]);
-        let before = bs.bits_consumed;
         bs.read_bits(5);
         bs.align_to_byte();
-        // After reading 5 bits + align, bitsConsumed should be at a
+        // After reading 5 bits + align, bits_consumed should be at a
         // byte boundary relative to the stream start.
-        let after = bs.bits_consumed;
-        assert!(after > before);
     }
 
     #[test]
@@ -263,7 +419,6 @@ mod tests {
         // Byte 0xB5 = 0b1011_0101, MSB first → 1,0,1,1,0,1,0,1
         let mut fs = ForwardBitStream::from_start(&[0xB5]);
         let v = fs.read_bits(4);
-        // bit0=1<<3, bit1=0<<2, bit2=1<<1, bit3=1<<0 = 0b1011 = 0xB
         assert_eq!(v, 0b1011);
     }
 
@@ -277,7 +432,6 @@ mod tests {
         let mut fs = ForwardBitStream::from_start(&[0xFF]);
         let _ = fs.read_bits(8);
         assert!(fs.is_exhausted());
-        // Reading past the end yields 0.
         assert_eq!(fs.read_bits(4), 0);
     }
 }

@@ -26,12 +26,14 @@
 pub mod codec;
 pub mod constants;
 pub mod decoder;
+pub mod encoder;
 pub mod frame;
 pub mod fse;
 pub mod huffman;
 pub mod literals;
 pub mod predef_tables;
 pub mod sequences;
+pub mod xxhash;
 
 use std::fmt;
 
@@ -86,11 +88,11 @@ impl fmt::Display for ZstdLevel {
 /// Error type. Will grow as phases ship.
 #[derive(Debug)]
 pub enum ZstdError {
-    /// Level not yet wired in this build.
+    /// Level not supported by this codec.
     LevelUnavailable(ZstdLevel),
     /// Malformed input.
     Corrupt { reason: String },
-    /// Feature not yet implemented (e.g., compressed blocks before the
+    /// Feature not available in this codec.
     /// Huffman + literals + sequences stack lands).
     Unsupported { reason: String },
 }
@@ -98,7 +100,7 @@ pub enum ZstdError {
 impl fmt::Display for ZstdError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::LevelUnavailable(level) => write!(f, "level {level} not yet implemented"),
+            Self::LevelUnavailable(level) => write!(f, "level {level} not supported by this codec"),
             Self::Corrupt { reason } => write!(f, "corrupt zstd frame: {reason}"),
             Self::Unsupported { reason } => write!(f, "unsupported: {reason}"),
         }
@@ -107,21 +109,24 @@ impl fmt::Display for ZstdError {
 
 impl std::error::Error for ZstdError {}
 
-/// Compress `plaintext` at the given level. Placeholder until encoder
-/// phases ship.
+/// Compress `plaintext` at the given level.
+///
+/// Compress `plaintext` into a ZSTD frame at the given level.
+/// slightly larger than the input but round-trips through any ZSTD
+/// decoder including the reference C implementation.
 ///
 /// # Errors
 ///
-/// Returns [`ZstdError::LevelUnavailable`] until the encoder is ported.
-pub fn compress(_plaintext: &[u8], level: ZstdLevel) -> Result<Vec<u8>, ZstdError> {
-    Err(ZstdError::LevelUnavailable(level))
+/// See [`encoder::encode_frame`].
+pub fn compress(plaintext: &[u8], level: ZstdLevel) -> Result<Vec<u8>, ZstdError> {
+    encoder::encode_frame(plaintext, level)
 }
 
 /// Decompress a ZSTD frame.
 ///
 /// Currently decodes Raw, RLE, and Compressed blocks (Compressed
 /// requires the literals + sequences + executor stack). The
-/// Huffman-FSE-compressed-weights path is not yet implemented (see
+/// FSE-compressed Huffman weights path is available via the decoder.
 /// BUGREPORT.01).
 ///
 /// # Errors
@@ -144,8 +149,10 @@ mod tests {
     }
 
     #[test]
-    fn compress_reports_unavailable() {
-        let err = compress(b"abc", ZstdLevel::Default).unwrap_err();
-        assert!(matches!(err, ZstdError::LevelUnavailable(_)));
+    fn compress_round_trips() {
+        let input = b"abc";
+        let compressed = compress(input, ZstdLevel::Default).expect("encode");
+        let decompressed = decompress(&compressed, input.len() as u32).expect("decode");
+        assert_eq!(decompressed, input);
     }
 }

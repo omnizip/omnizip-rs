@@ -16,7 +16,7 @@
 //!       RLE  → expand one byte to `block_size` copies
 //!       Compressed → decode literals + sequences + execute
 //!     break on last_block
-//!   consume optional checksum (TODO: real XXHash32 verification)
+//!   verify optional content checksum (XXHash64 truncated to u32)
 //! ```
 //!
 //! ## Statefulness
@@ -155,10 +155,22 @@ impl ZstdDecoder {
                     reason: "truncated frame checksum".into(),
                 });
             }
-            // TODO: real XXHash32 verification. The Ruby uses a non-standard
-            // polynomial (see ../../../../../omnizip/BUGREPORT.06-xxhash32-wrong-algorithm.md).
-            // We accept the bytes and skip verification until a proper
-            // impl lands.
+            // ZSTD frame checksum: XXH64 of decoded output, truncated to 32 bits.
+            // Matches C reference `zstd_decompress.c:1052`.
+            let expected = u32::from_le_bytes([
+                remaining[0],
+                remaining[1],
+                remaining[2],
+                remaining[3],
+            ]);
+            let actual = crate::xxhash::zstd_frame_checksum(&output);
+            if expected != actual {
+                return Err(ZstdError::Corrupt {
+                    reason: format!(
+                        "frame checksum mismatch: stored {expected:#010X}, computed {actual:#010X}"
+                    ),
+                });
+            }
             remaining = &remaining[4..];
         }
 

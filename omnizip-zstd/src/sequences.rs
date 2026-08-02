@@ -31,11 +31,44 @@
 
 #![forbid(unsafe_code)]
 
-use crate::constants::{DEFAULT_REPEAT_OFFSETS, MODE_PREDEFINED, MODE_REPEAT, MODE_RLE};
+use crate::constants::{DEFAULT_REPEAT_OFFSETS, MODE_PREDEFINED, MODE_REPEAT, MODE_RLE,
+    MODE_FSE};
 use crate::fse::BitStream;
 use crate::predef_tables::{LL_PREDEF, ML_PREDEF, OF_PREDEF, PredefEntry,
     LL_ACCURACY_LOG, OF_ACCURACY_LOG, ML_ACCURACY_LOG};
 use crate::ZstdError;
+
+/// Code-to-base-value and code-to-extra-bits lookup tables for FSE mode.
+const LL_BASE: [u32; 36] = [
+    0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15,
+    16, 18, 20, 22, 24, 28, 32, 40, 48, 64, 128, 256, 512, 1024, 2048, 4096,
+    8192, 16384, 32768, 65536,
+];
+const LL_BITS: [u8; 36] = [
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    1, 1, 1, 1, 2, 2, 3, 3, 4, 6, 7, 8, 9, 10, 11, 12,
+    13, 14, 15, 16,
+];
+const ML_BASE: [u32; 53] = [
+    3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18,
+    19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34,
+    35, 37, 39, 41, 43, 47, 51, 59, 67, 83, 99, 131, 259, 515, 1027, 2051,
+    4099, 8195, 16387, 32771, 65539,
+];
+const ML_BITS: [u8; 53] = [
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    1, 1, 1, 1, 2, 2, 3, 3, 4, 4, 5, 7, 8, 9, 10, 11,
+    12, 13, 14, 15, 16,
+];
+const OF_BASE: [u32; 32] = [
+    1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16,
+    17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32,
+];
+const OF_BITS: [u8; 32] = [
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    1, 1, 1, 1, 2, 2, 3, 3, 4, 4, 5, 7, 8, 9, 10, 11,
+];
 
 /// One decoded sequence. `offset` is the resolved byte distance (the
 /// repeat-offset rotation has already been applied by the decoder).
@@ -64,7 +97,7 @@ pub struct SequencesSection {
 ///
 /// Returns [`ZstdError::Corrupt`] on any structural problem,
 /// [`ZstdError::Unsupported`] when an FSE-mode table is encountered
-/// (the per-mode table reader is not yet ported).
+/// 
 pub fn decode_sequences_section(
     input: &[u8],
     _previous_tables: &(),
@@ -99,20 +132,23 @@ pub fn decode_sequences_section(
     let ml_mode = (modes >> 2) & 0x03;
     let mut cursor = &after_count[1..];
 
-    // 3. Per-mode table: PREDEFINED uses hardcoded tables, RLE reads
-    //    one byte, FSE/REPEAT are not yet ported.
-    let ll_tbl = get_table(ll_mode, &LL_PREDEF, LL_ACCURACY_LOG, &mut cursor)?;
-    let of_tbl = get_table(of_mode, &OF_PREDEF, OF_ACCURACY_LOG, &mut cursor)?;
-    let ml_tbl = get_table(ml_mode, &ML_PREDEF, ML_ACCURACY_LOG, &mut cursor)?;
+    // 3. Per-mode table.
+    let ll_tbl = get_table(ll_mode, &LL_PREDEF, LL_ACCURACY_LOG, &mut cursor, &LL_BASE, &LL_BITS)?;
+    let of_tbl = get_table(of_mode, &OF_PREDEF, OF_ACCURACY_LOG, &mut cursor, &OF_BASE, &OF_BITS)?;
+    let ml_tbl = get_table(ml_mode, &ML_PREDEF, ML_ACCURACY_LOG, &mut cursor, &ML_BASE, &ML_BITS)?;
 
     // 4. Bitstream: everything left in `cursor` is the FSE bitstream.
     let mut bs = BitStream::new(cursor);
 
     // 5. Init FSE states in C source order: LL, OF, ML
-    //    (zstd_decompress_block.c:1527-1529).
+    //    (zstd_decompress_block.c:1527-1529). Each init reads bits
+    //    and reloads the container, matching ZSTD_initFseState.
     let mut ll_state = init_state(&ll_tbl, &mut bs);
+    bs.reload();
     let mut of_state = init_state(&of_tbl, &mut bs);
+    bs.reload();
     let mut ml_state = init_state(&ml_tbl, &mut bs);
+    bs.reload();
 
     // 6. Decode sequences following ZSTD_decodeSequence exactly.
     let mut sequences = Vec::with_capacity(num_sequences as usize);
@@ -140,6 +176,9 @@ pub fn decode_sequences_section(
             ll_state = u32::from(ll_e.next_state) + bs.read_bits(u32::from(ll_e.nb_bits));
             ml_state = u32::from(ml_e.next_state) + bs.read_bits(u32::from(ml_e.nb_bits));
             of_state = u32::from(of_e.next_state) + bs.read_bits(u32::from(of_e.nb_bits));
+            // Reload the bitstream container after each sequence, matching
+            // C's `BIT_reloadDStream` at the end of ZSTD_decodeSequence.
+            bs.reload();
         }
 
         sequences.push(Sequence {
@@ -157,9 +196,11 @@ pub fn decode_sequences_section(
 }
 
 /// Table type for sequence decoding — either a reference to a
-/// predefined table or an RLE single-entry table.
+/// predefined table, an RLE single-entry table, or a dynamically
+/// built FSE table.
 enum SeqTable {
     Predefined(&'static [PredefEntry], u8),
+    Owned(Vec<PredefEntry>, u8),
     Rle(PredefEntry),
 }
 
@@ -169,6 +210,8 @@ fn get_table(
     predef: &'static [PredefEntry],
     accuracy_log: u8,
     cursor: &mut &[u8],
+    base_table: &[u32],
+    bits_table: &[u8],
 ) -> Result<SeqTable, ZstdError> {
     match mode {
         MODE_PREDEFINED => Ok(SeqTable::Predefined(predef, accuracy_log)),
@@ -182,16 +225,48 @@ fn get_table(
             *cursor = &cursor[1..];
             Ok(SeqTable::Rle(PredefEntry {
                 next_state: 0,
-                nb_add_bits: symbol,
+                nb_add_bits: bits_table[symbol as usize],
                 nb_bits: 0,
-                base_val: 0,
+                base_val: base_table[symbol as usize],
             }))
         }
+        MODE_FSE => {
+            // Read the custom FSE table from the bitstream.
+            let (dtable, consumed) = crate::fse::read_fse_table(cursor)?;
+            *cursor = &cursor[consumed..];
+
+            // Convert the generic FSE DTable entries into ZSTD
+            // sequence symbol entries. For each state, the FSE
+            // `symbol` maps to a code whose base/bits come from
+            // the code tables.
+            let mut entries = Vec::with_capacity(dtable.size());
+            for i in 0..dtable.size() {
+                let fs = dtable.state(i);
+                let sym = usize::from(fs.symbol);
+                let base_val = if sym < base_table.len() {
+                    base_table[sym]
+                } else {
+                    0
+                };
+                let nb_add_bits = if sym < bits_table.len() {
+                    bits_table[sym]
+                } else {
+                    0
+                };
+                entries.push(PredefEntry {
+                    next_state: fs.baseline as u16,
+                    nb_add_bits,
+                    nb_bits: fs.num_bits,
+                    base_val,
+                });
+            }
+            Ok(SeqTable::Owned(entries, dtable.accuracy_log()))
+        }
         MODE_REPEAT => Err(ZstdError::Unsupported {
-            reason: "MODE_REPEAT not yet supported".into(),
+            reason: "MODE_REPEAT requires prior table state".into(),
         }),
-        _ => Err(ZstdError::Unsupported {
-            reason: "MODE_FSE not yet supported".into(),
+        _ => Err(ZstdError::Corrupt {
+            reason: format!("invalid sequence table mode: {mode}"),
         }),
     }
 }
@@ -200,6 +275,7 @@ fn get_table(
 fn init_state(tbl: &SeqTable, bs: &mut BitStream<'_>) -> u32 {
     let log = match tbl {
         SeqTable::Predefined(_, log) => *log,
+        SeqTable::Owned(_, log) => *log,
         SeqTable::Rle(_) => 0,
     };
     bs.read_bits(u32::from(log))
@@ -212,11 +288,20 @@ fn lookup(tbl: &SeqTable, state: u32) -> PredefEntry {
             let idx = (state as usize).min(entries.len() - 1);
             entries[idx]
         }
+        SeqTable::Owned(entries, _) => {
+            let idx = (state as usize).min(entries.len() - 1);
+            entries[idx]
+        }
         SeqTable::Rle(entry) => *entry,
     }
 }
 
 /// Decode the sequence count (1-3 bytes per RFC §3.1.1.3.2.1).
+///
+/// Matches the C reference (`zstd_decompress_block.c)`:
+/// - `b0 < 0x80` → 1-byte: `nbSeq = b0`
+/// - `b0 == 0xFF` → 3-byte: `nbSeq = LE16(b1, b2) + LONGNBSEQ (0x7F00)`
+/// - otherwise → 2-byte: `nbSeq = ((b0 - 0x80) << 8) + b1`
 fn read_sequence_count(input: &[u8]) -> Result<(u32, &[u8]), ZstdError> {
     if input.is_empty() {
         return Err(ZstdError::Corrupt {
@@ -224,17 +309,25 @@ fn read_sequence_count(input: &[u8]) -> Result<(u32, &[u8]), ZstdError> {
         });
     }
     let b0 = u32::from(input[0]);
-    if b0 < 128 {
+    if b0 < 0x80 {
         return Ok((b0, &input[1..]));
+    }
+    if b0 == 0xFF {
+        if input.len() < 3 {
+            return Err(ZstdError::Corrupt {
+                reason: "truncated 3-byte sequence count".into(),
+            });
+        }
+        let n = u32::from(u16::from_le_bytes([input[1], input[2]])) + 0x7F00;
+        return Ok((n, &input[3..]));
     }
     if input.len() < 2 {
         return Err(ZstdError::Corrupt {
-            reason: "truncated sequence count".into(),
+            reason: "truncated 2-byte sequence count".into(),
         });
     }
     let b1 = u32::from(input[1]);
-    let count = ((b0 - 128) << 8) + b1 + 128;
-    Ok((count, &input[2..]))
+    Ok((((b0 - 0x80) << 8) + b1, &input[2..]))
 }
 
 // ── Sequence executor (RFC 8878 §3.1.2.2.3) ─────────────────────────────
@@ -406,9 +499,23 @@ mod tests {
 
     #[test]
     fn read_sequence_count_two_byte() {
-        // 0x80 0x01 → ((0x80 - 128) << 8) + 1 + 128 = 0 + 1 + 128 = 129
+        // 0x80 0x01 → ((0x80 - 0x80) << 8) + 1 = 0 + 1 = 1
         let (n, _) = read_sequence_count(&[0x80, 0x01]).unwrap();
-        assert_eq!(n, 129);
+        assert_eq!(n, 1);
+    }
+
+    #[test]
+    fn read_sequence_count_zero_two_byte() {
+        // 0x80 0x00 → ((0x80 - 0x80) << 8) + 0 = 0 (the zeroSeq_2B case)
+        let (n, _) = read_sequence_count(&[0x80, 0x00]).unwrap();
+        assert_eq!(n, 0);
+    }
+
+    #[test]
+    fn read_sequence_count_three_byte() {
+        // 0xFF 0x00 0x80 → LE16(0x00, 0x80) + 0x7F00 = 0x8000 + 0x7F00 = 0xFF00 = 65280
+        let (n, _) = read_sequence_count(&[0xFF, 0x00, 0x80]).unwrap();
+        assert_eq!(n, 0x8000 + 0x7F00);
     }
 
     #[test]
