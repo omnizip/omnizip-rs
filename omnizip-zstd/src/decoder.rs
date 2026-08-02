@@ -63,6 +63,23 @@ impl ZstdDecoder {
     /// (Huffman FSE-compressed weights, `MODE_FSE` sequence tables,
     /// real `XXHash32` verification).
     pub fn decode_stream(&mut self, input: &[u8]) -> Result<Vec<u8>, ZstdError> {
+        self.decode_stream_with_prefix(input, &[])
+    }
+
+    /// Decode a ZSTD stream with a dictionary prefix priming the
+    /// output window. Each frame's sequences may back-reference
+    /// positions in `prefix`. The returned bytes exclude the prefix.
+    ///
+    /// Used by [`crate::decompress_with_dict`].
+    ///
+    /// # Errors
+    ///
+    /// See [`Self::decode_stream`].
+    pub fn decode_stream_with_prefix(
+        &mut self,
+        input: &[u8],
+        prefix: &[u8],
+    ) -> Result<Vec<u8>, ZstdError> {
         let mut output = Vec::new();
         let mut remaining = input;
 
@@ -94,7 +111,7 @@ impl ZstdDecoder {
 
             // Borrow `self` mutably for the duration of one frame, then
             // release before the next loop iteration rebinds `remaining`.
-            let (frame_output, rest) = self.decode_frame(after_magic)?;
+            let (frame_output, rest) = self.decode_frame_with_prefix(after_magic, prefix)?;
             output.extend_from_slice(&frame_output);
             remaining = rest;
         }
@@ -122,14 +139,23 @@ impl ZstdDecoder {
         Ok(&input[end..])
     }
 
-    fn decode_frame<'a>(&mut self, input: &'a [u8]) -> Result<(Vec<u8>, &'a [u8]), ZstdError> {
+    fn decode_frame_with_prefix<'a>(
+        &mut self,
+        input: &'a [u8],
+        prefix: &[u8],
+    ) -> Result<(Vec<u8>, &'a [u8]), ZstdError> {
         // Reset per-frame state.
         self.previous_huffman_table = None;
         self.previous_fse_tables = ();
         self.executor = SequenceExecutor::new();
 
         let (header, after_header) = FrameHeader::parse(input)?;
-        let mut output = Vec::new();
+        // Prime the output window with the dictionary prefix. Sequences
+        // may back-reference positions in [0, prefix.len()). The prefix
+        // is stripped from the returned value and excluded from the
+        // checksum.
+        let prefix_len = prefix.len();
+        let mut output: Vec<u8> = prefix.to_vec();
         let mut remaining = after_header;
 
         loop {
@@ -140,9 +166,8 @@ impl ZstdDecoder {
                 });
             }
 
-            let (block_output, after_block_data) =
-                self.decode_block(block, after_block)?;
-            output.extend_from_slice(&block_output);
+            let after_block_data =
+                self.decode_block(block, after_block, &mut output)?;
             remaining = after_block_data;
             if block.last_block {
                 break;
@@ -156,14 +181,15 @@ impl ZstdDecoder {
                 });
             }
             // ZSTD frame checksum: XXH64 of decoded output, truncated to 32 bits.
-            // Matches C reference `zstd_decompress.c:1052`.
+            // The checksum covers only the plaintext (after the prefix).
             let expected = u32::from_le_bytes([
                 remaining[0],
                 remaining[1],
                 remaining[2],
                 remaining[3],
             ]);
-            let actual = crate::xxhash::zstd_frame_checksum(&output);
+            let plaintext = &output[prefix_len..];
+            let actual = crate::xxhash::zstd_frame_checksum(plaintext);
             if expected != actual {
                 return Err(ZstdError::Corrupt {
                     reason: format!(
@@ -174,14 +200,16 @@ impl ZstdDecoder {
             remaining = &remaining[4..];
         }
 
-        Ok((output, remaining))
+        // Strip the dictionary prefix from the returned output.
+        Ok((output[prefix_len..].to_vec(), remaining))
     }
 
     fn decode_block<'a>(
         &mut self,
         block: BlockHeader,
         input: &'a [u8],
-    ) -> Result<(Vec<u8>, &'a [u8]), ZstdError> {
+        output: &mut Vec<u8>,
+    ) -> Result<&'a [u8], ZstdError> {
         if block.is_raw() {
             let size = block.block_size as usize;
             if input.len() < size {
@@ -192,7 +220,8 @@ impl ZstdDecoder {
                     ),
                 });
             }
-            Ok((input[..size].to_vec(), &input[size..]))
+            output.extend_from_slice(&input[..size]);
+            Ok(&input[size..])
         } else if block.is_rle() {
             if input.is_empty() {
                 return Err(ZstdError::Corrupt {
@@ -200,10 +229,10 @@ impl ZstdDecoder {
                 });
             }
             let byte = input[0];
-            let out = vec![byte; block.block_size as usize];
-            Ok((out, &input[1..]))
+            output.extend(std::iter::repeat(byte).take(block.block_size as usize));
+            Ok(&input[1..])
         } else if block.is_compressed() {
-            self.decode_compressed_block(block, input)
+            self.decode_compressed_block(block, input, output)
         } else {
             Err(ZstdError::Corrupt {
                 reason: format!("reserved block type {}", block.block_type),
@@ -215,7 +244,8 @@ impl ZstdDecoder {
         &mut self,
         block: BlockHeader,
         input: &'a [u8],
-    ) -> Result<(Vec<u8>, &'a [u8]), ZstdError> {
+        output: &mut Vec<u8>,
+    ) -> Result<&'a [u8], ZstdError> {
         let block_end = block.block_size as usize;
         if input.len() < block_end {
             return Err(ZstdError::Corrupt {
@@ -246,11 +276,13 @@ impl ZstdDecoder {
         )?;
         let () = seq_section.fse_tables;
 
-        // 3. Execute sequences against literals, producing output.
-        let mut output = Vec::new();
-        self.executor.execute(&literals, &seq_section.sequences, &mut output)?;
+        // 3. Execute sequences against literals, appending to the
+        //    frame-level output buffer (which may already contain the
+        //    dictionary prefix). This lets back-references into the
+        //    prefix resolve correctly.
+        self.executor.execute(&literals, &seq_section.sequences, output)?;
 
-        Ok((output, after_block))
+        Ok(after_block)
     }
 }
 

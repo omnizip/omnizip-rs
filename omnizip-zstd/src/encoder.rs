@@ -33,3 +33,20 @@ use crate::{ZstdError, ZstdLevel};
 pub fn encode_frame(plaintext: &[u8], level: ZstdLevel) -> Result<Vec<u8>, ZstdError> {
     block::encode_frame_compressed(plaintext, level.as_reference_level())
 }
+
+/// Compress `plaintext` into a ZSTD frame primed with a dictionary.
+///
+/// Delegates to [`block::encode_frame_with_dict`]. See its docs for
+/// the dictionary-prefix strategy.
+///
+/// # Errors
+///
+/// Returns [`ZstdError::Corrupt`] only on internal arithmetic
+/// overflow.
+pub fn encode_frame_with_dict(
+    plaintext: &[u8],
+    level: u8,
+    dict: &crate::dict::ZstdDictionary,
+) -> Result<Vec<u8>, ZstdError> {
+    block::encode_frame_with_dict(plaintext, level, dict)
+}

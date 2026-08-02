@@ -11,6 +11,10 @@ members = [
     "omnizip-fsst",
     "omnizip-ricepp",
     "omnizip-flac",
+    "omnizip-blosc",
+    "omnizip-glza",
+    "omnizip-ppmd",
+    "omnizip-zpaq",
     "tests/differential",
 ]
 resolver = "2"

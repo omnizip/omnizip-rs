@@ -43,8 +43,8 @@ pub fn encode_frame_compressed(
     // Magic.
     out.extend_from_slice(&crate::constants::MAGIC_BYTES);
 
-    // Frame header: descriptor + window_descriptor + 8-byte FCS.
-    write_frame_header(&mut out, plaintext.len());
+    // Frame header: descriptor + optional window_descriptor + FCS.
+    write_frame_header(&mut out, plaintext.len(), None);
 
     // Blocks.
     let mut rep_offsets = [1u32, 4, 8];
@@ -73,11 +73,166 @@ pub fn encode_frame_compressed(
     Ok(out)
 }
 
+/// Encode `plaintext` as a complete ZSTD frame primed with a
+/// dictionary prefix.
+///
+/// Phase 1 strategy: build a virtual stream `dict_content ++
+/// plaintext`, seed the match finder's hash table with the dictionary
+/// positions, then compress the plaintext region only. Matches may
+/// back-reference dictionary bytes. The resulting frame:
+///
+/// - Has `Frame_Content_Size` = `plaintext.len()` (NOT including the
+///   dictionary).
+/// - Has a content checksum over `plaintext` only.
+/// - Carries the dictionary's `id` in the frame header.
+///
+/// The frame is **not** decodable by a standalone ZSTD decoder — it
+/// requires the dict-aware path ([`crate::decompress_with_dict`])
+/// which primes the decoder's output window with the dictionary
+/// content before executing sequences.
+///
+/// # Errors
+///
+/// Returns [`ZstdError::Corrupt`] on internal failures.
+pub fn encode_frame_with_dict(
+    plaintext: &[u8],
+    level: u8,
+    dict: &crate::dict::ZstdDictionary,
+) -> Result<Vec<u8>, ZstdError> {
+    use crate::encoder::cparams::Strategy;
+    use crate::encoder::match_finder::{
+        compress_block_fast_with_prefix, compress_block_lazy2_with_prefix,
+        compress_block_lazy_with_prefix,
+    };
+
+    let dict_content = dict.content();
+    let params = crate::encoder::cparams::get_params(level);
+
+    // Virtual stream: dict_content ++ plaintext. Match positions are
+    // absolute within this buffer.
+    let mut virtual_stream: Vec<u8> = Vec::with_capacity(dict_content.len() + plaintext.len());
+    virtual_stream.extend_from_slice(dict_content);
+    let prefix_len = virtual_stream.len();
+    virtual_stream.extend_from_slice(plaintext);
+
+    let mut out = Vec::with_capacity(plaintext.len() / 2 + 64);
+    let mut match_state = MatchState::new(params.hash_log);
+
+    // Seed the hash table with dictionary positions.
+    if prefix_len >= 4 {
+        match_state.seed_prefix(&virtual_stream, prefix_len);
+    }
+
+    // Magic.
+    out.extend_from_slice(&crate::constants::MAGIC_BYTES);
+
+    // Frame header: FCS = plaintext.len(), with Dictionary_ID.
+    write_frame_header(&mut out, plaintext.len(), Some(dict.id()));
+
+    // Blocks: iterate plaintext in BLOCK_MAX_SIZE chunks, but pass
+    // the full virtual_stream slice + prefix_len to the dict-aware
+    // match finders. The hash table persists across blocks (no
+    // ms.clear()) so dictionary positions remain queryable.
+    let mut rep_offsets = [1u32, 4, 8];
+    let mut last_huf_weights: Option<Vec<u8>> = None;
+    let mut offset = prefix_len;
+    let end = virtual_stream.len();
+
+    if offset < end {
+        loop {
+            let remaining = end - offset;
+            let chunk_size = remaining.min(BLOCK_MAX_SIZE);
+            let is_last = offset + chunk_size == end;
+
+            // Run the dict-aware match finder over the virtual
+            // stream starting at `offset`, producing a SeqStore for
+            // just this block's plaintext region.
+            let mut seq_store = SeqStore::new();
+            seq_store.reset(rep_offsets);
+            let min_match = params.min_match.max(4) as usize;
+
+            match params.strategy {
+                Strategy::Fast | Strategy::DoubleFast | Strategy::Greedy => {
+                    // For Fast/DoubleFast/Greedy, the fast parser
+                    // suffices (no look-ahead).
+                    compress_block_fast_with_prefix(
+                        &virtual_stream[..offset + chunk_size],
+                        offset,
+                        &mut seq_store,
+                        &mut match_state,
+                        min_match,
+                    );
+                }
+                Strategy::Lazy => {
+                    compress_block_lazy_with_prefix(
+                        &virtual_stream[..offset + chunk_size],
+                        offset,
+                        &mut seq_store,
+                        &mut match_state,
+                        min_match,
+                    );
+                }
+                _ => {
+                    compress_block_lazy2_with_prefix(
+                        &virtual_stream[..offset + chunk_size],
+                        offset,
+                        &mut seq_store,
+                        &mut match_state,
+                        min_match,
+                    );
+                }
+            }
+            rep_offsets = seq_store.rep_offsets;
+
+            // The chunk for literal/RLE/block-header purposes is the
+            // plaintext slice [offset, offset+chunk_size).
+            let chunk = &virtual_stream[offset..offset + chunk_size];
+
+            // RLE check.
+            if chunk.len() >= 2 && chunk.iter().all(|&b| b == chunk[0]) {
+                write_rle_block(&mut out, chunk[0], chunk.len(), is_last);
+                last_huf_weights = None;
+            } else {
+                let mut compressed_content = Vec::new();
+                let encode_ok = encode_compressed_content(
+                    &mut compressed_content,
+                    &seq_store,
+                    &mut last_huf_weights,
+                )
+                .is_ok();
+
+                if encode_ok && compressed_content.len() < chunk.len() {
+                    write_compressed_block_header(&mut out, compressed_content.len(), is_last);
+                    out.extend_from_slice(&compressed_content);
+                } else {
+                    write_raw_block(&mut out, chunk, is_last);
+                    last_huf_weights = None;
+                }
+            }
+
+            offset += chunk_size;
+            if offset >= end {
+                break;
+            }
+        }
+    } else {
+        // Plaintext is empty: emit a single empty last Raw block.
+        let hdr: u32 = 1;
+        out.extend_from_slice(&hdr.to_le_bytes()[..3]);
+    }
+
+    // Content checksum over plaintext only.
+    let checksum = xxhash::zstd_frame_checksum(plaintext);
+    out.extend_from_slice(&checksum.to_le_bytes());
+
+    Ok(out)
+}
+
 /// Write the frame header using the smallest FCS encoding that fits,
 /// matching the C reference's priority order.
 ///
 /// Descriptor byte layout:
-/// - bits 0-1: Dictionary_ID_flag (always 0 — no Dict_ID).
+/// - bits 0-1: Dictionary_ID_flag (0 = no Dict_ID, 1/2/3 = 1/2/4-byte ID).
 /// - bit 2: Content_Checksum_flag (always 1 — we always emit the checksum).
 /// - bit 5: Single_Segment_flag.
 /// - bits 6-7: Frame_Content_Size_flag (0/1/2/3 → 0/2/4/8-byte FCS).
@@ -90,10 +245,14 @@ pub fn encode_frame_compressed(
 ///
 /// When single_segment=1, no window_descriptor is emitted (the window
 /// size is implied to equal the frame content size).
-fn write_frame_header(out: &mut Vec<u8>, uncompressed_size: usize) {
+///
+/// When `dict_id` is `Some(id)`, the smallest Dictionary_ID encoding
+/// that fits is emitted (1 byte for id ≤ 255, 2 bytes for id ≤ 65535,
+/// 4 bytes otherwise). The ID value 0 is treated as "no dict id".
+fn write_frame_header(out: &mut Vec<u8>, uncompressed_size: usize, dict_id: Option<u32>) {
     let size_u64 = uncompressed_size as u64;
 
-    // Pick the smallest encoding.
+    // Pick the smallest FCS encoding.
     let (fcs_flag, fcs_bytes_buf, single_segment): (u8, [u8; 8], bool) = if size_u64 <= 255 {
         (0, size_u64.to_le_bytes(), true)
     } else if size_u64 <= 65_791 {
@@ -107,9 +266,12 @@ fn write_frame_header(out: &mut Vec<u8>, uncompressed_size: usize) {
         let window_log: u32 = 64 - size_u64.saturating_sub(1).leading_zeros();
         let window_log = window_log.max(10).min(31);
         let window_descriptor: u8 = ((window_log - 10) as u8) << 3;
-        let descriptor: u8 = (3u8 << 6) | 0x04;
+        // Fold the Dictionary_ID flag into the descriptor here too.
+        let (did_flag, did_bytes) = dict_id_encoding(dict_id);
+        let descriptor: u8 = (3u8 << 6) | 0x04 | did_flag;
         out.push(descriptor);
         out.push(window_descriptor);
+        out.extend_from_slice(&did_bytes);
         out.extend_from_slice(&size_u64.to_le_bytes());
         return;
     };
@@ -121,11 +283,27 @@ fn write_frame_header(out: &mut Vec<u8>, uncompressed_size: usize) {
     };
     let fcs_bytes = &fcs_bytes_buf[..fcs_len];
 
+    let (did_flag, did_bytes) = dict_id_encoding(dict_id);
     let descriptor: u8 = (fcs_flag << 6)
         | 0x04 // content_checksum = 1
-        | if single_segment { 0x20 } else { 0 };
+        | if single_segment { 0x20 } else { 0 }
+        | did_flag;
     out.push(descriptor);
+    out.extend_from_slice(&did_bytes);
     out.extend_from_slice(fcs_bytes);
+}
+
+/// Pick the smallest Dictionary_ID encoding for the given id.
+/// Returns `(flag_bits, id_bytes)` where `flag_bits` goes into the
+/// descriptor's bits 0-1 and `id_bytes` is the little-endian ID
+/// payload (0/1/2/4 bytes).
+fn dict_id_encoding(dict_id: Option<u32>) -> (u8, Vec<u8>) {
+    match dict_id {
+        None | Some(0) => (0, Vec::new()),
+        Some(id) if id <= 0xFF => (1, vec![id as u8]),
+        Some(id) if id <= 0xFFFF => (2, (id as u16).to_le_bytes().to_vec()),
+        Some(id) => (3, id.to_le_bytes().to_vec()),
+    }
 }
 
 /// Write one block. Chooses Raw/RLE/Compressed/Treeless based on which

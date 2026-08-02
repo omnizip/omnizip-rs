@@ -1,0 +1,15 @@
+[package]
+name = "omnizip-ppmd"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Pure-Rust PPMd text compression codec (PPM with escape, binary arithmetic coder)"
+
+[dependencies]
+omnizip-codecs.workspace = true
+
+[lints]
+workspace = true
