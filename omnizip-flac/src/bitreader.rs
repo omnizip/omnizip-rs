@@ -57,7 +57,11 @@ impl<'a> BitReader<'a> {
     }
 
     /// Read a unary-coded value: count the number of leading 1-bits
-    /// until a 0-bit is found. Used for Rice residual coding.
+    /// until a 0-bit terminator is found. Used for Rice residual
+    /// coding (matches libFLAC's convention of "ones then zero").
+    ///
+    /// This implementation is O(n) per bit but is provably correct for
+    /// any `bit_pos` alignment.
     #[must_use]
     pub fn read_unary(&mut self) -> u32 {
         let mut count = 0u32;
@@ -65,29 +69,9 @@ impl<'a> BitReader<'a> {
             if self.byte_pos >= self.data.len() {
                 break;
             }
-            let byte = self.data[self.byte_pos];
-            let remaining_in_byte = byte << self.bit_pos;
-            if remaining_in_byte == 0 {
-                // Rest of this byte is zeros.
-                count += (8 - self.bit_pos) as u32;
-                self.bit_pos = 0;
-                self.byte_pos += 1;
+            if self.read_bits(1) == 1 {
+                count += 1;
             } else {
-                // Count leading 1-bits: invert and count leading zeros.
-                let inverted = !remaining_in_byte;
-                let ones = inverted.leading_zeros() as u32 - self.bit_pos as u32;
-                count += ones;
-                self.bit_pos += ones as u8;
-                if self.bit_pos >= 8 {
-                    self.bit_pos -= 8;
-                    self.byte_pos += 1;
-                }
-                // Skip the terminating 0-bit.
-                self.bit_pos += 1;
-                if self.bit_pos >= 8 {
-                    self.bit_pos -= 8;
-                    self.byte_pos += 1;
-                }
                 break;
             }
         }

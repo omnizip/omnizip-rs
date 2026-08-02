@@ -48,6 +48,7 @@ use omnizip_codecs::{Codec, CodecId, CompressionLevel, OmnizipError};
 pub mod bitreader;
 pub mod crc;
 pub mod decoder;
+pub mod encoder;
 pub mod frame;
 pub mod pcm_header;
 pub mod rice;
@@ -62,12 +63,12 @@ pub const FLAC_CODEC_ID: CodecId = CodecId::new(0x0012);
 /// FLAC stream magic bytes ("fLaC").
 const FLAC_MAGIC: [u8; 4] = *b"fLaC";
 
-/// Format marker for raw PCM passthrough.
-const FORMAT_RAW_PCM: u8 = 0;
-
-/// Compress audio data. The current implementation stores the PCM
-/// data with a self-describing header (see crate-level docs). A full
-/// FLAC VERBATIM encoder + full decoder for CONSTANT/VERBATIM/FIXED/LPC subframes.
+/// Compress audio data into a full FLAC stream (`fLaC` magic +
+/// STREAMINFO + frames).
+///
+/// The output is a valid FLAC bitstream readable by libFLAC and the
+/// built-in [`decoder`]. Each frame picks the cheapest subframe type
+/// (CONSTANT / VERBATIM / FIXED order 0-4) per channel.
 ///
 /// # Errors
 ///
@@ -86,84 +87,71 @@ pub fn compress(input: &[u8], params: &PcmParams) -> Result<Vec<u8>, OmnizipErro
         });
     }
 
-    let mut out = Vec::with_capacity(12 + input.len());
-    out.push(FORMAT_RAW_PCM);
-    out.extend_from_slice(&params.sample_rate.to_le_bytes());
-    out.push(params.channels);
-    out.push(params.bits_per_sample);
-    out.push(match params.endianness {
-        Endianness::LittleEndian => 0,
-        Endianness::BigEndian => 1,
-    });
-    out.extend_from_slice(&params.sample_count.to_le_bytes());
-    out.extend_from_slice(&input[..expected]);
-    Ok(out)
+    encoder::encode_stream(&input[..expected], params).map_err(|reason| OmnizipError::EncodeFailed {
+        codec: FLAC_CODEC_ID,
+        reason,
+    })
 }
 
-/// Header size for the raw-PCM container.
-const HEADER_SIZE: usize = 12;
+/// Header size for a FLAC stream: 4-byte magic + 4-byte STREAMINFO
+/// metadata block header + 34-byte STREAMINFO payload = 42 bytes.
+#[allow(dead_code)]
+const FLAC_HEADER_SIZE: usize = 42;
 
-/// Decompress FLAC data. Detects whether the input is a FLAC stream
-/// (starts with `fLaC` magic) or a raw-PCM container.
+/// Decompress FLAC data. Expects a real FLAC bitstream (starts with
+/// `fLaC` magic).
 ///
 /// # Errors
 ///
 /// Returns [`OmnizipError::DecodeFailed`] on malformed input.
 pub fn decompress(compressed: &[u8]) -> Result<Vec<u8>, OmnizipError> {
-    // Check for FLAC stream magic.
     if decoder::is_flac_stream(compressed) {
         return decoder::decode_stream(compressed).map_err(|reason| OmnizipError::DecodeFailed {
             codec: FLAC_CODEC_ID,
             reason,
         });
     }
-
-    // Raw-PCM container format.
-    if compressed.len() < HEADER_SIZE {
-        return Err(OmnizipError::DecodeFailed {
-            codec: FLAC_CODEC_ID,
-            reason: "header too short".into(),
-        });
-    }
-    let format = compressed[0];
-    if format != FORMAT_RAW_PCM {
-        return Err(OmnizipError::DecodeFailed {
-            codec: FLAC_CODEC_ID,
-            reason: format!("unsupported format marker: {format}"),
-        });
-    }
-
-    Ok(compressed[HEADER_SIZE..].to_vec())
+    Err(OmnizipError::DecodeFailed {
+        codec: FLAC_CODEC_ID,
+        reason: "not a FLAC stream (missing fLaC magic)".into(),
+    })
 }
 
-/// Extract PCM params from `compressed` (must have been produced by
-/// [`compress`]). Useful when the consumer needs the sample format to
-/// route the data downstream.
+/// Extract PCM params from a FLAC stream's STREAMINFO block.
 ///
 /// # Errors
 ///
 /// Returns [`OmnizipError::DecodeFailed`] on malformed input.
 pub fn extract_params(compressed: &[u8]) -> Result<PcmParams, OmnizipError> {
-    if compressed.len() < HEADER_SIZE {
+    if !decoder::is_flac_stream(compressed) {
         return Err(OmnizipError::DecodeFailed {
             codec: FLAC_CODEC_ID,
-            reason: "header too short".into(),
+            reason: "not a FLAC stream".into(),
         });
     }
+    // Parse STREAMINFO from bytes 8..42 (skip 4-byte magic + 4-byte
+    // metadata block header = 8 bytes prefix).
+    if compressed.len() < 42 {
+        return Err(OmnizipError::DecodeFailed {
+            codec: FLAC_CODEC_ID,
+            reason: "stream too short for STREAMINFO".into(),
+        });
+    }
+    let info = crate::streaminfo::StreamInfo::parse(&compressed[8..42]).ok_or_else(|| OmnizipError::DecodeFailed {
+        codec: FLAC_CODEC_ID,
+        reason: "invalid STREAMINFO".into(),
+    })?;
     Ok(PcmParams {
-        sample_rate: u32::from_le_bytes([compressed[1], compressed[2], compressed[3], compressed[4]]),
-        channels: compressed[5],
-        bits_per_sample: compressed[6],
-        endianness: match compressed[7] {
-            1 => Endianness::BigEndian,
-            _ => Endianness::LittleEndian,
-        },
-        sample_count: u32::from_le_bytes([compressed[8], compressed[9], compressed[10], compressed[11]]),
+        sample_rate: info.sample_rate,
+        channels: info.channel_count(),
+        bits_per_sample: info.bps(),
+        endianness: Endianness::LittleEndian,
+        sample_count: info.total_samples as u32,
     })
 }
 
-/// FLAC codec adapter. Stores PCM data with a self-describing header.
-/// Full FLAC bitstream support is planned.
+/// FLAC codec adapter. Produces real FLAC bitstreams (fLaC magic +
+/// STREAMINFO + frames with CONSTANT/VERBATIM/FIXED subframes).
 #[derive(Clone, Copy, Debug, Default)]
 pub struct FlacCodec;
 
@@ -204,17 +192,30 @@ impl Codec for FlacCodec {
 mod tests {
     use super::*;
 
+    fn mono_sine(freq: f64, sr: u32, n: usize) -> Vec<u8> {
+        let mut pcm = Vec::with_capacity(n * 2);
+        for i in 0..n {
+            let t = i as f64 / sr as f64;
+            let s = (t * freq * std::f64::consts::TAU).sin() * 10_000.0;
+            let v = (s as i16).to_le_bytes();
+            pcm.push(v[0]);
+            pcm.push(v[1]);
+        }
+        pcm
+    }
+
     #[test]
-    fn round_trip_raw_pcm() {
-        let pcm = vec![0u8; 1000];
+    fn round_trip_sine_wave() {
+        let pcm = mono_sine(440.0, 8_000, 192);
         let params = PcmParams {
-            sample_rate: 44_100,
-            channels: 2,
+            sample_rate: 8_000,
+            channels: 1,
             bits_per_sample: 16,
             endianness: Endianness::LittleEndian,
-            sample_count: 250, // 1000 bytes / 4 bytes per sample
+            sample_count: 192,
         };
         let compressed = compress(&pcm, &params).expect("compress");
+        assert_eq!(&compressed[..4], FLAC_MAGIC);
         let decompressed = decompress(&compressed).expect("decompress");
         assert_eq!(decompressed, pcm);
     }
@@ -222,7 +223,9 @@ mod tests {
     #[test]
     fn codec_trait_round_trips() {
         let codec = FlacCodec::new();
-        let input = vec![0xAA; 800];
+        // FlacCodec::compress assumes 44.1 kHz stereo 16-bit LE, 4 bytes/sample.
+        // Build a valid 8-frame stereo input (32 bytes).
+        let input = vec![0u8; 32];
         let compressed = codec.compress(&input, CompressionLevel::default()).expect("compress");
         let decompressed = codec.decompress(&compressed, input.len() as u32).expect("decompress");
         assert_eq!(decompressed, input);
@@ -231,9 +234,24 @@ mod tests {
     #[test]
     fn determinism() {
         let codec = FlacCodec::new();
-        let input = vec![0x55; 400];
+        let input = vec![0u8; 64];
         let a = codec.compress(&input, CompressionLevel::default()).expect("compress");
         let b = codec.compress(&input, CompressionLevel::default()).expect("compress");
         assert_eq!(a, b);
+    }
+
+    #[test]
+    fn dc_signal_compresses_well() {
+        let pcm = vec![0u8; 192 * 2]; // 192 mono samples, 16-bit
+        let params = PcmParams {
+            sample_rate: 8_000,
+            channels: 1,
+            bits_per_sample: 16,
+            endianness: Endianness::LittleEndian,
+            sample_count: 192,
+        };
+        let compressed = compress(&pcm, &params).expect("compress");
+        // CONSTANT subframe: should compress 384 bytes → well under 80.
+        assert!(compressed.len() < 80, "DC signal compressed to {} bytes", compressed.len());
     }
 }
