@@ -46,6 +46,7 @@ pub fn encode_frame_compressed(
 
     // Blocks.
     let mut rep_offsets = [1u32, 4, 8];
+    let mut last_huf_weights: Option<Vec<u8>> = None;
     let mut offset = 0;
     while offset < plaintext.len() {
         let remaining = plaintext.len() - offset;
@@ -53,7 +54,7 @@ pub fn encode_frame_compressed(
         let is_last = offset + chunk_size == plaintext.len();
         let chunk = &plaintext[offset..offset + chunk_size];
 
-        write_block(&mut out, chunk, is_last, &mut match_state, &mut rep_offsets, &params)?;
+        write_block(&mut out, chunk, is_last, &mut match_state, &mut rep_offsets, &params, &mut last_huf_weights)?;
         offset += chunk_size;
     }
 
@@ -125,8 +126,8 @@ fn write_frame_header(out: &mut Vec<u8>, uncompressed_size: usize) {
     out.extend_from_slice(fcs_bytes);
 }
 
-/// Write one block. Chooses Raw/RLE/Compressed based on which produces
-/// the smallest output.
+/// Write one block. Chooses Raw/RLE/Compressed/Treeless based on which
+/// produces the smallest output.
 fn write_block(
     out: &mut Vec<u8>,
     chunk: &[u8],
@@ -134,6 +135,7 @@ fn write_block(
     ms: &mut MatchState,
     rep_offsets: &mut [u32; 3],
     params: &crate::encoder::cparams::CompressionParams,
+    last_huf_weights: &mut Option<Vec<u8>>,
 ) -> Result<(), ZstdError> {
     // Clear hash table: positions are block-relative, so cross-block
     // references would be invalid.
@@ -142,24 +144,24 @@ fn write_block(
     // RLE check: entire chunk is one repeated byte.
     if chunk.len() >= 2 && chunk.iter().all(|&b| b == chunk[0]) {
         write_rle_block(out, chunk[0], chunk.len(), is_last);
+        *last_huf_weights = None;
         return Ok(());
     }
 
     // Try compressed block.
     let mut seq_store = SeqStore::new();
     seq_store.reset(*rep_offsets);
-    // Use level-specific min_match from the compression parameters.
-    // The C reference uses searchLength which ranges from 3 to 7.
-    // Our hash is 4 bytes, so we clamp to >= 4.
     let min_match = params.min_match.max(4) as usize;
     compress_block_with_min_match(chunk, &mut seq_store, ms, min_match);
     *rep_offsets = seq_store.rep_offsets;
 
     let mut compressed_content = Vec::new();
-    let encode_result = encode_compressed_content(&mut compressed_content, &seq_store);
+    let encode_result = encode_compressed_content(
+        &mut compressed_content,
+        &seq_store,
+        last_huf_weights,
+    );
 
-    // Use compressed only if it's smaller than the raw chunk.
-    // FSE bitstream is now correct (write_ncount flush fixed).
     let use_compressed = encode_result.is_ok()
         && compressed_content.len() < chunk.len();
 
@@ -168,32 +170,83 @@ fn write_block(
         out.extend_from_slice(&compressed_content);
     } else {
         write_raw_block(out, chunk, is_last);
+        *last_huf_weights = None;
     }
 
     Ok(())
 }
 
 /// Encode the compressed block content: literals section + sequences
-/// section. Tries both Raw and Huffman literals, picks the smaller.
+/// section. Tries Raw, Huffman (Compressed), and Huffman (Treeless)
+/// literals, picks the smallest.
 fn encode_compressed_content(
     out: &mut Vec<u8>,
     seq_store: &SeqStore,
+    last_huf_weights: &mut Option<Vec<u8>>,
 ) -> Result<(), ZstdError> {
     // Build Raw literals section (always correct).
     let mut raw_literals = Vec::new();
     write_raw_literals(&mut raw_literals, &seq_store.literals);
 
-    // Build Huffman literals section. The encoder falls back to Raw
-    // internally when the alphabet is too large for direct weight
-    // encoding (> 128 symbols) or the distribution is degenerate.
-    let huf_literals = crate::huffman::encoder::encode_literals(&seq_store.literals)
-        .unwrap_or_default();
+    // Build Huffman literals section (Compressed, block_type=2).
+    let (huf_literals, huf_weights) = match crate::huffman::encoder::encode_literals_with_weights(
+        &seq_store.literals,
+        false,
+    ) {
+        Ok((data, weights)) => (data, Some(weights)),
+        Err(_) => (Vec::new(), None),
+    };
 
-    // Use Huffman when smaller than Raw.
-    if !huf_literals.is_empty() && huf_literals.len() < raw_literals.len() {
-        out.extend_from_slice(&huf_literals);
+    // Try Treeless (block_type=3) if previous block established a
+    // Huffman table with identical weights.
+    let treeless_literals = match (last_huf_weights.as_ref(), &huf_weights) {
+        (Some(prev), Some(curr)) if prev == curr => {
+            crate::huffman::encoder::encode_literals_with_weights(
+                &seq_store.literals,
+                true,
+            )
+            .map(|(data, _)| data)
+            .unwrap_or_default()
+        }
+        _ => Vec::new(),
+    };
+
+    // Pick the smallest literals representation.
+    let raw_len = raw_literals.len();
+    let huf_len = if !huf_literals.is_empty() { Some(huf_literals.len()) } else { None };
+    let treeless_len = if !treeless_literals.is_empty() {
+        Some(treeless_literals.len())
+    } else {
+        None
+    };
+
+    // Prefer Treeless → Compressed → Raw (smallest wins).
+    if let Some(tl) = treeless_len {
+        if tl < raw_len && (huf_len.is_none() || tl <= huf_len.unwrap()) {
+            out.extend_from_slice(&treeless_literals);
+        } else if let Some(hl) = huf_len {
+            if hl < raw_len {
+                out.extend_from_slice(&huf_literals);
+                *last_huf_weights = huf_weights;
+            } else {
+                out.extend_from_slice(&raw_literals);
+                *last_huf_weights = None;
+            }
+        } else {
+            out.extend_from_slice(&raw_literals);
+            *last_huf_weights = None;
+        }
+    } else if let Some(hl) = huf_len {
+        if hl < raw_len {
+            out.extend_from_slice(&huf_literals);
+            *last_huf_weights = huf_weights;
+        } else {
+            out.extend_from_slice(&raw_literals);
+            *last_huf_weights = None;
+        }
     } else {
         out.extend_from_slice(&raw_literals);
+        *last_huf_weights = None;
     }
 
     // Sequences section.

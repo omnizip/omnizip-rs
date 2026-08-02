@@ -133,55 +133,90 @@ fn huffman_lengths(symbols: &[(u8, u32)]) -> Vec<u8> {
 /// size doesn't fit any of the supported header formats. The block
 /// encoder falls back to Raw literals in those cases.
 pub fn encode_literals(literals: &[u8]) -> Result<Vec<u8>, ZstdError> {
+    encode_literals_internal(literals, false).map(|(data, _)| data)
+}
+
+/// Encode `literals` as a ZSTD compressed-literals section, returning
+/// both the encoded bytes and the Huffman weight wire bytes used.
+///
+/// The weight wire bytes allow the caller to detect when consecutive
+/// blocks would produce identical Huffman tables, enabling Treeless
+/// (block_type = 3) emission.
+///
+/// Set `treeless` to true to emit a Treeless section (omit the weights
+/// table). The caller MUST ensure a previous block in the same frame
+/// has already established the matching Huffman table.
+///
+/// # Errors
+///
+/// Same as [`encode_literals`].
+pub fn encode_literals_with_weights(
+    literals: &[u8],
+    treeless: bool,
+) -> Result<(Vec<u8>, Vec<u8>), ZstdError> {
+    encode_literals_internal(literals, treeless)
+}
+
+fn encode_literals_internal(
+    literals: &[u8],
+    treeless: bool,
+) -> Result<(Vec<u8>, Vec<u8>), ZstdError> {
     let weights = build_weights(literals);
     let table = HuffmanTable::from_weights(&weights)
         .map_err(|e| ZstdError::Corrupt { reason: e.to_string() })?;
 
+    // block_type bits: 0b10 = Compressed, 0b11 = Treeless.
+    let block_type: u32 = if treeless { 0b11 } else { 0b10 };
+
     let mut out = Vec::new();
 
-    // Emit weights as direct encoding (iSize >= 128 path). Returns Err
-    // when the alphabet is too large for direct encoding (max_symbol
-    // must be ≤ 128 so iSize = 127 + max_symbol ≤ 255 fits in one byte).
+    // Always compute the weights wire (needed for comparison even when
+    // emitting Treeless — the caller checks equality before deciding).
     let weights_wire = encode_weights(&weights)?;
 
-    // Encode the literals. We split into 4 streams whenever the
-    // combined coded size doesn't fit the 1-stream 3-byte header.
+    // For Treeless: don't include weights in output. lit_c_size excludes
+    // weights_wire.len(). For Compressed: include weights as before.
+    let weights_len = if treeless { 0 } else { weights_wire.len() };
+
     let lit_size = literals.len();
-    let lit_c_size_max = lit_size + weights_wire.len() + 6; // upper bound
+    let lit_c_size_max = lit_size + weights_len + 6;
 
     // Try 1-stream first (smaller headers, simpler decoding).
     if lit_size < 1024 && lit_c_size_max < 1024 {
         let coded = encode_huffman_stream(&table, literals);
-        let lit_c_size = weights_wire.len() + coded.len();
+        let lit_c_size = weights_len + coded.len();
         if lit_c_size < 1024 {
-            // 3-byte header: Size_Format=0 (1 stream, 10-bit sizes).
-            let header: u32 = 0b10 | (lit_size as u32) << 4 | (lit_c_size as u32) << 14;
+            let header: u32 = block_type | (lit_size as u32) << 4 | (lit_c_size as u32) << 14;
             out.extend_from_slice(&header.to_le_bytes()[..3]);
-            out.extend_from_slice(&weights_wire);
+            if !treeless {
+                out.extend_from_slice(&weights_wire);
+            }
             out.extend_from_slice(&coded);
-            return Ok(out);
+            return Ok((out, weights_wire));
         }
     }
 
-    // Fall back to 4-stream encoding. Required for litSize or litCSize
-    // ≥ 1024 (Size_Format 0b00 caps both at 1023).
-    if let Err(e) = encode_literals_4streams(literals, &table, &weights_wire, &mut out) {
+    // Fall back to 4-stream encoding.
+    if let Err(e) = encode_literals_4streams_internal(literals, &table, &weights_wire, &mut out, treeless) {
         return Err(ZstdError::Corrupt { reason: e });
     }
-    Ok(out)
+    Ok((out, weights_wire))
 }
 
 /// Encode literals using 4 parallel Huffman streams, matching the C
 /// reference's `HUF_compress4X_usingCTable`. Required for litSize or
 /// litCSize ≥ 1024, where the 1-stream 3-byte header can't hold the
 /// sizes.
-fn encode_literals_4streams(
+fn encode_literals_4streams_internal(
     literals: &[u8],
     table: &HuffmanTable,
     weights_wire: &[u8],
     out: &mut Vec<u8>,
+    treeless: bool,
 ) -> Result<(), String> {
     let lit_size = literals.len();
+    let block_type: u32 = if treeless { 0b11 } else { 0b10 };
+    let weights_len = if treeless { 0 } else { weights_wire.len() };
 
     // Split into 4 roughly-equal segments. Matches C: segmentSize = ceil(N / 4).
     let segment_size = lit_size.div_ceil(4);
@@ -202,24 +237,21 @@ fn encode_literals_4streams(
     let l1 = streams[0].len();
     let l2 = streams[1].len();
     let l3 = streams[2].len();
-    let lit_c_size = weights_wire.len() + 6 + l1 + l2 + l3 + streams[3].len();
+    let lit_c_size = weights_len + 6 + l1 + l2 + l3 + streams[3].len();
 
     // Pick smallest header that fits.
     if lit_size < 1024 && lit_c_size < 1024 {
-        // 3-byte header: Size_Format=1 (4 streams, 10-bit sizes).
-        let header: u32 = 0b10 | (0b01u32 << 2)
+        let header: u32 = block_type | (0b01u32 << 2)
             | (lit_size as u32) << 4
             | (lit_c_size as u32) << 14;
         out.extend_from_slice(&header.to_le_bytes()[..3]);
     } else if lit_size < 16384 && lit_c_size < 16384 {
-        // 4-byte header: Size_Format=2 (4 streams, 14-bit sizes).
-        let header: u32 = 0b10 | (0b10u32 << 2)
+        let header: u32 = block_type | (0b10u32 << 2)
             | ((lit_size as u32) << 4 & 0x3FFF0)
             | ((lit_c_size as u32) << 18 & 0xFFFC0000);
         out.extend_from_slice(&header.to_le_bytes()[..4]);
     } else if lit_size < 262144 && lit_c_size < 262144 {
-        // 5-byte header: Size_Format=3 (4 streams, 18-bit sizes).
-        let low: u32 = 0b10 | (0b11u32 << 2)
+        let low: u32 = block_type | (0b11u32 << 2)
             | ((lit_size as u32) << 4 & 0x3FFFF0)
             | ((lit_c_size as u32) << 22 & 0xFFC00000);
         out.extend_from_slice(&low.to_le_bytes());
@@ -230,11 +262,9 @@ fn encode_literals_4streams(
         ));
     }
 
-    // Weights table comes first (the decoder reads the Huffman table
-    // immediately after the literals_section_header), then the 6-byte
-    // jump table, then the four streams. Matches C's
-    // HUF_compress4X_usingCTable layout.
-    out.extend_from_slice(weights_wire);
+    if !treeless {
+        out.extend_from_slice(weights_wire);
+    }
 
     // Jump table: 3 × u16 LE = lengths of streams 1, 2, 3.
     out.extend_from_slice(&(l1 as u16).to_le_bytes());
