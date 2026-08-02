@@ -1,0 +1,16 @@
+[package]
+name = "omnizip-zpaq"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Pure-Rust ZPAQ context-mixing archival codec"
+keywords = ["compression", "zpaq", "archival", "context-mixing"]
+categories = ["compression"]
+
+[dependencies]
+omnizip-codecs.workspace = true
+
+[lints]
+workspace = true

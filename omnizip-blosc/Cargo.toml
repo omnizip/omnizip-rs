@@ -1,0 +1,17 @@
+[package]
+name = "omnizip-blosc"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Pure-Rust BLOSC2 multi-codec container — shuffle + LZ4 for scientific data"
+keywords = ["compression", "blosc", "shuffle", "scientific"]
+categories = ["compression"]
+
+[dependencies]
+omnizip-codecs.workspace = true
+lz4_flex.workspace = true
+
+[lints]
+workspace = true

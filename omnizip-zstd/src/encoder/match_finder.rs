@@ -101,10 +101,10 @@ impl SeqStore {
 #[derive(Debug)]
 pub struct MatchState {
     /// Hash table: `hash_table[h]` = last position with hash `h`, or 0.
-    hash_table: Vec<u32>,
-    hash_log: u32,
+    pub(crate) hash_table: Vec<u32>,
+    pub(crate) hash_log: u32,
     /// Next position to insert into the hash table.
-    next_to_update: u32,
+    pub(crate) next_to_update: u32,
 }
 
 impl MatchState {
@@ -131,6 +131,28 @@ impl MatchState {
     pub fn clear(&mut self) {
         self.hash_table.fill(0);
         self.next_to_update = 0;
+    }
+
+    /// Seed the hash table with a dictionary prefix. Scans
+    /// `buf[..prefix_len]` and inserts each 4-byte hash pointing to
+    /// its absolute position within `buf`. Subsequent
+    /// `compress_block_*_with_prefix` calls on slices of `buf` will
+    /// find these dictionary positions as match candidates.
+    ///
+    /// Positions stored are absolute indices into `buf` (0-based from
+    /// the start of the prefix). The block-level compressors must be
+    /// told the `prefix_len` offset so their own positions stay
+    /// consistent.
+    pub(crate) fn seed_prefix(&mut self, buf: &[u8], prefix_len: usize) {
+        if prefix_len < MIN_MATCH {
+            return;
+        }
+        let limit = prefix_len - MIN_MATCH + 1;
+        for pos in 0..limit {
+            let h = hash4(buf, pos, self.hash_log);
+            self.hash_table[h as usize] = pos as u32;
+        }
+        self.next_to_update = prefix_len as u32;
     }
 }
 
@@ -543,6 +565,345 @@ fn rotate_reps(reps: &mut [u32; REP_NUM], new_offset: u32) {
         reps[2] = reps[1];
         reps[1] = reps[0];
         reps[0] = new_offset;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Dictionary-prefix variants.
+//
+// These operate over `src = dict_content ++ plaintext`, with positions
+// `[0, prefix_len)` being pre-seeded dictionary content (already
+// inserted into the hash table via `MatchState::seed_prefix`).
+//
+// They iterate `[prefix_len, src.len())`, find matches that may point
+// back into `[0, prefix_len)` (dictionary), and emit literals +
+// sequences describing only the plaintext region. The decoder must
+// prime its output window with `src[..prefix_len]` so back-references
+// into the dictionary resolve.
+// ---------------------------------------------------------------------------
+
+/// Fast (greedy, single-match) parser over `src[prefix_len..]`,
+/// treating `src[..prefix_len]` as pre-seeded dictionary content.
+pub fn compress_block_fast_with_prefix(
+    src: &[u8],
+    prefix_len: usize,
+    seq_store: &mut SeqStore,
+    ms: &mut MatchState,
+    min_match: usize,
+) -> usize {
+    let mm = min_match.max(4);
+    if src.len() < prefix_len + mm + 1 {
+        seq_store.literals.extend_from_slice(&src[prefix_len..]);
+        return src.len() - prefix_len;
+    }
+
+    let h_bits = ms.hash_log;
+    let mut anchor: usize = prefix_len;
+    let mut ip: usize = if prefix_len == 0 { 1 } else { prefix_len };
+    let limit = src.len().saturating_sub(mm);
+
+    while ip < limit {
+        // Check repcode.
+        let rep0 = seq_store.rep_offsets[0];
+        if rep0 > 0 && ip > rep0 as usize {
+            if src[ip..ip + MIN_MATCH] == src[ip - rep0 as usize..ip - rep0 as usize + MIN_MATCH] {
+                let mut m_len = MIN_MATCH;
+                m_len += count_match(src, ip + m_len, src, ip + m_len - rep0 as usize, limit + MIN_MATCH - ip - m_len);
+
+                while ip > anchor
+                    && ip > rep0 as usize
+                    && src[ip - 1] == src[ip - 1 - rep0 as usize]
+                {
+                    ip -= 1;
+                    m_len += 1;
+                }
+
+                if m_len < min_match {
+                    ip += 1;
+                    continue;
+                }
+
+                let lit_len = (ip - anchor) as u32;
+                seq_store.literals.extend_from_slice(&src[anchor..ip]);
+                seq_store.sequences.push(RawSequence {
+                    literal_length: lit_len,
+                    match_length: m_len as u32,
+                    offset: rep0,
+                });
+                rotate_reps(&mut seq_store.rep_offsets, rep0);
+                insert_range_absolute(ms, src, ip, m_len);
+                ip += m_len;
+                anchor = ip;
+                continue;
+            }
+        }
+
+        // Hash + candidate lookup.
+        let h = hash4(src, ip, h_bits);
+        let mut candidate = ms.hash_table[h as usize] as usize;
+        ms.hash_table[h as usize] = ip as u32;
+
+        if candidate > 0 && candidate < ip {
+            let dist = ip - candidate;
+            if dist < BLOCK_MAX_SIZE
+                && candidate + MIN_MATCH <= src.len()
+                && src[ip..ip + MIN_MATCH] == src[candidate..candidate + MIN_MATCH]
+            {
+                let mut m_len = MIN_MATCH;
+                m_len += count_match(src, ip + m_len, src, candidate + m_len, limit + MIN_MATCH - ip - m_len);
+
+                while ip > anchor && candidate > 0 && src[ip - 1] == src[candidate - 1] {
+                    ip -= 1;
+                    candidate -= 1;
+                    m_len += 1;
+                }
+
+                if m_len < min_match {
+                    ip += 1;
+                    continue;
+                }
+
+                let lit_len = (ip - anchor) as u32;
+                let offset = dist as u32;
+                seq_store.literals.extend_from_slice(&src[anchor..ip]);
+                seq_store.sequences.push(RawSequence {
+                    literal_length: lit_len,
+                    match_length: m_len as u32,
+                    offset,
+                });
+                rotate_reps(&mut seq_store.rep_offsets, offset);
+                insert_range_absolute(ms, src, ip, m_len);
+                ip += m_len;
+                anchor = ip;
+                continue;
+            }
+        }
+
+        // Suppress unused-assignment warning when candidate is set but unused.
+        let _ = candidate;
+        ip += 1;
+    }
+
+    if anchor < src.len() {
+        seq_store.literals.extend_from_slice(&src[anchor..]);
+    }
+    src.len() - anchor
+}
+
+/// Lazy parser with dictionary prefix. Same algorithm as
+/// [`compress_block_lazy`] but operates over `src[prefix_len..]` with
+/// `src[..prefix_len]` as pre-seeded dictionary content.
+pub fn compress_block_lazy_with_prefix(
+    src: &[u8],
+    prefix_len: usize,
+    seq_store: &mut SeqStore,
+    ms: &mut MatchState,
+    min_match: usize,
+) -> usize {
+    let mm = min_match.max(4);
+    if src.len() < prefix_len + mm + 1 {
+        seq_store.literals.extend_from_slice(&src[prefix_len..]);
+        return src.len() - prefix_len;
+    }
+
+    let h_bits = ms.hash_log;
+    let mut anchor: usize = prefix_len;
+    let mut ip: usize = if prefix_len == 0 { 1 } else { prefix_len };
+    let limit = src.len().saturating_sub(mm);
+
+    while ip < limit {
+        let m1 = find_best_match_absolute(src, ip, h_bits, ms, min_match, limit);
+
+        if let Some((dist1, len1)) = m1 {
+            let m2 = if ip + 1 < limit {
+                probe_match_absolute(src, ip + 1, h_bits, ms, min_match, limit)
+            } else {
+                None
+            };
+
+            let defer = match m2 {
+                Some((_, len2)) => len2 > len1 + 1,
+                None => false,
+            };
+
+            if defer {
+                ip += 1;
+            } else {
+                let lit_len = (ip - anchor) as u32;
+                seq_store.literals.extend_from_slice(&src[anchor..ip]);
+                let offset = dist1 as u32;
+                seq_store.sequences.push(RawSequence {
+                    literal_length: lit_len,
+                    match_length: len1 as u32,
+                    offset,
+                });
+                rotate_reps(&mut seq_store.rep_offsets, offset);
+                insert_range_absolute(ms, src, ip, len1);
+                ip += len1;
+                anchor = ip;
+            }
+        } else {
+            ip += 1;
+        }
+    }
+
+    if anchor < src.len() {
+        seq_store.literals.extend_from_slice(&src[anchor..]);
+    }
+    src.len() - anchor
+}
+
+/// Lazy2 parser with dictionary prefix.
+pub fn compress_block_lazy2_with_prefix(
+    src: &[u8],
+    prefix_len: usize,
+    seq_store: &mut SeqStore,
+    ms: &mut MatchState,
+    min_match: usize,
+) -> usize {
+    let mm = min_match.max(4);
+    if src.len() < prefix_len + mm + 1 {
+        seq_store.literals.extend_from_slice(&src[prefix_len..]);
+        return src.len() - prefix_len;
+    }
+
+    let h_bits = ms.hash_log;
+    let mut anchor: usize = prefix_len;
+    let mut ip: usize = if prefix_len == 0 { 1 } else { prefix_len };
+    let limit = src.len().saturating_sub(mm);
+
+    while ip < limit {
+        let m1 = find_best_match_absolute(src, ip, h_bits, ms, min_match, limit);
+
+        if let Some((dist1, len1)) = m1 {
+            let m2 = if ip + 1 < limit {
+                probe_match_absolute(src, ip + 1, h_bits, ms, min_match, limit)
+            } else {
+                None
+            };
+            let m3 = if ip + 2 < limit {
+                probe_match_absolute(src, ip + 2, h_bits, ms, min_match, limit)
+            } else {
+                None
+            };
+
+            let defer1 = matches!(m2, Some((_, l)) if l > len1 + 1);
+            let defer2 = matches!(m3, Some((_, l)) if l > len1 + 2);
+
+            if defer1 || defer2 {
+                ip += 1;
+            } else {
+                let lit_len = (ip - anchor) as u32;
+                seq_store.literals.extend_from_slice(&src[anchor..ip]);
+                let offset = dist1 as u32;
+                seq_store.sequences.push(RawSequence {
+                    literal_length: lit_len,
+                    match_length: len1 as u32,
+                    offset,
+                });
+                rotate_reps(&mut seq_store.rep_offsets, offset);
+                insert_range_absolute(ms, src, ip, len1);
+                ip += len1;
+                anchor = ip;
+            }
+        } else {
+            ip += 1;
+        }
+    }
+
+    if anchor < src.len() {
+        seq_store.literals.extend_from_slice(&src[anchor..]);
+    }
+    src.len() - anchor
+}
+
+/// Find the best match at absolute position `ip` in `src`. Updates
+/// the hash table. Same as `find_best_match` but uses absolute
+/// positions (so candidates from the dictionary prefix are visible).
+fn find_best_match_absolute(
+    src: &[u8],
+    ip: usize,
+    h_bits: u32,
+    ms: &mut MatchState,
+    min_match: usize,
+    limit: usize,
+) -> Option<(usize, usize)> {
+    if ip + MIN_MATCH > src.len() {
+        return None;
+    }
+    let h = hash4(src, ip, h_bits);
+    let candidate = ms.hash_table[h as usize] as usize;
+    ms.hash_table[h as usize] = ip as u32;
+
+    if candidate == 0 || candidate >= ip {
+        return None;
+    }
+    let dist = ip - candidate;
+    if dist >= BLOCK_MAX_SIZE {
+        return None;
+    }
+    if candidate + MIN_MATCH > src.len() {
+        return None;
+    }
+    if src[ip..ip + MIN_MATCH] != src[candidate..candidate + MIN_MATCH] {
+        return None;
+    }
+    let mut m_len = MIN_MATCH;
+    m_len += count_match(src, ip + m_len, src, candidate + m_len, limit + MIN_MATCH - ip - m_len);
+    if m_len >= min_match {
+        Some((dist, m_len))
+    } else {
+        None
+    }
+}
+
+/// Read-only match probe using absolute positions.
+fn probe_match_absolute(
+    src: &[u8],
+    ip: usize,
+    h_bits: u32,
+    ms: &MatchState,
+    min_match: usize,
+    limit: usize,
+) -> Option<(usize, usize)> {
+    if ip + MIN_MATCH > src.len() {
+        return None;
+    }
+    let h = hash4(src, ip, h_bits);
+    let candidate = ms.hash_table[h as usize] as usize;
+    if candidate == 0 || candidate >= ip {
+        return None;
+    }
+    let dist = ip - candidate;
+    if dist >= BLOCK_MAX_SIZE {
+        return None;
+    }
+    if candidate + MIN_MATCH > src.len() {
+        return None;
+    }
+    if src[ip..ip + MIN_MATCH] != src[candidate..candidate + MIN_MATCH] {
+        return None;
+    }
+    let mut m_len = MIN_MATCH;
+    m_len += count_match(src, ip + m_len, src, candidate + m_len, limit + MIN_MATCH - ip - m_len);
+    if m_len >= min_match {
+        Some((dist, m_len))
+    } else {
+        None
+    }
+}
+
+/// Insert hash entries for positions `[start, start+len)` — same as
+/// `insert_range` but the function is already position-absolute.
+fn insert_range_absolute(ms: &mut MatchState, src: &[u8], start: usize, len: usize) {
+    if start + MIN_MATCH <= src.len() {
+        let h = hash4(src, start, ms.hash_log);
+        ms.hash_table[h as usize] = start as u32;
+    }
+    if start + len >= 2 && start + len - 2 + MIN_MATCH <= src.len() {
+        let pos = start + len - 2;
+        let h = hash4(src, pos, ms.hash_log);
+        ms.hash_table[h as usize] = pos as u32;
     }
 }
 
