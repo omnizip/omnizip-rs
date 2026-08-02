@@ -14,6 +14,9 @@ pub mod model;
 /// Container magic for PPMd8 streams: `b"PPD8\0"`.
 pub const PPMD8_MAGIC: &[u8; 5] = b"PPD8\0";
 
+/// Codec id for PPMd8.
+pub const PPMD8_CODEC_ID: omnizip_codecs::CodecId = omnizip_codecs::CodecId::PPMD8;
+
 /// Errors specific to the PPMd8 codec.
 #[derive(Debug)]
 pub enum Ppmd8Error {
