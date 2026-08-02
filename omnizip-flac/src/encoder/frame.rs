@@ -36,10 +36,14 @@ use crate::streaminfo::StreamInfo;
 /// Frame sync code: 14 bits of 0x3FFE.
 const SYNC_CODE: u64 = 0x3FFE;
 
-/// Encode one frame of `interleaved_samples` into `writer`.
+/// Encode one frame of audio into `writer`.
 ///
 /// `frame_number` is the sequential frame index (0-based). The samples
-/// are interleaved: `[ch0_s0, ch1_s0, ch0_s1, ch1_s1, ...]` for stereo.
+/// are per-channel (de-interleaved).
+///
+/// For stereo input, evaluates 4 channel assignments (independent,
+/// left/side, right/side, mid/side) and picks the one with the smallest
+/// total subframe cost.
 ///
 /// # Errors
 ///
@@ -59,6 +63,13 @@ pub fn encode_frame(
         return Err("channels have unequal block sizes".into());
     }
 
+    // For stereo, try all 4 channel assignments and pick the cheapest.
+    let (best_channels, channel_assign) = if num_channels == 2 {
+        pick_best_stereo_assignment(&channels_data[0], &channels_data[1])
+    } else {
+        (channels_data.to_vec(), (num_channels - 1) as u64)
+    };
+
     let header_start = writer.position();
 
     // Sync code + reserved + blocking strategy (fixed-block = 0).
@@ -66,21 +77,14 @@ pub fn encode_frame(
     writer.write_bits(0, 1); // reserved
     writer.write_bits(0, 1); // fixed-block strategy
 
-    // Block size code (4 bits). Pick the smallest encoding.
-    // Codes 1-5 map to fixed sizes; 6 = 8-bit extra; 7 = 16-bit extra.
+    // Block size code (4 bits).
     let (bs_code, bs_extra): (u64, Option<u32>) = pick_block_size_code(block_size);
     writer.write_bits(bs_code, 4);
 
     // Sample rate code (4 bits). 0 = get from STREAMINFO.
     writer.write_bits(0, 4);
 
-    // Channel assignment (4 bits). 0-7 = (n-1) independent channels.
-    let channel_assign = (num_channels - 1) as u64;
-    if channel_assign > 7 {
-        return Err(format!(
-            "unsupported channel count {num_channels} (max 8 independent)"
-        ));
-    }
+    // Channel assignment (4 bits).
     writer.write_bits(channel_assign, 4);
 
     // Sample size (3 bits). 0 = get from STREAMINFO.
@@ -89,8 +93,7 @@ pub fn encode_frame(
     // Reserved bit.
     writer.write_bits(0, 1);
 
-    // UTF-8 coded frame number. For small numbers (< 0x80), it's a
-    // single byte.
+    // UTF-8 coded frame number.
     write_utf8_coded(writer, u64::from(frame_number));
 
     // Optional block size extra bytes.
@@ -108,7 +111,7 @@ pub fn encode_frame(
     writer.write_bits(u64::from(crc8), 8);
 
     // Subframes.
-    for chan in channels_data {
+    for chan in &best_channels {
         subframe::encode_subframe(writer, chan, info.bps())?;
     }
 
@@ -122,6 +125,67 @@ pub fn encode_frame(
     writer.write_bits(u64::from(crc16 >> 8), 8);
 
     Ok(())
+}
+
+/// Channel assignment codes (from the FLAC frame header spec).
+/// For independent stereo, assign = 1 (num_channels - 1).
+const CH_INDEPENDENT_STEREO: u64 = 1;
+const CH_LEFT_SIDE: u64 = 8;
+const CH_RIGHT_SIDE: u64 = 9;
+const CH_MID_SIDE: u64 = 10;
+
+/// For stereo input, try all 4 channel assignments and return the one
+/// with the smallest estimated total subframe cost.
+///
+/// Returns `(channels_for_encoding, channel_assign_code)`.
+fn pick_best_stereo_assignment(left: &[i32], right: &[i32]) -> (Vec<Vec<i32>>, u64) {
+    // Independent (no transform).
+    let indep_cost = estimate_subframe_cost(left) + estimate_subframe_cost(right);
+
+    // Left/side: channel 0 = left, channel 1 = side = left - right.
+    let side: Vec<i32> = left.iter().zip(right.iter()).map(|(&l, &r)| l - r).collect();
+    let ls_cost = estimate_subframe_cost(left) + estimate_subframe_cost(&side);
+
+    // Right/side: channel 0 = right, channel 1 = side = left - right.
+    let rs_cost = estimate_subframe_cost(right) + estimate_subframe_cost(&side);
+
+    // Mid/side: channel 0 = mid = (l+r)>>1, channel 1 = side = l-r.
+    let mid: Vec<i32> = left.iter().zip(right.iter()).map(|(&l, &r)| (l + r) >> 1).collect();
+    let ms_cost = estimate_subframe_cost(&mid) + estimate_subframe_cost(&side);
+
+    // Pick the cheapest.
+    let mut best = (vec![left.to_vec(), right.to_vec()], CH_INDEPENDENT_STEREO, indep_cost);
+    if ls_cost < best.2 {
+        best = (vec![left.to_vec(), side.clone()], CH_LEFT_SIDE, ls_cost);
+    }
+    if rs_cost < best.2 {
+        best = (vec![right.to_vec(), side.clone()], CH_RIGHT_SIDE, rs_cost);
+    }
+    if ms_cost < best.2 {
+        best = (vec![mid, side], CH_MID_SIDE, ms_cost);
+    }
+
+    (best.0, best.1)
+}
+
+/// Quick estimate of the subframe encoding cost: sum of |residual|
+/// after order-1 FIXED prediction. Cheaper than running the full
+/// subframe encoder for each candidate.
+fn estimate_subframe_cost(samples: &[i32]) -> u64 {
+    if samples.is_empty() {
+        return 0;
+    }
+    if samples.iter().all(|&s| s == samples[0]) {
+        return 8; // CONSTANT — very cheap
+    }
+    // Order-1 FIXED residual sum.
+    let mut sum: u64 = 0;
+    for i in 1..samples.len() {
+        let residual = samples[i] - samples[i - 1];
+        let mapped = ((residual as u32) << 1) ^ ((residual >> 31) as u32);
+        sum += u64::from(mapped) + 2; // ~Rice cost per residual
+    }
+    sum
 }
 
 /// Map a block size to its 4-bit code + optional extra-byte payload.
