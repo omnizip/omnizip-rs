@@ -72,9 +72,7 @@ pub fn decode_frame(reader: &mut BitReader, info: &StreamInfo) -> Result<(AudioF
     let channel_assign = reader.read_bits(4);
     let (num_channels, _decorrelated) = match channel_assign {
         0..=7 => (channel_assign as u8 + 1, false),
-        8 => (2, true),  // left/side
-        9 => (2, true),  // right/side
-        10 => (2, true), // mid/side
+        8..=10 => (2u8, true), // left/side, right/side, mid/side
         11 => return Err("channel assignment 11 is reserved".into()),
         _ => return Err(format!("invalid channel assignment: {channel_assign}")),
     };
@@ -127,6 +125,11 @@ pub fn decode_frame(reader: &mut BitReader, info: &StreamInfo) -> Result<(AudioF
         channels_data.push(samples);
     }
 
+    // Reconstruct left/right from decorrelated representations.
+    if channel_assign >= 8 && channel_assign <= 10 {
+        channels_data = reconstruct_stereo(channels_data, channel_assign);
+    }
+
     // Align to byte boundary.
     reader.align_byte();
 
@@ -143,6 +146,48 @@ pub fn decode_frame(reader: &mut BitReader, info: &StreamInfo) -> Result<(AudioF
         },
         bytes_consumed,
     ))
+}
+
+/// Reconstruct left/right stereo channels from decorrelated
+/// representations (FLAC channel assignments 8-10).
+///
+/// - 8 (left/side): ch[0]=left, ch[1]=side=left-right → right=left-side.
+/// - 9 (right/side): ch[0]=right, ch[1]=side=left-right → left=side+right.
+/// - 10 (mid/side): ch[0]=mid=(l+r)>>1, ch[1]=side=l-r
+///   → left=mid+((side+(side&1))>>1), right=left-side.
+fn reconstruct_stereo(mut channels: Vec<Vec<i32>>, assign: u32) -> Vec<Vec<i32>> {
+    if channels.len() != 2 {
+        return channels;
+    }
+    // Take ownership of both channel vectors.
+    let ch1 = channels.remove(1);
+    let ch0 = channels.remove(0);
+    let (left, right) = match assign {
+        8 => {
+            // Left/side: ch0 = left, ch1 = side = left - right.
+            let left = ch0.clone();
+            let right: Vec<i32> = ch0.iter().zip(ch1.iter()).map(|(&l, &s)| l - s).collect();
+            (left, right)
+        }
+        9 => {
+            // Right/side: ch0 = right, ch1 = side = left - right.
+            let right = ch0.clone();
+            let left: Vec<i32> = ch1.iter().zip(ch0.iter()).map(|(&s, &r)| s + r).collect();
+            (left, right)
+        }
+        10 => {
+            // Mid/side: ch0 = mid = (l+r)>>1, ch1 = side = l - r.
+            let left: Vec<i32> = ch0
+                .iter()
+                .zip(ch1.iter())
+                .map(|(&m, &s)| m + ((s + (s & 1)) >> 1))
+                .collect();
+            let right: Vec<i32> = left.iter().zip(ch1.iter()).map(|(&l, &s)| l - s).collect();
+            (left, right)
+        }
+        _ => return vec![ch0, ch1],
+    };
+    vec![left, right]
 }
 
 /// Read a UTF-8 coded number (1-6 bytes) from the reader.
