@@ -770,6 +770,24 @@ mod tests {
     }
 
     #[test]
+    fn ncount_round_trip_large_alphabet() {
+        // Exercise the NCount write+read pair with maxSymbolValue=11,
+        // tableLog=6 (the configuration used for Huffman weight encoding).
+        let count = vec![40u32, 60, 35, 25, 20, 15, 10, 10, 5, 5, 5, 5];
+        let total: u64 = count.iter().map(|&c| u64::from(c)).sum();
+        let norm = normalize_count(6, &count, total, 11, true).expect("normalize");
+        let sum: i32 = norm.iter().map(|&n| if n > 0 { n as i32 } else if n < 0 { 1 } else { 0 }).sum();
+        assert_eq!(sum, 64, "normalized counts must sum to tableSize=64, got {norm:?}");
+
+        let mut out = Vec::new();
+        write_ncount(&mut out, &norm, 11, 6).expect("writeNCount");
+
+        let (dtable, consumed) = read_fse_table(&out).expect("read table");
+        assert_eq!(consumed, out.len());
+        let _ = dtable;
+    }
+
+    #[test]
     fn round_trip_of_predefined_distribution() {
         // OF_DEFAULT_NORM has -1 (low-prob) entries at indices 24-28.
         // Verify the FSE encoder handles these correctly.
