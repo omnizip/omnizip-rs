@@ -1,0 +1,15 @@
+[package]
+name = "omnizip-fsst"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Pure-Rust FSST (Fast Static Symbol Table) text preprocessor — port of the FSST reference algorithm"
+
+[dependencies]
+omnizip-codecs.workspace = true
+
+[lints]
+workspace = true
