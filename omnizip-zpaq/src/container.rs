@@ -179,6 +179,11 @@ pub fn decompress_container(data: &[u8]) -> Result<Vec<u8>, ContainerError> {
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss
+)]
 mod tests {
     use super::*;
 

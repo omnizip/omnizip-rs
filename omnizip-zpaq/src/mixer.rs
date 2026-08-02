@@ -33,6 +33,17 @@
 //! RNG, no float, no scheduling-dependent behaviour.
 
 #![forbid(unsafe_code)]
+// Fixed-point arithmetic inherently involves narrowing casts between
+// i32/i64/u16/usize. All such casts in this module are provably safe
+// (operands are bounded by the constants STRETCH_SIZE, PROB_SCALE,
+// WEIGHT_SCALE, and the stretch table range) but clippy::pedantic flags
+// them unconditionally.
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss
+)]
 
 /// Number of input models mixed by [`Mixer`].
 pub const NUM_MODELS: usize = 4;
@@ -51,7 +62,7 @@ const STRETCH_BITS: u32 = 12;
 const STRETCH_SIZE: usize = 1 << STRETCH_BITS; // 4096
 
 /// Fixed-point bits for weights (Q.8 gives plenty of headroom for adaptation
-/// without overflowing i32 sums of up to NUM_MODELS stretched values).
+/// without overflowing `i32` sums of up to `NUM_MODELS` stretched values).
 const WEIGHT_FRAC_BITS: i32 = 8;
 const WEIGHT_SCALE: i32 = 1 << WEIGHT_FRAC_BITS;
 
@@ -114,7 +125,7 @@ const fn build_stretch_table() -> [i32; STRETCH_SIZE] {
             // Advance two powers: x^(k+2) = x^(k) * x^2.
             xpow = xpow * x / q24_one; // x^(k+1)
             xpow = xpow * x / q24_one; // x^(k+2)
-            // Stop early once terms become negligible.
+                                       // Stop early once terms become negligible.
             if xpow.abs() < 4 {
                 break;
             }
@@ -238,8 +249,8 @@ impl Mixer {
     #[must_use]
     pub fn mix(&mut self, probs: &[u16; NUM_MODELS]) -> u16 {
         let mut sum: i32 = 0;
-        for i in 0..NUM_MODELS {
-            let s = stretch(probs[i]);
+        for (i, &p) in probs.iter().enumerate() {
+            let s = stretch(p);
             self.last_stretched[i] = s;
             // sum += w_i * s_i, where w is Q.8 and s is Q.8 -> result is Q.16
             // but we'll re-normalise below.
@@ -316,7 +327,7 @@ mod tests {
         for bucket in 1..STRETCH_SIZE {
             let prob_u16 = ((bucket as i32) << 4).clamp(1, PROB_MAX) as u16;
             let s = stretch(prob_u16);
-            let recovered = squash(s) as i32;
+            let recovered = i32::from(squash(s));
             let err = (recovered - i32::from(prob_u16)).abs();
             if err > max_err {
                 max_err = err;
@@ -339,13 +350,13 @@ mod tests {
             "near-one prob should give positive logit"
         );
         for i in 1..STRETCH_SIZE - 1 {
-            assert!(
-                STRETCH[i] <= STRETCH[i + 1],
-                "stretch not monotonic at {i}"
-            );
+            assert!(STRETCH[i] <= STRETCH[i + 1], "stretch not monotonic at {i}");
         }
         let uniform = stretch(1 << 15);
-        assert!(uniform.abs() < 50, "uniform stretch should be ~0, got {uniform}");
+        assert!(
+            uniform.abs() < 50,
+            "uniform stretch should be ~0, got {uniform}"
+        );
     }
 
     #[test]
