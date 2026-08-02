@@ -118,7 +118,7 @@ pub fn compress(input: &[u8], max_order: u8) -> Result<Vec<u8>, PpmdError> {
         for &b in input {
             model.encode_byte(&mut enc, b);
         }
-        enc.flush();
+        enc.flush(&mut out);
     }
     Ok(out)
 }
