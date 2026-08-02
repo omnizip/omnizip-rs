@@ -108,7 +108,7 @@ pub fn compress(input: &[u8], max_order: u8) -> Result<Vec<u8>, PpmdError> {
         return Ok(out);
     }
 
-    let mut model = model::PpmModel::new(usize::from(max_order));
+    let mut model = model::PpmModel::with_capacity(usize::from(max_order), input.len());
     {
         let mut enc = model::ArithEncoder::new(&mut out);
         for &b in input {
@@ -177,7 +177,7 @@ pub fn decompress(compressed: &[u8], expected_len: usize) -> Result<Vec<u8>, Ppm
     }
 
     let bitstream = &compressed[10..];
-    let mut model = model::PpmModel::new(usize::from(max_order));
+    let mut model = model::PpmModel::with_capacity(usize::from(max_order), size);
     let mut dec = model::ArithDecoder::new(bitstream);
     for _ in 0..size {
         out.push(model.decode_byte(&mut dec));
