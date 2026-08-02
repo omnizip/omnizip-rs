@@ -26,6 +26,7 @@
 #![forbid(unsafe_code)]
 
 pub mod encoder;
+pub mod package_merge;
 pub mod weights;
 
 use crate::constants::HUFFMAN_MAX_BITS;

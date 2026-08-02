@@ -37,13 +37,23 @@ pub fn build_weights(literals: &[u8]) -> Vec<u8> {
     }
 
     let mut lengths = huffman_lengths(&present);
-    // Limit to HUF_TABLELOG_MAX (11) using frequency-aware package-merge.
     let freqs: Vec<u32> = present.iter().map(|&(_, f)| f).collect();
-    limit_lengths(&mut lengths, 11, &freqs);
+    // Use the optimal package-merge algorithm for length-limiting at
+    // HUF_TABLELOG_MAX. Falls back to the ad-hoc method only if
+    // package-merge produces an invalid Kraft sum (shouldn't happen,
+    // but keep the fallback as a safety net for unusual distributions).
+    let mut pm_lengths = vec![0u8; freqs.len()];
+    crate::huffman::package_merge::package_merge(&freqs, 11, &mut pm_lengths);
+    if pm_lengths.iter().any(|&l| l > 11) || pm_lengths.iter().filter(|&&l| l > 0).count() != freqs.len() {
+        // Package-merge produced invalid output; fall back.
+        limit_lengths(&mut lengths, 11, &freqs);
+    } else {
+        lengths = pm_lengths;
+    }
 
     debug_assert!(
         lengths.iter().copied().max().unwrap_or(0) <= 11,
-        "limit_lengths failed to cap at 11"
+        "length limiting failed to cap at 11"
     );
     let max_len = lengths.iter().copied().max().unwrap_or(1).max(1);
     let mut weights = vec![0u8; 256];

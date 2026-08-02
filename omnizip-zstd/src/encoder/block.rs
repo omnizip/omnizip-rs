@@ -70,26 +70,59 @@ pub fn encode_frame_compressed(
     Ok(out)
 }
 
-/// Write the frame header: descriptor byte + window_descriptor + 8-byte FCS.
+/// Write the frame header using the smallest FCS encoding that fits,
+/// matching the C reference's priority order.
+///
+/// Descriptor byte layout:
+/// - bits 0-1: Dictionary_ID_flag (always 0 — no Dict_ID).
+/// - bit 2: Content_Checksum_flag (always 1 — we always emit the checksum).
+/// - bit 5: Single_Segment_flag.
+/// - bits 6-7: Frame_Content_Size_flag (0/1/2/3 → 0/2/4/8-byte FCS).
+///
+/// Encoding choice:
+/// - size ≤ 255: FCS_flag=0 (1 byte), single_segment=1 → 2-byte header.
+/// - size ≤ 65535: FCS_flag=1 (2 bytes), single_segment=1 → 3-byte header.
+/// - size ≤ 2³²-1: FCS_flag=2 (4 bytes), single_segment=1 → 5-byte header.
+/// - larger: FCS_flag=3 (8 bytes), window_descriptor → 10-byte header.
+///
+/// When single_segment=1, no window_descriptor is emitted (the window
+/// size is implied to equal the frame content size).
 fn write_frame_header(out: &mut Vec<u8>, uncompressed_size: usize) {
     let size_u64 = uncompressed_size as u64;
 
-    // Pick window_log large enough for the entire input.
-    let window_log: u32 = if size_u64 == 0 {
-        10
+    // Pick the smallest encoding.
+    let (fcs_flag, fcs_bytes_buf, single_segment): (u8, [u8; 8], bool) = if size_u64 <= 255 {
+        (0, size_u64.to_le_bytes(), true)
+    } else if size_u64 <= 65_791 {
+        // FCS_Type=1: 2-byte field. Decoder adds 256, so subtract here.
+        let stored = size_u64 - 256;
+        (1, stored.to_le_bytes(), true)
+    } else if size_u64 <= u32::MAX as u64 {
+        (2, size_u64.to_le_bytes(), true)
     } else {
-        let bits = 64 - size_u64.saturating_sub(1).leading_zeros();
-        bits.max(10).min(31)
+        // Need window_descriptor + 8-byte FCS for > 4 GiB inputs.
+        let window_log: u32 = 64 - size_u64.saturating_sub(1).leading_zeros();
+        let window_log = window_log.max(10).min(31);
+        let window_descriptor: u8 = ((window_log - 10) as u8) << 3;
+        let descriptor: u8 = (3u8 << 6) | 0x04;
+        out.push(descriptor);
+        out.push(window_descriptor);
+        out.extend_from_slice(&size_u64.to_le_bytes());
+        return;
     };
-    let window_descriptor: u8 = ((window_log - 10) as u8) << 3;
+    let fcs_len = match fcs_flag {
+        0 => 1,
+        1 => 2,
+        2 => 4,
+        _ => 8,
+    };
+    let fcs_bytes = &fcs_bytes_buf[..fcs_len];
 
-    // Descriptor: FCS_flag=3 (8-byte FCS), no single_segment, content_checksum=1.
-    // Bits 7-6: FCS_Type = 3 (8 bytes)
-    // Bit 2: Content_Checksum_flag = 1
-    let descriptor: u8 = (3u8 << 6) | 0x04;
+    let descriptor: u8 = (fcs_flag << 6)
+        | 0x04 // content_checksum = 1
+        | if single_segment { 0x20 } else { 0 };
     out.push(descriptor);
-    out.push(window_descriptor);
-    out.extend_from_slice(&size_u64.to_le_bytes());
+    out.extend_from_slice(fcs_bytes);
 }
 
 /// Write one block. Chooses Raw/RLE/Compressed based on which produces
@@ -278,6 +311,28 @@ mod tests {
         let a = encode_frame_compressed(&input, 1).expect("encode");
         let b = encode_frame_compressed(&input, 1).expect("encode");
         assert_eq!(a, b, "encoder non-deterministic");
+    }
+
+    #[test]
+    fn frame_header_uses_smallest_fcs() {
+        // The magic + frame header should be compact for small inputs:
+        //   4 bytes magic + 1 byte descriptor + 1 byte FCS = 6 bytes.
+        let input = b"hello";
+        let compressed = encode_frame_compressed(input, 1).expect("encode");
+        // Magic (4) + frame header (2) + ... blocks ...
+        // Verify descriptor byte: fcs_flag=0, single_segment=1, checksum=1.
+        // descriptor = (0<<6) | 0x20 | 0x04 = 0x24.
+        assert_eq!(compressed[4], 0x24, "expected 1-byte FCS + single_segment");
+        assert_eq!(compressed[5], input.len() as u8, "FCS value = input length");
+    }
+
+    #[test]
+    fn frame_header_2byte_fcs_for_medium_input() {
+        // 1000 bytes: FCS_flag=1, 2-byte FCS.
+        let input = vec![0u8; 1000];
+        let compressed = encode_frame_compressed(&input, 1).expect("encode");
+        // descriptor = (1<<6) | 0x20 | 0x04 = 0x64.
+        assert_eq!(compressed[4], 0x64, "expected 2-byte FCS + single_segment");
     }
 
     #[test]
