@@ -23,6 +23,15 @@
 //! are stored — typically a few thousand entries for text inputs.
 
 #![forbid(unsafe_code)]
+// Probability/counter arithmetic involves narrowing casts that are
+// provably safe (values are bounded by MAX_COUNT, PROB_SCALE, etc.) but
+// flagged by clippy::pedantic.
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss
+)]
 
 use std::collections::HashMap;
 
@@ -115,12 +124,7 @@ impl Order2Model {
     /// Look up the per-context probability using an *explicit* byte context,
     /// rather than the model's internal `(prev_byte, last_byte)` state.
     /// Used by [`MultiModel`] which manages its own byte context.
-    pub(crate) fn prob_with_context(
-        &self,
-        prev_byte: u8,
-        last_byte: u8,
-        bit_pos: u8,
-    ) -> u16 {
+    pub(crate) fn prob_with_context(&self, prev_byte: u8, last_byte: u8, bit_pos: u8) -> u16 {
         let ctx = (u16::from(prev_byte) << 8) | u16::from(last_byte);
         match self.table.get(&(ctx, bit_pos)) {
             Some(c) => c.prob_one(),
@@ -242,7 +246,7 @@ impl Order0Model {
 #[derive(Debug)]
 pub struct Order1Model {
     /// 256 byte contexts * 8 bit positions = 2048 counter pairs.
-    /// Dense storage is cheap (8 KB) and avoids HashMap overhead.
+    /// Dense storage is cheap (8 KB) and avoids `HashMap` overhead.
     counters: [[CounterPair; 8]; 256],
 }
 
