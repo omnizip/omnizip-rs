@@ -18,7 +18,8 @@
     clippy::cast_lossless
 )]
 
-use crate::encode::MAGIC;
+use crate::encode::{MAGIC, VERSION_HUFFMAN, VERSION_RAW};
+use crate::entropy::{index_to_symbol, BitReader, HuffmanDecoder};
 use crate::grammar::Symbol;
 use omnizip_codecs::{CodecId, OmnizipError};
 
@@ -38,12 +39,13 @@ pub type ParsedGrammar = (u32, Vec<Symbol>, Vec<Vec<Symbol>>);
 
 /// Parse the GLZA wire format.
 ///
-/// Returns `(uncompressed_size, start_rule, rules)`.
+/// Returns `(uncompressed_size, start_rule, rules)`. Dispatches on the
+/// container version byte: `1` = raw varints, `2` = Huffman-coded.
 pub fn parse(compressed: &[u8]) -> Result<ParsedGrammar, OmnizipError> {
-    if compressed.len() < 11 {
+    if compressed.len() < 12 {
         return Err(OmnizipError::Corrupt {
             codec: GLZA_CODEC_ID,
-            reason: format!("payload too short ({} bytes, need >= 11)", compressed.len()),
+            reason: format!("payload too short ({} bytes, need >= 12)", compressed.len()),
         });
     }
     if &compressed[..5] != MAGIC {
@@ -53,29 +55,164 @@ pub fn parse(compressed: &[u8]) -> Result<ParsedGrammar, OmnizipError> {
         });
     }
 
-    let uncompressed_size = u32::from_le_bytes(compressed[5..9].try_into().unwrap());
-    let rule_count = u16::from_le_bytes(compressed[9..11].try_into().unwrap()) as usize;
+    let version = compressed[5];
+    let uncompressed_size = u32::from_le_bytes(compressed[6..10].try_into().unwrap());
+    let rule_count = u16::from_le_bytes(compressed[10..12].try_into().unwrap()) as usize;
 
-    let mut cursor = 11usize;
+    match version {
+        VERSION_RAW => parse_v1_body(&compressed[12..], uncompressed_size, rule_count),
+        VERSION_HUFFMAN => parse_v2_body(&compressed[12..], uncompressed_size, rule_count),
+        other => Err(OmnizipError::Corrupt {
+            codec: GLZA_CODEC_ID,
+            reason: format!("unsupported container version {other}"),
+        }),
+    }
+}
+
+/// Parse a Phase 1 raw-varint body (everything after the `rule_count` field).
+fn parse_v1_body(
+    body: &[u8],
+    uncompressed_size: u32,
+    rule_count: usize,
+) -> Result<ParsedGrammar, OmnizipError> {
+    let mut cursor = 0usize;
     let mut start_rule: Vec<Symbol> = Vec::new();
     let mut rules: Vec<Vec<Symbol>> = Vec::with_capacity(rule_count);
 
-    // Read start rule + rule_count rule definitions.
     let total_rules = rule_count + 1;
     for i in 0..total_rules {
-        let (syms, consumed) =
-            read_rule(&compressed[cursor..]).ok_or_else(|| OmnizipError::Corrupt {
-                codec: GLZA_CODEC_ID,
-                reason: format!("truncated rule body at rule index {i}"),
-            })?;
+        let (syms, consumed) = read_rule(&body[cursor..]).ok_or_else(|| OmnizipError::Corrupt {
+            codec: GLZA_CODEC_ID,
+            reason: format!("truncated rule body at rule index {i}"),
+        })?;
         cursor += consumed;
         if i == 0 {
             start_rule = syms;
         } else {
-            // Verify every rule reference points to a rule that has already
-            // been parsed OR will be parsed later — but more importantly
-            // verify the append-only invariant (ref must be < current rule
-            // index in the rules vec).
+            let rule_idx = i - 1;
+            for s in &syms {
+                if let Symbol::Rule(ref_id) = s {
+                    if (*ref_id as usize) >= rule_idx {
+                        return Err(OmnizipError::Corrupt {
+                            codec: GLZA_CODEC_ID,
+                            reason: format!(
+                                "rule {rule_idx} references rule {ref_id} which is not strictly smaller — cyclic grammar"
+                            ),
+                        });
+                    }
+                }
+            }
+            rules.push(syms);
+        }
+    }
+
+    Ok((uncompressed_size, start_rule, rules))
+}
+
+/// Parse a Phase 2 Huffman-coded body.
+fn parse_v2_body(
+    body: &[u8],
+    uncompressed_size: u32,
+    rule_count: usize,
+) -> Result<ParsedGrammar, OmnizipError> {
+    // huff_alphabet_size:u16 LE
+    if body.len() < 2 {
+        return Err(OmnizipError::Corrupt {
+            codec: GLZA_CODEC_ID,
+            reason: "v2 body too short for alphabet size".to_string(),
+        });
+    }
+    let alphabet_size = u16::from_le_bytes(body[..2].try_into().unwrap()) as usize;
+    let mut cursor = 2usize;
+
+    // Sanity: alphabet must be at least 256 and at most 256 + rule_count.
+    // We allow alphabet >= 256 + rule_count exactly; smaller is corrupt.
+    let expected_alphabet = 256 + rule_count;
+    if alphabet_size < 256 || alphabet_size < expected_alphabet {
+        return Err(OmnizipError::Corrupt {
+            codec: GLZA_CODEC_ID,
+            reason: format!(
+                "alphabet size {alphabet_size} smaller than expected {expected_alphabet}"
+            ),
+        });
+    }
+
+    // huff_code_lengths: [u8; alphabet_size]
+    if body.len() < cursor + alphabet_size {
+        return Err(OmnizipError::Corrupt {
+            codec: GLZA_CODEC_ID,
+            reason: format!(
+                "v2 body too short for code lengths (need {alphabet_size}, have {})",
+                body.len() - cursor
+            ),
+        });
+    }
+    let lengths = &body[cursor..cursor + alphabet_size];
+    cursor += alphabet_size;
+
+    let decoder = HuffmanDecoder::from_lengths(lengths);
+
+    // body_byte_len:u32 LE
+    if body.len() < cursor + 4 {
+        return Err(OmnizipError::Corrupt {
+            codec: GLZA_CODEC_ID,
+            reason: "v2 body too short for body_byte_len".to_string(),
+        });
+    }
+    let body_byte_len = u32::from_le_bytes(body[cursor..cursor + 4].try_into().unwrap()) as usize;
+    cursor += 4;
+
+    if body.len() < cursor + body_byte_len {
+        return Err(OmnizipError::Corrupt {
+            codec: GLZA_CODEC_ID,
+            reason: format!(
+                "v2 body too short: declared {body_byte_len} bytes, have {}",
+                body.len() - cursor
+            ),
+        });
+    }
+    let body_region = &body[cursor..cursor + body_byte_len];
+
+    // Now we need to read: for each of (rule_count + 1) rules, a varint
+    // symbol count (byte-aligned, from the front of body_region) and then
+    // `count` Huffman-coded symbols (bit-packed, following the counts).
+    //
+    // Layout chosen by the encoder: all varint counts come first
+    // (byte-aligned), then the bit-packed symbol stream follows.
+    //
+    // We read the counts first, accumulating how many bytes they consume,
+    // then hand the remainder to the bit reader.
+    let mut counts: Vec<usize> = Vec::with_capacity(rule_count + 1);
+    let mut cpos = 0usize;
+    for i in 0..=rule_count {
+        let (c, consumed) =
+            read_varint(&body_region[cpos..]).ok_or_else(|| OmnizipError::Corrupt {
+                codec: GLZA_CODEC_ID,
+                reason: format!("truncated varint count at rule index {i}"),
+            })?;
+        cpos += consumed;
+        counts.push(c as usize);
+    }
+    let bit_region = &body_region[cpos..];
+    let mut reader = BitReader::new(bit_region);
+
+    let mut start_rule: Vec<Symbol> = Vec::new();
+    let mut rules: Vec<Vec<Symbol>> = Vec::with_capacity(rule_count);
+
+    for (i, &count) in counts.iter().enumerate() {
+        let mut syms: Vec<Symbol> = Vec::with_capacity(count);
+        for _ in 0..count {
+            let idx = decoder
+                .decode(&mut reader)
+                .ok_or_else(|| OmnizipError::Corrupt {
+                    codec: GLZA_CODEC_ID,
+                    reason: "bit-packed symbol stream exhausted mid-code".to_string(),
+                })?;
+            syms.push(index_to_symbol(idx));
+        }
+        if i == 0 {
+            start_rule = syms;
+        } else {
             let rule_idx = i - 1;
             for s in &syms {
                 if let Symbol::Rule(ref_id) = s {
@@ -211,7 +348,8 @@ mod tests {
 
     #[test]
     fn rejects_bad_magic() {
-        let bad = b"XXXX\0\0\0\0\0\0\0";
+        // 5 bytes magic-area "XXXX\0" + version + 4 size + 2 rule_count = 12
+        let bad = b"XXXX\0\x01\0\0\0\0\0\0";
         assert!(parse(bad).is_err());
     }
 
@@ -224,6 +362,7 @@ mod tests {
     fn empty_payload_parses() {
         let mut buf = Vec::new();
         buf.extend_from_slice(MAGIC);
+        buf.push(VERSION_RAW);
         buf.extend_from_slice(&0u32.to_le_bytes());
         buf.extend_from_slice(&0u16.to_le_bytes());
         // start rule: varint 0 (no symbols)
@@ -240,6 +379,7 @@ mod tests {
         // rule_count = 1, start_rule is empty, rule_0 has one Symbol::Rule(0).
         let mut buf = Vec::new();
         buf.extend_from_slice(MAGIC);
+        buf.push(VERSION_RAW);
         buf.extend_from_slice(&0u32.to_le_bytes());
         buf.extend_from_slice(&1u16.to_le_bytes());
         // start rule: varint 0
@@ -258,6 +398,7 @@ mod tests {
         // Output: "AB"
         let mut buf = Vec::new();
         buf.extend_from_slice(MAGIC);
+        buf.push(VERSION_RAW);
         buf.extend_from_slice(&2u32.to_le_bytes());
         buf.extend_from_slice(&1u16.to_le_bytes());
         // start rule: 1 symbol = Rule(0)

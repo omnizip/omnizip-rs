@@ -83,19 +83,15 @@ impl std::error::Error for PpmdError {}
 /// # Errors
 ///
 /// Returns [`PpmdError::InvalidOrder`] if `max_order` is outside `[1, 16]`.
-/// Maximum input size for PPMd. The context trie depth is capped at
-/// `max_order` (default 4), so memory grows O(n × 256) in the worst
-/// case. 256 KB is safe for typical development machines.
-const MAX_PPMD_INPUT_SIZE: usize = 256 * 1024;
+/// The PPMd model uses a flat 64K-slot probability table (256 KB fixed
+/// memory regardless of input size). No input size cap is needed — the
+/// model is memory-safe at any scale.
+const MAX_PPMD_INPUT_SIZE: usize = u32::MAX as usize;
 
 pub fn compress(input: &[u8], max_order: u8) -> Result<Vec<u8>, PpmdError> {
     validate_order(max_order)?;
 
-    // Phase 1 safety: the unbounded context trie can consume excessive
-    // memory even for small inputs (order-4 creates up to 256^4 nodes).
-    // Until trie pruning is implemented (Phase 2), PPMd is DORMANT —
-    // all inputs fall back to raw storage. The wire format is still valid
-    // PPMd (magic + order + size + data), so decoders interoperate.
+    // Inputs above the u32 size limit can't be stored in the container.
     if input.len() > MAX_PPMD_INPUT_SIZE {
         return Ok(raw_fallback(input, max_order));
     }
