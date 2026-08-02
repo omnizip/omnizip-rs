@@ -6,6 +6,7 @@ members = [
     "omnizip-snappy",
     "omnizip-lz4",
     "omnizip-deflate",
+    "omnizip-deflate64",
     "omnizip-brotli",
     "omnizip-filters",
     "omnizip-fsst",
@@ -15,6 +16,7 @@ members = [
     "omnizip-glza",
     "omnizip-ppmd",
     "omnizip-zpaq",
+    "omnizip-bzip2",
     "tests/differential",
 ]
 resolver = "2"

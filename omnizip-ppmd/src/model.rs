@@ -4,7 +4,12 @@
 //! for bit `k` of byte `n` combines the byte-level context (last
 //! `order` bytes hashed to u16) with the bit position.
 
-#![allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap, clippy::cast_sign_loss, clippy::cast_lossless)]
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless
+)]
 
 const PRECISION: u32 = 32;
 const HALF: u64 = 1u64 << (PRECISION - 1);
@@ -26,13 +31,24 @@ pub struct ArithEncoder {
 
 impl ArithEncoder {
     pub fn new(_out: &mut Vec<u8>) -> Self {
-        Self { low: 0, high: u64::from(MASK), pending_ff: 0, out: Vec::new(), bit_buf: 0, bit_count: 0 }
+        Self {
+            low: 0,
+            high: u64::from(MASK),
+            pending_ff: 0,
+            out: Vec::new(),
+            bit_buf: 0,
+            bit_count: 0,
+        }
     }
 
     pub fn encode_bit(&mut self, prob: u16, bit: bool) {
         let range = self.high - self.low + 1;
         let split = self.low + range - (range * u64::from(prob)) / PROB_SCALE;
-        if bit { self.low = split; } else { self.high = split - 1; }
+        if bit {
+            self.low = split;
+        } else {
+            self.high = split - 1;
+        }
         loop {
             if self.high < HALF {
                 self.emit_bit(false);
@@ -44,7 +60,9 @@ impl ArithEncoder {
                 self.pending_ff += 1;
                 self.low -= QUARTER;
                 self.high -= QUARTER;
-            } else { break; }
+            } else {
+                break;
+            }
             self.low <<= 1;
             self.high = (self.high << 1) | 1;
         }
@@ -52,7 +70,9 @@ impl ArithEncoder {
 
     fn emit_bit(&mut self, bit: bool) {
         self.push_bit(bit);
-        for _ in 0..self.pending_ff { self.push_bit(!bit); }
+        for _ in 0..self.pending_ff {
+            self.push_bit(!bit);
+        }
         self.pending_ff = 0;
     }
 
@@ -68,8 +88,14 @@ impl ArithEncoder {
 
     pub fn flush(mut self, out: &mut Vec<u8>) {
         self.pending_ff += 1;
-        if self.low >= QUARTER { self.emit_bit(true); } else { self.emit_bit(false); }
-        while self.bit_count != 0 { self.push_bit(false); }
+        if self.low >= QUARTER {
+            self.emit_bit(true);
+        } else {
+            self.emit_bit(false);
+        }
+        while self.bit_count != 0 {
+            self.push_bit(false);
+        }
         out.extend_from_slice(&self.out);
     }
 }
@@ -77,21 +103,42 @@ impl ArithEncoder {
 // ── Arithmetic decoder ──────────────────────────────────────────────
 
 pub struct ArithDecoder<'a> {
-    low: u64, high: u64, code: u64,
-    data: &'a [u8], pos: usize,
-    bit_buf: u32, bit_count: u32,
+    low: u64,
+    high: u64,
+    code: u64,
+    data: &'a [u8],
+    pos: usize,
+    bit_buf: u32,
+    bit_count: u32,
 }
 
 impl<'a> ArithDecoder<'a> {
     pub fn new(data: &'a [u8]) -> Self {
-        let mut s = Self { low: 0, high: u64::from(MASK), code: 0, data, pos: 0, bit_buf: 0, bit_count: 0 };
-        for _ in 0..PRECISION { let b = s.read_bit(); s.code = (s.code << 1) | u64::from(b); }
+        let mut s = Self {
+            low: 0,
+            high: u64::from(MASK),
+            code: 0,
+            data,
+            pos: 0,
+            bit_buf: 0,
+            bit_count: 0,
+        };
+        for _ in 0..PRECISION {
+            let b = s.read_bit();
+            s.code = (s.code << 1) | u64::from(b);
+        }
         s
     }
 
     fn read_bit(&mut self) -> u8 {
         if self.bit_count == 0 {
-            self.bit_buf = u32::from(if self.pos < self.data.len() { let b = self.data[self.pos]; self.pos += 1; b } else { 0 });
+            self.bit_buf = u32::from(if self.pos < self.data.len() {
+                let b = self.data[self.pos];
+                self.pos += 1;
+                b
+            } else {
+                0
+            });
             self.bit_count = 8;
         }
         self.bit_count -= 1;
@@ -102,14 +149,24 @@ impl<'a> ArithDecoder<'a> {
         let range = self.high - self.low + 1;
         let split = self.low + range - (range * u64::from(prob)) / PROB_SCALE;
         let bit = self.code > split - 1;
-        if bit { self.low = split; } else { self.high = split - 1; }
+        if bit {
+            self.low = split;
+        } else {
+            self.high = split - 1;
+        }
         loop {
             if self.high < HALF {
             } else if self.low >= HALF {
-                self.low -= HALF; self.high -= HALF; self.code -= HALF;
+                self.low -= HALF;
+                self.high -= HALF;
+                self.code -= HALF;
             } else if self.low >= QUARTER && self.high < THREE_Q {
-                self.low -= QUARTER; self.high -= QUARTER; self.code -= QUARTER;
-            } else { break; }
+                self.low -= QUARTER;
+                self.high -= QUARTER;
+                self.code -= QUARTER;
+            } else {
+                break;
+            }
             self.low <<= 1;
             self.high = (self.high << 1) | 1;
             self.code = (self.code << 1) | u64::from(self.read_bit());
@@ -121,17 +178,29 @@ impl<'a> ArithDecoder<'a> {
 // ── PPM model ───────────────────────────────────────────────────────
 
 #[derive(Clone, Copy)]
-struct BitModel { n0: u16, n1: u16 }
+struct BitModel {
+    n0: u16,
+    n1: u16,
+}
 
 impl BitModel {
-    const fn new() -> Self { Self { n0: 1, n1: 1 } }
+    const fn new() -> Self {
+        Self { n0: 1, n1: 1 }
+    }
     fn prob1(&self) -> u16 {
         let t = u32::from(self.n0) + u32::from(self.n1);
         (((u32::from(self.n1) << 16) + t / 2) / t).clamp(1, 65535) as u16
     }
     fn update(&mut self, bit: bool) {
-        if bit { self.n1 = self.n1.saturating_add(1); } else { self.n0 = self.n0.saturating_add(1); }
-        if self.n0 + self.n1 > 1 << 12 { self.n0 = (self.n0 + 1) >> 1; self.n1 = (self.n1 + 1) >> 1; }
+        if bit {
+            self.n1 = self.n1.saturating_add(1);
+        } else {
+            self.n0 = self.n0.saturating_add(1);
+        }
+        if self.n0 + self.n1 > 1 << 12 {
+            self.n0 = (self.n0 + 1) >> 1;
+            self.n1 = (self.n1 + 1) >> 1;
+        }
     }
 }
 
@@ -156,8 +225,8 @@ impl PpmModel {
         // Scale table to input: 1 slot per 4 bytes of input, capped.
         let slots = (hint_len / 4)
             .next_power_of_two()
-            .max(1 << 12)   // 4K minimum (16 KB)
-            .min(1 << 20);  // 1M maximum (4 MB)
+            .max(1 << 12) // 4K minimum (16 KB)
+            .min(1 << 20); // 1M maximum (4 MB)
         Self {
             history: Vec::with_capacity(hint_len),
             order,
@@ -168,10 +237,14 @@ impl PpmModel {
 
     fn ctx_hash(&self) -> u32 {
         let len = self.history.len().min(self.order);
-        if len == 0 { return 0; }
+        if len == 0 {
+            return 0;
+        }
         let start = self.history.len() - len;
         let mut h: u32 = 5381;
-        for &b in &self.history[start..] { h = h.wrapping_mul(33).wrapping_add(u32::from(b)); }
+        for &b in &self.history[start..] {
+            h = h.wrapping_mul(33).wrapping_add(u32::from(b));
+        }
         h
     }
 
@@ -194,7 +267,9 @@ impl PpmModel {
             let idx = ((ctx.wrapping_mul(8).wrapping_add(bp)) as usize) & self.table_mask;
             let prob = self.models[idx].prob1();
             let bit = dec.decode_bit(prob);
-            if bit { byte |= 1 << bp; }
+            if bit {
+                byte |= 1 << bp;
+            }
             self.models[idx].update(bit);
         }
         self.history.push(byte);
@@ -210,7 +285,11 @@ mod tests {
     fn round_trip_single_byte() {
         let mut m = PpmModel::new(4);
         let mut buf = Vec::new();
-        { let mut enc = ArithEncoder::new(&mut buf); m.encode_byte(&mut enc, b'A'); enc.flush(&mut buf); }
+        {
+            let mut enc = ArithEncoder::new(&mut buf);
+            m.encode_byte(&mut enc, b'A');
+            enc.flush(&mut buf);
+        }
         let mut m2 = PpmModel::new(4);
         let mut dec = ArithDecoder::new(&buf);
         assert_eq!(m2.decode_byte(&mut dec), b'A');
@@ -221,7 +300,13 @@ mod tests {
         let text = b"The quick brown fox jumps over the lazy dog. ".repeat(10);
         let mut m = PpmModel::new(4);
         let mut buf = Vec::new();
-        { let mut enc = ArithEncoder::new(&mut buf); for &b in &text { m.encode_byte(&mut enc, b); } enc.flush(&mut buf); }
+        {
+            let mut enc = ArithEncoder::new(&mut buf);
+            for &b in &text {
+                m.encode_byte(&mut enc, b);
+            }
+            enc.flush(&mut buf);
+        }
         let mut m2 = PpmModel::new(4);
         let mut dec = ArithDecoder::new(&buf);
         let out: Vec<u8> = (0..text.len()).map(|_| m2.decode_byte(&mut dec)).collect();
@@ -233,7 +318,13 @@ mod tests {
         let data: Vec<u8> = (0..=255u16).map(|i| i as u8).collect();
         let mut m = PpmModel::new(4);
         let mut buf = Vec::new();
-        { let mut enc = ArithEncoder::new(&mut buf); for &b in &data { m.encode_byte(&mut enc, b); } enc.flush(&mut buf); }
+        {
+            let mut enc = ArithEncoder::new(&mut buf);
+            for &b in &data {
+                m.encode_byte(&mut enc, b);
+            }
+            enc.flush(&mut buf);
+        }
         let mut m2 = PpmModel::new(4);
         let mut dec = ArithDecoder::new(&buf);
         let out: Vec<u8> = (0..data.len()).map(|_| m2.decode_byte(&mut dec)).collect();
@@ -245,7 +336,13 @@ mod tests {
         let text = b"hello world ".repeat(100);
         let mut m = PpmModel::new(4);
         let mut buf = Vec::new();
-        { let mut enc = ArithEncoder::new(&mut buf); for &b in &text { m.encode_byte(&mut enc, b); } enc.flush(&mut buf); }
+        {
+            let mut enc = ArithEncoder::new(&mut buf);
+            for &b in &text {
+                m.encode_byte(&mut enc, b);
+            }
+            enc.flush(&mut buf);
+        }
         let ratio = buf.len() as f64 / text.len() as f64;
         eprintln!("ratio: {ratio:.3}");
         assert!(ratio < 0.50, "ratio {ratio:.3} >= 0.50");
@@ -253,7 +350,16 @@ mod tests {
 
     #[test]
     fn determinism() {
-        let mk = || { let mut m = PpmModel::new(4); let mut b = Vec::new(); let mut e = ArithEncoder::new(&mut b); for &c in b"test" { m.encode_byte(&mut e, c); } e.flush(&mut b); b };
+        let mk = || {
+            let mut m = PpmModel::new(4);
+            let mut b = Vec::new();
+            let mut e = ArithEncoder::new(&mut b);
+            for &c in b"test" {
+                m.encode_byte(&mut e, c);
+            }
+            e.flush(&mut b);
+            b
+        };
         assert_eq!(mk(), mk());
     }
 }

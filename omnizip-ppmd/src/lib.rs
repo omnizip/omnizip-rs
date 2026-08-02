@@ -39,9 +39,15 @@
 
 #![forbid(unsafe_code)]
 #![warn(clippy::pedantic)]
-#![allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap, clippy::cast_sign_loss, clippy::cast_lossless)]
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless
+)]
 
 pub mod model;
+pub mod ppmd8;
 
 use omnizip_codecs::{Codec, CodecId, CompressionLevel, OmnizipError};
 
@@ -49,6 +55,9 @@ use omnizip_codecs::{Codec, CodecId, CompressionLevel, OmnizipError};
 /// This crate uses that id (it is the canonical PPMd slot; the task
 /// brief's "0x0C" conflicts with the existing `LZ4_HC` assignment).
 pub const PPMD_CODEC_ID: CodecId = CodecId::PPMD7;
+
+/// Re-export of the PPMd8 codec for convenience.
+pub use ppmd8::Ppmd8Codec;
 
 /// Container magic.
 const MAGIC: &[u8; 5] = b"PPMD\0";
@@ -98,9 +107,8 @@ pub fn compress(input: &[u8], max_order: u8) -> Result<Vec<u8>, PpmdError> {
     let mut out = Vec::with_capacity(input.len() / 2 + 16);
     out.extend_from_slice(MAGIC);
     out.push(max_order);
-    let uncompressed_size = u32::try_from(input.len()).map_err(|_| {
-        PpmdError::Corrupt(format!("input too large: {} bytes", input.len()))
-    })?;
+    let uncompressed_size = u32::try_from(input.len())
+        .map_err(|_| PpmdError::Corrupt(format!("input too large: {} bytes", input.len())))?;
     out.extend_from_slice(&uncompressed_size.to_le_bytes());
 
     if input.is_empty() {
@@ -147,12 +155,7 @@ pub fn decompress(compressed: &[u8], expected_len: usize) -> Result<Vec<u8>, Ppm
     }
     let max_order = compressed[5];
 
-    let size = u32::from_le_bytes([
-        compressed[6],
-        compressed[7],
-        compressed[8],
-        compressed[9],
-    ]);
+    let size = u32::from_le_bytes([compressed[6], compressed[7], compressed[8], compressed[9]]);
     let size = usize::try_from(size).map_err(|_| PpmdError::Corrupt("size overflow".into()))?;
     if size != expected_len {
         return Err(PpmdError::Corrupt(format!(
@@ -235,11 +238,7 @@ impl Codec for PpmdCodec {
         "ppmd"
     }
 
-    fn compress(
-        &self,
-        plaintext: &[u8],
-        level: CompressionLevel,
-    ) -> Result<Vec<u8>, OmnizipError> {
+    fn compress(&self, plaintext: &[u8], level: CompressionLevel) -> Result<Vec<u8>, OmnizipError> {
         let order = Self::level_to_order(level);
         compress(plaintext, order).map_err(|e| OmnizipError::EncodeFailed {
             codec: self.id(),
@@ -247,11 +246,7 @@ impl Codec for PpmdCodec {
         })
     }
 
-    fn decompress(
-        &self,
-        compressed: &[u8],
-        expected_len: u32,
-    ) -> Result<Vec<u8>, OmnizipError> {
+    fn decompress(&self, compressed: &[u8], expected_len: u32) -> Result<Vec<u8>, OmnizipError> {
         let expected = usize::try_from(expected_len).map_err(|_| OmnizipError::Corrupt {
             codec: self.id(),
             reason: format!("expected_len {expected_len} overflows usize"),
@@ -296,7 +291,8 @@ mod tests {
         let compressed = compress(input, order).expect("compress");
         let decompressed = decompress(&compressed, input.len()).expect("decompress");
         assert_eq!(
-            decompressed, input,
+            decompressed,
+            input,
             "round-trip failed at order {order} (len={})",
             input.len()
         );
@@ -376,7 +372,12 @@ mod tests {
             big.len()
         );
         let ratio = compressed.len() as f64 / big.len() as f64;
-        eprintln!("text ratio: {:.3} ({} -> {})", ratio, big.len(), compressed.len());
+        eprintln!(
+            "text ratio: {:.3} ({} -> {})",
+            ratio,
+            big.len(),
+            compressed.len()
+        );
         assert!(ratio < 0.60, "ratio {ratio:.3} worse than 0.60 bound");
     }
 
@@ -398,7 +399,10 @@ mod tests {
         let o4_b = compress(input, 4).expect("o4 b");
         assert_eq!(o2_a, o2_b);
         assert_eq!(o4_a, o4_b);
-        assert_ne!(o2_a, o4_a, "different orders should produce different output");
+        assert_ne!(
+            o2_a, o4_a,
+            "different orders should produce different output"
+        );
     }
 
     #[test]

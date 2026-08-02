@@ -40,6 +40,7 @@
 #![forbid(unsafe_code)]
 #![warn(clippy::pedantic)]
 
+pub mod bcj2;
 pub mod bcj_arm;
 pub mod bcj_arm64;
 pub mod bcj_arm_thumb;
@@ -50,6 +51,7 @@ pub mod bcj_x86;
 pub mod delta;
 pub mod shuffle;
 
+pub use bcj2::Bcj2Filter;
 pub use bcj_arm::BcjArmFilter;
 pub use bcj_arm64::BcjArm64Filter;
 pub use bcj_arm_thumb::BcjArmThumbFilter;
