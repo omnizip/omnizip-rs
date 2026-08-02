@@ -91,20 +91,27 @@ impl std::error::Error for PpmdError {}
 /// # Errors
 ///
 /// Returns [`PpmdError::InvalidOrder`] if `max_order` is outside `[1, 16]`.
-/// The PPMd model uses a flat 64K-slot probability table (256 KB fixed
-/// memory regardless of input size). No input size cap is needed — the
-/// model is memory-safe at any scale.
-const MAX_PPMD_INPUT_SIZE: usize = u32::MAX as usize;
+///
+/// # Memory budget
+///
+/// Hard input cap: 16 MiB. The model uses a fixed 16K-slot context
+/// table (~256 KB) plus a sliding-window history of `max_order`
+/// bytes. Worst-case peak memory for a max-size input is < 32 MiB.
+/// Inputs above the cap fall through to [`raw_fallback`] (stored
+/// uncompressed with a sentinel order byte) so the call still
+/// succeeds — but no compression is attempted.
+pub const MAX_PPMD_INPUT_SIZE: usize = 16 * 1024 * 1024;
 
 pub fn compress(input: &[u8], max_order: u8) -> Result<Vec<u8>, PpmdError> {
     validate_order(max_order)?;
 
-    // Inputs above the u32 size limit can't be stored in the container.
+    // Hard memory guard: above the cap, store raw instead of running
+    // the O(N) model construction that would balloon memory.
     if input.len() > MAX_PPMD_INPUT_SIZE {
         return Ok(raw_fallback(input, max_order));
     }
 
-    let mut out = Vec::with_capacity(input.len() / 2 + 16);
+    let mut out = Vec::with_capacity(64);
     out.extend_from_slice(MAGIC);
     out.push(max_order);
     let uncompressed_size = u32::try_from(input.len())
@@ -457,5 +464,19 @@ mod tests {
         assert!(o0 <= o6);
         assert!(o6 <= o22);
         let _ = codec;
+    }
+
+    /// Inputs above `MAX_PPMD_INPUT_SIZE` must NOT run the model —
+    /// they fall through to raw storage to keep memory bounded.
+    #[test]
+    fn oversize_input_falls_back_to_raw() {
+        let huge: Vec<u8> = vec![0u8; MAX_PPMD_INPUT_SIZE + 1];
+        let compressed = compress(&huge, 4).expect("compress must succeed (raw fallback)");
+        // Header: magic(5) + order(1) + size(4) + raw body.
+        assert_eq!(&compressed[..5], MAGIC);
+        assert_eq!(compressed[5], 0xFF); // sentinel: raw mode
+        let out = decompress(&compressed, huge.len()).expect("decompress");
+        assert_eq!(out.len(), huge.len());
+        assert_eq!(out, huge);
     }
 }
