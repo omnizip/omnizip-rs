@@ -88,7 +88,6 @@ pub struct ZpaqCodec;
 /// Note: this is defined locally because `omnizip-codecs` does not yet
 /// export a `ZPAQ` constant. When the constant is added upstream, replace
 /// this with `CodecId::ZPAQ`.
-pub const ZPAQ_CODEC_ID: CodecId = CodecId::new(0x000D);
 
 /// Supported compression-level range for Phase 2. The single model
 /// portfolio produces identical output for any level in this range; future
@@ -98,7 +97,7 @@ const LEVEL_MAX: u8 = 9;
 
 impl Codec for ZpaqCodec {
     fn id(&self) -> CodecId {
-        ZPAQ_CODEC_ID
+        CodecId::ZPAQ
     }
 
     fn name(&self) -> &'static str {
@@ -109,7 +108,7 @@ impl Codec for ZpaqCodec {
         let lvl = level.as_u8();
         if lvl > LEVEL_MAX {
             return Err(OmnizipError::LevelOutOfRange {
-                codec: ZPAQ_CODEC_ID,
+                codec: CodecId::ZPAQ,
                 level: lvl,
                 min: LEVEL_MIN,
                 max: LEVEL_MAX,
@@ -121,16 +120,16 @@ impl Codec for ZpaqCodec {
 
     fn decompress(&self, compressed: &[u8], expected_len: u32) -> Result<Vec<u8>, OmnizipError> {
         let expected_us = usize::try_from(expected_len).map_err(|_| OmnizipError::Corrupt {
-            codec: ZPAQ_CODEC_ID,
+            codec: CodecId::ZPAQ,
             reason: format!("expected_len {expected_len} exceeds usize"),
         })?;
         let out = decompress_container(compressed).map_err(|e| OmnizipError::DecodeFailed {
-            codec: ZPAQ_CODEC_ID,
+            codec: CodecId::ZPAQ,
             reason: e.to_string(),
         })?;
         if out.len() != expected_us {
             return Err(OmnizipError::LengthMismatch {
-                codec: ZPAQ_CODEC_ID,
+                codec: CodecId::ZPAQ,
                 expected: expected_len,
                 actual: out.len(),
             });

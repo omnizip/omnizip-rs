@@ -40,7 +40,6 @@
 use omnizip_codecs::{Codec, CodecId, CompressionLevel, OmnizipError};
 
 /// Ricepp codec id.
-pub const RICEPP_CODEC_ID: CodecId = CodecId::new(0x0011);
 
 /// Maximum block size (pixels per block). DwarFS default.
 const DEFAULT_BLOCK_SIZE: usize = 16;
@@ -498,7 +497,7 @@ pub fn compress(input: &[u8], config: CodecConfig) -> Result<Vec<u8>, OmnizipErr
     let bytes_per_pixel = config.pixel_bits.byte_count();
     if input.len() % bytes_per_pixel != 0 {
         return Err(OmnizipError::EncodeFailed {
-            codec: RICEPP_CODEC_ID,
+            codec: CodecId::RICEPP,
             reason: format!(
                 "input length {} not a multiple of pixel width {}",
                 input.len(),
@@ -547,12 +546,12 @@ pub fn compress(input: &[u8], config: CodecConfig) -> Result<Vec<u8>, OmnizipErr
 pub fn decompress(compressed: &[u8]) -> Result<Vec<u8>, OmnizipError> {
     if compressed.len() < 10 {
         return Err(OmnizipError::DecodeFailed {
-            codec: RICEPP_CODEC_ID,
+            codec: CodecId::RICEPP,
             reason: "header too short".into(),
         });
     }
     let pixel_bits = PixelBits::from_u8(compressed[0]).ok_or(OmnizipError::DecodeFailed {
-        codec: RICEPP_CODEC_ID,
+        codec: CodecId::RICEPP,
         reason: format!("unsupported pixel bits: {}", compressed[0]),
     })?;
     let byte_order = ByteOrder::from_u8(compressed[1]);
@@ -609,7 +608,7 @@ impl RiceppCodec {
 
 impl Codec for RiceppCodec {
     fn id(&self) -> CodecId {
-        RICEPP_CODEC_ID
+        CodecId::RICEPP
     }
 
     fn name(&self) -> &'static str {

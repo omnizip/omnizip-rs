@@ -58,7 +58,6 @@ pub mod subframe;
 pub use pcm_header::{Endianness, PcmParams};
 
 /// FLAC codec id.
-pub const FLAC_CODEC_ID: CodecId = CodecId::new(0x0012);
 
 /// FLAC stream magic bytes ("fLaC").
 const FLAC_MAGIC: [u8; 4] = *b"fLaC";
@@ -78,7 +77,7 @@ pub fn compress(input: &[u8], params: &PcmParams) -> Result<Vec<u8>, OmnizipErro
     let expected = params.sample_count as usize * usize::from(params.channels) * bytes_per_sample;
     if input.len() < expected {
         return Err(OmnizipError::EncodeFailed {
-            codec: FLAC_CODEC_ID,
+            codec: CodecId::FLAC,
             reason: format!(
                 "input {} bytes shorter than expected PCM payload {} bytes",
                 input.len(),
@@ -88,7 +87,7 @@ pub fn compress(input: &[u8], params: &PcmParams) -> Result<Vec<u8>, OmnizipErro
     }
 
     encoder::encode_stream(&input[..expected], params).map_err(|reason| OmnizipError::EncodeFailed {
-        codec: FLAC_CODEC_ID,
+        codec: CodecId::FLAC,
         reason,
     })
 }
@@ -107,12 +106,12 @@ const FLAC_HEADER_SIZE: usize = 42;
 pub fn decompress(compressed: &[u8]) -> Result<Vec<u8>, OmnizipError> {
     if decoder::is_flac_stream(compressed) {
         return decoder::decode_stream(compressed).map_err(|reason| OmnizipError::DecodeFailed {
-            codec: FLAC_CODEC_ID,
+            codec: CodecId::FLAC,
             reason,
         });
     }
     Err(OmnizipError::DecodeFailed {
-        codec: FLAC_CODEC_ID,
+        codec: CodecId::FLAC,
         reason: "not a FLAC stream (missing fLaC magic)".into(),
     })
 }
@@ -125,7 +124,7 @@ pub fn decompress(compressed: &[u8]) -> Result<Vec<u8>, OmnizipError> {
 pub fn extract_params(compressed: &[u8]) -> Result<PcmParams, OmnizipError> {
     if !decoder::is_flac_stream(compressed) {
         return Err(OmnizipError::DecodeFailed {
-            codec: FLAC_CODEC_ID,
+            codec: CodecId::FLAC,
             reason: "not a FLAC stream".into(),
         });
     }
@@ -133,12 +132,12 @@ pub fn extract_params(compressed: &[u8]) -> Result<PcmParams, OmnizipError> {
     // metadata block header = 8 bytes prefix).
     if compressed.len() < 42 {
         return Err(OmnizipError::DecodeFailed {
-            codec: FLAC_CODEC_ID,
+            codec: CodecId::FLAC,
             reason: "stream too short for STREAMINFO".into(),
         });
     }
     let info = crate::streaminfo::StreamInfo::parse(&compressed[8..42]).ok_or_else(|| OmnizipError::DecodeFailed {
-        codec: FLAC_CODEC_ID,
+        codec: CodecId::FLAC,
         reason: "invalid STREAMINFO".into(),
     })?;
     Ok(PcmParams {
@@ -164,7 +163,7 @@ impl FlacCodec {
 
 impl Codec for FlacCodec {
     fn id(&self) -> CodecId {
-        FLAC_CODEC_ID
+        CodecId::FLAC
     }
 
     fn name(&self) -> &'static str {
