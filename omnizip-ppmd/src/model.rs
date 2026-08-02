@@ -138,28 +138,38 @@ impl BitModel {
 pub struct PpmModel {
     history: Vec<u8>,
     order: usize,
+    /// 1M-slot probability table (4 MB fixed memory). Each slot holds
+    /// a per-bit adaptive model. The table is indexed by a u32 hash
+    /// of the byte context combined with the bit position.
     models: Vec<BitModel>,
 }
 
+/// Table size: 2^20 = 1M entries. Uses 4 MB of memory (1M × 4 bytes).
+/// This provides far better distribution than the old 64K table which
+/// caused 681% expansion on large inputs due to hash collisions.
+const TABLE_SIZE: usize = 1 << 20;
+const TABLE_MASK: usize = TABLE_SIZE - 1;
+
 impl PpmModel {
     pub fn new(order: usize) -> Self {
-        Self { history: Vec::new(), order, models: vec![BitModel::new(); 1 << 16] }
+        Self { history: Vec::new(), order, models: vec![BitModel::new(); TABLE_SIZE] }
     }
 
-    fn ctx_key(&self) -> u16 {
+    /// Hash the last `order` bytes to a u32 context key.
+    fn ctx_hash(&self) -> u32 {
         let len = self.history.len().min(self.order);
         if len == 0 { return 0; }
         let start = self.history.len() - len;
         let mut h: u32 = 5381;
         for &b in &self.history[start..] { h = h.wrapping_mul(33).wrapping_add(u32::from(b)); }
-        h as u16
+        h
     }
 
     pub fn encode_byte(&mut self, enc: &mut ArithEncoder, byte: u8) {
-        let ctx = self.ctx_key();
+        let ctx = self.ctx_hash();
         for bp in (0..8u32).rev() {
             let bit = ((byte >> bp) & 1) == 1;
-            let idx = (u32::from(ctx) * 8 + bp) as usize & 0xFFFF;
+            let idx = ((ctx.wrapping_mul(8).wrapping_add(bp)) as usize) & TABLE_MASK;
             let prob = self.models[idx].prob1();
             enc.encode_bit(prob, bit);
             self.models[idx].update(bit);
@@ -168,10 +178,10 @@ impl PpmModel {
     }
 
     pub fn decode_byte(&mut self, dec: &mut ArithDecoder) -> u8 {
-        let ctx = self.ctx_key();
+        let ctx = self.ctx_hash();
         let mut byte = 0u8;
         for bp in (0..8u32).rev() {
-            let idx = (u32::from(ctx) * 8 + bp) as usize & 0xFFFF;
+            let idx = ((ctx.wrapping_mul(8).wrapping_add(bp)) as usize) & TABLE_MASK;
             let prob = self.models[idx].prob1();
             let bit = dec.decode_bit(prob);
             if bit { byte |= 1 << bp; }
