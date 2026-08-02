@@ -31,20 +31,19 @@ use crate::mtf::{mtf_decode, mtf_encode};
 use crate::rle::{rle_decode, rle_encode};
 
 /// Minimum supported block size — Ruby `MIN_BLOCK_SIZE`.
-#[allow(dead_code)]
 pub const MIN_BLOCK_SIZE: usize = 100_000;
 
 /// Maximum supported block size — Ruby `MAX_BLOCK_SIZE`.
-#[allow(dead_code)]
 pub const MAX_BLOCK_SIZE: usize = 900_000;
 
 /// Default block size — Ruby `DEFAULT_BLOCK_SIZE`.
-#[allow(dead_code)]
 pub const DEFAULT_BLOCK_SIZE: usize = 900_000;
 
 /// `BZip2` codec. Block size is derived from the compression level: level 1
 /// maps to 100 KB, level 9 to 900 KB, linearly in between. Levels outside
 /// `1..=9` are rejected.
+///
+/// For an explicit block size, use [`Bzip2Codec::compress_with_block_size`].
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Bzip2Codec;
 
@@ -56,10 +55,47 @@ impl Bzip2Codec {
     }
 
     /// Map a level in `1..=9` to a block size in bytes.
-    fn block_size_for(level: u8) -> usize {
+    pub fn block_size_for(level: u8) -> usize {
         // Level 1 -> 100_000, level 9 -> 900_000. Step is 100_000 per level.
         let scaled = usize::from(level).clamp(1, 9);
         scaled * 100_000
+    }
+
+    /// Compress with an explicit block size in bytes (100_000..=900_000,
+    /// in 100 KB increments matching the upstream `bzip2 -1`..`-9` flags).
+    ///
+    /// Smaller blocks encode faster but compress worse; larger blocks
+    /// compress better but use more memory and time. Memory peak is
+    /// ~5x block size (BWT buffers).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`OmnizipError::LevelOutOfRange`] if `block_size` is not
+    /// a valid BZip2 block size (multiple of 100_000 in 100_000..=900_000).
+    pub fn compress_with_block_size(
+        &self,
+        plaintext: &[u8],
+        block_size: usize,
+    ) -> Result<Vec<u8>, OmnizipError> {
+        if block_size < MIN_BLOCK_SIZE
+            || block_size > MAX_BLOCK_SIZE
+            || block_size % 100_000 != 0
+        {
+            return Err(OmnizipError::LevelOutOfRange {
+                codec: CodecId::BZIP2,
+                level: 0,
+                min: 1,
+                max: 9,
+            });
+        }
+        if plaintext.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut out = Vec::new();
+        for chunk in plaintext.chunks(block_size) {
+            encode_block(chunk, &mut out);
+        }
+        Ok(out)
     }
 }
 

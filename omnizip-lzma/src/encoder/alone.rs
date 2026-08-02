@@ -24,6 +24,140 @@ const DEFAULT_LC: u32 = 3;
 const DEFAULT_LP: u32 = 0;
 const DEFAULT_PB: u32 = 2;
 
+/// Maximum legal LZMA literal-context bits.
+pub const MAX_LC: u32 = 8;
+/// Maximum legal LZMA literal-position bits.
+pub const MAX_LP: u32 = 4;
+/// Maximum legal LZMA position bits.
+pub const MAX_PB: u32 = 4;
+/// Hard limit: `lc + lp <= 4` per the LZMA spec.
+pub const LC_LP_SUM_MAX: u32 = 4;
+/// Minimum dictionary size (matches xz-utils floor).
+pub const MIN_DICT_SIZE: u32 = 4096;
+/// Maximum dictionary size for the `.lzma` container (u32 max).
+pub const MAX_DICT_SIZE: u32 = u32::MAX;
+
+/// User-tunable LZMA encoder parameters.
+///
+/// These map to the standard `xz` / `lzma` CLI flags. The wire format
+/// stores them in a 1-byte properties field (`lc + 9*lp + 45*pb`).
+///
+/// ```rust
+/// use omnizip_lzma::LzmaOptions;
+/// use omnizip_lzma::encoder::lzma_alone_compress_with_options;
+///
+/// let opts = LzmaOptions {
+///     lc: 3,                      // literal-context bits (default 3)
+///     lp: 0,                      // literal-position bits (default 0)
+///     pb: 2,                      // position bits (default 2)
+///     dict_size: 16 * 1024 * 1024, // 16 MB (default)
+///     use_optimal_parser: true,  // slower but better ratio
+/// };
+/// let bytes = lzma_alone_compress_with_options(b"input", &opts).unwrap();
+/// ```
+#[derive(Debug, Clone, Copy)]
+pub struct LzmaOptions {
+    /// Literal-context bits (0..=8). Higher = more context for literal
+    /// coding. Default 3.
+    pub lc: u32,
+    /// Literal-position bits (0..=4). Default 0.
+    pub lp: u32,
+    /// Position bits (0..=4). Default 2.
+    pub pb: u32,
+    /// Dictionary size in bytes (4 KB..=4 GB). Larger = better ratio
+    /// on inputs with long-range repeats. Default 16 MB.
+    pub dict_size: u32,
+    /// If true, use the optimal (DP) parser — slower but better ratio.
+    /// If false, use the lazy parser — faster, slightly worse ratio.
+    pub use_optimal_parser: bool,
+}
+
+impl Default for LzmaOptions {
+    fn default() -> Self {
+        Self {
+            lc: DEFAULT_LC,
+            lp: DEFAULT_LP,
+            pb: DEFAULT_PB,
+            dict_size: DEFAULT_DICT_SIZE,
+            use_optimal_parser: false,
+        }
+    }
+}
+
+impl LzmaOptions {
+    /// Validate the parameters against the LZMA spec.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LzmaError::Corrupt`] if any parameter is out of range.
+    pub fn validate(&self) -> Result<(), LzmaError> {
+        if self.lc > MAX_LC {
+            return Err(LzmaError::Corrupt {
+                reason: format!("lc={} exceeds max {}", self.lc, MAX_LC),
+            });
+        }
+        if self.lp > MAX_LP {
+            return Err(LzmaError::Corrupt {
+                reason: format!("lp={} exceeds max {}", self.lp, MAX_LP),
+            });
+        }
+        if self.pb > MAX_PB {
+            return Err(LzmaError::Corrupt {
+                reason: format!("pb={} exceeds max {}", self.pb, MAX_PB),
+            });
+        }
+        if self.lc + self.lp > LC_LP_SUM_MAX {
+            return Err(LzmaError::Corrupt {
+                reason: format!(
+                    "lc + lp = {} + {} = {} exceeds {} (spec hard limit)",
+                    self.lc, self.lp, self.lc + self.lp, LC_LP_SUM_MAX
+                ),
+            });
+        }
+        if self.dict_size < MIN_DICT_SIZE {
+            return Err(LzmaError::Corrupt {
+                reason: format!(
+                    "dict_size={} below minimum {}",
+                    self.dict_size, MIN_DICT_SIZE
+                ),
+            });
+        }
+        Ok(())
+    }
+}
+
+/// Compress `input` with explicit user-tunable options.
+///
+/// # Errors
+///
+/// Returns [`LzmaError::Corrupt`] if `options` fails validation or on
+/// arithmetic overflow.
+pub fn lzma_alone_compress_with_options(
+    input: &[u8],
+    options: &LzmaOptions,
+) -> Result<Vec<u8>, LzmaError> {
+    options.validate()?;
+    let lc = options.lc;
+    let lp = options.lp;
+    let pb = options.pb;
+
+    let mut out = Vec::with_capacity(input.len() + 13);
+    let props_byte = (lc + 9 * lp + 45 * pb) as u8;
+    out.push(props_byte);
+    out.extend_from_slice(&options.dict_size.to_le_bytes());
+    out.extend_from_slice(&(input.len() as u64).to_le_bytes());
+
+    let encoder = Lzma1Encoder::new(lc, lp, pb);
+    let stream = if options.use_optimal_parser {
+        encoder.encode_optimal(input)
+    } else {
+        encoder.encode(input)
+    };
+    out.extend_from_slice(&stream);
+
+    Ok(out)
+}
+
 /// Compress `input` into the `.lzma` (LZMA-Alone) container using the
 /// optimal (DP) parser for best ratio.
 ///
@@ -31,21 +165,11 @@ const DEFAULT_PB: u32 = 2;
 ///
 /// Returns [`LzmaError::Corrupt`] only on arithmetic overflow.
 pub fn lzma_alone_compress_optimal(input: &[u8]) -> Result<Vec<u8>, LzmaError> {
-    let lc = DEFAULT_LC;
-    let lp = DEFAULT_LP;
-    let pb = DEFAULT_PB;
-
-    let mut out = Vec::with_capacity(input.len() + 13);
-    let props_byte = (lc + 9 * lp + 45 * pb) as u8;
-    out.push(props_byte);
-    out.extend_from_slice(&DEFAULT_DICT_SIZE.to_le_bytes());
-    out.extend_from_slice(&(input.len() as u64).to_le_bytes());
-
-    let encoder = Lzma1Encoder::new(lc, lp, pb);
-    let stream = encoder.encode_optimal(input);
-    out.extend_from_slice(&stream);
-
-    Ok(out)
+    let opts = LzmaOptions {
+        use_optimal_parser: true,
+        ..Default::default()
+    };
+    lzma_alone_compress_with_options(input, &opts)
 }
 
 /// Compress `input` into the `.lzma` (LZMA-Alone) container.
@@ -55,22 +179,7 @@ pub fn lzma_alone_compress_optimal(input: &[u8]) -> Result<Vec<u8>, LzmaError> {
 /// Returns [`LzmaError::Corrupt`] only on arithmetic overflow (shouldn't
 /// happen for any plausible input).
 pub fn lzma_alone_compress(input: &[u8]) -> Result<Vec<u8>, LzmaError> {
-    let lc = DEFAULT_LC;
-    let lp = DEFAULT_LP;
-    let pb = DEFAULT_PB;
-
-    let mut out = Vec::with_capacity(input.len() + 13);
-    // Properties byte: lc + 9*lp + 45*pb.
-    let props_byte = (lc + 9 * lp + 45 * pb) as u8;
-    out.push(props_byte);
-    out.extend_from_slice(&DEFAULT_DICT_SIZE.to_le_bytes());
-    out.extend_from_slice(&(input.len() as u64).to_le_bytes());
-
-    let encoder = Lzma1Encoder::new(lc, lp, pb);
-    let stream = encoder.encode(input);
-    out.extend_from_slice(&stream);
-
-    Ok(out)
+    lzma_alone_compress_with_options(input, &LzmaOptions::default())
 }
 
 #[cfg(test)]
