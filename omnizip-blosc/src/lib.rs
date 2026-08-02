@@ -60,15 +60,6 @@ use omnizip_codecs::{Codec, CodecId, CompressionLevel, OmnizipError};
 // Constants
 // ---------------------------------------------------------------------------
 
-/// Codec id for the BLOSC2-style container.
-///
-/// Allocated in the per-crate range (>= 0x0010) to avoid colliding with
-/// the foundational codecs defined in `omnizip-codecs::CodecId`. The
-/// task brief suggested `0x0A`, but that id is already assigned to
-/// `CodecId::SNAPPY` in `omnizip-codecs/src/codec.rs`; `0x0013` is the
-/// next free id after FSST (0x0010), RICEPP (0x0011), and FLAC (0x0012).
-pub const BLOSC_CODEC_ID: CodecId = CodecId::new(0x0013);
-
 /// Magic prefixing every BLOSC2 container frame.
 const MAGIC: &[u8; 8] = b"BLOSC2\0\0";
 
@@ -150,7 +141,7 @@ pub fn compress(
     validate_item_size(item_size)?;
 
     let uncompressed_size = u32::try_from(input.len()).map_err(|_| OmnizipError::Corrupt {
-        codec: BLOSC_CODEC_ID,
+        codec: CodecId::BLOSC,
         reason: format!("uncompressed size {} exceeds u32::MAX", input.len()),
     })?;
 
@@ -163,7 +154,7 @@ pub fn compress(
     };
     debug_assert_eq!(shuffled.len(), input.len());
     let shuffled_size = u32::try_from(shuffled.len()).map_err(|_| OmnizipError::Corrupt {
-        codec: BLOSC_CODEC_ID,
+        codec: CodecId::BLOSC,
         reason: format!("shuffled size {} exceeds u32::MAX", shuffled.len()),
     })?;
 
@@ -205,13 +196,13 @@ pub fn decompress(compressed: &[u8]) -> Result<Vec<u8>, OmnizipError> {
     // 4-byte LE size prefix written by `compress_prepend_size`.
     let shuffled =
         lz4_flex::decompress_size_prepended(body).map_err(|e| OmnizipError::DecodeFailed {
-            codec: BLOSC_CODEC_ID,
+            codec: CodecId::BLOSC,
             reason: format!("lz4 decompress failed: {e}"),
         })?;
 
     if u32::try_from(shuffled.len()).unwrap_or(u32::MAX) != header.shuffled_size {
         return Err(OmnizipError::LengthMismatch {
-            codec: BLOSC_CODEC_ID,
+            codec: CodecId::BLOSC,
             expected: header.shuffled_size,
             actual: shuffled.len(),
         });
@@ -226,7 +217,7 @@ pub fn decompress(compressed: &[u8]) -> Result<Vec<u8>, OmnizipError> {
 
     if u32::try_from(plaintext.len()).unwrap_or(u32::MAX) != header.uncompressed_size {
         return Err(OmnizipError::LengthMismatch {
-            codec: BLOSC_CODEC_ID,
+            codec: CodecId::BLOSC,
             expected: header.uncompressed_size,
             actual: plaintext.len(),
         });
@@ -248,7 +239,7 @@ pub struct BloscCodec;
 
 impl Codec for BloscCodec {
     fn id(&self) -> CodecId {
-        BLOSC_CODEC_ID
+        CodecId::BLOSC
     }
     fn name(&self) -> &'static str {
         "blosc"
@@ -288,7 +279,7 @@ struct Header {
 fn parse_header(compressed: &[u8]) -> Result<Header, OmnizipError> {
     if compressed.len() < HEADER_LEN {
         return Err(OmnizipError::Corrupt {
-            codec: BLOSC_CODEC_ID,
+            codec: CodecId::BLOSC,
             reason: format!(
                 "header too short: need {HEADER_LEN} bytes, got {}",
                 compressed.len()
@@ -299,7 +290,7 @@ fn parse_header(compressed: &[u8]) -> Result<Header, OmnizipError> {
     let magic = &compressed[..8];
     if magic != MAGIC {
         return Err(OmnizipError::Corrupt {
-            codec: BLOSC_CODEC_ID,
+            codec: CodecId::BLOSC,
             reason: format!("bad magic: expected {MAGIC:?}, got {magic:?}"),
         });
     }
@@ -307,7 +298,7 @@ fn parse_header(compressed: &[u8]) -> Result<Header, OmnizipError> {
     let version = compressed[8];
     if version != VERSION {
         return Err(OmnizipError::Corrupt {
-            codec: BLOSC_CODEC_ID,
+            codec: CodecId::BLOSC,
             reason: format!("unsupported version {version}, expected {VERSION}"),
         });
     }
@@ -317,14 +308,14 @@ fn parse_header(compressed: &[u8]) -> Result<Header, OmnizipError> {
 
     let shuffle_raw = compressed[10];
     let shuffle_mode = ShuffleMode::from_u8(shuffle_raw).ok_or_else(|| OmnizipError::Corrupt {
-        codec: BLOSC_CODEC_ID,
+        codec: CodecId::BLOSC,
         reason: format!("unknown shuffle_mode {shuffle_raw}"),
     })?;
 
     let inner_codec = compressed[11];
     if inner_codec != INNER_CODEC_LZ4 {
         return Err(OmnizipError::Corrupt {
-            codec: BLOSC_CODEC_ID,
+            codec: CodecId::BLOSC,
             reason: format!(
                 "unsupported inner codec {inner_codec}, expected {INNER_CODEC_LZ4} (LZ4)"
             ),
@@ -359,7 +350,7 @@ fn validate_item_size(item_size: u8) -> Result<(), OmnizipError> {
         Ok(())
     } else {
         Err(OmnizipError::Corrupt {
-            codec: BLOSC_CODEC_ID,
+            codec: CodecId::BLOSC,
             reason: format!("item_size must be one of {VALID_ITEM_SIZES:?}, got {item_size}"),
         })
     }
@@ -765,7 +756,7 @@ mod tests {
     fn codec_id_is_distinct_from_other_codecs() {
         // 0x0013 — must not collide with SNAPPY (0x000A), FSST (0x0010),
         // RICEPP (0x0011), or FLAC (0x0012).
-        assert_eq!(BloscCodec.id(), CodecId::new(0x0013));
+        assert_eq!(BloscCodec.id(), CodecId::BLOSC);
         assert_ne!(BloscCodec.id(), CodecId::SNAPPY);
     }
 

@@ -42,7 +42,6 @@
 use omnizip_codecs::{Codec, CodecId, CompressionLevel, OmnizipError};
 
 /// FSST codec id (allocated in omnizip-codecs).
-pub const FSST_CODEC_ID: CodecId = CodecId::new(0x0010);
 
 /// The escape-escape byte. When this appears in the output, the next
 /// byte is a literal (not a symbol lookup).
@@ -228,7 +227,7 @@ fn escape_text(input: &[u8], table: &SymbolTable) -> Vec<u8> {
 pub fn decompress(compressed: &[u8]) -> Result<Vec<u8>, OmnizipError> {
     let (table, header_len) = SymbolTable::deserialize(compressed)
         .ok_or(OmnizipError::DecodeFailed {
-            codec: FSST_CODEC_ID,
+            codec: CodecId::FSST,
             reason: "malformed symbol table header".into(),
         })?;
     let escaped = &compressed[header_len..];
@@ -240,7 +239,7 @@ pub fn decompress(compressed: &[u8]) -> Result<Vec<u8>, OmnizipError> {
             pos += 1;
             if pos >= escaped.len() {
                 return Err(OmnizipError::DecodeFailed {
-                    codec: FSST_CODEC_ID,
+                    codec: CodecId::FSST,
                     reason: "trailing escape-escape without literal".into(),
                 });
             }
@@ -250,7 +249,7 @@ pub fn decompress(compressed: &[u8]) -> Result<Vec<u8>, OmnizipError> {
             let idx = usize::from(b);
             if idx >= table.symbols.len() {
                 return Err(OmnizipError::DecodeFailed {
-                    codec: FSST_CODEC_ID,
+                    codec: CodecId::FSST,
                     reason: format!("symbol index {idx} out of range"),
                 });
             }
@@ -274,7 +273,7 @@ impl FsstCodec {
 
 impl Codec for FsstCodec {
     fn id(&self) -> CodecId {
-        FSST_CODEC_ID
+        CodecId::FSST
     }
 
     fn name(&self) -> &'static str {

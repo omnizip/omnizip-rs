@@ -42,7 +42,7 @@ mod suffix_array;
 
 use omnizip_codecs::{Codec, CodecId, CompressionLevel, OmnizipError};
 
-pub use decode::GLZA_CODEC_ID;
+
 pub use grammar::{Grammar, Symbol};
 
 /// Compress `input` with GLZA using the default container version.
@@ -58,10 +58,27 @@ pub use grammar::{Grammar, Symbol};
 ///
 /// Returns [`OmnizipError::EncodeFailed`] only on internal errors (currently
 /// never — the encoder is total).
+/// Maximum input size for GLZA. Grammar construction is O(n²) — the
+/// suffix array sort dominates at large sizes. Inputs above this cap
+/// are stored raw (uncompressed) to avoid stalling. Callers should
+/// chunk large inputs or use LZMA/ZSTD for general-purpose compression.
+const MAX_GLZA_INPUT_SIZE: usize = 512 * 1024; // 512 KB
+
 pub fn compress(input: &[u8]) -> Result<Vec<u8>, OmnizipError> {
+    // Size guard: O(n²) grammar construction stalls on large inputs.
+    if input.len() > MAX_GLZA_INPUT_SIZE {
+        return Err(OmnizipError::EncodeFailed {
+            codec: CodecId::GLZA,
+            reason: format!(
+                "input {} bytes exceeds {} cap — GLZA grammar construction is O(n²). Chunk the input or use LZMA/ZSTD for large data.",
+                input.len(),
+                MAX_GLZA_INPUT_SIZE
+            ),
+        });
+    }
     let grammar = Grammar::build(input);
     let uncompressed_size = u32::try_from(input.len()).map_err(|_| OmnizipError::EncodeFailed {
-        codec: GLZA_CODEC_ID,
+        codec: CodecId::GLZA,
         reason: format!("input length {} exceeds u32::MAX", input.len()),
     })?;
     let v1 = encode::encode_v1(&grammar, uncompressed_size);
@@ -81,7 +98,7 @@ pub fn compress(input: &[u8]) -> Result<Vec<u8>, OmnizipError> {
 pub fn compress_with_version(input: &[u8], version: u8) -> Result<Vec<u8>, OmnizipError> {
     let grammar = Grammar::build(input);
     let uncompressed_size = u32::try_from(input.len()).map_err(|_| OmnizipError::EncodeFailed {
-        codec: GLZA_CODEC_ID,
+        codec: CodecId::GLZA,
         reason: format!("input length {} exceeds u32::MAX", input.len()),
     })?;
     Ok(encode::encode_with_version(
@@ -117,7 +134,7 @@ impl GlzaCodec {
 
 impl Codec for GlzaCodec {
     fn id(&self) -> CodecId {
-        GLZA_CODEC_ID
+        CodecId::GLZA
     }
 
     fn name(&self) -> &'static str {
@@ -136,7 +153,7 @@ impl Codec for GlzaCodec {
         let out = decompress(compressed)?;
         if out.len() as u32 != expected_len {
             return Err(OmnizipError::LengthMismatch {
-                codec: GLZA_CODEC_ID,
+                codec: CodecId::GLZA,
                 expected: expected_len,
                 actual: out.len(),
             });
@@ -277,10 +294,10 @@ mod tests {
     }
 
     #[test]
-    fn codec_id_is_0x0d() {
-        assert_eq!(GLZA_CODEC_ID.as_u16(), 0x000D);
+    fn codec_id_is_0x0014() {
+        assert_eq!(CodecId::GLZA.as_u16(), 0x0014);
         let codec = GlzaCodec::new();
-        assert_eq!(codec.id().as_u16(), 0x000D);
+        assert_eq!(codec.id().as_u16(), 0x0014);
         assert_eq!(codec.name(), "glza");
     }
 

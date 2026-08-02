@@ -24,7 +24,6 @@ use crate::grammar::Symbol;
 use omnizip_codecs::{CodecId, OmnizipError};
 
 /// GLZA codec id, used for error attribution.
-pub const GLZA_CODEC_ID: CodecId = CodecId::new(0x000D);
 
 /// Marker byte introducing either a rule reference or a literal escape.
 const MARKER: u8 = 0xFF;
@@ -44,13 +43,13 @@ pub type ParsedGrammar = (u32, Vec<Symbol>, Vec<Vec<Symbol>>);
 pub fn parse(compressed: &[u8]) -> Result<ParsedGrammar, OmnizipError> {
     if compressed.len() < 12 {
         return Err(OmnizipError::Corrupt {
-            codec: GLZA_CODEC_ID,
+            codec: CodecId::GLZA,
             reason: format!("payload too short ({} bytes, need >= 12)", compressed.len()),
         });
     }
     if &compressed[..5] != MAGIC {
         return Err(OmnizipError::Corrupt {
-            codec: GLZA_CODEC_ID,
+            codec: CodecId::GLZA,
             reason: format!("bad magic: {:02x?}", &compressed[..5]),
         });
     }
@@ -63,7 +62,7 @@ pub fn parse(compressed: &[u8]) -> Result<ParsedGrammar, OmnizipError> {
         VERSION_RAW => parse_v1_body(&compressed[12..], uncompressed_size, rule_count),
         VERSION_HUFFMAN => parse_v2_body(&compressed[12..], uncompressed_size, rule_count),
         other => Err(OmnizipError::Corrupt {
-            codec: GLZA_CODEC_ID,
+            codec: CodecId::GLZA,
             reason: format!("unsupported container version {other}"),
         }),
     }
@@ -82,7 +81,7 @@ fn parse_v1_body(
     let total_rules = rule_count + 1;
     for i in 0..total_rules {
         let (syms, consumed) = read_rule(&body[cursor..]).ok_or_else(|| OmnizipError::Corrupt {
-            codec: GLZA_CODEC_ID,
+            codec: CodecId::GLZA,
             reason: format!("truncated rule body at rule index {i}"),
         })?;
         cursor += consumed;
@@ -94,7 +93,7 @@ fn parse_v1_body(
                 if let Symbol::Rule(ref_id) = s {
                     if (*ref_id as usize) >= rule_idx {
                         return Err(OmnizipError::Corrupt {
-                            codec: GLZA_CODEC_ID,
+                            codec: CodecId::GLZA,
                             reason: format!(
                                 "rule {rule_idx} references rule {ref_id} which is not strictly smaller — cyclic grammar"
                             ),
@@ -118,7 +117,7 @@ fn parse_v2_body(
     // huff_alphabet_size:u16 LE
     if body.len() < 2 {
         return Err(OmnizipError::Corrupt {
-            codec: GLZA_CODEC_ID,
+            codec: CodecId::GLZA,
             reason: "v2 body too short for alphabet size".to_string(),
         });
     }
@@ -130,7 +129,7 @@ fn parse_v2_body(
     let expected_alphabet = 256 + rule_count;
     if alphabet_size < 256 || alphabet_size < expected_alphabet {
         return Err(OmnizipError::Corrupt {
-            codec: GLZA_CODEC_ID,
+            codec: CodecId::GLZA,
             reason: format!(
                 "alphabet size {alphabet_size} smaller than expected {expected_alphabet}"
             ),
@@ -140,7 +139,7 @@ fn parse_v2_body(
     // huff_code_lengths: [u8; alphabet_size]
     if body.len() < cursor + alphabet_size {
         return Err(OmnizipError::Corrupt {
-            codec: GLZA_CODEC_ID,
+            codec: CodecId::GLZA,
             reason: format!(
                 "v2 body too short for code lengths (need {alphabet_size}, have {})",
                 body.len() - cursor
@@ -155,7 +154,7 @@ fn parse_v2_body(
     // body_byte_len:u32 LE
     if body.len() < cursor + 4 {
         return Err(OmnizipError::Corrupt {
-            codec: GLZA_CODEC_ID,
+            codec: CodecId::GLZA,
             reason: "v2 body too short for body_byte_len".to_string(),
         });
     }
@@ -164,7 +163,7 @@ fn parse_v2_body(
 
     if body.len() < cursor + body_byte_len {
         return Err(OmnizipError::Corrupt {
-            codec: GLZA_CODEC_ID,
+            codec: CodecId::GLZA,
             reason: format!(
                 "v2 body too short: declared {body_byte_len} bytes, have {}",
                 body.len() - cursor
@@ -187,7 +186,7 @@ fn parse_v2_body(
     for i in 0..=rule_count {
         let (c, consumed) =
             read_varint(&body_region[cpos..]).ok_or_else(|| OmnizipError::Corrupt {
-                codec: GLZA_CODEC_ID,
+                codec: CodecId::GLZA,
                 reason: format!("truncated varint count at rule index {i}"),
             })?;
         cpos += consumed;
@@ -205,7 +204,7 @@ fn parse_v2_body(
             let idx = decoder
                 .decode(&mut reader)
                 .ok_or_else(|| OmnizipError::Corrupt {
-                    codec: GLZA_CODEC_ID,
+                    codec: CodecId::GLZA,
                     reason: "bit-packed symbol stream exhausted mid-code".to_string(),
                 })?;
             syms.push(index_to_symbol(idx));
@@ -218,7 +217,7 @@ fn parse_v2_body(
                 if let Symbol::Rule(ref_id) = s {
                     if (*ref_id as usize) >= rule_idx {
                         return Err(OmnizipError::Corrupt {
-                            codec: GLZA_CODEC_ID,
+                            codec: CodecId::GLZA,
                             reason: format!(
                                 "rule {rule_idx} references rule {ref_id} which is not strictly smaller — cyclic grammar"
                             ),
@@ -303,7 +302,7 @@ pub fn expand(
     }
     if out.len() as u32 != uncompressed_size {
         return Err(OmnizipError::LengthMismatch {
-            codec: GLZA_CODEC_ID,
+            codec: CodecId::GLZA,
             expected: uncompressed_size,
             actual: out.len(),
         });
@@ -319,7 +318,7 @@ fn expand_symbol(
 ) -> Result<(), OmnizipError> {
     if depth > MAX_DEPTH {
         return Err(OmnizipError::Corrupt {
-            codec: GLZA_CODEC_ID,
+            codec: CodecId::GLZA,
             reason: format!("expansion depth exceeded {MAX_DEPTH} — cyclic grammar suspected"),
         });
     }
@@ -328,7 +327,7 @@ fn expand_symbol(
         Symbol::Rule(n) => {
             let idx = n as usize;
             let body = rules.get(idx).ok_or_else(|| OmnizipError::Corrupt {
-                codec: GLZA_CODEC_ID,
+                codec: CodecId::GLZA,
                 reason: format!(
                     "rule reference {n} out of range (have {} rules)",
                     rules.len()

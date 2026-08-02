@@ -55,6 +55,24 @@ impl CodecId {
     pub const LIBDEFLATE: CodecId = Self::new(0x000B);
     /// 0x000C: LZ4 HC (high-compression variant).
     pub const LZ4_HC: CodecId = Self::new(0x000C);
+    /// 0x000D: Reserved (was previously used by GLZA and ZPAQ — collision fixed).
+    pub const RESERVED_0D: CodecId = Self::new(0x000D);
+    /// 0x000E: Reserved.
+    pub const RESERVED_0E: CodecId = Self::new(0x000E);
+    /// 0x000F: Reserved.
+    pub const RESERVED_0F: CodecId = Self::new(0x000F);
+    /// 0x0010: FSST (Fast Static Symbol Table).
+    pub const FSST: CodecId = Self::new(0x0010);
+    /// 0x0011: Rice++ (DwarFS ricepp).
+    pub const RICEPP: CodecId = Self::new(0x0011);
+    /// 0x0012: FLAC audio.
+    pub const FLAC: CodecId = Self::new(0x0012);
+    /// 0x0013: BLOSC2 container.
+    pub const BLOSC: CodecId = Self::new(0x0013);
+    /// 0x0014: GLZA (grammar-based LZ).
+    pub const GLZA: CodecId = Self::new(0x0014);
+    /// 0x0015: ZPAQ (context-mixing archival).
+    pub const ZPAQ: CodecId = Self::new(0x0015);
 }
 
 impl std::fmt::Display for CodecId {
