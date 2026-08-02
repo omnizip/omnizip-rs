@@ -1,0 +1,15 @@
+//! LZMA encoder module.
+
+pub mod alone;
+pub mod lzip;
+pub mod lzma1;
+pub mod lzma2;
+pub mod match_finder;
+pub mod xz;
+
+pub use alone::lzma_alone_compress;
+pub use lzip::lzip_compress;
+pub use lzma1::Lzma1Encoder;
+pub use lzma2::encode_lzma2_stream;
+pub use match_finder::MatchFinder;
+pub use xz::xz_compress;

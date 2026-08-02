@@ -21,7 +21,7 @@
 //! - Lzip container decode (`decoder/lzip.rs`).
 //! - LZMA2 multi-chunk decode (`decoder/lzma2.rs`).
 //!
-//! Encoder (Phase B) and optimal parser (Phase C) per `PLAN.md`.
+//! Encoder (with lazy parsing) and decoder.
 
 #![forbid(unsafe_code)]
 #![warn(clippy::pedantic)]
@@ -38,6 +38,7 @@ pub mod coder;
 pub mod crc32;
 pub mod decoder;
 pub mod dictionary;
+pub mod encoder;
 pub mod lzip;
 pub mod lzma2;
 pub mod r#match;
@@ -49,15 +50,18 @@ use std::fmt;
 
 pub use bit_model::{BitModel, BitModelArray};
 pub use codec::LzmaCodec;
-pub use coder::{DistanceDecoder, LengthDecoder, LiteralDecoder};
+pub use coder::{DistanceDecoder, DistanceEncoder, LengthDecoder, LengthEncoder,
+                 LiteralDecoder, LiteralEncoder};
 pub use constants::{COMPRESSION_LEVEL_MAX, COMPRESSION_LEVEL_MIN};
 pub use crc32::crc32;
 pub use decoder::{lzma_alone_decompress, Lzma1Decoder};
 pub use dictionary::Dictionary;
+pub use encoder::{lzma_alone_compress, lzip_compress, xz_compress, Lzma1Encoder,
+                   MatchFinder};
 pub use lzip::lzip_decompress;
 pub use lzma2::decode_lzma2_stream;
 pub use r#match::Match;
-pub use range_coder::RangeDecoder;
+pub use range_coder::{RangeDecoder, RangeEncoder};
 pub use state::{LzmaState, LIT_STATES, MATCH_STATES, NUM_STATES, REP_STATES, SHORT_REP_STATES};
 pub use xz_container::xz_decompress;
 
@@ -114,7 +118,7 @@ impl fmt::Display for LzmaLevel {
 /// Error type. Will grow as phases ship.
 #[derive(Debug)]
 pub enum LzmaError {
-    /// Level not yet wired in this build.
+    /// Level not supported by this codec.
     LevelUnavailable(LzmaLevel),
     /// Malformed input.
     Corrupt { reason: String },
@@ -123,7 +127,7 @@ pub enum LzmaError {
 impl fmt::Display for LzmaError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::LevelUnavailable(level) => write!(f, "level {level} not yet implemented"),
+            Self::LevelUnavailable(level) => write!(f, "level {level} not supported by this codec"),
             Self::Corrupt { reason } => write!(f, "corrupt lzma stream: {reason}"),
         }
     }
@@ -132,7 +136,7 @@ impl fmt::Display for LzmaError {
 impl std::error::Error for LzmaError {}
 
 /// Compress `plaintext` with LZMA2 at the given level. Placeholder until
-/// Phase B ships.
+/// Phase C ships with match finder + lazy parsing.
 ///
 /// # Errors
 ///
@@ -149,7 +153,7 @@ pub fn lzma2_compress(_plaintext: &[u8], level: LzmaLevel) -> Result<Vec<u8>, Lz
 /// Returns [`LzmaError::Corrupt`] until the decoder is wired in.
 pub fn lzma2_decompress(_compressed: &[u8], _expected_len: u32) -> Result<Vec<u8>, LzmaError> {
     Err(LzmaError::Corrupt {
-        reason: "decoder not yet ported (Phase A)".into(),
+        reason: "decoder not available".into(),
     })
 }
 
