@@ -32,11 +32,22 @@ use super::model::{ArithDecoder, ArithEncoder, Ppmd8Model};
 use super::{Ppmd8Error, PPMD8_MAGIC};
 
 /// Minimum context order (Ruby `MIN_ORDER`).
-const MIN_ORDER: u8 = 2;
+pub const MIN_ORDER: u8 = 2;
 /// Maximum context order (Ruby `MAX_ORDER`).
-const MAX_ORDER: u8 = 16;
+pub const MAX_ORDER: u8 = 16;
 /// Default context order when none specified (Ruby `DEFAULT_ORDER`).
 pub const DEFAULT_ORDER: u8 = 6;
+
+/// Default memory budget (~64 MB) used by [`compress`] and [`decompress`].
+/// Override with [`compress_with_budget`].
+///
+/// At ~40 B per context node, this allows ~1.6 M nodes — enough for
+/// most text inputs up to a few MB.
+pub const DEFAULT_MEMORY_BUDGET_BYTES: usize = 64 * 1024 * 1024;
+
+/// Approximate bytes per node, used to translate a memory budget to
+/// a node cap. Each `Ppmd8Context` carries Vec headers + children.
+const BYTES_PER_NODE: usize = 40;
 
 /// PPMd8 codec struct.
 #[derive(Clone, Copy, Debug, Default)]
@@ -103,14 +114,35 @@ impl Codec for Ppmd8Codec {
 
 /// Compress `input` with the given `max_order` using the PPMd8 model.
 ///
+/// Uses the default memory budget ([`DEFAULT_MEMORY_BUDGET_BYTES`],
+/// ~64 MB). Call [`compress_with_budget`] to override.
+///
 /// # Errors
 ///
 /// Returns [`Ppmd8Error::InvalidOrder`] if `max_order` is outside
 /// `[2, 16]`.
 pub fn compress(input: &[u8], max_order: u8) -> Result<Vec<u8>, Ppmd8Error> {
+    compress_with_budget(input, max_order, DEFAULT_MEMORY_BUDGET_BYTES)
+}
+
+/// Compress `input` with an explicit memory budget in bytes.
+///
+/// Larger budgets allow more contexts to be tracked before RESTART
+/// restoration fires, improving the compression ratio on inputs with
+/// many distinct contexts.
+///
+/// # Errors
+///
+/// Returns [`Ppmd8Error::InvalidOrder`] if `max_order` is outside
+/// `[2, 16]`.
+pub fn compress_with_budget(
+    input: &[u8],
+    max_order: u8,
+    memory_budget_bytes: usize,
+) -> Result<Vec<u8>, Ppmd8Error> {
     Ppmd8Codec::validate_order(max_order)?;
 
-    let mut out = Vec::with_capacity(input.len() / 2 + 16);
+    let mut out = Vec::with_capacity(64);
     out.extend_from_slice(PPMD8_MAGIC);
     out.push(max_order);
     let uncompressed_size =
@@ -121,7 +153,12 @@ pub fn compress(input: &[u8], max_order: u8) -> Result<Vec<u8>, Ppmd8Error> {
         return Ok(out);
     }
 
-    let mut model = Ppmd8Model::default_for(usize::from(max_order));
+    let max_nodes = (memory_budget_bytes / BYTES_PER_NODE).max(10_000);
+    let mut model = Ppmd8Model::new(
+        usize::from(max_order),
+        super::model::DEFAULT_RESTORE_METHOD,
+        max_nodes,
+    );
     {
         let mut enc = ArithEncoder::new();
         model.encode_stream(&mut enc, input);
@@ -130,12 +167,31 @@ pub fn compress(input: &[u8], max_order: u8) -> Result<Vec<u8>, Ppmd8Error> {
     Ok(out)
 }
 
-/// Decompress a PPMd8 container produced by [`compress`].
+/// Decompress a PPMd8 container produced by [`compress`] or
+/// [`compress_with_budget`].
+///
+/// Uses the default memory budget. The budget must be at least as
+/// large as the one used to compress.
 ///
 /// # Errors
 ///
 /// Returns [`Ppmd8Error`] on structural problems or size mismatch.
 pub fn decompress(compressed: &[u8], expected_len: usize) -> Result<Vec<u8>, Ppmd8Error> {
+    decompress_with_budget(compressed, expected_len, DEFAULT_MEMORY_BUDGET_BYTES)
+}
+
+/// Decompress with an explicit memory budget. The budget must be at
+/// least as large as the one used to compress (otherwise the model
+/// may RESTART at a different point and diverge from the encoder).
+///
+/// # Errors
+///
+/// Same as [`decompress`].
+pub fn decompress_with_budget(
+    compressed: &[u8],
+    expected_len: usize,
+    memory_budget_bytes: usize,
+) -> Result<Vec<u8>, Ppmd8Error> {
     if compressed.len() < 10 {
         return Err(Ppmd8Error::Corrupt("header too short".into()));
     }
@@ -157,8 +213,13 @@ pub fn decompress(compressed: &[u8], expected_len: usize) -> Result<Vec<u8>, Ppm
         return Ok(Vec::new());
     }
 
+    let max_nodes = (memory_budget_bytes / BYTES_PER_NODE).max(10_000);
     let bitstream = &compressed[10..];
-    let mut model = Ppmd8Model::default_for(usize::from(max_order));
+    let mut model = Ppmd8Model::new(
+        usize::from(max_order),
+        super::model::DEFAULT_RESTORE_METHOD,
+        max_nodes,
+    );
     let mut dec = ArithDecoder::new(bitstream);
     Ok(model.decode_stream(&mut dec, size))
 }

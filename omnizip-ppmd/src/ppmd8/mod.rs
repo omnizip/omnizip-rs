@@ -43,5 +43,8 @@ impl std::fmt::Display for Ppmd8Error {
 
 impl std::error::Error for Ppmd8Error {}
 
-pub use codec::{compress, decompress, Ppmd8Codec};
+pub use codec::{
+    compress, compress_with_budget, decompress, decompress_with_budget, Ppmd8Codec,
+    DEFAULT_MEMORY_BUDGET_BYTES, DEFAULT_ORDER, MAX_ORDER, MIN_ORDER,
+};
 pub use model::{ArithDecoder, ArithEncoder, Ppmd8Model};
