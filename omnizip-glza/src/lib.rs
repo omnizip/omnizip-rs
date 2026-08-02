@@ -36,6 +36,7 @@
 
 mod decode;
 mod encode;
+mod entropy;
 mod grammar;
 mod suffix_array;
 
@@ -44,7 +45,14 @@ use omnizip_codecs::{Codec, CodecId, CompressionLevel, OmnizipError};
 pub use decode::GLZA_CODEC_ID;
 pub use grammar::{Grammar, Symbol};
 
-/// Compress `input` with GLZA.
+/// Compress `input` with GLZA using the default container version.
+///
+/// The encoder computes both the Phase 1 (raw varint) and Phase 2
+/// (Huffman-coded) payloads and emits whichever is smaller. For inputs
+/// where Huffman coding helps (most real data) this yields Phase 2; for
+/// small or near-uniform-distribution inputs where the Huffman table
+/// overhead exceeds the symbol-stream savings, it falls back to Phase 1.
+/// Either way the decoder dispatches transparently on the version byte.
 ///
 /// # Errors
 ///
@@ -56,7 +64,31 @@ pub fn compress(input: &[u8]) -> Result<Vec<u8>, OmnizipError> {
         codec: GLZA_CODEC_ID,
         reason: format!("input length {} exceeds u32::MAX", input.len()),
     })?;
-    Ok(encode::encode(&grammar, uncompressed_size))
+    let v1 = encode::encode_v1(&grammar, uncompressed_size);
+    let v2 = encode::encode_v2(&grammar, uncompressed_size);
+    // Pick the smaller payload; ties go to v1 (older, simpler format).
+    Ok(if v2.len() < v1.len() { v2 } else { v1 })
+}
+
+/// Compress with an explicit container version.
+///
+/// `1` = Phase 1 raw varints, `2` = Phase 2 Huffman-coded. Other values
+/// fall back to Phase 1.
+///
+/// # Errors
+///
+/// Same error conditions as [`compress`].
+pub fn compress_with_version(input: &[u8], version: u8) -> Result<Vec<u8>, OmnizipError> {
+    let grammar = Grammar::build(input);
+    let uncompressed_size = u32::try_from(input.len()).map_err(|_| OmnizipError::EncodeFailed {
+        codec: GLZA_CODEC_ID,
+        reason: format!("input length {} exceeds u32::MAX", input.len()),
+    })?;
+    Ok(encode::encode_with_version(
+        &grammar,
+        uncompressed_size,
+        version,
+    ))
 }
 
 /// Decompress GLZA-compressed `compressed`.
@@ -240,7 +272,7 @@ mod tests {
 
     #[test]
     fn rejects_bad_magic() {
-        let result = decompress(b"NOTGLZA\0\0\0\0\0");
+        let result = decompress(b"NOTGLZA\0\x01\0\0\0\0\0\0");
         assert!(result.is_err());
     }
 
@@ -250,5 +282,144 @@ mod tests {
         let codec = GlzaCodec::new();
         assert_eq!(codec.id().as_u16(), 0x000D);
         assert_eq!(codec.name(), "glza");
+    }
+
+    // ----- Phase 2 tests -----
+
+    /// Phase 1 and Phase 2 must both round-trip to the same decoded output.
+    #[test]
+    fn phase1_and_phase2_round_trip_same_output() {
+        let input: Vec<u8> =
+            b"the quick brown fox the quick brown fox the quick brown fox".repeat(20);
+        let v1 = compress_with_version(&input, encode::VERSION_RAW).expect("v1 compress");
+        let v2 = compress_with_version(&input, encode::VERSION_HUFFMAN).expect("v2 compress");
+        let out1 = decompress(&v1).expect("v1 decompress");
+        let out2 = decompress(&v2).expect("v2 decompress");
+        assert_eq!(out1, input);
+        assert_eq!(out2, input);
+    }
+
+    /// Phase 2 output should be no larger than Phase 1 on repetitive data.
+    #[test]
+    fn phase2_smaller_than_phase1_on_repetitive_data() {
+        let input: Vec<u8> = b"<html><body>Hello, World!</body></html>".repeat(500);
+        let v1 = compress_with_version(&input, encode::VERSION_RAW).expect("v1 compress");
+        let v2 = compress_with_version(&input, encode::VERSION_HUFFMAN).expect("v2 compress");
+        assert!(
+            v2.len() < v1.len(),
+            "phase 2 ({}) should be smaller than phase 1 ({})",
+            v2.len(),
+            v1.len()
+        );
+    }
+
+    /// Phase 2 must be deterministic: same input -> byte-identical output.
+    #[test]
+    fn phase2_determinism() {
+        let input: Vec<u8> = b"the quick brown fox the quick brown fox".repeat(10);
+        let a = compress_with_version(&input, encode::VERSION_HUFFMAN).expect("compress a");
+        let b = compress_with_version(&input, encode::VERSION_HUFFMAN).expect("compress b");
+        assert_eq!(a, b, "Phase 2 must be deterministic");
+    }
+
+    /// Large grammar with many rules must round-trip.
+    #[test]
+    fn phase2_large_grammar_round_trips() {
+        // Many distinct repeating patterns -> many rules.
+        let mut input = Vec::new();
+        for i in 0..200u8 {
+            let pat = [
+                b'A' + (i % 26),
+                b'B' + (i % 26),
+                b'C' + (i % 26),
+                b'D' + (i % 26),
+            ];
+            for _ in 0..10 {
+                input.extend_from_slice(&pat);
+            }
+            input.push(b'\n');
+        }
+        let v2 = compress_with_version(&input, encode::VERSION_HUFFMAN).expect("compress");
+        let out = decompress(&v2).expect("decompress");
+        assert_eq!(out, input);
+    }
+
+    /// Round-trip with all 256 byte values to exercise the full byte alphabet.
+    #[test]
+    fn phase2_round_trip_all_byte_values() {
+        let input: Vec<u8> = (0..=255u8).cycle().take(8_000).collect();
+        let v2 = compress_with_version(&input, encode::VERSION_HUFFMAN).expect("compress");
+        let out = decompress(&v2).expect("decompress");
+        assert_eq!(out, input);
+    }
+
+    /// Phase 1 still works through the public `compress_with_version` API.
+    #[test]
+    fn phase1_explicit_round_trips() {
+        let input: Vec<u8> = b"repetitive repetitive repetitive text".to_vec();
+        let v1 = compress_with_version(&input, encode::VERSION_RAW).expect("v1 compress");
+        let out = decompress(&v1).expect("decompress");
+        assert_eq!(out, input);
+    }
+
+    /// Unknown version byte must be rejected.
+    #[test]
+    fn rejects_unknown_version() {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(encode::MAGIC);
+        buf.push(99); // unknown version
+        buf.extend_from_slice(&0u32.to_le_bytes());
+        buf.extend_from_slice(&0u16.to_le_bytes());
+        let err = decompress(&buf);
+        assert!(err.is_err(), "unknown version must be rejected");
+    }
+
+    /// Default `compress()` picks the smaller of v1/v2 and round-trips.
+    #[test]
+    fn default_compress_round_trips_and_picks_smaller() {
+        let input: Vec<u8> = b"<html><body>Hello, World!</body></html>".repeat(500);
+        let out = compress(&input).expect("compress");
+        // On repetitive data, v2 should win.
+        assert_eq!(out[5], encode::VERSION_HUFFMAN);
+        let decoded = decompress(&out).expect("decompress");
+        assert_eq!(decoded, input);
+    }
+
+    /// Print before/after ratios for visibility. Not asserted at a fixed
+    /// threshold (just sanity: ratio < 1.0).
+    #[test]
+    #[allow(clippy::cast_precision_loss, clippy::len_zero)]
+    fn report_ratios() {
+        let cases: &[(&str, Vec<u8>)] = &[
+            (
+                "repetitive html",
+                b"<html><body>Hello, World!</body></html>".repeat(500),
+            ),
+            ("dna-like", {
+                let alphabet = [b'A', b'C', b'G', b'T'];
+                (0..10_000)
+                    .map(|i| alphabet[(i * 17 + 3) % 4])
+                    .collect::<Vec<u8>>()
+            }),
+            ("all same byte", vec![0x41u8; 5_000]),
+            ("pseudo-random", {
+                (0..5_000)
+                    .map(|i| ((i * 7919) % 251) as u8)
+                    .collect::<Vec<u8>>()
+            }),
+        ];
+        for (name, input) in cases {
+            let v1 = compress_with_version(input, encode::VERSION_RAW).expect("v1");
+            let v2 = compress_with_version(input, encode::VERSION_HUFFMAN).expect("v2");
+            let r1 = v1.len() as f64 / input.len().max(1) as f64;
+            let r2 = v2.len() as f64 / input.len().max(1) as f64;
+            eprintln!(
+                "{name:20}: input={} v1={} (ratio {r1:.3}) v2={} (ratio {r2:.3}) delta={:.1}%",
+                input.len(),
+                v1.len(),
+                v2.len(),
+                (1.0 - r2 / r1) * 100.0
+            );
+        }
     }
 }
