@@ -59,6 +59,9 @@ pub fn encode_subframe(
             }
             rice::encode_residuals(writer, &residuals, 0, bps)?;
         }
+        SubframeType::Lpc { solution } => {
+            crate::encoder::lpc::encode_from_solution(writer, &solution, bps)?;
+        }
     }
 
     Ok(())
@@ -70,6 +73,7 @@ enum SubframeType {
     Constant(i32),
     Verbatim,
     Fixed { order: u8, residuals: Vec<i32> },
+    Lpc { solution: crate::encoder::lpc::LpcSolution },
 }
 
 /// Choose the cheapest subframe type for `samples`. The cost metric is
@@ -86,31 +90,65 @@ fn choose_type(samples: &[i32], bps: u8) -> SubframeType {
         }
     }
 
-    // Try FIXED orders 0..=4. Pick the best.
-    let mut best_fixed: Option<(u8, Vec<i32>, u32)> = None;
+    // Compute the best FIXED candidate.
+    let fixed = best_fixed(samples, bps);
+
+    // Compute the best LPC candidate (if block size allows).
+    let lpc = if samples.len() >= 64 {
+        crate::encoder::lpc::best_lpc_candidate(samples, bps)
+    } else {
+        None
+    };
+
+    // Compare costs. LPC and FIXED both have warmup + header + residual.
+    let fixed_cost = match &fixed {
+        Some((order, residuals, cost)) => {
+            let header = 8 + u32::from(*order) * u32::from(bps);
+            Some((header + cost, SubframeType::Fixed { order: *order, residuals: residuals.clone() }))
+        }
+        None => None,
+    };
+
+    let lpc_cost = match lpc {
+        Some(sol) => {
+            let header = 8 + (sol.order as u32 * u32::from(bps)) + 4 + 5 + (sol.order as u32 * u32::from(sol.precision_bits));
+            let cost = header + sol.estimated_residual_bits;
+            Some((cost, SubframeType::Lpc { solution: sol }))
+        }
+        None => None,
+    };
+
+    // Pick the cheapest of FIXED / LPC / VERBATIM.
+    let candidates = [fixed_cost, lpc_cost];
+    let best = candidates
+        .into_iter()
+        .flatten()
+        .min_by_key(|(cost, _)| *cost);
+
+    match best {
+        Some((cost, variant)) if cost < verbatim_cost => variant,
+        _ => SubframeType::Verbatim,
+    }
+}
+
+/// Compute the best FIXED candidate (order + residuals + bit cost).
+fn best_fixed(samples: &[i32], _bps: u8) -> Option<(u8, Vec<i32>, u32)> {
+    let mut best: Option<(u8, Vec<i32>, u32)> = None;
     for order in 0..=4u8 {
         if samples.len() < order as usize {
             break;
         }
         let residuals = compute_fixed_residuals(samples, order);
-        let cost = fixed_cost(samples.len(), bps, order, &residuals);
-        match &best_fixed {
-            None => best_fixed = Some((order, residuals, cost)),
-            Some((_, _, best)) if cost < *best => {
-                best_fixed = Some((order, residuals, cost));
+        let cost = fixed_cost(samples.len(), _bps, order, &residuals);
+        match &best {
+            None => best = Some((order, residuals, cost)),
+            Some((_, _, prev)) if cost < *prev => {
+                best = Some((order, residuals, cost));
             }
             _ => {}
         }
     }
-
-    if let Some((order, residuals, cost)) = best_fixed {
-        let header = 8 + u32::from(order) * u32::from(bps);
-        if header + cost < verbatim_cost {
-            return SubframeType::Fixed { order, residuals };
-        }
-    }
-
-    SubframeType::Verbatim
+    best
 }
 
 /// Return `Some(value)` if all samples equal `value`, else `None`.
