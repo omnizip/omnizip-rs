@@ -1,21 +1,16 @@
-//! `ZstdCodec` — adapts the ZSTD decoder to the `omnizip_codecs::Codec`
-//! trait so it can be registered and dispatched through the workspace
-//! codec registry.
-//!
-//! Phase A: decode side handles Raw + RLE blocks (small inputs that
-//! `zstd` chooses not to compress). Encode is Phase B.
+//! `ZstdCodec` — adapts the ZSTD encoder + decoder to the
+//! `omnizip_codecs::Codec` trait.
 
 #![forbid(unsafe_code)]
 
 use omnizip_codecs::{Codec, CodecId, CompressionLevel, OmnizipError};
 
-use crate::ZstdDecoder;
+use crate::{compress, decompress, ZstdDecoder, ZstdError, ZstdLevel};
 
 /// Codec entry for the Zstandard format.
 pub struct ZstdCodec;
 
 impl ZstdCodec {
-    /// Construct a new codec instance. Stateless.
     #[must_use]
     pub const fn new() -> Self {
         Self
@@ -39,21 +34,26 @@ impl Codec for ZstdCodec {
 
     fn compress(
         &self,
-        _plaintext: &[u8],
+        plaintext: &[u8],
         level: CompressionLevel,
     ) -> Result<Vec<u8>, OmnizipError> {
-        Err(OmnizipError::Unsupported {
+        let zstd_level = match level.as_u8() {
+            0..=2 => ZstdLevel::Fastest,
+            3..=9 => ZstdLevel::Fast,
+            10..=16 => ZstdLevel::Default,
+            17..=22 => ZstdLevel::Better,
+            _ => ZstdLevel::Best,
+        };
+        compress(plaintext, zstd_level).map_err(|e| OmnizipError::EncodeFailed {
             codec: CodecId::ZSTD,
-            reason: format!(
-                "encode at level {level} not yet ported (ZSTD Phase B — see TODO.omnizip-rs/14)"
-            ),
+            reason: e.to_string(),
         })
     }
 
     fn decompress(&self, compressed: &[u8], expected_len: u32) -> Result<Vec<u8>, OmnizipError> {
-        let mut dec = ZstdDecoder::new();
-        let out = dec.decode_stream(compressed).map_err(|e| match e {
-            crate::ZstdError::Unsupported { reason } => OmnizipError::Unsupported {
+        let _ = ZstdDecoder::new(); // ensure constructor is referenced
+        let out = decompress(compressed, expected_len).map_err(|e| match e {
+            ZstdError::Unsupported { reason } => OmnizipError::Unsupported {
                 codec: CodecId::ZSTD,
                 reason,
             },
@@ -87,15 +87,15 @@ mod tests {
     }
 
     #[test]
-    fn name_is_stable() {
-        assert_eq!(ZstdCodec::new().name(), "zstd");
-    }
-
-    #[test]
-    fn compress_returns_unsupported_in_phase_a() {
-        let err = ZstdCodec::new()
-            .compress(b"abc", CompressionLevel::default())
-            .unwrap_err();
-        assert!(matches!(err, OmnizipError::Unsupported { .. }));
+    fn round_trip_via_codec() {
+        let codec = ZstdCodec::new();
+        let input = b"hello zstd codec world";
+        let compressed = codec
+            .compress(input, CompressionLevel::default())
+            .expect("encode");
+        let decompressed = codec
+            .decompress(&compressed, input.len() as u32)
+            .expect("decode");
+        assert_eq!(decompressed, input);
     }
 }

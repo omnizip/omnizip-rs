@@ -57,23 +57,16 @@ impl Table {
         let step = (table_size >> 1) + (table_size >> 3) + 3;
         let mask = table_size - 1;
 
-        // Phase 1: Place symbols.
-        // table_symbol tracks which symbol occupies each cell.
-        // Initialize to 0xFFFF (sentinel = empty).
+        // Phase 1a: Place low-probability (-1) symbols FIRST at the
+        // top of the table. The C reference does this before spreading
+        // positive-count symbols so the spread can skip the reserved area.
         let mut table_symbol: Vec<u16> = vec![0xFFFF; table_size];
         let mut high_threshold = table_size - 1;
-        let mut position = 0usize;
-
         for (symbol, &freq) in distribution.iter().enumerate() {
-            if freq == 0 {
-                continue;
-            }
-            let symbol_u16 = u16::try_from(symbol).map_err(|_| ZstdError::Corrupt {
-                reason: format!("FSE symbol {symbol} exceeds u16"),
-            })?;
-
             if freq == -1 {
-                // Low-probability: place at high_threshold from top.
+                let symbol_u16 = u16::try_from(symbol).map_err(|_| ZstdError::Corrupt {
+                    reason: format!("FSE symbol {symbol} exceeds u16"),
+                })?;
                 table_symbol[high_threshold] = symbol_u16;
                 if high_threshold == 0 {
                     return Err(ZstdError::Corrupt {
@@ -81,28 +74,27 @@ impl Table {
                     });
                 }
                 high_threshold -= 1;
+            }
+        }
+
+        // Phase 1b: Spread positive-count symbols. Matches C reference
+        // FSE_buildDTable_internal slow path exactly: place at position,
+        // then advance by step, skipping positions above high_threshold
+        // (reserved for low-probability symbols).
+        let mut position = 0usize;
+        for (symbol, &freq) in distribution.iter().enumerate() {
+            if freq <= 0 {
                 continue;
             }
-
-            // Positive: spread from position. Find empty cell FIRST,
-            // then place, then advance. This avoids an infinite search
-            // after placing the last cell (all cells full).
+            let symbol_u16 = u16::try_from(symbol).map_err(|_| ZstdError::Corrupt {
+                reason: format!("FSE symbol {symbol} exceeds u16"),
+            })?;
             for _ in 0..freq {
-                // Find the next empty cell.
-                let mut guard = 0usize;
-                while table_symbol[position] != 0xFFFF {
-                    position = (position + step) & mask;
-                    guard += 1;
-                    if guard > table_size {
-                        return Err(ZstdError::Corrupt {
-                            reason: "FSE spread failed: no empty cell".into(),
-                        });
-                    }
-                }
-                // Place the symbol.
                 table_symbol[position] = symbol_u16;
-                // Advance for the next iteration.
                 position = (position + step) & mask;
+                while position > high_threshold {
+                    position = (position + step) & mask;
+                }
             }
         }
 

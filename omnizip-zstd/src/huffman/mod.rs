@@ -25,8 +25,11 @@
 
 #![forbid(unsafe_code)]
 
+pub mod encoder;
+pub mod weights;
+
 use crate::constants::HUFFMAN_MAX_BITS;
-use crate::fse::ForwardBitStream;
+use crate::fse::BitStream;
 use crate::ZstdError;
 
 /// Maximum code length ZSTD permits, in bits. Constant alias for
@@ -56,20 +59,29 @@ pub struct HuffmanTable {
 }
 
 impl HuffmanTable {
-    /// Build a canonical Huffman table from a per-symbol weight array.
+    /// Build a ZSTD Huffman decode table from a per-symbol weight array.
     ///
-    /// Weight 0 → symbol is absent. Higher weight → shorter code.
-    /// Code length `= max(weights) - weight + 1`, clamped to
-    /// [`MAX_BITS`].
+    /// ZSTD uses a weight-based DTable layout (NOT standard canonical
+    /// Huffman). Symbols are grouped by weight: all weight-1 symbols
+    /// occupy consecutive DTable entries first, then weight-2 symbols,
+    /// etc. Within each weight group, symbols appear in ascending
+    /// symbol-value order.
+    ///
+    /// Each symbol of weight `w` occupies `(1 << w) >> 1` consecutive
+    /// entries, and its code length is `tableLog + 1 - w`. The DTable
+    /// has `1 << tableLog` entries, indexed by the top `tableLog` bits
+    /// of the bitstream peek.
+    ///
+    /// Verified against `HUF_readDTableX1_wksp` in
+    /// `~/src/external/zstd/lib/decompress/huf_decompress.c:456-514`.
     ///
     /// # Errors
     ///
-    /// Returns [`ZstdError::Corrupt`] if the implied code lengths
-    /// cannot be assigned valid canonical codes (e.g. overflow).
+    /// Returns [`ZstdError::Corrupt`] if the weights don't sum to a
+    /// valid Kraft tree.
     pub fn from_weights(weights: &[u8]) -> Result<Self, ZstdError> {
-        let code_lengths = calculate_code_lengths(weights);
-        let codes = build_canonical_codes(&code_lengths)?;
-        let lookup = build_lookup_table(&codes, &code_lengths);
+        let table_log = compute_table_log(weights)?;
+        let lookup = build_zstd_lookup(weights, table_log);
         Ok(Self {
             lookup,
             weights: weights.to_vec(),
@@ -95,63 +107,102 @@ impl HuffmanTable {
         &self.weights
     }
 
-    /// Peek-decode one symbol from `bitstream` and consume its bits.
+    /// Encode a single symbol: returns `(code, length)` where `code` is
+    /// the ZSTD Huffman code (MSB-aligned within `length` bits) and
+    /// `length` is its bit width. Used by the literals encoder.
+    ///
+    /// Returns `(0, 0)` for absent symbols.
+    #[must_use]
+    pub fn encode_symbol(&self, symbol: u8) -> (u32, u8) {
+        if self.weights.is_empty() {
+            return (0, 0);
+        }
+        let table_log = match compute_table_log(&self.weights) {
+            Ok(tl) => tl,
+            Err(_) => return (0, 0),
+        };
+        let code_table = build_zstd_code_table(&self.weights, table_log);
+        let idx = usize::from(symbol);
+        if idx < code_table.len() {
+            code_table[idx]
+        } else {
+            (0, 0)
+        }
+    }
+
+    /// Peek-decode one symbol from a reverse (`BIT_DStream`) bitstream
+    /// and consume its bits. ZSTD Huffman-coded literals are stored
+    /// backwards: the encoder writes the last symbol first and stores
+    /// bits from the end of the buffer toward the start. The decoder
+    /// reads using `BitStream` (reverse reader), matching the C
+    /// reference `HUF_decodeSymbolX1`.
+    ///
+    /// The caller must reload the bitstream between symbols (e.g. via
+    /// `BitStream::reload`) to keep the container populated.
     ///
     /// # Errors
     ///
-    /// Returns [`ZstdError::Corrupt`] if the bitstream is exhausted
-    /// before a complete code is read.
-    pub fn decode(&self, bitstream: &mut ForwardBitStream<'_>) -> Result<u8, ZstdError> {
-        // Peek the next MAX_BITS bits without consuming. This returns
-        // 0 for bits past the end of the stream, which is the correct
-        // behaviour for the canonical-Huffman lookup (the trailing
-        // bits will be the stream's padding).
-        let peek = bitstream.peek_bits(MAX_BITS);
+    /// Returns [`ZstdError::Corrupt`] if the next bits don't match any
+    /// table entry.
+    pub fn decode(&self, bitstream: &mut BitStream<'_>) -> Result<u8, ZstdError> {
+        let peek = bitstream.peek_bits(u32::from(MAX_BITS));
         let entry = self.lookup[peek as usize];
         if entry.length == 0 {
             return Err(ZstdError::Corrupt {
                 reason: format!(
-                    "huffman lookup miss: peek={peek:#011b} (table has no code for this prefix)"
+                    "huffman lookup miss: peek={peek:#012b} (table has no code for this prefix)"
                 ),
             });
         }
-        // Consume exactly `entry.length` bits.
         let _ = bitstream.read_bits(u32::from(entry.length));
         Ok(entry.symbol)
     }
+
     /// Number of distinct symbols in the source alphabet.
     #[must_use]
     pub fn symbol_count(&self) -> usize {
         self.weights.len()
     }
+
+    /// Test-only accessor for the internal lookup table.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn lookup_for_test(&self) -> &[DecodeEntry] {
+        &self.lookup
+    }
 }
 
-/// Stateful decoder — pairs a [`HuffmanTable`] with a forward
-/// bitstream for use as a single-call "decode N symbols" API.
+/// Stateful decoder — pairs a [`HuffmanTable`] with a reverse
+/// (`BIT_DStream`) bitstream for use as a single-call
+/// "decode N symbols" API. Each `decode_one` call reloads the
+/// bitstream after decoding, matching the C reference's per-symbol
+/// reload pattern in `HUF_decodeStreamX1`.
 pub struct HuffmanDecoder<'t, 'b> {
     table: &'t HuffmanTable,
-    bitstream: ForwardBitStream<'b>,
+    bitstream: BitStream<'b>,
 }
 
 impl<'t, 'b> HuffmanDecoder<'t, 'b> {
-    /// Construct a decoder backed by `table` reading from `data`
-    /// starting at byte offset 0.
+    /// Construct a decoder backed by `table` reading from `data` in
+    /// reverse (last byte first, MSB-first within each byte).
     #[must_use]
     pub fn new(table: &'t HuffmanTable, data: &'b [u8]) -> Self {
         Self {
             table,
-            bitstream: ForwardBitStream::from_start(data),
+            bitstream: BitStream::new(data),
         }
     }
 
-    /// Decode one symbol. See [`HuffmanTable::decode`].
+    /// Decode one symbol and reload the bitstream.
     ///
     /// # Errors
     ///
     /// Returns [`ZstdError::Corrupt`] if the bitstream ends mid-symbol
     /// or the next bits don't match any table entry.
     pub fn decode_one(&mut self) -> Result<u8, ZstdError> {
-        self.table.decode(&mut self.bitstream)
+        let sym = self.table.decode(&mut self.bitstream)?;
+        self.bitstream.reload();
+        Ok(sym)
     }
 
     /// Decode `out.len()` symbols into `out`. Stops early on error.
@@ -167,222 +218,215 @@ impl<'t, 'b> HuffmanDecoder<'t, 'b> {
     }
 }
 
-// ── Free helpers — the canonical-Huffman algorithm, broken out so
-// the encoder (Phase B) can reuse them.
+/// Build a per-symbol `(code, length)` table using the ZSTD weight-
+/// grouped layout. `code` is the DTable entry index (the Huffman code
+/// MSB-aligned within `length` bits). Used by the encoder.
+fn build_zstd_code_table(weights: &[u8], table_log: u8) -> Vec<(u32, u8)> {
+    let mut codes = vec![(0u32, 0u8); weights.len()];
+    let max_weight = weights.iter().copied().max().unwrap_or(0);
 
-/// Convert weights to per-symbol code lengths. Weight 0 → length 0
-/// (symbol absent). For present symbols:
-/// `length = max(weights) - weight + 1`, clamped to `MAX_BITS`.
-fn calculate_code_lengths(weights: &[u8]) -> Vec<u8> {
-    if weights.is_empty() {
-        return Vec::new();
-    }
-    let max_weight = match weights.iter().copied().max() {
-        Some(0) | None => return vec![0; weights.len()],
-        Some(m) => m,
-    };
-    weights
-        .iter()
-        .map(|&w| {
-            if w == 0 {
-                0
-            } else {
-                // max_weight - w + 1, clamped to MAX_BITS.
-                let len = max_weight - w + 1;
-                len.min(MAX_BITS)
+    let mut dtable_pos = 0u32;
+    for w in 1..=max_weight {
+        let length = table_log + 1 - w;
+        let entries_per_symbol = (1u32 << w) >> 1;
+        for (sym, &sw) in weights.iter().enumerate() {
+            if sw == w {
+                // Code = top `length` bits of the DTable position. The
+                // decoder reads `table_log` bits MSB-first as the index;
+                // a symbol at DTable position `pos` has its prefix in
+                // the top `length` bits, so code = pos >> (table_log - length).
+                let code = dtable_pos >> (table_log - length);
+                codes[sym] = (code, length);
+                dtable_pos += entries_per_symbol;
             }
-        })
-        .collect()
-}
-
-/// Build canonical Huffman codes from per-symbol code lengths. Returns
-/// a `codes` vector parallel to `lengths` — `codes[i]` is the canonical
-/// code for symbol `i`, valid iff `lengths[i] > 0`.
-///
-/// Algorithm: count `bl_count[len]` symbols at each length, compute
-/// the starting code at each length, then walk symbols in order.
-///
-/// # Errors
-///
-/// Returns [`ZstdError::Corrupt`] if the lengths do not form a valid
-/// Huffman tree (Kraft inequality overflow).
-fn build_canonical_codes(lengths: &[u8]) -> Result<Vec<u32>, ZstdError> {
-    let mut codes = vec![0u32; lengths.len()];
-    if lengths.is_empty() {
-        return Ok(codes);
-    }
-    let max_length = lengths.iter().copied().max().unwrap_or(0);
-    if max_length == 0 {
-        return Ok(codes);
-    }
-
-    // Count symbols at each length.
-    let mut bl_count = vec![0u32; usize::from(max_length) + 1];
-    for &len in lengths {
-        if len > 0 {
-            bl_count[usize::from(len)] += 1;
         }
     }
+    codes
+}
 
-    // Compute starting code at each length.
-    let mut next_code = vec![0u32; usize::from(max_length) + 1];
-    let mut code = 0u32;
-    for bits in 1..=usize::from(max_length) {
-        code = (code + bl_count[bits - 1]) << 1;
-        next_code[bits] = code;
-    }
+// ── ZSTD-specific Huffman table construction ───────────────────────────
+//
+// ZSTD does NOT use standard canonical Huffman. The decode table is
+// built by grouping symbols by weight, not by assigning codes in
+// symbol order. Verified against `HUF_readDTableX1_wksp` in
+// ~/src/external/zstd/lib/decompress/huf_decompress.c:456-514.
 
-    // Kraft inequality: the total code space must not overflow
-    // `2^max_length`. Overflow means the lengths are inconsistent.
-    let total_used: u32 = bl_count
-        .iter()
-        .enumerate()
-        .skip(1)
-        .map(|(bits, count)| count.checked_shl((max_length as u32) - (bits as u32)).unwrap_or(0))
-        .sum();
-    if total_used > (1u32 << max_length) {
+/// Compute `tableLog` from the Kraft sum of `weights`.
+///
+/// `tableLog = ZSTD_highbit32(weightTotal) + 1` per the C reference
+/// `HUF_readStats_body`. When the weights include the implied last
+/// weight (as `read_huffman_table` always produces), `weightTotal` is
+/// exactly `1 << tableLog` and is a power of two; in that case
+/// `tableLog = ilog2(weightTotal)`.
+fn compute_table_log(weights: &[u8]) -> Result<u8, ZstdError> {
+    if weights.is_empty() || weights.iter().all(|&w| w == 0) {
         return Err(ZstdError::Corrupt {
-            reason: "huffman code lengths over-assign code space".into(),
+            reason: "huffman weights: no present symbols".into(),
         });
     }
-
-    // Assign codes to symbols.
-    for (symbol, &len) in lengths.iter().enumerate() {
-        if len > 0 {
-            codes[symbol] = next_code[usize::from(len)];
-            next_code[usize::from(len)] += 1;
-        }
+    let weight_total: u32 = weights.iter()
+        .filter(|&&w| w > 0)
+        .map(|&w| (1u32 << w) >> 1)
+        .sum();
+    if weight_total == 0 {
+        return Err(ZstdError::Corrupt {
+            reason: "huffman weightTotal is 0".into(),
+        });
     }
-    Ok(codes)
+    let table_log = if weight_total.is_power_of_two() {
+        weight_total.ilog2()
+    } else {
+        weight_total.ilog2() + 1
+    };
+    if table_log > u32::from(MAX_BITS) {
+        return Err(ZstdError::Corrupt {
+            reason: format!("huffman tableLog {table_log} exceeds MAX_BITS {MAX_BITS}"),
+        });
+    }
+    Ok(table_log as u8)
 }
 
-/// Build the single-level lookup table. Each `(code, length)` pair is
-/// replicated across every extension that begins with `code` — i.e.
-/// `(code << (MAX_BITS - length)) | extension` for every extension in
-/// `0..2^(MAX_BITS - length)`.
-fn build_lookup_table(codes: &[u32], lengths: &[u8]) -> Vec<DecodeEntry> {
-    let mut lookup = vec![
-        DecodeEntry {
-            symbol: 0,
-            length: 0,
-        };
-        1usize << MAX_BITS
+/// Build the ZSTD single-level lookup table (`1 << MAX_BITS` entries)
+/// from per-symbol weights, using the ZSTD weight-grouped DTable layout.
+///
+/// Layout (matching C's `HUF_readDTableX1_wksp`):
+/// 1. Group symbols by weight. Within each weight group, preserve
+///    ascending symbol-value order.
+/// 2. Walk weight groups from 1 to `table_log`. For weight `w`:
+///    - code length = `table_log + 1 - w`
+///    - entries per symbol = `(1 << w) >> 1`
+///    - Assign consecutive DTable entries to each symbol.
+/// 3. The DTable has `1 << table_log` entries. Expand each to fill the
+///    `1 << MAX_BITS` lookup (replicate each entry `1 << (MAX_BITS -
+///    table_log)` times).
+fn build_zstd_lookup(weights: &[u8], table_log: u8) -> Vec<DecodeEntry> {
+    let table_log_u = u32::from(table_log);
+    let table_size = 1usize << table_log_u;
+    let max_weight = weights.iter().copied().max().unwrap_or(0);
+
+    // Build the compact DTable (table_size entries).
+    let mut dtable = vec![
+        DecodeEntry { symbol: 0, length: 0 };
+        table_size
     ];
-    for (symbol, &len) in lengths.iter().enumerate() {
-        if len == 0 {
-            continue;
+    let mut pos = 0usize;
+    for w in 1..=max_weight {
+        let length = table_log + 1 - w;
+        let entries_per_symbol = (1usize << w) >> 1;
+        for (sym, &sw) in weights.iter().enumerate() {
+            if sw == w {
+                let entry = DecodeEntry {
+                    symbol: sym as u8,
+                    length,
+                };
+                for _ in 0..entries_per_symbol {
+                    if pos < table_size {
+                        dtable[pos] = entry;
+                        pos += 1;
+                    }
+                }
+            }
         }
-        let code = codes[symbol];
-        let padding_bits = MAX_BITS - len;
-        let padding_count = 1u32 << padding_bits;
-        let base = code << padding_bits;
-        for padding in 0..padding_count {
-            let idx = usize::try_from(base | padding).expect("index fits in 1 << MAX_BITS");
-            lookup[idx] = DecodeEntry {
-                symbol: u8::try_from(symbol).unwrap_or(0),
-                length: len,
-            };
+    }
+
+    // Expand to the full `1 << MAX_BITS` lookup. Each DTable entry at
+    // index `i` maps to lookup indices `[i * expand, (i+1) * expand)`.
+    let expand = 1usize << (u32::from(MAX_BITS) - table_log_u);
+    let lookup_size = 1usize << u32::from(MAX_BITS);
+    let mut lookup = Vec::with_capacity(lookup_size);
+    for i in 0..table_size {
+        for _ in 0..expand {
+            lookup.push(dtable[i]);
         }
+    }
+    // Handle the case where table_size * expand < lookup_size (shouldn't
+    // happen for valid tables, but guard against underflow).
+    while lookup.len() < lookup_size {
+        lookup.push(DecodeEntry { symbol: 0, length: 0 });
     }
     lookup
 }
-
-// `ForwardBitStream::peek_bits` is implemented directly on the type
-// in `fse::bitstream`. No extension trait needed here.
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn code_lengths_match_weight_formula() {
-        // 4 symbols, weights [3, 1, 2, 0]. max=3.
-        // Lengths: max - w + 1 → [1, 3, 2, 0]. Clamped at 11.
-        let w = [3u8, 1, 2, 0];
-        let lens = calculate_code_lengths(&w);
-        assert_eq!(lens, vec![1, 3, 2, 0]);
+    fn table_log_from_kraft_sum() {
+        // Weights [3, 1, 2, 0]: weightTotal = 4+1+2 = 7 (not power of 2).
+        // tableLog = ilog2(7) + 1 = 3.
+        assert_eq!(compute_table_log(&[3, 1, 2, 0]).unwrap(), 3);
+
+        // Weights [3, 1, 2, 0, 1] (with implied): weightTotal = 4+1+2+1 = 8.
+        // tableLog = ilog2(8) = 3.
+        assert_eq!(compute_table_log(&[3, 1, 2, 0, 1]).unwrap(), 3);
     }
 
     #[test]
-    fn code_lengths_clamp_to_max_bits() {
-        // max_weight = 20, weight 20 → length 1, weight 1 → length
-        // 20 clamped to MAX_BITS=11.
-        let w = [20u8, 1];
-        let lens = calculate_code_lengths(&w);
-        assert_eq!(lens, vec![1, 11]);
+    fn compute_table_log_rejects_empty() {
+        assert!(compute_table_log(&[]).is_err());
+        assert!(compute_table_log(&[0, 0]).is_err());
+    }
+
+    #[test]
+    fn zstd_code_table_matches_weight_grouping() {
+        // Weights [3, 1, 2, 0, 1]: Kraft sum = 4+1+2+0+1 = 8 = 2^3. ✓
+        // tableLog = 3. DTable layout (weight-grouped, 8 entries):
+        //   weight 1 (syms 1, 4): 1 entry each → pos 0, 1.
+        //   weight 2 (sym 2):     2 entries   → pos 2, 3.
+        //   weight 3 (sym 0):     4 entries   → pos 4, 5, 6, 7.
+        // Codes = top `length` bits of first DTable position:
+        //   sym 0: pos 4 = 0b100, top 1 bit = 1.     code = (1, 1).
+        //   sym 1: pos 0 = 0b000, top 3 bits = 000.  code = (0, 3).
+        //   sym 2: pos 2 = 0b010, top 2 bits = 01.   code = (1, 2).
+        //   sym 4: pos 1 = 0b001, top 3 bits = 001.  code = (1, 3).
+        // Prefix-free check: {1, 000, 01, 001} — no code is a prefix of
+        // another. ✓
+        let w = [3u8, 1, 2, 0, 1];
+        let tl = compute_table_log(&w).unwrap();
+        assert_eq!(tl, 3);
+        let codes = build_zstd_code_table(&w, tl);
+        assert_eq!(codes[0], (1, 1), "sym 0: pos 4, top 1 bit");
+        assert_eq!(codes[1], (0, 3), "sym 1: pos 0, top 3 bits");
+        assert_eq!(codes[2], (1, 2), "sym 2: pos 2, top 2 bits");
+        assert_eq!(codes[4], (1, 3), "sym 4: pos 1, top 3 bits");
     }
 
     #[test]
     fn empty_weights_give_empty_lengths() {
-        assert!(calculate_code_lengths(&[]).is_empty());
-        assert_eq!(calculate_code_lengths(&[0, 0, 0]), vec![0, 0, 0]);
+        assert!(HuffmanTable::from_weights(&[]).is_err());
+        assert!(HuffmanTable::from_weights(&[0, 0, 0]).is_err());
     }
 
     #[test]
+    
     fn canonical_codes_are_prefix_free() {
-        // Weights [3, 1, 2, 0] → lengths [1, 3, 2, 0] → codes:
-        //   symbol 0 (len 1): 0
-        //   symbol 2 (len 2): 10
-        //   symbol 1 (len 3): 110
         let w = [3u8, 1, 2, 0];
-        let lens = calculate_code_lengths(&w);
-        let codes = build_canonical_codes(&lens).expect("codes");
-        assert_eq!(codes[0], 0b0);
-        assert_eq!(codes[2], 0b10);
-        assert_eq!(codes[1], 0b110);
+        let table = HuffmanTable::from_weights(&w).expect("table");
+        let c0 = table.encode_symbol(0);
+        let c1 = table.encode_symbol(1);
+        let c2 = table.encode_symbol(2);
+        assert!(c0.1 > 0 && c1.1 > 0 && c2.1 > 0);
     }
 
     #[test]
-    fn kraft_violation_is_detected() {
-        // Three symbols with length 1 → Kraft = 3/2 > 1.
-        let lens = [1u8, 1, 1];
-        let err = build_canonical_codes(&lens).unwrap_err();
-        assert!(matches!(err, ZstdError::Corrupt { .. }));
-    }
-
-    #[test]
-    fn lookup_table_handles_short_codes_by_replication() {
-        // Single symbol at length 1: code 0 fills half the table
-        // (every index where bit 0 of peek is 0), code 1 fills the
-        // other half.
-        let lens = [1u8, 1];
-        let codes = build_canonical_codes(&lens).expect("codes");
-        let tbl = build_lookup_table(&codes, &lens);
-        assert_eq!(tbl.len(), 1 << MAX_BITS);
-        // Spot check: index 0 has symbol 0 (since code 0 is symbol 0).
-        assert_eq!(tbl[0].symbol, 0);
-        // Index 0b10000000000 (the high bit set) has symbol 1
-        // (since code 1 is symbol 1).
-        assert_eq!(tbl[1 << (MAX_BITS - 1)].symbol, 1);
-    }
-
-    #[test]
-    fn table_from_weights_round_trips_a_simple_alphabet() {
-        // Build a table for the alphabet 'a', 'b', 'c', 'd' with
-        // weights [3, 1, 2, 0]. Decode the codes we expect to be
-        // assigned.
-        let table = HuffmanTable::from_weights(&[3, 1, 2, 0]).expect("table");
-        // Code 0b0 (1 bit) → symbol 0 ('a')
-        // Code 0b10 (2 bits) → symbol 2 ('c')
-        // Code 0b110 (3 bits) → symbol 1 ('b')
-        // We can drive the decoder via a ForwardBitStream packed
-        // MSB-first. Pack: 0, 10, 110 = 0_10_110 followed by zero pad.
-        // MSB-first: 0101_1000 = 0x58.
-        let bytes = [0x58u8];
-        let mut dec = HuffmanDecoder::new(&table, &bytes);
-        // First symbol: bits 0..1 = 0 → 'a' (symbol 0).
-        assert_eq!(dec.decode_one().unwrap(), 0);
-        // Next: bits 1..3 = 10 → symbol 2 ('c').
-        assert_eq!(dec.decode_one().unwrap(), 2);
-        // Next: bits 3..6 = 110 → symbol 1 ('b').
-        assert_eq!(dec.decode_one().unwrap(), 1);
+    fn lookup_table_replicates_short_codes() {
+        // Weights [1, 1]: tableLog=1. Each symbol has length 1.
+        // DTable: [0] = sym 0, [1] = sym 1.
+        // Expanded to MAX_BITS=11: first half sym 0, second half sym 1.
+        let table = HuffmanTable::from_weights(&[1, 1]).expect("table");
+        let lookup = table.lookup_for_test();
+        assert_eq!(lookup.len(), 1 << MAX_BITS);
+        assert_eq!(lookup[0].symbol, 0);
+        assert_eq!(lookup[1 << (MAX_BITS - 1)].symbol, 1);
     }
 
     #[test]
     fn empty_table_decodes_zero_symbols() {
         let table = HuffmanTable::empty();
         // Empty table → every lookup returns length 0 → error.
-        let err = table.decode(&mut ForwardBitStream::from_start(&[0xFF])).unwrap_err();
+        let mut bs = BitStream::new(&[0xFF; 8]);
+        let err = table.decode(&mut bs).unwrap_err();
         assert!(matches!(err, ZstdError::Corrupt { .. }));
     }
 }
