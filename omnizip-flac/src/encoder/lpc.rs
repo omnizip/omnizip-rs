@@ -55,10 +55,9 @@ pub fn best_lpc_candidate(samples: &[i32], _bps: u8) -> Option<LpcSolution> {
     let mut best: Option<LpcSolution> = None;
     let mut best_cost = u64::MAX;
 
-    for &order in &[32usize, 16, 12, 8, 6, 4, 2] {
-        if order > max_order || order == 0 {
-            continue;
-        }
+    // Try all orders from high to low. Higher orders fit better but
+    // cost more header bytes. The DP picks the cheapest overall.
+    for order in (1..=max_order).rev() {
         if let Some(sol) = levinson_durbin_quantise(&acf, order, samples) {
             if (sol.estimated_residual_bits as u64) < best_cost {
                 best_cost = sol.estimated_residual_bits as u64;
@@ -179,12 +178,12 @@ fn levinson_durbin(acf: &[f64], order: usize) -> Vec<f64> {
 fn levinson_durbin_quantise(acf: &[f64], order: usize, samples: &[i32]) -> Option<LpcSolution> {
     let lpc = levinson_durbin(acf, order);
 
-    // Try a few precision/shift combinations and pick the best.
+    // Wider precision/shift search for better coefficient quantization.
     let mut best: Option<LpcSolution> = None;
     let mut best_cost = u64::MAX;
 
-    for &precision_bits in &[7u8, 9, 11, 12] {
-        for &shift in &[0i8, 2, 4, 6, 8, 10, 12] {
+    for &precision_bits in &[5u8, 7, 8, 9, 10, 11, 12, 13] {
+        for &shift in &[0i8, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12] {
             if let Some(sol) = quantise_and_predict(&lpc, order, precision_bits, shift, samples) {
                 if (sol.estimated_residual_bits as u64) < best_cost {
                     best_cost = sol.estimated_residual_bits as u64;
