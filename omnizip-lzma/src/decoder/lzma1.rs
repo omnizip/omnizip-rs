@@ -103,7 +103,7 @@ impl Lzma1Decoder {
     ///
     /// `dict_size` is currently unused — the decoder uses a growing
     /// `Vec<u8>` rather than the Ruby's pre-allocated ring. It's kept
-    /// in the signature so the API matches the planned Phase A
+    /// for API compatibility with the decoder interface
     /// continuation that switches back to a circular buffer.
     ///
     /// # Panics

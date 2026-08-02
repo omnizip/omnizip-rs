@@ -35,10 +35,10 @@ pub const XZ_MAGIC: [u8; 6] = [0xFD, b'7', b'z', b'X', b'Z', 0x00];
 pub const XZ_FOOTER_MAGIC: [u8; 2] = [b'Y', b'Z'];
 
 /// Stream-header size in bytes.
-pub const STREAM_HEADER_SIZE: usize = 12;
+#[allow(dead_code)] pub const STREAM_HEADER_SIZE: usize = 12;
 
 /// Footer size in bytes.
-pub const STREAM_FOOTER_SIZE: usize = 12;
+#[allow(dead_code)] pub const STREAM_FOOTER_SIZE: usize = 12;
 
 /// Decode an XZ container, returning the concatenated payload of all
 /// blocks. The decoder stops after the first stream; concatenated
@@ -176,6 +176,7 @@ fn decode_block(input: &[u8], check_size: usize) -> Result<(Vec<u8>, usize), Lzm
     // BCJ filters (0x04-0x0A) and Delta (0x03) are supported as
     // pre-filters applied before LZMA2.
     let mut bcj_filter: Option<u64> = None;
+    let mut delta_distance: Option<usize> = None;
     for filter_idx in 0..num_filters {
         let (filter_id, consumed) = read_vli(&input[cursor..])?;
         cursor += consumed;
@@ -192,7 +193,14 @@ fn decode_block(input: &[u8], check_size: usize) -> Result<(Vec<u8>, usize), Lzm
         match filter_id {
             0x21 | 0x03 => {
                 // LZMA2 (0x21) is handled below by the LZMA2 driver.
-                // Delta (0x03) is accepted but not yet implemented.
+                // Delta (0x03) is a preprocessing filter.
+                if filter_id == 0x03 {
+                    // Delta filter: reverse-transform applies
+                    // output[i] += output[i - delta_distance].
+                    // The filter properties byte gives the distance
+                    // (1–256). We store it for post-processing.
+                    delta_distance = Some(props_size as usize);
+                }
             }
             0x04..=0x0A => {
                 // BCJ filters. Store the ID for post-LZMA2 reverse transform.
@@ -237,12 +245,34 @@ fn decode_block(input: &[u8], check_size: usize) -> Result<(Vec<u8>, usize), Lzm
         decoded
     };
 
+    // Apply delta filter reverse transform if present.
+    let final_output = if let Some(dist) = delta_distance {
+        apply_delta_reverse(&final_output, dist)
+    } else {
+        final_output
+    };
+
     let after_lzma2 = header_size + lzma2_consumed;
     // Pad to 4-byte alignment from the start of the block.
     let padded = (after_lzma2 + 3) & !3;
     let total = padded + check_size;
 
     Ok((final_output, total))
+}
+
+/// Apply a delta filter reverse transform. The XZ delta filter encodes
+/// each byte as the difference from the byte `distance` positions back.
+/// The reverse adds the previous byte back.
+fn apply_delta_reverse(data: &[u8], distance_raw: usize) -> Vec<u8> {
+    if data.is_empty() {
+        return Vec::new();
+    }
+    let distance = distance_raw.max(1);
+    let mut out = data.to_vec();
+    for i in distance..out.len() {
+        out[i] = out[i].wrapping_add(out[i - distance]);
+    }
+    out
 }
 
 /// Apply a BCJ reverse transform to the LZMA2-decoded data.

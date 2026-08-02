@@ -19,6 +19,7 @@
 
 use crate::bit_model::BitModel;
 use crate::LzmaError;
+use crate::range_coder::RangeEncoder;
 use crate::RangeDecoder;
 
 /// Decode a `num_bits`-wide symbol by walking a binary bit-tree forwards
@@ -43,6 +44,42 @@ pub fn decode_tree(
         symbol |= bit << i;
     }
     Ok(symbol)
+}
+
+/// Encode a `num_bits`-wide symbol by walking the bit-tree forwards
+/// (MSB first). Inverse of [`decode_tree`].
+#[inline]
+pub fn encode_tree(
+    rc: &mut RangeEncoder,
+    models: &mut [BitModel],
+    num_bits: u32,
+    symbol: u32,
+) {
+    let mut node = 1usize;
+    for i in (0..num_bits).rev() {
+        let bit = (symbol >> i) & 1;
+        rc.encode_bit(&mut models[node], bit);
+        node = (node << 1) | bit as usize;
+    }
+}
+
+/// Encode a `num_bits`-wide symbol by walking the bit-tree backwards
+/// (LSB first). Inverse of [`decode_reverse_tree`].
+#[inline]
+pub fn encode_reverse_tree(
+    rc: &mut RangeEncoder,
+    models: &mut [BitModel],
+    base_idx: i64,
+    num_bits: u32,
+    symbol: u32,
+) {
+    let mut node = 1i64;
+    for i in 0..num_bits {
+        let bit = (symbol >> i) & 1;
+        let idx = usize::try_from(base_idx + node).expect("reverse-tree index");
+        rc.encode_bit(&mut models[idx], bit);
+        node = (node << 1) | i64::from(bit);
+    }
 }
 
 /// Decode a `num_bits`-wide symbol by walking a binary bit-tree backwards
