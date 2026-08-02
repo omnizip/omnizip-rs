@@ -94,22 +94,17 @@ impl std::error::Error for PpmdError {}
 ///
 /// # Memory budget
 ///
-/// Hard input cap: 16 MiB. The model uses a fixed 16K-slot context
-/// table (~256 KB) plus a sliding-window history of `max_order`
-/// bytes. Worst-case peak memory for a max-size input is < 32 MiB.
-/// Inputs above the cap fall through to [`raw_fallback`] (stored
-/// uncompressed with a sentinel order byte) so the call still
-/// succeeds — but no compression is attempted.
-pub const MAX_PPMD_INPUT_SIZE: usize = 16 * 1024 * 1024;
+/// The model uses a fixed-size context table (~12 MB worst case)
+/// plus a sliding-window history of `max_order` bytes. Memory is
+/// **bounded regardless of input size** — a gigabyte input still
+/// uses ~12 MB. No input cap is enforced.
+///
+/// The only upper bound is `u32::MAX` for the size field in the
+/// container header; larger inputs return [`PpmdError::Corrupt`].
+pub const MAX_PPMD_INPUT_SIZE: usize = u32::MAX as usize;
 
 pub fn compress(input: &[u8], max_order: u8) -> Result<Vec<u8>, PpmdError> {
     validate_order(max_order)?;
-
-    // Hard memory guard: above the cap, store raw instead of running
-    // the O(N) model construction that would balloon memory.
-    if input.len() > MAX_PPMD_INPUT_SIZE {
-        return Ok(raw_fallback(input, max_order));
-    }
 
     let mut out = Vec::with_capacity(64);
     out.extend_from_slice(MAGIC);
@@ -466,17 +461,16 @@ mod tests {
         let _ = codec;
     }
 
-    /// Inputs above `MAX_PPMD_INPUT_SIZE` must NOT run the model —
-    /// they fall through to raw storage to keep memory bounded.
+    /// Memory is bounded regardless of input size — verify a 1 MB
+    /// input round-trips without issue. The sliding-window history
+    /// keeps memory at ~12 MB even for gigabyte inputs.
     #[test]
-    fn oversize_input_falls_back_to_raw() {
-        let huge: Vec<u8> = vec![0u8; MAX_PPMD_INPUT_SIZE + 1];
-        let compressed = compress(&huge, 4).expect("compress must succeed (raw fallback)");
-        // Header: magic(5) + order(1) + size(4) + raw body.
-        assert_eq!(&compressed[..5], MAGIC);
-        assert_eq!(compressed[5], 0xFF); // sentinel: raw mode
-        let out = decompress(&compressed, huge.len()).expect("decompress");
-        assert_eq!(out.len(), huge.len());
-        assert_eq!(out, huge);
+    fn round_trip_large_input() {
+        let input: Vec<u8> = (0..1_000_000u64)
+            .map(|i| ((i * 7919) % 251) as u8)
+            .collect();
+        let compressed = compress(&input, 4).expect("compress");
+        let out = decompress(&compressed, input.len()).expect("decompress");
+        assert_eq!(out, input);
     }
 }
