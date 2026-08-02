@@ -190,23 +190,33 @@ fn reconstruct_stereo(mut channels: Vec<Vec<i32>>, assign: u32) -> Vec<Vec<i32>>
     vec![left, right]
 }
 
-/// Read a UTF-8 coded number (1-6 bytes) from the reader.
+/// Read a FLAC UTF-8 coded number (1-6 bytes) from the reader.
+///
+/// The first byte's leading 1-bits determine the total byte count:
+/// - 0xxxxxxx → 1 byte (value 0-127)
+/// - 110xxxxx → 2 bytes
+/// - 1110xxxx → 3 bytes
+/// - 11110xxx → 4 bytes
 fn read_utf8_coded(reader: &mut BitReader) -> Result<u64, String> {
-    let first = reader.read_bits(8);
+    let first = reader.read_bits(8) as u8;
     if first < 0x80 {
-        return Ok(first as u64);
+        return Ok(u64::from(first));
     }
-    let num_bytes = first.leading_zeros() as usize - 24; // for u32: 0x80..0xFF
-    if num_bytes == 0 || num_bytes > 7 {
+    // Count leading 1-bits via the inverted byte's leading zeros.
+    let num_leading_ones = (!first).leading_zeros() as usize;
+    if num_leading_ones < 2 || num_leading_ones > 7 {
         return Err(format!("invalid UTF-8 coded number: 0x{first:02X}"));
     }
-    let mut value = (first & ((1 << (7 - num_bytes)) - 1)) as u64;
-    for _ in 0..num_bytes {
-        let byte = reader.read_bits(8);
+    let num_continuation = num_leading_ones - 1;
+    // Data bits in first byte = 7 - num_leading_ones.
+    let data_bits_first = 7 - num_leading_ones;
+    let mut value = u64::from(first & ((1u8 << data_bits_first) - 1));
+    for _ in 0..num_continuation {
+        let byte = reader.read_bits(8) as u8;
         if byte & 0xC0 != 0x80 {
             return Err(format!("invalid UTF-8 continuation byte: 0x{byte:02X}"));
         }
-        value = (value << 6) | (byte & 0x3F) as u64;
+        value = (value << 6) | u64::from(byte & 0x3F);
     }
     Ok(value)
 }

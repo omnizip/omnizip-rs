@@ -214,24 +214,42 @@ fn pick_block_size_code(block_size: usize) -> (u64, Option<u32>) {
     (7, Some(block_size as u32 - 1))
 }
 
-/// Write a UTF-8 coded number. For values < 0x80, this is a single byte.
-/// For larger values, uses the multi-byte form matching `read_utf8_coded`.
+/// Write a UTF-8 coded number (FLAC frame/sample number encoding).
+///
+/// FLAC uses a custom UTF-8-like encoding for frame numbers:
+/// - 1 byte:  0xxxxxxx                     → value 0-127
+/// - 2 bytes: 110xxxxx 10xxxxxx            → value 128-2047
+/// - 3 bytes: 1110xxxx 10xxxxxx 10xxxxxx   → value 2048-65535
+/// - 4 bytes: 11110xxx 10xxxxxx ×3          → value 65536-2097151
+/// - ...
+///
+/// For `nbytes` continuation bytes, the first byte has `(nbytes+1)`
+/// leading 1-bits, then a 0-bit separator, then `(6 - nbytes)` data
+/// bits. Total data bits = `(6 - nbytes) + 6 * nbytes = 6 + 5 * nbytes`.
 fn write_utf8_coded(writer: &mut BitWriter, value: u64) {
     if value < 0x80 {
         writer.write_bits(value, 8);
         return;
     }
-    // Determine byte count.
+
+    // Determine byte count from the value range.
     let mut nbytes = 1usize;
-    let mut max_val = 0x1F_FFFFu64; // 3 bytes
+    let mut max_val = 0x7FFu64; // 2-byte max = (1<<11)-1
     while value > max_val && nbytes < 6 {
         nbytes += 1;
-        max_val = (max_val << 5) | 0x1F;
+        // total data bits = 6 + 5 * nbytes
+        max_val = (1u64 << (6 + 5 * nbytes)) - 1;
     }
-    // First byte: nbytes leading 1-bits, then a 0-bit, then the high bits.
-    let first_mask = (0xFFu8 << (7 - nbytes)) & 0xFE;
-    let high_bits = (value >> (6 * nbytes)) as u8;
-    writer.write_bits(u64::from(first_mask | high_bits), 8);
+
+    // First byte: (nbytes+1) leading 1s, then 0-separator, then data.
+    let leading_ones_mask = ((1u8 << (nbytes + 1)) - 1) << (7 - nbytes);
+    let data_bits_first = 6 - nbytes; // wait, this should be 7 - nbytes - 1 = 6 - nbytes... hmm
+    // Actually: total bits = 8. Leading 1s = nbytes+1. Separator = 1.
+    // Data = 8 - (nbytes+1) - 1 = 6 - nbytes.
+    let data_mask = (1u8 << data_bits_first) - 1;
+    let high_data = (value >> (6 * nbytes)) as u8 & data_mask;
+    writer.write_bits(u64::from(leading_ones_mask | high_data), 8);
+
     // Continuation bytes: 10xxxxxx.
     for i in (0..nbytes).rev() {
         let byte = ((value >> (6 * i)) & 0x3F) as u8 | 0x80;
