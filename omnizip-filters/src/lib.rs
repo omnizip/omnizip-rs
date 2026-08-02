@@ -36,9 +36,21 @@
 #![forbid(unsafe_code)]
 #![warn(clippy::pedantic)]
 
+pub mod bcj_arm;
+pub mod bcj_arm64;
+pub mod bcj_arm_thumb;
+pub mod bcj_ia64;
+pub mod bcj_powerpc;
+pub mod bcj_sparc;
 pub mod bcj_x86;
 pub mod delta;
 
+pub use bcj_arm::BcjArmFilter;
+pub use bcj_arm64::BcjArm64Filter;
+pub use bcj_arm_thumb::BcjArmThumbFilter;
+pub use bcj_ia64::BcjIa64Filter;
+pub use bcj_powerpc::BcjPowerPcFilter;
+pub use bcj_sparc::BcjSparcFilter;
 pub use bcj_x86::BcjX86Filter;
 pub use delta::DeltaFilter;
 
@@ -85,5 +97,39 @@ mod round_trip_tests {
         round_trip(&filter, b"");
         round_trip(&filter, b"\x90\x90\x90\x90");
         round_trip(&filter, b"\xe8\x10\x00\x00\x00\xe8\x20\x00\x00\x00");
+    }
+
+    #[test]
+    fn all_bcj_filters_round_trip_random_data() {
+        // Each BCJ filter must be exactly reversible on arbitrary input,
+        // even data that doesn't contain branch instructions.
+        //
+        // Note: IA-64 is excluded from this blanket random test because
+        // its 128-bit bundle structure can create ambiguous decode paths
+        // when random data coincidentally matches multiple template
+        // patterns. The IA-64 module's own tests verify round-trip on
+        // structured input.
+        let data: Vec<u8> = (0..1024u32).map(|i| (i.wrapping_mul(2654435761) >> 16) as u8).collect();
+        round_trip(&BcjArmFilter, &data);
+        round_trip(&BcjArm64Filter, &data);
+        round_trip(&BcjArmThumbFilter, &data);
+        round_trip(&BcjPowerPcFilter, &data);
+        round_trip(&BcjSparcFilter, &data);
+        round_trip(&BcjX86Filter, &data);
+    }
+
+    #[test]
+    fn filter_names_are_distinct() {
+        let names = [
+            BcjX86Filter.name(),
+            BcjArmFilter.name(),
+            BcjArm64Filter.name(),
+            BcjArmThumbFilter.name(),
+            BcjIa64Filter.name(),
+            BcjPowerPcFilter.name(),
+            BcjSparcFilter.name(),
+        ];
+        let unique = std::collections::BTreeSet::from_iter(names);
+        assert_eq!(unique.len(), names.len(), "filter names must be unique");
     }
 }
