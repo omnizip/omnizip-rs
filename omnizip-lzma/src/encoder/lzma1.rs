@@ -85,14 +85,14 @@ impl Lzma1Encoder {
     /// one byte yields a longer match. If so, emits a literal and
     /// takes the deferred match; otherwise takes the current match.
     #[must_use]
-    pub fn encode(mut self, input: &[u8]) -> Vec<u8> {
+    pub fn encode(self, input: &[u8]) -> Vec<u8> {
         self.encode_with_parser(input, false)
     }
 
     /// Encode using the optimal (DP) parser. Gives 3-8% better ratio
     /// than `encode` at the cost of O(n) DP computation.
     #[must_use]
-    pub fn encode_optimal(mut self, input: &[u8]) -> Vec<u8> {
+    pub fn encode_optimal(self, input: &[u8]) -> Vec<u8> {
         self.encode_with_parser(input, true)
     }
 

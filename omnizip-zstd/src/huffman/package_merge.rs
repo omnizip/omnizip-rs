@@ -69,7 +69,7 @@ pub fn package_merge(freqs: &[u32], max_len: u8, lengths: &mut [u8]) {
     // `list` holds coins for the current level. Each coin is (weight,
     // set_of_symbol_indices). We represent the set as a Vec<usize>.
     // Starting list: the original symbols, sorted by frequency.
-    let mut list: Vec<(u64, Vec<usize>)> = present
+    let list: Vec<(u64, Vec<usize>)> = present
         .iter()
         .map(|&(f, i)| (u64::from(f), vec![i]))
         .collect();

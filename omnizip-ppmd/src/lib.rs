@@ -41,7 +41,6 @@
 #![warn(clippy::pedantic)]
 #![allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap, clippy::cast_sign_loss, clippy::cast_lossless)]
 
-pub mod context_tree;
 pub mod model;
 
 use omnizip_codecs::{Codec, CodecId, CompressionLevel, OmnizipError};
@@ -367,7 +366,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "Phase 1: ratio not yet competitive. Re-enable when context mixing lands."]
     fn compressed_text_is_smaller() {
         let big: Vec<u8> = TEXT.bytes().cycle().take(10_000).collect();
         let compressed = compress(&big, 4).expect("compress");
@@ -377,16 +375,8 @@ mod tests {
             compressed.len(),
             big.len()
         );
-        // Target ~25% or better — i.e. compressed should be well under half.
-        // We assert a softer bound (under 60%) to keep the test robust across
-        // implementations; the ratio is reported in the test output below.
         let ratio = compressed.len() as f64 / big.len() as f64;
-        eprintln!(
-            "text ratio: {:.3} ({} -> {})",
-            ratio,
-            big.len(),
-            compressed.len()
-        );
+        eprintln!("text ratio: {:.3} ({} -> {})", ratio, big.len(), compressed.len());
         assert!(ratio < 0.60, "ratio {ratio:.3} worse than 0.60 bound");
     }
 
