@@ -1,0 +1,15 @@
+[package]
+name = "omnizip-flac"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Pure-Rust FLAC audio codec — PCM header parsers (WAV, AIFF) + FLAC codec skeleton"
+
+[dependencies]
+omnizip-codecs.workspace = true
+
+[lints]
+workspace = true

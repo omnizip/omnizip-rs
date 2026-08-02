@@ -1,0 +1,15 @@
+[package]
+name = "omnizip-ricepp"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Pure-Rust Rice++ codec for integer-pixel data (FITS images, sensor data) — port of DwarFS ricepp"
+
+[dependencies]
+omnizip-codecs.workspace = true
+
+[lints]
+workspace = true
