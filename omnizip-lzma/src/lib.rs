@@ -58,6 +58,10 @@ pub use decoder::{lzma_alone_decompress, Lzma1Decoder};
 pub use dictionary::Dictionary;
 pub use encoder::{lzma_alone_compress, lzip_compress, xz_compress, Lzma1Encoder,
                    MatchFinder};
+pub use encoder::alone::{
+    lzma_alone_compress_with_options, LzmaOptions, LC_LP_SUM_MAX, MAX_DICT_SIZE,
+    MAX_LC, MAX_LP, MAX_PB, MIN_DICT_SIZE,
+};
 pub use lzip::lzip_decompress;
 pub use lzma2::decode_lzma2_stream;
 pub use r#match::Match;

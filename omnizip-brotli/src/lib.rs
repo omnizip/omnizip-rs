@@ -15,8 +15,113 @@ use omnizip_codecs::{Codec, CodecId, CompressionLevel, OmnizipError};
 /// Brotli quality 11 (the reference encoder's maximum).
 const DEFAULT_QUALITY: i32 = 11;
 
+/// Default window size: 22 = 4 MB (matches brotli spec default).
+pub const DEFAULT_WINDOW_SIZE: u8 = 22;
+
+/// Minimum legal Brotli window size (per RFC 7932).
+pub const MIN_WINDOW_SIZE: u8 = 10; // 1 KB
+
+/// Maximum legal Brotli window size (per RFC 7932).
+pub const MAX_WINDOW_SIZE: u8 = 24; // 16 MB
+
+/// Brotli input mode: hints the encoder about content type. Different
+/// modes use different prefix-code tables.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum BrotliMode {
+    /// Generic content (default).
+    #[default]
+    Generic,
+    /// UTF-8 text — favours context-model assignments for ASCII.
+    Text,
+    /// Font data — optimised for OTF/TTF byte patterns.
+    Font,
+}
+
+impl BrotliMode {
+    fn as_brotli_const(self) -> brotli::enc::backward_references::BrotliEncoderMode {
+        use brotli::enc::backward_references::BrotliEncoderMode;
+        match self {
+            Self::Generic => BrotliEncoderMode::BROTLI_MODE_GENERIC,
+            Self::Text => BrotliEncoderMode::BROTLI_MODE_TEXT,
+            Self::Font => BrotliEncoderMode::BROTLI_MODE_FONT,
+        }
+    }
+}
+
+/// User-tunable Brotli encoder options.
+///
+/// All fields are optional; `Default` produces the same output as
+/// [`BrotliCodec::compress`] at `CompressionLevel::default()`.
+///
+/// ```rust
+/// use omnizip_brotli::{BrotliCodec, BrotliOptions, BrotliMode};
+/// use omnizip_codecs::Codec;
+///
+/// let opts = BrotliOptions {
+///     quality: Some(11),
+///     window_size: Some(20),       // 1 MB window
+///     mode: BrotliMode::Text,
+/// };
+/// let input = b"hello world".repeat(1000);
+/// let bytes = BrotliCodec::new().compress_with_options(&input, opts).unwrap();
+/// ```
+#[derive(Debug, Clone, Copy, Default)]
+pub struct BrotliOptions {
+    /// Quality 0..=11. `None` uses level from `CompressionLevel` (default 11).
+    pub quality: Option<i32>,
+    /// Window size as `log2(bytes)` (10..=24). `None` defaults to 22 (4 MB).
+    pub window_size: Option<u8>,
+    /// Input content hint. `Default` is `Generic`.
+    pub mode: BrotliMode,
+}
+
 /// Brotli codec. Encodes at quality `level` (0–11); default 11.
 pub struct BrotliCodec;
+
+impl BrotliCodec {
+    /// Construct a `BrotliCodec`.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self
+    }
+
+    /// Compress with explicit user-tunable options.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`OmnizipError::EncodeFailed`] on internal encoder error
+    /// or [`OmnizipError::LevelOutOfRange`] if window_size is out of range.
+    pub fn compress_with_options(
+        &self,
+        plaintext: &[u8],
+        options: BrotliOptions,
+    ) -> Result<Vec<u8>, OmnizipError> {
+        let quality = options.quality.unwrap_or(DEFAULT_QUALITY);
+        let lgwin = options.window_size.unwrap_or(DEFAULT_WINDOW_SIZE);
+        if !(MIN_WINDOW_SIZE..=MAX_WINDOW_SIZE).contains(&lgwin) {
+            return Err(OmnizipError::LevelOutOfRange {
+                codec: CodecId::BROTLI,
+                level: lgwin,
+                min: MIN_WINDOW_SIZE,
+                max: MAX_WINDOW_SIZE,
+            });
+        }
+        let params = brotli::enc::backward_references::BrotliEncoderParams {
+            quality,
+            lgwin: i32::from(lgwin),
+            mode: options.mode.as_brotli_const(),
+            ..Default::default()
+        };
+        let mut output = Vec::new();
+        brotli::BrotliCompress(&mut Cursor::new(plaintext), &mut output, &params).map_err(|e| {
+            OmnizipError::EncodeFailed {
+                codec: CodecId::BROTLI,
+                reason: format!("brotli compress (quality {quality}, lgwin {lgwin}) failed: {e}"),
+            }
+        })?;
+        Ok(output)
+    }
+}
 
 impl Codec for BrotliCodec {
     fn id(&self) -> CodecId {

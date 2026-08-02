@@ -252,6 +252,11 @@ impl BitModel {
 pub struct Ppmd8Context {
     /// Number of times this node was visited as a prediction context.
     pub glue_count: u32,
+    /// Symbols observed after this context, in first-occurrence order.
+    /// Used by the byte-level PPM coding path.
+    pub freqs: Vec<(u8, u16)>,
+    /// Sum of all frequencies in `freqs` (cached for speed).
+    pub total: u32,
     /// Child contexts keyed by the extending byte (first-occurrence order).
     children: Vec<(u8, Ppmd8Context)>,
 }
@@ -271,6 +276,31 @@ impl Ppmd8Context {
             let last = self.children.last_mut().expect("just pushed");
             &mut last.1
         }
+    }
+
+    /// Record that `symbol` followed this context. Updates the byte-level
+    /// frequency table used by the PPM coding path.
+    fn add_observation(&mut self, symbol: u8) {
+        if let Some((_, f)) = self.freqs.iter_mut().find(|(s, _)| *s == symbol) {
+            if *f < u16::MAX {
+                *f += 1;
+            }
+        } else if self.freqs.len() < 256 {
+            self.freqs.push((symbol, 1));
+        }
+        self.total = self.total.saturating_add(1);
+    }
+
+    /// Halve all frequencies (floor at 1) and recompute total. Used
+    /// during rescale to free statistical weight when counts saturate.
+    fn rescale_freqs(&mut self) {
+        let mut new_total: u32 = 0;
+        for (_, f) in self.freqs.iter_mut() {
+            let new_f = (u32::from(*f) / 2).max(1) as u16;
+            *f = new_f;
+            new_total += u32::from(new_f);
+        }
+        self.total = new_total;
     }
 }
 
@@ -433,10 +463,12 @@ impl Ppmd8Model {
     /// glue counts and creating nodes as needed. Nodes are created up
     /// to `max_order` deep. Takes the history as a separate parameter
     /// to avoid borrowing `self` immutably while mutating the trie.
-    fn descend_and_glue(&mut self, ctx: &[u8]) {
+    fn descend_and_glue(&mut self, ctx: &[u8], symbol: u8) {
         let depth = ctx.len().min(self.max_order);
         let mut node: &mut Ppmd8Context = &mut self.root;
         node.glue_count = node.glue_count.saturating_add(1);
+        // Also record the symbol at the root context (order-(-1)+).
+        node.add_observation(symbol);
         if depth == 0 {
             return;
         }
@@ -444,6 +476,7 @@ impl Ppmd8Model {
             let is_new = node.child(b).is_none();
             node = node.child_mut(b);
             node.glue_count = node.glue_count.saturating_add(1);
+            node.add_observation(symbol);
             if is_new {
                 self.node_count += 1;
             }
@@ -479,32 +512,157 @@ impl Ppmd8Model {
         self.restart_count += 1;
     }
 
-    // ── Bit-level byte coding ──────────────────────────────────────
+    // ── Byte-level PPM coding (through trie) ──────────────────────
 
-    fn encode_byte_bits(&mut self, enc: &mut ArithEncoder, byte: u8) {
-        let ctx = self.ctx_hash();
-        for bp in (0..8u32).rev() {
-            let bit = ((byte >> bp) & 1) == 1;
-            let idx = ((ctx.wrapping_mul(8).wrapping_add(bp)) as usize) & self.table_mask;
-            let prob = self.models[idx].prob1();
-            enc.encode_bit(prob, bit);
-            self.models[idx].update(bit);
+    /// Walk the trie along `ctx`, collecting the freqs snapshot at each
+    /// node from root to deepest existing node. Returns the snapshots
+    /// in deepest-first order (so callers can walk short-context-first).
+    ///
+    /// This snapshot approach avoids holding an immutable borrow of the
+    /// trie while we mutate the encoder.
+    fn collect_freq_snapshots(&self, ctx: &[u8]) -> Vec<Vec<(u8, u16)>> {
+        let mut snapshots: Vec<Vec<(u8, u16)>> = Vec::with_capacity(ctx.len() + 1);
+        let mut node: &Ppmd8Context = &self.root;
+        snapshots.push(node.freqs.iter().copied().collect());
+        for &b in ctx {
+            if let Some(child) = node.child(b) {
+                node = child;
+                snapshots.push(node.freqs.iter().copied().collect());
+            } else {
+                break;
+            }
+        }
+        // Reverse so deepest context is first.
+        snapshots.reverse();
+        snapshots
+    }
+
+    /// PPM*C escape count: `D + 1` where D is the number of distinct
+    /// symbols at this context.
+    fn escape_count(d: usize) -> u32 {
+        u32::try_from(d).unwrap_or(0) + 1
+    }
+
+    /// 16-bit probability for "is the byte s_i?" given remaining weight.
+    fn prob16(c_i: u32, remaining: u32) -> u16 {
+        if remaining == 0 {
+            return 1;
+        }
+        let p = (u64::from(c_i) * 65_536 + u64::from(remaining) / 2) / u64::from(remaining);
+        p.min(65_535).max(1) as u16
+    }
+
+    /// Encode one byte using byte-level PPM through the context trie.
+    ///
+    /// Walks orders from deepest down to root. At each order:
+    /// - If the byte is in the node's freqs: emit binary "yes" at that
+    ///   position, then return.
+    /// - Else: emit "no" for every freqs entry (escape), drop to lower order.
+    ///
+    /// On total miss, emit 8 equiprobable bits (order -1 fallback).
+    fn encode_byte_trie(&mut self, enc: &mut ArithEncoder, byte: u8) {
+        let (ctx_buf, ctx_len) = self.context_window();
+        let ctx = &ctx_buf[..ctx_len];
+
+        let snapshots = self.collect_freq_snapshots(ctx);
+        let mut resolved = false;
+        for snap in &snapshots {
+            if snap.is_empty() {
+                continue;
+            }
+            let total: u32 =
+                snap.iter().map(|(_, f)| u32::from(*f)).sum::<u32>() + Self::escape_count(snap.len());
+            let mut remaining = total;
+            let pos = snap.iter().position(|(s, _)| *s == byte);
+            match pos {
+                Some(k) => {
+                    for (i, (_s, f)) in snap.iter().enumerate() {
+                        let c_i = u32::from(*f);
+                        let p = Self::prob16(c_i, remaining);
+                        if i == k {
+                            enc.encode_bit(p, true);
+                            break;
+                        }
+                        enc.encode_bit(p, false);
+                        remaining = remaining.saturating_sub(c_i);
+                    }
+                    resolved = true;
+                    break;
+                }
+                None => {
+                    for (_s, f) in snap.iter() {
+                        let c_i = u32::from(*f);
+                        let p = Self::prob16(c_i, remaining);
+                        enc.encode_bit(p, false);
+                        remaining = remaining.saturating_sub(c_i);
+                    }
+                }
+            }
+        }
+
+        if !resolved {
+            let mut b = byte;
+            for _ in 0..8 {
+                let bit = (b & 0x80) != 0;
+                enc.encode_bit(32_768, bit);
+                b <<= 1;
+            }
         }
     }
 
-    fn decode_byte_bits(&mut self, dec: &mut ArithDecoder) -> u8 {
-        let ctx = self.ctx_hash();
-        let mut byte = 0u8;
-        for bp in (0..8u32).rev() {
-            let idx = ((ctx.wrapping_mul(8).wrapping_add(bp)) as usize) & self.table_mask;
-            let prob = self.models[idx].prob1();
-            let bit = dec.decode_bit(prob);
-            if bit {
-                byte |= 1 << bp;
+    /// Decode one byte using byte-level PPM through the context trie.
+    /// Mirrors `encode_byte_trie`.
+    fn decode_byte_trie(&mut self, dec: &mut ArithDecoder) -> u8 {
+        let (ctx_buf, ctx_len) = self.context_window();
+        let ctx = &ctx_buf[..ctx_len];
+        let snapshots = self.collect_freq_snapshots(ctx);
+
+        let mut resolved: Option<u8> = None;
+        for snap in &snapshots {
+            if snap.is_empty() {
+                continue;
             }
-            self.models[idx].update(bit);
+            let total: u32 =
+                snap.iter().map(|(_, f)| u32::from(*f)).sum::<u32>() + Self::escape_count(snap.len());
+            let mut remaining = total;
+            let mut found: Option<u8> = None;
+            for (s, f) in snap.iter() {
+                let c_i = u32::from(*f);
+                let p = Self::prob16(c_i, remaining);
+                if dec.decode_bit(p) {
+                    found = Some(*s);
+                    break;
+                }
+                remaining = remaining.saturating_sub(c_i);
+            }
+            if let Some(s) = found {
+                resolved = Some(s);
+                break;
+            }
         }
-        byte
+
+        match resolved {
+            Some(b) => b,
+            None => {
+                let mut b: u8 = 0;
+                for i in 0..8 {
+                    if dec.decode_bit(32_768) {
+                        b |= 1 << (7 - i);
+                    }
+                }
+                b
+            }
+        }
+    }
+
+    // Backwards-compat aliases — kept for any existing external callers.
+    // Both delegate to the new trie-based implementation.
+    fn encode_byte_bits(&mut self, enc: &mut ArithEncoder, byte: u8) {
+        self.encode_byte_trie(enc, byte);
+    }
+
+    fn decode_byte_bits(&mut self, dec: &mut ArithDecoder) -> u8 {
+        self.decode_byte_trie(dec)
     }
 
     // ── Gamma-coded run length (RLE) ───────────────────────────────
@@ -623,7 +781,7 @@ impl Ppmd8Model {
             // Copy the bounded context window to avoid borrowing self
             // while mutating the trie.
             let (ctx, ctx_len) = self.context_window();
-            self.descend_and_glue(&ctx[..ctx_len]);
+            self.descend_and_glue(&ctx[..ctx_len], byte);
             self.history.push(byte);
             self.check_memory();
 
@@ -648,7 +806,7 @@ impl Ppmd8Model {
             let byte = self.decode_byte_bits(dec);
             self.update_run_state(byte);
             let (ctx, ctx_len) = self.context_window();
-            self.descend_and_glue(&ctx[..ctx_len]);
+            self.descend_and_glue(&ctx[..ctx_len], byte);
             self.history.push(byte);
             self.check_memory();
             out.push(byte);
