@@ -66,7 +66,12 @@ impl DistanceEncoder {
         let base = len_state * slot_tree_size;
 
         let slot = distance_slot(distance);
-        encode_tree(rc, &mut self.slot_encoders[base..], NUM_DIST_SLOT_BITS, slot);
+        encode_tree(
+            rc,
+            &mut self.slot_encoders[base..],
+            NUM_DIST_SLOT_BITS,
+            slot,
+        );
 
         if slot < START_POS_MODEL_INDEX {
             return;
@@ -82,48 +87,84 @@ impl DistanceEncoder {
         } else {
             // Slots ≥14: high direct bits + low aligned bits.
             //
-            // Decoder logic (`decode_direct_bits_with_base`):
-            //   result = base
-            //   for each bit:
-            //     result = (result << 1) + 1   // tentative 1
-            //     range >>= 1
-            //     bit = (code >= range) ? 1 : 0
-            //     if bit == 1: code -= range; result keeps the +1.
-            //     if bit == 0: result -= 1     // change to 0
+            // Matches XZ Utils `lzma_encoder.c::match()`:
+            //   base = (2 | (slot & 1)) << footer_bits
+            //   dist_reduced = distance - base
+            //   rc_direct(dist_reduced >> ALIGN_BITS, footer_bits - ALIGN_BITS)
+            //   rc_bittree_reverse(dist_align, ALIGN_BITS,
+            //                      dist_reduced & ALIGN_MASK)
             //
-            // For the encoder to produce `bit == 1`, the decoder's `code`
-            // must be in the HIGH half of [0, range). So the encoder
-            // narrows its interval to the HIGH half: `low += range` AFTER
-            // halving (the half goes into the high position).
-            // For `bit == 0`, the encoder narrows to the LOW half: do
-            // nothing (low stays, range halves).
+            // The decoder's `decode_direct_bits_with_base` starts from
+            // `result = 2 + (slot & 1)` and doubles+1 each step. The
+            // encoder must emit the direct bits of `dist_reduced >>
+            // ALIGN_BITS` so the decoder reconstructs the correct value.
+            //
+            // BUG HISTORY: an earlier version used
+            //   direct_value = (distance - (2 + (slot & 1))) >> DIST_ALIGN_BITS
+            // and
+            //   low_bits = distance & low_mask
+            // instead of subtracting `base` and masking `dist_reduced`.
+            // For small distances the two formulas agree (footer_bits
+            // is small), but for slot 63 (EOPM, distance = 0xFFFFFFFF)
+            // the wrong formula produced direct_value = 0x0FFFFFFF and
+            // low_bits = 0xF, while the correct values are
+            // direct_value = 0x03FFFFFF and low_bits = 0xF. The
+            // decoder then reconstructed the wrong distance and the
+            // `rep0 == UINT32_MAX` check failed, causing xz-utils to
+            // report "Compressed data is corrupt".
             let num_direct_bits = footer_bits - DIST_ALIGN_BITS;
             let low_mask = (1u32 << DIST_ALIGN_BITS) - 1;
-            let direct_value = (distance - (2 + (slot & 1))) >> DIST_ALIGN_BITS;
+            let dist_base = (2 | (slot & 1)) << footer_bits;
+            let dist_reduced = distance - dist_base;
+            let direct_value = dist_reduced >> DIST_ALIGN_BITS;
 
-            // Emit direct bits MSB-first.
+            // Emit direct bits MSB-first. The decoder mirrors this by
+            // starting from `result = 2 + (slot & 1)` and applying
+            // `(result << 1) + 1` then adjusting on bit == 0.
             for i in (0..num_direct_bits).rev() {
                 let bit = (direct_value >> i) & 1;
                 rc.normalize();
                 rc.range_div2();
                 if bit == 1 {
-                    // Encoder narrows to high half: low += range (new halved range).
+                    // Encoder narrows to high half: low += range (halved).
                     rc.add_range();
                 }
                 // bit == 0: encoder narrows to low half (do nothing).
             }
 
-            let low_bits = distance & low_mask;
+            let low_bits = dist_reduced & low_mask;
             encode_reverse_tree(rc, &mut self.align_encoder, 0, DIST_ALIGN_BITS, low_bits);
         }
     }
 }
 
-/// Compute the LZMA distance slot. Matches `get_pos_slot` in XZ Utils.
+/// Compute the LZMA distance slot. Matches `get_dist_slot` in XZ Utils
+/// (`src/liblzma/lzma/fastpos.h`) and `get_pos_slot` in the LZMA SDK.
+///
+/// `distance` is the 0-based form (0 = "1 byte back"). Slots 0..=3 are
+/// identity with the distance; for distance ≥ 4 the slot encodes the
+/// position of the highest set bit plus the bit just below it.
+///
+/// The formula `(high_bit << 1) + ((distance >> (high_bit - 1)) & 1)`
+/// matches the C reference `get_dist_slot_2`. Note: an earlier version of
+/// this function subtracted 2 from the result and used `distance < 4`
+/// instead of `distance <= 4`. Both bugs were invisible to the Rust-only
+/// round-trip tests (the decoder walks the bit-tree from the stream and
+/// never recomputes the slot), but broke interop with `xz`/`lzma`:
+///
+/// - The `< 4` guard vs `<= 4` only matters at `distance == 4`, where
+///   both paths happen to return 4, so this was harmless in practice
+///   but fixed for spec-conformance.
+/// - The `- 2` meant every distance ≥ 4 produced a slot value 2 too
+///   low, so the EOPM marker `distance = 0xFFFFFFFF` produced slot 61
+///   instead of 63. The decoder then reconstructed `rep0 = 0x7FFFFFFF`
+///   instead of `0xFFFFFFFF` and never entered the EOPM branch,
+///   causing xz-utils to report "Compressed data is corrupt".
 fn distance_slot(distance: u32) -> u32 {
-    if distance < 4 {
+    // Matches the C `dist <= 4` early-return path: get_dist_slot(4) = 4.
+    if distance <= 4 {
         return distance;
     }
     let high_bit = distance.ilog2();
-    (high_bit << 1) + ((distance >> (high_bit - 1)) & 1) - 2
+    (high_bit << 1) + ((distance >> (high_bit - 1)) & 1)
 }
