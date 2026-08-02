@@ -12,6 +12,7 @@ CRATES=(
     omnizip-snappy
     omnizip-lz4
     omnizip-deflate
+    omnizip-deflate64
     omnizip-brotli
     omnizip-fsst
     omnizip-ricepp
@@ -19,6 +20,7 @@ CRATES=(
     omnizip-glza
     omnizip-ppmd
     omnizip-zpaq
+    omnizip-bzip2
 )
 
 echo "Publishing ${#CRATES[@]} crates..."
