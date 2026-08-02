@@ -63,7 +63,7 @@ impl CodecId {
     pub const RESERVED_0F: CodecId = Self::new(0x000F);
     /// 0x0010: FSST (Fast Static Symbol Table).
     pub const FSST: CodecId = Self::new(0x0010);
-    /// 0x0011: Rice++ (DwarFS ricepp).
+    /// 0x0011: Rice++ (`DwarFS` ricepp).
     pub const RICEPP: CodecId = Self::new(0x0011);
     /// 0x0012: FLAC audio.
     pub const FLAC: CodecId = Self::new(0x0012);

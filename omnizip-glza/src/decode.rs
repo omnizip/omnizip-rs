@@ -23,8 +23,6 @@ use crate::entropy::{index_to_symbol, BitReader, HuffmanDecoder};
 use crate::grammar::Symbol;
 use omnizip_codecs::{CodecId, OmnizipError};
 
-/// GLZA codec id, used for error attribution.
-
 /// Marker byte introducing either a rule reference or a literal escape.
 const MARKER: u8 = 0xFF;
 

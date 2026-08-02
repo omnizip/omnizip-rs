@@ -1,0 +1,20 @@
+[package]
+name = "omnizip-bzip2"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Pure-Rust BZip2 compression codec"
+keywords = ["compression", "bzip2", "bwt"]
+categories = ["compression"]
+
+[lib]
+name = "omnizip_bzip2"
+path = "src/lib.rs"
+
+[dependencies]
+omnizip-codecs.workspace = true
+
+[lints]
+workspace = true
