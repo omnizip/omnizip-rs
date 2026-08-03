@@ -9,6 +9,7 @@ pub mod optimal;
 pub mod xz;
 
 pub use alone::lzma_alone_compress;
+pub use alone::lzma_alone_compress_with_options;
 pub use lzip::lzip_compress;
 pub use lzma1::Lzma1Encoder;
 pub use lzma2::encode_lzma2_stream;

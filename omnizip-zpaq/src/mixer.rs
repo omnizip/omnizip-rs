@@ -46,7 +46,13 @@
 )]
 
 /// Number of input models mixed by [`Mixer`].
-pub const NUM_MODELS: usize = 4;
+///
+/// Five models feed the mixer: order-0, order-1, order-2, match, and
+/// run-length. Adding more models (order-3, word-level) requires
+/// updating this constant plus every callsite that builds a
+/// `[u16; NUM_MODELS]` array — kept deliberately small for that
+/// reason. See `TODO.complete/80-zpaq-more-models.md`.
+pub const NUM_MODELS: usize = 5;
 
 /// Probability scale (matches the arithmetic coder's `PROB_SCALE`).
 const PROB_SCALE: i32 = 65_536;
@@ -232,10 +238,11 @@ impl Mixer {
     /// Rationale: on short inputs (kilobytes), the order-2 byte-context
     /// model is the strongest single predictor. Starting the others at zero
     /// means Phase 2 never does *worse* than Phase 1 — it can only improve
-    /// as adaptation discovers useful contributions from order-0/1/match.
+    /// as adaptation discovers useful contributions from order-0/1/match/run.
     #[must_use]
     pub fn new() -> Self {
-        let weights = [0, 0, WEIGHT_SCALE, 0];
+        // Indices: 0=order-0, 1=order-1, 2=order-2, 3=match, 4=run-length.
+        let weights = [0, 0, WEIGHT_SCALE, 0, 0];
         Self {
             weights,
             last_stretched: [0; NUM_MODELS],
@@ -388,7 +395,7 @@ mod tests {
         let mut m = Mixer::new();
         let initial = m.weights();
         for _ in 0..200 {
-            let _ = m.mix(&[65_000, 100, 100, 100]);
+            let _ = m.mix(&[65_000, 100, 100, 100, 100]);
             m.update(true);
         }
         let after = m.weights();
@@ -417,6 +424,7 @@ mod tests {
                     ((i * 7) % 65_535) as u16 + 1,
                     ((i * 13) % 65_535) as u16 + 1,
                     ((i * 31) % 65_535) as u16 + 1,
+                    ((i * 47) % 65_535) as u16 + 1,
                 ];
                 let p = m.mix(&probs);
                 m.update(p > 32_000);
@@ -444,9 +452,9 @@ mod tests {
         for i in 0..2000u32 {
             let bit = i % 3 != 0; // bit=1 with prob 2/3
             let probs = if bit {
-                [60_000u16, 5_000, 5_000, 5_000]
+                [60_000u16, 5_000, 5_000, 5_000, 5_000]
             } else {
-                [5_000u16, 60_000, 60_000, 60_000]
+                [5_000u16, 60_000, 60_000, 60_000, 60_000]
             };
             let p = m.mix(&probs);
             // "Correct" = p > 0.5 when bit=1, p < 0.5 when bit=0.
