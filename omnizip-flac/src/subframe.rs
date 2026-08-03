@@ -37,7 +37,9 @@ pub fn decode_subframe(
     // Check for wasted bits per sample.
     let has_wasted = reader.read_bits(1);
     let wasted_bits = if has_wasted != 0 {
-        // Unary-coded: count 0-bits until 1.
+        // Per FLAC spec: unary-coded value k where the encoding is
+        // `k` ZERO-bits followed by a single ONE-bit terminator.
+        // The wasted-bits-per-sample count is then k+1.
         let mut count = 0u32;
         while reader.read_bits(1) == 0 {
             count += 1;
@@ -47,7 +49,11 @@ pub fn decode_subframe(
         0
     };
 
-    let effective_bps = bps + wasted_bits as u8;
+    // Samples are stored at (bps - wasted_bits) bits each. After decoding,
+    // we shift left by wasted_bits to recover the original bps-width value.
+    let effective_bps = bps
+        .checked_sub(wasted_bits as u8)
+        .ok_or_else(|| format!("wasted_bits {wasted_bits} exceeds bps {bps}"))?;
 
     let mut samples = match type_byte {
         SUBFRAME_CONSTANT => decode_constant(reader, block_size, effective_bps)?,

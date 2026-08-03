@@ -3,17 +3,34 @@
 **Priority:** High (LimniFS #1 quality issue)
 **Source:** `~/src/external/flac/src/libFLAC/` (Xiph reference, BSD license)
 
+## Status
+
+**Interop achieved (2026-08-03):** All FLAC files produced by omnizip-flac decode byte-identically through `flac -d` (libFLAC CLI). Validated by 6 permanent parity tests in `tests/differential/tests/flac_parity.rs`.
+
+**Bugs fixed during the interop effort:**
+- CRC-16 was written little-endian; spec requires big-endian
+- `read_unary`/`write_unary` had FLAC's polarity inverted (was "ones then zero" instead of the spec's "zeros then one" terminator)
+- Decoder's wasted-bits handler had the same polarity bug
+- `effective_bps` calculation was `bps + wasted_bits` (should be `bps - wasted_bits`)
+- `bs_code` values 8-15 (power-of-2 block sizes) weren't handled by the frame decoder
+- Missing residual-overflow check in `quantise_and_predict` (silent i32 wrap produced out-of-bounds samples)
+
+**Temporarily disabled for interop safety:**
+- **Multi-partition Rice coding** (`MAX_PARTITION_ORDER = 0`) — partition layout diverges from spec; libFLAC puts `predictor_order - 1` residuals in partition 0 and equal-size partitions after, our encoder uses ceiling division.
+- **LPC subframes** (LPC lookup in `subframe.rs` gated with `if false`) — high-order LPC quantization has a remaining interop bug (LOST_SYNC during decode). Bounded MAX_LPC_ORDER to 16 as a stopgap.
+
+**Re-enable plan:** see `Phase 2B` and `Phase 3` sections below. Once both are fixed, our 28.62% ratio on the 3-second sine should drop back toward the 17.97% achieved in Phase 1+2 (and ideally closer to libFLAC's 18.59%).
+
 ## Measured baseline (2026-08-03)
 
 Identical 3-second 440 Hz sine, 44.1 kHz, 16-bit mono, 131 072 samples:
 
 | Encoder        | Output size | Ratio  |
 |----------------|-------------|--------|
-| omnizip-flac   | 75 478 B    | 28.79% |
+| omnipip-flac   | 75 031 B    | 28.62% |
 | libFLAC --best | 48 737 B    | 18.59% |
 
-**Real gap: ~1.5×.** The "22×" report from LimniFS was likely measured on a
-short clip where framing overhead dominates.
+Real gap ~1.5× (was misreported as 22× on short clips).
 
 ## Scope
 

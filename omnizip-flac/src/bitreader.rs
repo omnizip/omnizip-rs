@@ -62,6 +62,10 @@ impl<'a> BitReader<'a> {
     ///
     /// This implementation is O(n) per bit but is provably correct for
     /// any `bit_pos` alignment.
+    ///
+    /// Per FLAC spec: counts ZERO-bits until a single ONE-bit
+    /// terminator is read. (OPPOSITE polarity from the more common
+    /// "ones then zero" unary used by some other codecs.)
     #[must_use]
     pub fn read_unary(&mut self) -> u32 {
         let mut count = 0u32;
@@ -69,7 +73,8 @@ impl<'a> BitReader<'a> {
             if self.byte_pos >= self.data.len() {
                 break;
             }
-            if self.read_bits(1) == 1 {
+            let bit = self.read_bits(1);
+            if bit == 0 {
                 count += 1;
             } else {
                 break;
@@ -141,22 +146,22 @@ mod tests {
     }
 
     #[test]
-    fn read_unary_ones() {
-        // 0b1110_0000: 3 ones then a zero.
-        let mut br = BitReader::new(&[0xE0]);
+    fn read_unary_zeros() {
+        // Per FLAC spec: 0b0001_0000 = 3 zeros then a one.
+        let mut br = BitReader::new(&[0x10]);
         assert_eq!(br.read_unary(), 3);
     }
 
     #[test]
     fn read_rice_signed() {
-        // Rice(k=2): value 5 = quotient 1, remainder 1.
-        // Unary: 1 one then 0 (bits: 10). Remainder: 01.
-        // Byte: 10_01_0000 = 0x90.
-        let mut br = BitReader::new(&[0x90]);
+        // Per FLAC spec: unary = "value zeros followed by 1".
+        // Rice(k=2): value 5 → quotient 1, remainder 1.
+        // Unary(1) = "01" (1 zero then 1). Remainder 1 in 2 bits = "01".
+        // Byte: 01_01_0000 = 0x50.
+        let mut br = BitReader::new(&[0x50]);
         let val = br.read_rice_signed(2);
         // (1 << 2) | 1 = 5. Zigzag: 5 is odd → -(5>>1)-1 = -2-1 = -3.
-        // Wait, let me recalculate. Rice maps unsigned to signed:
-        // 0→0, 1→-1, 2→1, 3→-2, 4→2, 5→-3.
+        // Rice maps unsigned to signed: 0→0, 1→-1, 2→1, 3→-2, 4→2, 5→-3.
         assert_eq!(val, -3);
     }
 

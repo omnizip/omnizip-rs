@@ -44,7 +44,11 @@ pub fn decode_frame(reader: &mut BitReader, info: &StreamInfo) -> Result<(AudioF
         0 => return Err("block size 0 is reserved".into()),
         1 => 192,
         v @ 2..=5 => 576 * (1 << (v - 2)),
-        6 | 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14 | 15 => 0, // Read later
+        // Codes 8-15 = 256 × 2^(code-8): 256, 512, 1024, 2048, 4096,
+        // 8192, 16384, 32768.
+        v @ 8..=15 => 256 * (1 << (v - 8)),
+        // Codes 6 and 7 take an extra byte (8 or 16 bits) later.
+        6 | 7 => 0,
         _ => return Err(format!("invalid block size code: {block_size_raw}")),
     };
 

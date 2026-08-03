@@ -67,19 +67,25 @@ impl BitWriter {
         self.write_bits(unsigned, count);
     }
 
-    /// Write a unary coded value: `value` one-bits followed by a zero
-    /// bit. Matches the FLAC Rice residual coding convention used by
-    /// libFLAC and `crate::bitreader::BitReader::read_unary`.
+    /// Write a unary coded value per the FLAC spec: `value` ZERO-bits
+    /// followed by a single ONE-bit terminator. (Confusingly, this is
+    /// the OPPOSITE of the more common "ones then zero" unary used by
+    /// e.g. Golomb-Rice in other codecs — FLAC's convention is its own.)
+    ///
+    /// Matches the FLAC frame residual coding and wasted-bits-per-sample
+    /// encoding. See libFLAC's `FLAC__bitwriter_write_unary_unsigned`.
     pub fn write_unary(&mut self, value: u32) {
         let mut remaining = value;
+        // Emit `value` zero-bits in chunks of up to 56 bits.
         while remaining >= 56 {
-            self.write_bits(u64::MAX, 56);
+            self.write_bits(0, 56);
             remaining -= 56;
         }
         if remaining > 0 {
-            self.write_bits(u64::MAX, remaining as u8);
+            self.write_bits(0, remaining as u8);
         }
-        self.write_bits(0, 1);
+        // Terminator: a single 1-bit.
+        self.write_bits(1, 1);
     }
 
     /// Pad the current byte with zero bits so the next write starts
@@ -194,10 +200,10 @@ mod tests {
     #[test]
     fn unary_encoding_matches_rice_convention() {
         let mut w = BitWriter::new();
-        // q=3 → three 1-bits then a 0-bit: 0b1110_0000
+        // Per FLAC spec: q=3 → three 0-bits then a 1-bit: 0b0001_0000
         w.write_unary(3);
         w.flush_byte_aligned();
-        assert_eq!(w.as_bytes(), [0b1110_0000]);
+        assert_eq!(w.as_bytes(), [0b0001_0000]);
     }
 
     #[test]
