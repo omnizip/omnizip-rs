@@ -1,18 +1,29 @@
 # 98 — LPC subframe interop bug: LOST_SYNC on high-order LPC
 
-**Priority:** High (closes the remaining ~7 percentage-point ratio gap)
-**Source:** TODO 97 Phase 3 (deferred from FLAC interop work)
+**Priority:** High ~~(closes the remaining ~7 percentage-point ratio gap)~~
+**Status:** ✅ FIXED (PR #47)
 
-## Symptom
+## Root cause (found and fixed)
 
-When LPC subframes are enabled (`if true` in
-`omnizip-flac/src/encoder/subframe.rs`), 2 of 6 libFLAC CLI parity
-tests fail:
+Two bugs:
 
-- `parity_sine_short` (192-sample sine, 8 kHz)
-- `parity_sine_3_seconds` (131 072-sample sine, 44.1 kHz)
+1. **Coefficient order reversed.** Our encoder stored
+   `qlpc[0] = -lpc[order-1]` (oldest lag coefficient first), but the
+   FLAC spec requires `coeff[0]` to multiply the MOST RECENT sample
+   (`sample[i-1]`). Fix: store coefficients in natural order
+   (`coeff[j] = -lpc[j]`, no reversal).
 
-libFLAC reports `LOST_SYNC` or `OUT_OF_BOUNDS` on these inputs.
+2. **Prediction computed in i64, decoder uses i32.** libFLAC's
+   decoder accumulates the prediction in `FLAC__int32` (wrapping on
+   overflow). Our encoder used `i64` (no wrapping). Predictions
+   diverged when intermediate sums exceeded i32 range. Fix: use
+   `i32::wrapping_add` / `wrapping_mul` in both encoder and decoder.
+
+## Result
+
+- All 6 libFLAC CLI parity tests pass with LPC enabled.
+- Ratio on 131 072-sample sine: 19.81% (was 28.62% FIXED-only;
+  libFLAC is 18.59%).
 
 ## What works
 
