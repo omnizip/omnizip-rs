@@ -50,3 +50,53 @@ Every encoder PR must satisfy:
 - All imports via `use` from crate root; no path-based imports.
 - Field access via methods, not direct struct field writes from
   outside the module (encapsulate state).
+
+---
+
+# 2026-08-03 update — RESEARCH-driven backlog (items 80+)
+
+A new wave of TODOs (80–89) was added based on `RESEARCH.md` — a
+review of recent (2024–2026) academic compression literature. The
+historical items (00–76) above document the path that got us here;
+the new items document the path forward.
+
+## Status legend (for items 80+)
+
+- ⏳ **Pending** — not started
+- 🔄 **In progress** — actively being worked
+- ✅ **Done** — landed and tested
+- 🚫 **Rejected** — research determined not worth pursuing
+
+## High priority
+
+| # | Title | Status |
+|---|-------|--------|
+| 81 | [ZSTD dictionary trainer (FastCover)](81-zstd-dict-trainer.md) | ⏳ |
+| 82 | [SIMD CRC-32 / XXHash-64](82-simd-crc32-xxhash.md) | ⏳ |
+| 86 | [Benchmark suite (Silesia/Enwik8/Calgary)](86-benchmark-suite.md) | ⏳ |
+| 87 | [Differential parity harness vs C/Ruby refs](87-differential-harness.md) | ⏳ |
+
+## Medium priority
+
+| # | Title | Status |
+|---|-------|--------|
+| 80 | [ZPAQ: more context-mixing sub-models](80-zpaq-more-models.md) | ⏳ |
+| 83 | [SIMD Huffman decode](83-simd-huffman-decode.md) | ⏳ |
+| 84 | [Multi-byte FSE decoder](84-multibyte-fse.md) | ⏳ |
+| 88 | [Architecture audit (OCP/MECE/DRY)](88-architecture-audit.md) | ⏳ |
+| 89 | [Spec coverage analysis](89-spec-coverage.md) | ⏳ |
+
+## Low priority
+
+| # | Title | Status |
+|---|-------|--------|
+| 85 | [Document convergent-encryption boundary](85-convergent-encryption-note.md) | ⏳ |
+
+## How to claim a TODO
+
+1. Pick an item from the tables above.
+2. Move its entry to 🔄 status.
+3. Create a feature branch `feat/{slug}`.
+4. Implement per the acceptance criteria in the TODO file.
+5. Open a PR; merge to main; mark ✅ here.
+

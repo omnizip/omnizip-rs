@@ -28,7 +28,9 @@
 
 use omnizip_codecs::{Codec, CodecId, CompressionLevel, OmnizipError};
 
-use super::model::{ArithDecoder, ArithEncoder, Ppmd8Model};
+use omnizip_codecs::arith::{ArithDecoder, ArithEncoder};
+
+use super::model::Ppmd8Model;
 use super::{Ppmd8Error, PPMD8_MAGIC};
 
 /// Minimum context order (Ruby `MIN_ORDER`).
