@@ -81,7 +81,21 @@ pub struct BrotliOptions<'a> {
     pub custom_dictionary: Option<&'a [u8]>,
 }
 
-/// Brotli codec. Encodes at quality `level` (0–11); default 11.
+/// Brotli codec.
+///
+/// Maps `CompressionLevel` (0–22) to Brotli quality (0–11) via
+/// `level.as_u8().min(11)`. Callers that want a specific Brotli
+/// quality should pass `CompressionLevel::new(quality)`.
+///
+/// ## Level mapping
+///
+/// | CompressionLevel | Brotli quality | Use case |
+/// |------------------|----------------|----------|
+/// | 1 (= `fastest`)  | 1              | max speed |
+/// | 5                | 5              | competitive (LimniFS profile) |
+/// | 6 (= `default`)  | 6              | balanced |
+/// | 11               | 11             | max ratio |
+/// | 22 (= `best`)    | 11 (clamped)   | max ratio |
 pub struct BrotliCodec;
 
 impl BrotliCodec {
