@@ -42,6 +42,6 @@ omnizip-codecs = { path = "omnizip-codecs", version = "0.13.1" }
 omnizip-lzma = { path = "omnizip-lzma", version = "0.13.1" }
 omnizip-zstd = { path = "omnizip-zstd", version = "0.13.1" }
 brotli = "8.0"
-lz4_flex = { version = "0.11", default-features = false, features = ["std"] }
+lz4_flex = { version = "0.11", default-features = false, features = ["std", "frame"] }
 miniz_oxide = "0.8"
 snap = "1.1"

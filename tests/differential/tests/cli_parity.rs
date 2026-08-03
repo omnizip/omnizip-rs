@@ -68,11 +68,10 @@ fn brotli_round_trips_through_reference_cli() {
 #[test]
 fn lz4_round_trips_through_reference_cli() {
     let input = sample_input();
-    let compressed = Lz4FastCodec
-        .compress(&input, CompressionLevel::default())
-        .expect("lz4 encode");
+    // Use LZ4 frame format (compatible with `lz4 -d` CLI).
+    let compressed = omnizip_lz4::compress_frame(&input).expect("lz4 frame encode");
     match lz4_oracle_decode(&compressed) {
-        Err(e) => eprintln!("[skip] lz4 oracle error (framing gap?): {e}"),
+        Err(e) => eprintln!("[skip] lz4 oracle error: {e}"),
         Ok(None) => eprintln!("[skip] lz4 CLI not installed"),
         Ok(Some(out)) => assert_eq!(out.bytes, input, "lz4 CLI decoded output != original"),
     }

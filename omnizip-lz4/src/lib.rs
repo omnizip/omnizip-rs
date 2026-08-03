@@ -86,6 +86,43 @@ fn decompress_lz4(
     Ok(result)
 }
 
+/// Compress using LZ4 frame format (compatible with `lz4 -d` CLI).
+///
+/// Uses `lz4_flex::frame::FrameEncoder` which produces standard LZ4
+/// frames with magic number, descriptor, blocks, and end mark.
+///
+/// # Errors
+///
+/// Returns [`OmnizipError::EncodeFailed`] on internal failure.
+pub fn compress_frame(plaintext: &[u8]) -> Result<Vec<u8>, OmnizipError> {
+    use std::io::Write;
+    let mut encoder = lz4_flex::frame::FrameEncoder::new(Vec::new());
+    encoder.write_all(plaintext).map_err(|e| OmnizipError::EncodeFailed {
+        codec: CodecId::LZ4,
+        reason: format!("lz4 frame encode failed: {e}"),
+    })?;
+    encoder.finish().map_err(|e| OmnizipError::EncodeFailed {
+        codec: CodecId::LZ4,
+        reason: format!("lz4 frame finalize failed: {e}"),
+    })
+}
+
+/// Decompress an LZ4 frame (compatible with `lz4` CLI output).
+///
+/// # Errors
+///
+/// Returns [`OmnizipError::DecodeFailed`] on malformed frame.
+pub fn decompress_frame(compressed: &[u8]) -> Result<Vec<u8>, OmnizipError> {
+    use std::io::Read;
+    let mut decoder = lz4_flex::frame::FrameDecoder::new(compressed);
+    let mut output = Vec::new();
+    decoder.read_to_end(&mut output).map_err(|e| OmnizipError::DecodeFailed {
+        codec: CodecId::LZ4,
+        reason: format!("lz4 frame decode failed: {e}"),
+    })?;
+    Ok(output)
+}
+
 #[cfg(test)]
 #[allow(clippy::cast_possible_truncation)]
 mod tests {
