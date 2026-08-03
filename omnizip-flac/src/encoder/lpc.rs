@@ -48,19 +48,30 @@ pub struct LpcSolution {
 
 /// Find the best LPC solution for `samples`, trying multiple orders
 /// and precision/shift combinations.
-pub fn best_lpc_candidate(samples: &[i32], _bps: u8) -> Option<LpcSolution> {
+///
+/// The "best" solution minimises **total** encoded bits (header +
+/// residual), not just residual bits. Higher orders have smaller
+/// residuals but bigger headers (warmup samples + quantised
+/// coefficients); the DP picks the actually-cheapest combination.
+pub fn best_lpc_candidate(samples: &[i32], bps: u8) -> Option<LpcSolution> {
     let max_order = MAX_LPC_ORDER.min(samples.len().saturating_sub(1).max(1));
     let acf = autocorrelate(samples, max_order);
 
     let mut best: Option<LpcSolution> = None;
-    let mut best_cost = u64::MAX;
+    let mut best_total_cost = u64::MAX;
 
-    // Try all orders from high to low. Higher orders fit better but
-    // cost more header bytes. The DP picks the cheapest overall.
     for order in (1..=max_order).rev() {
         if let Some(sol) = levinson_durbin_quantise(&acf, order, samples) {
-            if (sol.estimated_residual_bits as u64) < best_cost {
-                best_cost = sol.estimated_residual_bits as u64;
+            // Include header cost in the comparison: subframe header (8)
+            // + warmup (order * bps) + precision field (4) + shift
+            // field (5) + coefficients (order * precision_bits).
+            let order_u64 = order as u64;
+            let header_bits: u64 = 8 + 4 + 5
+                + order_u64 * u64::from(bps)
+                + order_u64 * u64::from(sol.precision_bits);
+            let total = header_bits + u64::from(sol.estimated_residual_bits);
+            if total < best_total_cost {
+                best_total_cost = total;
                 best = Some(sol);
             }
         }
@@ -178,11 +189,12 @@ fn levinson_durbin(acf: &[f64], order: usize) -> Vec<f64> {
 fn levinson_durbin_quantise(acf: &[f64], order: usize, samples: &[i32]) -> Option<LpcSolution> {
     let lpc = levinson_durbin(acf, order);
 
-    // Wider precision/shift search for better coefficient quantization.
     let mut best: Option<LpcSolution> = None;
     let mut best_cost = u64::MAX;
 
-    for &precision_bits in &[5u8, 7, 8, 9, 10, 11, 12, 13] {
+    // libFLAC's `-8` setting searches LPC precision up to 15 bits.
+    // We try the same spread (skipping 6 since it's rarely optimal).
+    for &precision_bits in &[5u8, 7, 8, 9, 10, 11, 12, 13, 14, 15] {
         for &shift in &[0i8, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12] {
             if let Some(sol) = quantise_and_predict(&lpc, order, precision_bits, shift, samples) {
                 if (sol.estimated_residual_bits as u64) < best_cost {
