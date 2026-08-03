@@ -47,7 +47,10 @@ pub use constants::{
 };
 pub use decoder::ZstdDecoder;
 pub use dict::ZstdDictionary;
-pub use dict_trainer::train_dictionary;
+pub use dict_trainer::{
+    train_dictionary, train_dictionary_with, DictTrainer, FastCoverOptions, FastCoverTrainer,
+    FrequencyTrainer,
+};
 pub use frame::{detect_frame_kind, strip_magic, BlockHeader, FrameHeader};
 pub use fse::{BitStream, ForwardBitStream, FseDecoder, FseState, Table};
 pub use huffman::{HuffmanDecoder, HuffmanTable};

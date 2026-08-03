@@ -177,7 +177,10 @@ impl Order2Model {
 // ---------------------------------------------------------------------------
 
 /// Number of models feeding the [`Mixer`](crate::mixer::Mixer).
-pub const NUM_MODELS: usize = 4;
+///
+/// Must agree with [`crate::mixer::NUM_MODELS`]. Five models:
+/// order-0, order-1, order-2, match, run-length.
+pub const NUM_MODELS: usize = 5;
 
 /// Maximum count before a counter pair is halved. Same value as the
 /// order-2 model uses, kept consistent so all models forget at the same rate.
@@ -416,16 +419,99 @@ impl MatchModel {
 /// coder pays heavily for; the mixer's adaptation handles weighting.
 const MATCH_CONFIDENCE: u16 = 52_000; // ~0.79
 
+// ---------------------------------------------------------------------------
+// Run-length model.
+// ---------------------------------------------------------------------------
+
+/// Run-length model: predicts that the next byte will equal the previous
+/// byte when the recent history is a run of identical bytes.
+///
+/// After two or more consecutive identical bytes, this model emits a
+/// strongly-biased probability toward the run byte's bits. Below that
+/// threshold it emits the default 50/50 probability. The mixer learns
+/// when to trust this signal (highly repetitive data) vs. ignore it
+/// (mixed text/binary).
+///
+/// Unlike [`Order2Model`] / [`MatchModel`], this model has no per-context
+/// table — its state is just `(last_byte, run_length, current_bit_pos)`.
+/// That makes it cheap and a useful sharp signal in the mix.
+#[derive(Debug)]
+pub struct RunLengthModel {
+    last_byte: u8,
+    run_length: u32,
+    bit_pos: u8,
+}
+
+impl Default for RunLengthModel {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl RunLengthModel {
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            last_byte: 0,
+            run_length: 0,
+            bit_pos: 0,
+        }
+    }
+
+    /// Begin a new byte: reset the per-byte bit position.
+    fn begin_byte(&mut self) {
+        self.bit_pos = 0;
+    }
+
+    /// Predict the next bit. When in a run of ≥ 2 identical bytes, predict
+    /// the run-byte's bit strongly. Otherwise return default uncertainty.
+    fn prob(&self) -> u16 {
+        if self.run_length >= 2 && self.bit_pos < 8 {
+            let predicted_bit = (self.last_byte >> (7 - self.bit_pos)) & 1 == 1;
+            if predicted_bit {
+                RUN_CONFIDENCE
+            } else {
+                u16::MAX - RUN_CONFIDENCE + 1
+            }
+        } else {
+            DEFAULT_PROB
+        }
+    }
+
+    /// Advance the bit position after each coded bit.
+    fn update(&mut self) {
+        self.bit_pos = self.bit_pos.saturating_add(1);
+    }
+
+    /// Finalise the byte: update the run counter based on whether the new
+    /// byte extends or breaks the current run.
+    fn end_byte(&mut self, byte: u8) {
+        if byte == self.last_byte {
+            self.run_length = self.run_length.saturating_add(1);
+        } else {
+            self.run_length = 1;
+            self.last_byte = byte;
+        }
+    }
+}
+
+/// Confidence for [`RunLengthModel`] when in a run. Slightly higher than
+/// [`MATCH_CONFIDENCE`] because a run is a stronger signal than a single
+/// match (the run is *current*, the match is recalled).
+const RUN_CONFIDENCE: u16 = 54_000; // ~0.82
+
 /// Combined context-mixing model driving the arithmetic coder.
 ///
-/// Wraps four sub-models and an adaptive [`Mixer`](crate::mixer::Mixer).
-/// The model is stateless across encode/decode — both sides rebuild it
-/// identically because all state depends only on already-coded bytes.
+/// Wraps five sub-models (order-0, order-1, order-2, match, run-length)
+/// and an adaptive [`Mixer`](crate::mixer::Mixer). The model is stateless
+/// across encode/decode — both sides rebuild it identically because all
+/// state depends only on already-coded bytes.
 pub struct MultiModel {
     order0: Order0Model,
     order1: Order1Model,
     order2: Order2Model,
     matcher: MatchModel,
+    runlen: RunLengthModel,
     mixer: crate::mixer::Mixer,
     last_byte: u8,
     prev_byte: u8,
@@ -445,6 +531,7 @@ impl MultiModel {
             order1: Order1Model::new(),
             order2: Order2Model::new(),
             matcher: MatchModel::new(),
+            runlen: RunLengthModel::new(),
             mixer: crate::mixer::Mixer::new(),
             last_byte: 0,
             prev_byte: 0,
@@ -458,13 +545,15 @@ impl MultiModel {
             .order2
             .prob_with_context(self.prev_byte, self.last_byte, bit_pos);
         let pm = self.matcher.prob();
-        [p0, p1, p2, pm]
+        let pr = self.runlen.prob();
+        [p0, p1, p2, pm, pr]
     }
 
     /// Encode one byte MSB-first using the mixed model probability.
     pub fn encode_byte(&mut self, byte: u8, enc: &mut ArithmeticEncoder) {
-        // Start a new match search for this byte's context.
+        // Start a new match search and reset per-byte model state.
         self.matcher.begin_byte(self.prev_byte, self.last_byte);
+        self.runlen.begin_byte();
 
         for bit_pos in 0..8u8 {
             let probs = self.collect_probs(bit_pos);
@@ -479,10 +568,12 @@ impl MultiModel {
                 .update_with_context(self.prev_byte, self.last_byte, bit_pos, bit);
             self.mixer.update(bit);
             self.matcher.update();
+            self.runlen.update();
         }
 
         // Finalise: advance byte context and history.
         self.matcher.end_byte(byte);
+        self.runlen.end_byte(byte);
         self.prev_byte = self.last_byte;
         self.last_byte = byte;
     }
@@ -490,6 +581,7 @@ impl MultiModel {
     /// Decode one byte MSB-first using the mixed model probability.
     pub fn decode_byte(&mut self, dec: &mut ArithmeticDecoder) -> u8 {
         self.matcher.begin_byte(self.prev_byte, self.last_byte);
+        self.runlen.begin_byte();
 
         let mut byte: u8 = 0;
         for bit_pos in 0..8u8 {
@@ -503,6 +595,7 @@ impl MultiModel {
                 .update_with_context(self.prev_byte, self.last_byte, bit_pos, bit);
             self.mixer.update(bit);
             self.matcher.update();
+            self.runlen.update();
 
             if bit {
                 byte |= 1 << (7 - bit_pos);
@@ -510,6 +603,7 @@ impl MultiModel {
         }
 
         self.matcher.end_byte(byte);
+        self.runlen.end_byte(byte);
         self.prev_byte = self.last_byte;
         self.last_byte = byte;
         byte

@@ -1,0 +1,40 @@
+[package]
+name = "omnizip-bench"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Benchmark suite for omnizip-rs codecs (Silesia, Enwik8, Calgary, Canterbury corpora)"
+
+[[bin]]
+name = "omnizip-bench"
+path = "src/main.rs"
+
+[lib]
+name = "omnizip_bench"
+path = "src/lib.rs"
+
+[dependencies]
+omnizip-codecs = { path = "../omnizip-codecs", version = "0.13.1" }
+omnizip-lzma = { path = "../omnizip-lzma", version = "0.13.1" }
+omnizip-zstd = { path = "../omnizip-zstd", version = "0.13.1" }
+omnizip-snappy = { path = "../omnizip-snappy", version = "0.13.1" }
+omnizip-lz4 = { path = "../omnizip-lz4", version = "0.13.1" }
+omnizip-deflate = { path = "../omnizip-deflate", version = "0.13.1" }
+omnizip-brotli = { path = "../omnizip-brotli", version = "0.13.1" }
+omnizip-bzip2 = { path = "../omnizip-bzip2", version = "0.13.1" }
+omnizip-ppmd = { path = "../omnizip-ppmd", version = "0.13.1" }
+omnizip-zpaq = { path = "../omnizip-zpaq", version = "0.13.1" }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+clap = { version = "4.5", features = ["derive"] }
+ureq = { version = "2.12", default-features = false, features = ["tls"] }
+zip = { version = "2.2", default-features = false, features = ["deflate"] }
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+pedantic = "warn"

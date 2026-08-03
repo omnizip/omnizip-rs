@@ -17,6 +17,7 @@ members = [
     "omnizip-ppmd",
     "omnizip-zpaq",
     "omnizip-bzip2",
+    "omnizip-bench",
     "tests/differential",
 ]
 resolver = "2"

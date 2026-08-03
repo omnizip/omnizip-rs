@@ -20,12 +20,14 @@
 
 pub mod arith;
 mod codec;
+pub mod checksum;
 mod error;
 pub mod hash;
 mod level;
 mod registry;
 
 pub use arith::{ArithDecoder, ArithEncoder, PROB_SCALE as ARITH_PROB_SCALE};
+pub use checksum::{crc32_iso_hdlc, crc32_iso_hdlc_raw, crc32_iso_hdlc_update};
 pub use codec::{Codec, CodecId};
 pub use error::OmnizipError;
 pub use hash::{djb2_32, djb2_32_tagged, fnv1a_32, fnv1a_32_tagged};
