@@ -98,6 +98,9 @@ the new items document the path forward.
 | 92 | [Track DCC 2026 proceedings quarterly](92-dcc-2026-tracking.md) | process |
 | 93 | [Track ZipServ GPU insights for future SIMD work](93-zipserv-insights.md) | process |
 | 95 | [Wire FSST/Rice++/FLAC/BLOSC/GLZA/Deflate64 into omnizip-bench](95-more-bench-codecs.md) | ⏳ |
+| 98 | [LPC subframe interop bug: LOST_SYNC on high-order LPC](98-lpc-interop-bug.md) | ⏳ |
+| 99 | [Differential harness: fix bzip2/lz4/DEFLATE framing gaps](99-framing-gaps.md) | ⏳ |
+| 100 | [Code review sweep: OCP/MECE/DRY improvements](100-code-review-sweep.md) | 🔄 |
 
 ## How to claim a TODO
 
