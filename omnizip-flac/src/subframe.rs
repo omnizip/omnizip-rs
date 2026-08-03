@@ -118,7 +118,7 @@ fn decode_fixed(
     }
 
     // Read Rice-coded residual.
-    let residual = rice::decode_residual(reader, block_size - order)?;
+    let residual = rice::decode_residual(reader, block_size, order as u32)?;
 
     // Apply fixed prediction to reconstruct samples.
     // FIXED prediction coefficients (from FLAC spec):
@@ -192,7 +192,7 @@ fn decode_lpc(
     }
 
     // Read Rice-coded residual.
-    let residual = rice::decode_residual(reader, block_size - order)?;
+    let residual = rice::decode_residual(reader, block_size, order as u32)?;
 
     // Apply LPC prediction.
     for (i, &res) in residual.iter().enumerate() {

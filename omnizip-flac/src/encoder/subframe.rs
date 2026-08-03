@@ -57,10 +57,10 @@ pub fn encode_subframe(
             for &s in &samples[..order as usize] {
                 writer.write_signed(i64::from(s), bps);
             }
-            rice::encode_residuals_best(writer, &residuals, bps)?;
+            rice::encode_residuals_best(writer, &residuals, samples.len(), u32::from(order), bps)?;
         }
         SubframeType::Lpc { solution } => {
-            crate::encoder::lpc::encode_from_solution(writer, &solution, bps)?;
+            crate::encoder::lpc::encode_from_solution(writer, &solution, samples.len(), bps)?;
         }
     }
 
@@ -94,9 +94,12 @@ fn choose_type(samples: &[i32], bps: u8) -> SubframeType {
     let fixed = best_fixed(samples, bps);
 
     // Compute the best LPC candidate (if block size allows).
-    // TEMPORARILY DISABLED: LPC encoding has a remaining interop bug
-    // against libFLAC (LOST_SYNC during decode). Falling back to
-    // FIXED-only until TODO 97 Phase 2B/3 isolates the issue.
+    //
+    // LPC subframes have a remaining interop bug against libFLAC
+    // (LOST_SYNC on some inputs with high LPC order). Multi-partition
+    // Rice coding is now fully fixed (Phase 2B done), so FIXED
+    // subframes achieve reasonable ratios. Re-enabling LPC is TODO 97
+    // Phase 3.
     let lpc: Option<crate::encoder::lpc::LpcSolution> = if false {
         crate::encoder::lpc::best_lpc_candidate(samples, bps)
     } else {
@@ -200,11 +203,11 @@ fn compute_fixed_residuals(samples: &[i32], order: u8) -> Vec<i32> {
 /// Estimate the bit cost of encoding `residuals` via partitioned Rice
 /// coding. Uses the actual best-partition-order search so the estimate
 /// matches what the encoder actually writes.
-fn fixed_cost(_len: usize, _bps: u8, _order: u8, residuals: &[i32]) -> u32 {
+fn fixed_cost(len: usize, _bps: u8, order: u8, residuals: &[i32]) -> u32 {
     if residuals.is_empty() {
         return 10;
     }
-    let (_, bits) = rice::best_partition_order(residuals);
+    let (_, bits) = rice::best_partition_order(residuals, len, u32::from(order));
     bits.min(u32::MAX as u64) as u32
 }
 
