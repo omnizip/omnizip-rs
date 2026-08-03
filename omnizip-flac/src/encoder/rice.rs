@@ -221,27 +221,32 @@ pub fn encode_residuals_best(
 }
 
 /// Choose the Rice parameter `k` (0..=14) that minimises encoded size.
+///
+/// Tries ALL k values (0..=14) and picks the one with the smallest
+/// actual bit count. This is what libFLAC does; the heuristic
+/// `floor(log2(mean/2))` approximation is slightly suboptimal.
 /// Returns 15 (escape) when the partition is empty.
 fn best_rice_parameter(partition: &[i32]) -> u8 {
     if partition.is_empty() {
         return 15;
     }
 
-    // Mean of the mapped (unsigned) residual values. Under the
-    // geometric-distribution assumption, the optimal k is:
-    //   k* = floor(log2(mean / 2))
-    let mut mapped_sum: u64 = 0;
-    for &r in partition {
-        mapped_sum += u64::from(map_to_unsigned(r));
-    }
-    let mean = mapped_sum / partition.len() as u64;
+    let mapped: Vec<u32> = partition.iter().map(|&r| map_to_unsigned(r)).collect();
 
-    if mean <= 1 {
-        return 0;
+    let mut best_k = 0u8;
+    let mut best_cost = u64::MAX;
+    for k in 0..=14u8 {
+        let mut cost: u64 = 0;
+        for &m in &mapped {
+            let q = m >> k;
+            cost += u64::from(q) + 1 + u64::from(k);
+        }
+        if cost < best_cost {
+            best_cost = cost;
+            best_k = k;
+        }
     }
-    let half_mean = mean / 2;
-    let k = if half_mean == 0 { 0 } else { 63 - half_mean.leading_zeros() };
-    k.clamp(0, 14) as u8
+    best_k
 }
 
 /// FLAC's signed-to-unsigned mapping:
