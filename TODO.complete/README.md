@@ -82,9 +82,9 @@ the new items document the path forward.
 
 | # | Title | Status |
 |---|-------|--------|
-| 80 | [ZPAQ: more context-mixing sub-models](80-zpaq-more-models.md) | ✅ |
-| 83 | [SIMD Huffman decode](83-simd-huffman-decode.md) | ⏳ (blocked on `std::simd` gather stabilisation) |
-| 84 | [Multi-byte FSE decoder](84-multibyte-fse.md) | ⏳ (multi-day algorithmic port) |
+| 80 | [ZPAQ: more context-mixing sub-models](80-zpaq-more-models.md) | ✅ (7-model Best portfolio incl. word-level; Fast/Default/Best selection via level) |
+| 83 | [SIMD Huffman decode](83-simd-huffman-decode.md) | 🚫 Blocked → see TODO 102 for unblock via `wide` crate |
+| 84 | [Multi-byte FSE decoder](84-multibyte-fse.md) | 🚫 Blocked → see TODO 103 for decoupled implementation |
 | 88 | [Architecture audit (OCP/MECE/DRY)](88-architecture-audit.md) | ✅ |
 | 89 | [Spec coverage analysis](89-spec-coverage.md) | ✅ |
 | 94 | [DRY CRC-32 migration to shared checksum module](94-dry-crc32-migration.md) | ✅ |
@@ -102,6 +102,11 @@ the new items document the path forward.
 | 99 | [Differential harness: fix bzip2/lz4/DEFLATE framing gaps](99-framing-gaps.md) | ✅ |
 | 100 | [Code review sweep: OCP/MECE/DRY improvements](100-code-review-sweep.md) | ✅ |
 | 101 | [ZSTD encoder: per-call hash-table allocation](101-zstd-encoder-reuse-hash-table.md) | ✅ (partial — hash_log cap landed; full compressor reuse deferred) |
+| 102 | [SIMD Huffman via `wide` crate](102-simd-huffman-wide.md) | ⏳ (unblocks TODO 83) |
+| 103 | [Multi-byte FSE — decoupled impl](103-multibyte-fse-unblocked.md) | ⏳ (unblocks TODO 84) |
+| 104 | [Libdeflate pure-Rust codec](104-libdeflate-codec.md) | ⏳ |
+| 105 | [FLAC LPC verification corpus](105-flac-lpc-finish.md) | ⏳ (omnizip-rs side; LimniFS provides corpus) |
+| 106 | [LZMA optimal parser: exact prices](106-lzma-optimal-parser-exact-prices.md) | ⏳ (TODO 64 completion) |
 
 ## How to claim a TODO
 
