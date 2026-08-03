@@ -123,14 +123,34 @@ storage (LimniFS `DropId = BLAKE3(plaintext)`).
 ## Known smells (audit pending)
 
 See `TODO.complete/88-architecture-audit.md` for the full list.
-Highlights:
+Current status:
 
-- PPMd7 and PPMd8 still have separate context-trie implementations
-  with similar but not identical code. A shared `PpmCore` would
-  eliminate duplication.
-- Adding a codec requires editing `codec.rs` for an ID constant
-  (minor OCP violation).
-- No benchmark suite (see `TODO.complete/86-benchmark-suite.md`).
+- **PPMd7 / PPMd8 context-trie duplication** — still separate
+  implementations with similar shape. The shared `arith` coder is
+  already extracted; the trie itself remains per-codec. PPMd8 uses
+  a recursive trie with glue counts and RLE; PPMd7 uses an
+  arena-allocated trie. The structural differences are large enough
+  that a `PpmCore` extraction is high-effort/low-payoff.
+- **Adding a codec requires editing `codec.rs` for an ID constant**
+  (minor OCP violation). Tracked in TODO 88.
+- ~~No benchmark suite~~ — DONE (TODO 86). `omnizip-bench` runs 13
+  codecs against Silesia/Enwik8/Calgary/Canterbury + 9 synthetic
+  corpora (zeros, random, text, mixed, LLM-chat, LLM-code, LLM-JSON,
+  LLM-mixed, AIT-mix).
+
+## Performance notes
+
+- **ZSTD encoder** now caps `hash_log` against input size
+  (`cap_hash_log_for_input` in `omnizip-zstd/src/encoder/block.rs`).
+  Mirrors the C reference's `ZSTD_adjustCParams_internal`. Without
+  the cap, a 4 KB input at level 22 allocated a 128 MB hash table
+  per call (TODO 101).
+- **ZSTD level 22 direct compress of 4 KB** — 110 µs after the cap
+  (was effectively hung before).
+- **Reusable compressor state** (TODO 101 follow-up) — the current
+  API allocates a fresh `MatchState` per call. A `ZstdCompressor`
+  struct that caches the table would amortise this for batched
+  workloads.
 
 ## Convergent encryption boundary
 

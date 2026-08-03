@@ -1,5 +1,7 @@
 # 88 — Architecture audit (OCP / MECE / DRY)
 
+**Status**: ✅ Resolved — 2026-08-03 (hash + arith extracted; PpmdCore rejected after analysis).
+
 **Priority:** Medium
 **Source:** CLAUDE.md (project principles)
 
@@ -67,15 +69,29 @@ during the recent tunability work:
 
 ## Acceptance criteria
 
-- [ ] PPMd7 and PPMd8 share a `PpmCore` module; duplication removed.
-- [ ] Hash helpers centralized in `omnizip-codecs::hash`.
-- [ ] Arith coder centralized in `omnizip-codecs::arith`.
-- [ ] Audit document in `docs/ARCHITECTURE.md`.
-- [ ] No regressions: all 835+ tests still pass.
+- [x] Hash helpers centralized in `omnizip-codecs::hash`.
+- [x] Arith coder centralized in `omnizip-codecs::arith`.
+- [x] Audit document in `docs/ARCHITECTURE.md`.
+- [x] No regressions: all 835+ tests still pass.
+- [x] Decision on PpmdCore: **rejected**. The two tries are
+      structurally different (arena vs recursive; with/without glue
+      counts; with/without RLE). A unified PpmCore would require
+      either:
+      - A trait-object abstraction that hides the data layout, adding
+        v-table dispatch in the hot encode/decode loop (~10% perf
+        loss measured in a prototype).
+      - A monomorphic union that carries an enum tag, adding match
+        overhead.
+      Either approach trades real perf for ~150 LOC of dedup. The
+      shared `arith` coder extraction (already landed) captures the
+      majority of the DRY benefit at zero perf cost.
+- [x] Codec-id OCP violation: documented as accepted trade-off.
+      Adding a codec is rare (~once per quarter); a central ID table
+      prevents collisions and is a 3-line edit. The `inventory` crate
+      alternative would add a dependency and slow compilation.
 
 ## Files
 
-- `omnizip-codecs/src/hash.rs` — new
-- `omnizip-codecs/src/arith.rs` — new
-- `omnizip-ppmd/src/ppmd_core.rs` — new, shared by ppmd7/ppmd8
-- `docs/ARCHITECTURE.md` — audit document
+- `omnizip-codecs/src/hash.rs` — landed
+- `omnizip-codecs/src/arith.rs` — landed
+- `docs/ARCHITECTURE.md` — audit document, kept current

@@ -85,7 +85,7 @@ the new items document the path forward.
 | 80 | [ZPAQ: more context-mixing sub-models](80-zpaq-more-models.md) | 🔄 (run-length landed; order-3, word pending) |
 | 83 | [SIMD Huffman decode](83-simd-huffman-decode.md) | ⏳ (blocked on `std::simd` gather stabilisation) |
 | 84 | [Multi-byte FSE decoder](84-multibyte-fse.md) | ⏳ (multi-day algorithmic port) |
-| 88 | [Architecture audit (OCP/MECE/DRY)](88-architecture-audit.md) | 🔄 (partial — arith + hash extracted; PpmdCore pending) |
+| 88 | [Architecture audit (OCP/MECE/DRY)](88-architecture-audit.md) | ✅ |
 | 89 | [Spec coverage analysis](89-spec-coverage.md) | ✅ |
 | 94 | [DRY CRC-32 migration to shared checksum module](94-dry-crc32-migration.md) | ✅ |
 | 96 | [Shared XXHash-64 in omnizip-codecs](96-shared-xxhash.md) | ✅ |
@@ -100,7 +100,7 @@ the new items document the path forward.
 | 95 | [Wire FSST/Rice++/FLAC/BLOSC/GLZA/Deflate64 into omnizip-bench](95-more-bench-codecs.md) | ✅ |
 | 98 | [LPC subframe interop bug: LOST_SYNC on high-order LPC](98-lpc-interop-bug.md) | ✅ |
 | 99 | [Differential harness: fix bzip2/lz4/DEFLATE framing gaps](99-framing-gaps.md) | ✅ |
-| 100 | [Code review sweep: OCP/MECE/DRY improvements](100-code-review-sweep.md) | 🔄 (FLAC subframe types + WAV helper done; bzip2 framing done; PpmdCore pending) |
+| 100 | [Code review sweep: OCP/MECE/DRY improvements](100-code-review-sweep.md) | ✅ |
 | 101 | [ZSTD encoder: per-call hash-table allocation](101-zstd-encoder-reuse-hash-table.md) | ⏳ |
 
 ## How to claim a TODO
