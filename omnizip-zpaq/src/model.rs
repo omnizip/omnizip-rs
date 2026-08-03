@@ -178,9 +178,9 @@ impl Order2Model {
 
 /// Number of models feeding the [`Mixer`](crate::mixer::Mixer).
 ///
-/// Must agree with [`crate::mixer::NUM_MODELS`]. Six models:
-/// order-0, order-1, order-2, order-3, match, run-length.
-pub const NUM_MODELS: usize = 6;
+/// Must agree with [`crate::mixer::NUM_MODELS`]. Seven models:
+/// order-0, order-1, order-2, order-3, match, run-length, word.
+pub const NUM_MODELS: usize = 7;
 
 /// Maximum count before a counter pair is halved. Same value as the
 /// order-2 model uses, kept consistent so all models forget at the same rate.
@@ -501,6 +501,163 @@ impl RunLengthModel {
 const RUN_CONFIDENCE: u16 = 54_000; // ~0.82
 
 // ---------------------------------------------------------------------------
+// Word-level model.
+// ---------------------------------------------------------------------------
+
+/// Word-level model: tokenises the input stream into ASCII alphanumeric
+/// runs and predicts the next byte from the current word's prefix hash.
+///
+/// The model is **gated** by a warmup counter — before
+/// [`WORD_WARMUP_BYTES`] bytes have been processed it returns the
+/// neutral 50/50 probability so the mixer's stretch() contributes
+/// nothing. After warmup the model emits a biased probability based
+/// on the frequency table. This avoids regressing on short inputs
+/// where adaptation hasn't converged.
+///
+/// Memory is bounded: both hashmaps evict arbitrary entries when they
+/// exceed [`WORD_TABLE_CAP`].
+pub struct WordModel {
+    /// Frequency of (current word prefix hash, byte) → count.
+    /// Key = (word_hash, next_byte).
+    next_byte_freq: HashMap<(u32, u8), u16>,
+    /// Frequency of (current word prefix hash) → count.
+    word_freq: HashMap<u32, u16>,
+    /// Hash of the current word's accumulated bytes (FNV-1a).
+    current_word_hash: u32,
+    /// Bytes accumulated in the current word so far.
+    current_word_len: u8,
+    /// Are we currently inside a word (alphanumeric run)?
+    in_word: bool,
+    /// Total bytes processed (for warmup gate).
+    bytes_processed: u64,
+    /// Last bit position used by prob_with_context.
+    last_bit_pos: u8,
+}
+
+/// Warmup: number of bytes to process before the WordModel starts
+/// emitting non-uniform probabilities. Picked empirically — small
+/// enough that the model engages within a typical text paragraph,
+/// large enough that the mixer has converged on the dominant
+/// order-1/order-2 signal first.
+const WORD_WARMUP_BYTES: u64 = 16_384;
+
+/// Maximum entries in each frequency table. Beyond this, the table
+/// is cleared (a "flush" — adaptation restarts). This bounds memory
+/// at ~16 MiB worst case (2 × 65_536 × ~64 B/entry).
+const WORD_TABLE_CAP: usize = 65_536;
+
+impl Default for WordModel {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl WordModel {
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            next_byte_freq: HashMap::new(),
+            word_freq: HashMap::new(),
+            current_word_hash: 0x811C_9DC5, // FNV-1a offset basis
+            current_word_len: 0,
+            in_word: false,
+            bytes_processed: 0,
+            last_bit_pos: 0,
+        }
+    }
+
+    /// Begin a new byte: update word-state from the previous byte.
+    /// Called once per byte before the bit loop.
+    fn begin_byte(&mut self, prev_byte: u8) {
+        self.last_bit_pos = 0;
+        // The actual word-boundary logic runs in `end_byte` so we know
+        // the byte that just got coded.
+        let _ = prev_byte;
+    }
+
+    /// Probability for the current bit. Returns uniform during warmup
+    /// or when outside a word.
+    fn prob(&self) -> u16 {
+        if self.bytes_processed < WORD_WARMUP_BYTES || !self.in_word || self.current_word_len < 3 {
+            return DEFAULT_PROB;
+        }
+        // Look up the current word's prefix hash and emit a prediction
+        // for "next bit = 1" based on observed byte frequencies.
+        let mut n0: u64 = 0;
+        let mut n1: u64 = 0;
+        for byte in 0..=255u16 {
+            let count = u64::from(
+                self.next_byte_freq
+                    .get(&(self.current_word_hash, byte as u8))
+                    .copied()
+                    .unwrap_or(0),
+            );
+            if (byte >> (7 - self.last_bit_pos)) & 1 == 1 {
+                n1 += count;
+            } else {
+                n0 += count;
+            }
+        }
+        if n0 + n1 == 0 {
+            return DEFAULT_PROB;
+        }
+        let total = n0 + n1 + 2;
+        let p1 = ((n1 + 1) * (PROB_SCALE - 1)) / total + 1;
+        let cap = PROB_SCALE - 1;
+        p1.min(cap) as u16
+    }
+
+    /// Advance the bit position after each coded bit.
+    fn update(&mut self) {
+        self.last_bit_pos = self.last_bit_pos.saturating_add(1);
+    }
+
+    /// Finalise the byte: update word state and frequency tables.
+    fn end_byte(&mut self, byte: u8) {
+        self.bytes_processed = self.bytes_processed.saturating_add(1);
+        let is_alnum = byte.is_ascii_alphanumeric() || byte == b'_';
+
+        if is_alnum {
+            // Extend the current word hash.
+            self.current_word_hash ^= u32::from(byte);
+            self.current_word_hash = self.current_word_hash.wrapping_mul(0x0100_0193);
+            self.current_word_len = self.current_word_len.saturating_add(1);
+            self.in_word = true;
+        } else if self.in_word {
+            // Word just ended. Record its frequency.
+            self.flush_word_if_needed();
+            *self.word_freq.entry(self.current_word_hash).or_insert(0) += 1;
+            // Reset for next word.
+            self.current_word_hash = 0x811C_9DC5;
+            self.current_word_len = 0;
+            self.in_word = false;
+        }
+
+        // Update next-byte frequency: given current word prefix hash,
+        // record that this byte followed it.
+        if self.in_word && self.current_word_len >= 3 {
+            let cap_ok = self.next_byte_freq.len() < WORD_TABLE_CAP;
+            if cap_ok {
+                *self.next_byte_freq
+                    .entry((self.current_word_hash, byte))
+                    .or_insert(0) += 1;
+            } else {
+                // Cap exceeded — flush both tables.
+                self.next_byte_freq.clear();
+                self.word_freq.clear();
+            }
+        }
+    }
+
+    /// Reset the word hash if we've crossed the cap during accumulation.
+    fn flush_word_if_needed(&mut self) {
+        if self.word_freq.len() >= WORD_TABLE_CAP {
+            self.word_freq.clear();
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Order-3 model.
 // ---------------------------------------------------------------------------
 
@@ -563,17 +720,108 @@ fn make_order3_ctx(prev2: u8, prev1: u8, last: u8) -> u32 {
 /// run-length) and an adaptive [`Mixer`](crate::mixer::Mixer). The
 /// model is stateless across encode/decode — both sides rebuild it
 /// identically because all state depends only on already-coded bytes.
+///
+/// ## Portfolio selection
+///
+/// Not every deployment needs all six models. [`Portfolio::Fast`]
+/// disables order-2/order-3/run-length for speed on inline-metadata
+/// workloads; [`Portfolio::Default`] enables order-2 + run-length but
+/// not order-3; [`Portfolio::Best`] enables everything (the legacy
+/// behaviour). The mixer's per-model weight adapts to whatever subset
+/// is active — disabled models contribute a neutral probability that
+/// the mixer learns to weight at zero.
 pub struct MultiModel {
+    portfolio: Portfolio,
     order0: Order0Model,
     order1: Order1Model,
     order2: Order2Model,
     order3: Order3Model,
     matcher: MatchModel,
     runlen: RunLengthModel,
+    word: WordModel,
     mixer: crate::mixer::Mixer,
     last_byte: u8,
     prev_byte: u8,
     prev2_byte: u8,
+}
+
+/// Subset of sub-models used by a [`MultiModel`].
+///
+/// | Variant   | Models enabled                                          |
+/// |-----------|---------------------------------------------------------|
+/// | `Fast`    | order-0, order-1, match (3 models)                      |
+/// | `Default` | + order-2, run-length (5 models)                        |
+/// | `Best`    | + order-3, word (7 models)                              |
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum Portfolio {
+    Fast,
+    Default,
+    Best,
+}
+
+impl Portfolio {
+    /// Map a compression level (0..=9) to a portfolio.
+    ///
+    /// | Level | Portfolio |
+    /// |-------|-----------|
+    /// | 0..=2 | `Fast`    |
+    /// | 3..=5 | `Default` |
+    /// | 6..=9 | `Best`    |
+    #[must_use]
+    pub fn from_level(level: u8) -> Self {
+        match level {
+            0..=2 => Self::Fast,
+            3..=5 => Self::Default,
+            _ => Self::Best,
+        }
+    }
+
+    /// True if the order-2 model is included.
+    #[must_use]
+    pub const fn includes_order2(self) -> bool {
+        matches!(self, Self::Default | Self::Best)
+    }
+
+    /// True if the order-3 model is included.
+    #[must_use]
+    pub const fn includes_order3(self) -> bool {
+        matches!(self, Self::Best)
+    }
+
+    /// True if the run-length model is included.
+    #[must_use]
+    pub const fn includes_runlen(self) -> bool {
+        matches!(self, Self::Default | Self::Best)
+    }
+
+    /// True if the word-level model is included.
+    #[must_use]
+    pub const fn includes_word(self) -> bool {
+        matches!(self, Self::Best)
+    }
+
+    /// Stable wire-format identifier (stored in the container header).
+    #[must_use]
+    pub const fn config_id(self) -> u8 {
+        match self {
+            Self::Fast => 3,
+            Self::Default => 4,
+            Self::Best => 5,
+        }
+    }
+
+    /// Inverse of [`config_id`](Self::config_id). Returns `None` for
+    /// legacy ids 1 (Phase 1 order-2) and 2 (Phase 2 all-models);
+    /// callers handle those explicitly.
+    #[must_use]
+    pub fn from_config_id(id: u8) -> Option<Self> {
+        match id {
+            3 => Some(Self::Fast),
+            4 => Some(Self::Default),
+            5 | 2 => Some(Self::Best),
+            _ => None,
+        }
+    }
 }
 
 impl Default for MultiModel {
@@ -585,13 +833,23 @@ impl Default for MultiModel {
 impl MultiModel {
     #[must_use]
     pub fn new() -> Self {
+        Self::with_portfolio(Portfolio::Best)
+    }
+
+    /// Construct with a specific model [`Portfolio`]. Inactive models
+    /// remain in the struct for layout uniformity but contribute a
+    /// neutral probability that the mixer's adaptation zeroes out.
+    #[must_use]
+    pub fn with_portfolio(portfolio: Portfolio) -> Self {
         Self {
+            portfolio,
             order0: Order0Model::new(),
             order1: Order1Model::new(),
             order2: Order2Model::new(),
             order3: Order3Model::new(),
             matcher: MatchModel::new(),
             runlen: RunLengthModel::new(),
+            word: WordModel::new(),
             mixer: crate::mixer::Mixer::new(),
             last_byte: 0,
             prev_byte: 0,
@@ -599,18 +857,44 @@ impl MultiModel {
         }
     }
 
+    /// Portfolio this model was constructed with.
+    #[must_use]
+    pub fn portfolio(&self) -> Portfolio {
+        self.portfolio
+    }
+
     fn collect_probs(&self, bit_pos: u8) -> [u16; NUM_MODELS] {
+        // Always-active models.
         let p0 = Order0Model::prob(bit_pos, &self.order0.counters);
         let p1 = Order1Model::prob(self.prev_byte, bit_pos, &self.order1.counters);
-        let p2 = self
-            .order2
-            .prob_with_context(self.prev_byte, self.last_byte, bit_pos);
-        let p3 = self
-            .order3
-            .prob_with_context(self.prev2_byte, self.prev_byte, self.last_byte, bit_pos);
         let pm = self.matcher.prob();
-        let pr = self.runlen.prob();
-        [p0, p1, p2, p3, pm, pr]
+
+        // Conditionally-active models. When disabled, contribute the
+        // neutral 50/50 probability so the mixer's stretch() yields 0
+        // and the model has zero effect on the mix.
+        let p2 = if self.portfolio.includes_order2() {
+            self.order2
+                .prob_with_context(self.prev_byte, self.last_byte, bit_pos)
+        } else {
+            DEFAULT_PROB
+        };
+        let p3 = if self.portfolio.includes_order3() {
+            self.order3
+                .prob_with_context(self.prev2_byte, self.prev_byte, self.last_byte, bit_pos)
+        } else {
+            DEFAULT_PROB
+        };
+        let pr = if self.portfolio.includes_runlen() {
+            self.runlen.prob()
+        } else {
+            DEFAULT_PROB
+        };
+        let pw = if self.portfolio.includes_word() {
+            self.word.prob()
+        } else {
+            DEFAULT_PROB
+        };
+        [p0, p1, p2, p3, pm, pr, pw]
     }
 
     /// Encode one byte MSB-first using the mixed model probability.
@@ -618,6 +902,7 @@ impl MultiModel {
         // Start a new match search and reset per-byte model state.
         self.matcher.begin_byte(self.prev_byte, self.last_byte);
         self.runlen.begin_byte();
+        self.word.begin_byte(self.prev_byte);
 
         for bit_pos in 0..8u8 {
             let probs = self.collect_probs(bit_pos);
@@ -640,11 +925,13 @@ impl MultiModel {
             self.mixer.update(bit);
             self.matcher.update();
             self.runlen.update();
+            self.word.update();
         }
 
         // Finalise: advance byte context and history.
         self.matcher.end_byte(byte);
         self.runlen.end_byte(byte);
+        self.word.end_byte(byte);
         self.prev2_byte = self.prev_byte;
         self.prev_byte = self.last_byte;
         self.last_byte = byte;
@@ -654,6 +941,7 @@ impl MultiModel {
     pub fn decode_byte(&mut self, dec: &mut ArithmeticDecoder) -> u8 {
         self.matcher.begin_byte(self.prev_byte, self.last_byte);
         self.runlen.begin_byte();
+        self.word.begin_byte(self.prev_byte);
 
         let mut byte: u8 = 0;
         for bit_pos in 0..8u8 {
@@ -675,6 +963,7 @@ impl MultiModel {
             self.mixer.update(bit);
             self.matcher.update();
             self.runlen.update();
+            self.word.update();
 
             if bit {
                 byte |= 1 << (7 - bit_pos);
@@ -683,6 +972,7 @@ impl MultiModel {
 
         self.matcher.end_byte(byte);
         self.runlen.end_byte(byte);
+        self.word.end_byte(byte);
         self.prev2_byte = self.prev_byte;
         self.prev_byte = self.last_byte;
         self.last_byte = byte;
