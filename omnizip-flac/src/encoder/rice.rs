@@ -30,6 +30,79 @@ const RICE_METHOD: u64 = 0;
 /// Escape parameter value for RICE (4-bit): signals raw storage.
 const RICE_ESCAPE: u64 = 0b1111;
 
+/// Maximum partition order tried by [`best_partition_order`].
+///
+/// libFLAC's default is 6 (== 64 partitions). Higher orders rarely
+/// help on real audio and increase per-partition k-header overhead.
+pub const MAX_PARTITION_ORDER: u8 = 6;
+
+/// Pick the partition order (0..=[`MAX_PARTITION_ORDER`]) that yields
+/// the smallest encoded bit count for `residuals`.
+///
+/// This is the libFLAC pattern: try every order, score each with the
+/// actual sum of `unary(q) + binary(r, k)` bits per residual (not a
+/// heuristic), and pick the cheapest.
+///
+/// Returns `(order, total_bits_including_header)`.
+#[must_use]
+pub fn best_partition_order(residuals: &[i32]) -> (u8, u64) {
+    let n = residuals.len();
+    if n == 0 {
+        return (0, 10);
+    }
+    let mut best_order = 0u8;
+    let mut best_bits = u64::MAX;
+    for order in 0..=MAX_PARTITION_ORDER {
+        let n_parts = 1usize << order;
+        if n_parts > n {
+            break;
+        }
+        let bits = encoded_bits_for_order(residuals, order);
+        if bits < best_bits {
+            best_bits = bits;
+            best_order = order;
+        }
+    }
+    (best_order, best_bits)
+}
+
+/// Compute the encoded bit count for `residuals` at a fixed `partition_order`.
+///
+/// Includes the 10-bit residual-section header.
+fn encoded_bits_for_order(residuals: &[i32], partition_order: u8) -> u64 {
+    let n_parts = 1usize << partition_order;
+    let n = residuals.len();
+    let samples_per_partition = (n + n_parts - 1) / n_parts;
+
+    let mut total: u64 = 10; // method (2) + partition_order (4) + reserved
+    let mut offset = 0usize;
+    for _ in 0..n_parts {
+        let end = (offset + samples_per_partition).min(n);
+        let part = &residuals[offset..end];
+        offset = end;
+        if part.is_empty() {
+            // libFLAC encodes escape for empty partitions in some cases;
+            // we treat as zero additional bits.
+            continue;
+        }
+        let k = best_rice_parameter(part);
+        total += 4; // k parameter field
+        if k >= 15 {
+            // Escape: 5-bit bps field + bps bits per residual. Use a
+            // large upper bound (32) since bps isn't known here.
+            total += 5;
+            total += 32 * part.len() as u64;
+        } else {
+            for &r in part {
+                let mapped = map_to_unsigned(r);
+                let q = mapped >> k;
+                total += u64::from(q) + 1 + u64::from(k);
+            }
+        }
+    }
+    total
+}
+
 /// Encode a partitioned Rice residual block.
 ///
 /// `residuals` is the full residual array (across all partitions).
@@ -90,6 +163,25 @@ pub fn encode_residuals(
     }
 
     Ok(())
+}
+
+/// Convenience: pick the best partition order and encode in one call.
+///
+/// Used by FIXED and LPC subframe encoders that don't have a reason
+/// to force a specific partition order. Returns the order that was
+/// used, for cost-estimation by the caller.
+///
+/// # Errors
+///
+/// See [`encode_residuals`].
+pub fn encode_residuals_best(
+    writer: &mut BitWriter,
+    residuals: &[i32],
+    bps: u8,
+) -> Result<u8, String> {
+    let (order, _) = best_partition_order(residuals);
+    encode_residuals(writer, residuals, order, bps)?;
+    Ok(order)
 }
 
 /// Choose the Rice parameter `k` (0..=14) that minimises encoded size.

@@ -108,7 +108,7 @@ pub fn encode_from_solution(
     }
 
     // Residual.
-    rice::encode_residuals(writer, &sol.residuals, 0, bps)?;
+    let _order_used = rice::encode_residuals_best(writer, &sol.residuals, bps)?;
 
     Ok(())
 }
@@ -197,15 +197,16 @@ fn levinson_durbin_quantise(acf: &[f64], order: usize, samples: &[i32]) -> Optio
 }
 
 /// Estimate the total bit cost of an LPC solution's residuals.
+///
+/// Uses the actual best-partition-order search so the estimate matches
+/// what the encoder writes — critical for the order/precision/shift
+/// DP to pick the actually-cheapest solution.
 fn estimate_residual_bits(residuals: &[i32]) -> u32 {
-    // Each Rice-coded residual ≈ log2(|r|+1) + 3 bits.
-    let mut total = 10u32; // rice header
-    for &r in residuals {
-        let mapped = ((r as u32) << 1) ^ ((r >> 31) as u32);
-        let bits = if mapped == 0 { 1 } else { 32 - mapped.leading_zeros() };
-        total = total.saturating_add(bits + 3);
+    if residuals.is_empty() {
+        return 10;
     }
-    total
+    let (_, bits) = rice::best_partition_order(residuals);
+    bits.min(u32::MAX as u64) as u32
 }
 
 /// Quantise LPC coefficients and compute residuals.
