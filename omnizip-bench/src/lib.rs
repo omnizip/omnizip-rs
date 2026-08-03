@@ -53,13 +53,17 @@ use omnizip_zstd::ZstdCodec;
 /// spread of compression levels; out-of-range levels are silently
 /// skipped by the runner (the codec returns `LevelOutOfRange`).
 ///
+/// ZSTD's default levels cap at 15 — levels 19/22 are blocked by
+/// TODO 101 (per-call hash-table allocation makes them take minutes
+/// per case). Drop the cap when TODO 101 lands.
+///
 /// This is the single place that enumerates codecs — the runner and
 /// reporters are codec-agnostic.
 #[must_use]
 pub fn default_codecs() -> Vec<BenchCodec> {
     vec![
         BenchCodec::new("lzma", Box::new(LzmaCodec), vec![0, 3, 6, 9]),
-        BenchCodec::new("zstd", Box::new(ZstdCodec), vec![1, 3, 6, 9, 12, 15, 19, 22]),
+        BenchCodec::new("zstd", Box::new(ZstdCodec), vec![1, 3, 6, 9, 12, 15]),
         BenchCodec::new("deflate", Box::new(DeflateCodec), vec![1, 6, 9]),
         BenchCodec::new("deflate64", Box::new(Deflate64Codec), vec![1, 6, 9]),
         BenchCodec::new("brotli", Box::new(BrotliCodec), vec![1, 6, 9, 11]),
