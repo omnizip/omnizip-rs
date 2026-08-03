@@ -84,9 +84,10 @@ fn deflate_round_trips_through_python_zlib() {
     let compressed = DeflateCodec
         .compress(&input, CompressionLevel::default())
         .expect("deflate encode");
-    // wbits = -15 means raw DEFLATE (no zlib/gzip framing).
-    match python_zlib_oracle_decode(&compressed, -15) {
-        Err(e) => eprintln!("[skip] python zlib error (framing gap?): {e}"),
+    // Our encoder produces zlib-wrapped DEFLATE (starts with 78 9C).
+    // wbits=47 = auto-detect (zlib or gzip or raw).
+    match python_zlib_oracle_decode(&compressed, 47) {
+        Err(e) => eprintln!("[skip] python zlib error: {e}"),
         Ok(None) => eprintln!("[skip] python3 not installed"),
         Ok(Some(out)) => assert_eq!(out.bytes, input, "python zlib decoded output != original"),
     }
