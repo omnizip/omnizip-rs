@@ -5,7 +5,10 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
 description = "Pure-Rust DEFLATE codec — wraps miniz_oxide behind the omnizip Codec trait"
+keywords = ["compression", "deflate", "zlib", "gzip"]
+categories = ["compression"]
 
 [lib]
 name = "omnizip_deflate"

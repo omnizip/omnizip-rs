@@ -7,6 +7,8 @@ license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 description = "Pure-Rust PPMd text compression codec (PPM with escape, binary arithmetic coder)"
+keywords = ["compression", "ppmd", "ppm", "arithmetic-coding"]
+categories = ["compression"]
 
 [dependencies]
 omnizip-codecs.workspace = true
