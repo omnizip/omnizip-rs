@@ -47,7 +47,7 @@
 // `omnizip_codecs::arith`. We re-import it here under the same names
 // so the rest of this file reads naturally.
 
-use omnizip_codecs::arith::{scaled_prob, ArithDecoder, ArithEncoder, PROB_SCALE};
+use omnizip_codecs::arith::{scaled_prob, ArithDecoder, ArithEncoder};
 
 // ── Bit probability model ───────────────────────────────────────────
 
@@ -61,10 +61,12 @@ impl BitModel {
     const fn new() -> Self {
         Self { n0: 1, n1: 1 }
     }
+    #[allow(dead_code)]
     fn prob1(self) -> u16 {
         let t = u32::from(self.n0) + u32::from(self.n1);
         (((u32::from(self.n1) << 16) + t / 2) / t).clamp(1, 65535) as u16
     }
+    #[allow(dead_code)]
     fn update(&mut self, bit: bool) {
         if bit {
             self.n1 = self.n1.saturating_add(1);
@@ -131,6 +133,7 @@ impl Ppmd8Context {
 
     /// Halve all frequencies (floor at 1) and recompute total. Used
     /// during rescale to free statistical weight when counts saturate.
+    #[allow(dead_code)]
     fn rescale_freqs(&mut self) {
         let mut new_total: u32 = 0;
         for (_, f) in self.freqs.iter_mut() {
@@ -188,6 +191,7 @@ pub struct Ppmd8Model {
     /// This is where the arithmetic-coder probabilities live — same
     /// design as the PPMd7 model.
     models: Vec<BitModel>,
+    #[allow(dead_code)]
     table_mask: usize,
     /// Number of RESTART restoration events that have fired.
     restart_count: u32,
@@ -282,6 +286,7 @@ impl Ppmd8Model {
         (buf, len)
     }
 
+    #[allow(dead_code)]
     fn ctx_hash(&self) -> u32 {
         let len = self.history.len().min(self.max_order);
         if len == 0 {

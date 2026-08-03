@@ -52,7 +52,7 @@
     clippy::doc_markdown
 )]
 
-use super::context_tree::{ContextTree, NodeId};
+use super::context_tree::ContextTree;
 use omnizip_codecs::arith::{scaled_prob, ArithDecoder, ArithEncoder, PROB_SCALE};
 
 // ── PPM model ───────────────────────────────────────────────────────
