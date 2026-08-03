@@ -8,6 +8,7 @@
 #![forbid(unsafe_code)]
 
 use crate::LzmaError;
+use super::alone::LzmaOptions;
 
 /// Default LZMA parameters (matches lzip/xz-utils defaults).
 const DEFAULT_LC: u32 = 3;
@@ -22,6 +23,26 @@ const MAX_CHUNK_UNCOMPRESSED: usize = (1 << 21) - 1;
 /// chunk with state reset at the start (level 3 = full reset for the
 /// first chunk).
 pub fn encode_lzma2_stream(input: &[u8]) -> Result<Vec<u8>, LzmaError> {
+    encode_lzma2_stream_with_options(input, &LzmaOptions::default())
+}
+
+/// Compress `input` as an LZMA2 stream with explicit LZMA parameters
+/// (lc, lp, pb). The `dict_size` field of `options` is used for
+/// validation only — LZMA2 chunks always use the encoder's internal
+/// dict size, which is fixed by `MAX_CHUNK_UNCOMPRESSED`.
+///
+/// # Errors
+///
+/// Returns [`LzmaError::Corrupt`] on parameter validation failure.
+pub fn encode_lzma2_stream_with_options(
+    input: &[u8],
+    options: &LzmaOptions,
+) -> Result<Vec<u8>, LzmaError> {
+    options.validate()?;
+    let lc = options.lc;
+    let lp = options.lp;
+    let pb = options.pb;
+    let use_optimal = options.use_optimal_parser;
     let mut out = Vec::new();
 
     if input.is_empty() {
@@ -37,16 +58,13 @@ pub fn encode_lzma2_stream(input: &[u8]) -> Result<Vec<u8>, LzmaError> {
         let chunk_size = remaining.min(MAX_CHUNK_UNCOMPRESSED);
         let chunk = &input[offset..offset + chunk_size];
 
-        // Encode chunk via Lzma1Encoder (which includes EOPM internally
-        // for known-size encoding we can skip EOPM, but for simplicity
-        // we always emit it — the LZMA2 decoder knows the chunk size
-        // and stops accordingly).
-        let encoder = crate::encoder::Lzma1Encoder::new(DEFAULT_LC, DEFAULT_LP, DEFAULT_PB);
-        let compressed = encoder.encode(chunk);
+        let encoder = crate::encoder::Lzma1Encoder::new(lc, lp, pb);
+        let compressed = if use_optimal {
+            encoder.encode_optimal(chunk)
+        } else {
+            encoder.encode(chunk)
+        };
 
-        // Per LZMA2 spec, the compressed-size field excludes the
-        // 5-byte range-coder flush. `bytes_for_decode` gives us the
-        // pre-flush position.
         let usable_compressed_size = compressed.len().saturating_sub(5);
         if usable_compressed_size > u16::MAX as usize {
             return Err(LzmaError::Corrupt {
@@ -55,12 +73,9 @@ pub fn encode_lzma2_stream(input: &[u8]) -> Result<Vec<u8>, LzmaError> {
                 ),
             });
         }
-        let u_size = chunk_size - 1; // spec encodes size-1 in 21 bits
-        let c_size = usable_compressed_size - 1; // spec encodes size-1 in 16 bits
+        let u_size = chunk_size - 1;
+        let c_size = usable_compressed_size - 1;
 
-        // Control byte: 0x80 | (reset_level << 5) | (u_size >> 16).
-        // First chunk uses reset_level=3 (state + props + dict).
-        // Subsequent chunks use reset_level=0.
         let reset_level: u8 = if first_chunk { 3 } else { 0 };
         let control: u8 = 0x80
             | (reset_level << 5)
@@ -69,13 +84,11 @@ pub fn encode_lzma2_stream(input: &[u8]) -> Result<Vec<u8>, LzmaError> {
         out.extend_from_slice(&((u_size & 0xFFFF) as u16).to_be_bytes());
         out.extend_from_slice(&((c_size & 0xFFFF) as u16).to_be_bytes());
 
-        // For reset_level >= 2, emit properties byte.
         if reset_level >= 2 {
-            let props = (DEFAULT_LC + 9 * DEFAULT_LP + 45 * DEFAULT_PB) as u8;
+            let props = (lc + 9 * lp + 45 * pb) as u8;
             out.push(props);
         }
 
-        // Emit only the bytes_for_decode portion (exclude flush padding).
         out.extend_from_slice(&compressed[..usable_compressed_size]);
 
         offset += chunk_size;

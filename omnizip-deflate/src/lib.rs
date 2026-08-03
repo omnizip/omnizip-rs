@@ -22,15 +22,51 @@ pub enum DeflateFormat {
     Gzip,
 }
 
+/// DEFLATE compression strategy (matches zlib's `Z_*` constants).
+///
+/// Selectable via [`DeflateOptions::strategy`]. Different strategies
+/// favour different match-finder heuristics; some inputs compress
+/// better with `Filtered` (e.g. structured data with many short
+/// matches) or `HuffmanOnly` (high-entropy input).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum DeflateStrategy {
+    /// Standard LZ77 + Huffman. Default.
+    #[default]
+    Default,
+    /// Only use matches ≥5 bytes. Better for structured data
+    /// (e.g. tables, code with predictable structure).
+    Filtered,
+    /// Huffman-only — skip LZ77. Fastest on high-entropy input.
+    HuffmanOnly,
+    /// Run-length only — only matches at distance 1.
+    Rle,
+    /// Fixed Huffman codes only (no dynamic tables).
+    Fixed,
+}
+
+impl DeflateStrategy {
+    fn as_miniz_const(self) -> miniz_oxide::deflate::core::CompressionStrategy {
+        use miniz_oxide::deflate::core::CompressionStrategy;
+        match self {
+            Self::Default => CompressionStrategy::Default,
+            Self::Filtered => CompressionStrategy::Filtered,
+            Self::HuffmanOnly => CompressionStrategy::HuffmanOnly,
+            Self::Rle => CompressionStrategy::RLE,
+            Self::Fixed => CompressionStrategy::Fixed,
+        }
+    }
+}
+
 /// User-tunable DEFLATE options.
 ///
 /// ```rust
-/// use omnizip_deflate::{DeflateCodec, DeflateFormat, DeflateOptions};
+/// use omnizip_deflate::{DeflateCodec, DeflateFormat, DeflateOptions, DeflateStrategy};
 /// use omnizip_codecs::Codec;
 ///
 /// let opts = DeflateOptions {
 ///     level: 9,
 ///     format: DeflateFormat::Gzip,
+///     strategy: DeflateStrategy::Filtered,
 /// };
 /// let input = b"hello".repeat(100);
 /// let bytes = DeflateCodec.compress_with_options(&input, opts).unwrap();
@@ -41,6 +77,8 @@ pub struct DeflateOptions {
     pub level: u8,
     /// Output framing format.
     pub format: DeflateFormat,
+    /// Match-finder strategy.
+    pub strategy: DeflateStrategy,
 }
 
 impl Default for DeflateOptions {
@@ -48,6 +86,7 @@ impl Default for DeflateOptions {
         Self {
             level: 6,
             format: DeflateFormat::Zlib,
+            strategy: DeflateStrategy::Default,
         }
     }
 }
@@ -62,7 +101,7 @@ impl DeflateCodec {
         Self
     }
 
-    /// Compress with explicit user-tunable options (level + format).
+    /// Compress with explicit user-tunable options (level + format + strategy).
     ///
     /// # Errors
     ///
@@ -72,8 +111,7 @@ impl DeflateCodec {
         plaintext: &[u8],
         options: DeflateOptions,
     ) -> Result<Vec<u8>, OmnizipError> {
-        let miniz_level = clamp_level(CompressionLevel::new(options.level));
-        let body = miniz_oxide::deflate::compress_to_vec(plaintext, miniz_level);
+        let body = compress_deflate_with_strategy(plaintext, options.level, options.strategy);
         Ok(match options.format {
             DeflateFormat::Raw => body,
             DeflateFormat::Zlib => wrap_zlib(plaintext, &body),
@@ -124,6 +162,72 @@ fn clamp_level(level: CompressionLevel) -> u8 {
         n if n <= 9 => n,
         _ => 6,
     }
+}
+
+/// Compress raw DEFLATE body using miniz_oxide's lower-level API to
+/// expose the strategy parameter. Falls back to the public
+/// `compress_to_vec` when strategy is `Default`.
+fn compress_deflate_with_strategy(
+    plaintext: &[u8],
+    level: u8,
+    strategy: DeflateStrategy,
+) -> Vec<u8> {
+    if strategy == DeflateStrategy::Default {
+        // Fast path — use the public API (identical output, no callback overhead).
+        let miniz_level = clamp_level(CompressionLevel::new(level));
+        return miniz_oxide::deflate::compress_to_vec(plaintext, miniz_level);
+    }
+
+    use miniz_oxide::deflate::core::{
+        compress_to_output, create_comp_flags_from_zip_params, CompressorOxide, TDEFLFlush,
+        TDEFLStatus,
+    };
+
+    let level_i32 = i32::from(clamp_level(CompressionLevel::new(level)));
+    let strategy_i32 = i32::from(strategy.as_miniz_const());
+    let flags = create_comp_flags_from_zip_params(level_i32, 0, strategy_i32);
+    let mut compressor = CompressorOxide::new(flags);
+    let mut out = Vec::with_capacity(plaintext.len());
+    let mut consumed = 0;
+    let in_buf = plaintext;
+    // Cap iterations to avoid pathological loops on misbehaving input.
+    for _ in 0..1_000_000 {
+        let mut chunk_out: Vec<u8> = Vec::with_capacity(64 * 1024);
+        let (status, in_consumed) = compress_to_output(
+            &mut compressor,
+            &in_buf[consumed..],
+            TDEFLFlush::Finish,
+            |bytes: &[u8]| {
+                chunk_out.extend_from_slice(bytes);
+                true
+            },
+        );
+        out.extend_from_slice(&chunk_out);
+        consumed += in_consumed;
+        if status == TDEFLStatus::Done {
+            return out;
+        }
+        if status == TDEFLStatus::BadParam || status == TDEFLStatus::PutBufFailed {
+            // Fallback to default strategy.
+            return miniz_oxide::deflate::compress_to_vec(
+                plaintext,
+                clamp_level(CompressionLevel::new(level)),
+            );
+        }
+        if in_consumed == 0 {
+            // No progress in this iteration — bail to avoid infinite loop.
+            return miniz_oxide::deflate::compress_to_vec(
+                plaintext,
+                clamp_level(CompressionLevel::new(level)),
+            );
+        }
+        if consumed >= in_buf.len() {
+            // All input consumed; one more Finish call to flush should
+            // have produced Done. If not, break to avoid infinite loop.
+            return out;
+        }
+    }
+    out
 }
 
 /// Wrap a raw DEFLATE body in a zlib header/trailer.

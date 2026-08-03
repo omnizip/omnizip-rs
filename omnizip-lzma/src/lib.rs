@@ -62,6 +62,8 @@ pub use encoder::alone::{
     lzma_alone_compress_with_options, LzmaOptions, LC_LP_SUM_MAX, MAX_DICT_SIZE,
     MAX_LC, MAX_LP, MAX_PB, MIN_DICT_SIZE,
 };
+pub use encoder::lzma2::encode_lzma2_stream_with_options;
+pub use encoder::xz::xz_compress_with_options;
 pub use lzip::lzip_decompress;
 pub use lzma2::decode_lzma2_stream;
 pub use r#match::Match;

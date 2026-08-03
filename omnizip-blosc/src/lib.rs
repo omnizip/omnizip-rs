@@ -237,6 +237,32 @@ pub fn decompress(compressed: &[u8]) -> Result<Vec<u8>, OmnizipError> {
 /// the other omnizip-rs codecs.
 pub struct BloscCodec;
 
+impl BloscCodec {
+    /// Construct a `BloscCodec`.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self
+    }
+
+    /// Compress with explicit user-tunable options (item size, shuffle mode).
+    ///
+    /// Thin wrapper over the free function [`compress`] that documents
+    /// the tunable surface in one place. Same as calling `compress()`
+    /// directly.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`OmnizipError::Corrupt`] if `item_size` is invalid.
+    pub fn compress_with_options(
+        &self,
+        plaintext: &[u8],
+        item_size: u8,
+        shuffle: ShuffleMode,
+    ) -> Result<Vec<u8>, OmnizipError> {
+        compress(plaintext, item_size, shuffle)
+    }
+}
+
 impl Codec for BloscCodec {
     fn id(&self) -> CodecId {
         CodecId::BLOSC
