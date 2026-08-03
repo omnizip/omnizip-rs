@@ -94,13 +94,7 @@ fn choose_type(samples: &[i32], bps: u8) -> SubframeType {
     let fixed = best_fixed(samples, bps);
 
     // Compute the best LPC candidate (if block size allows).
-    //
-    // LPC subframes have a remaining interop bug against libFLAC
-    // (LOST_SYNC on some inputs with high LPC order). Multi-partition
-    // Rice coding is now fully fixed (Phase 2B done), so FIXED
-    // subframes achieve reasonable ratios. Re-enabling LPC is TODO 97
-    // Phase 3.
-    let lpc: Option<crate::encoder::lpc::LpcSolution> = if false {
+    let lpc: Option<crate::encoder::lpc::LpcSolution> = if samples.len() >= 64 {
         crate::encoder::lpc::best_lpc_candidate(samples, bps)
     } else {
         None

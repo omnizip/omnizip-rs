@@ -194,19 +194,21 @@ fn decode_lpc(
     // Read Rice-coded residual.
     let residual = rice::decode_residual(reader, block_size, order as u32)?;
 
-    // Apply LPC prediction.
+    // Apply LPC prediction. Per FLAC spec: coeff[j] multiplies the
+    // sample at position (current - 1 - j), i.e. coeff[0] = most recent.
+    // Uses i32 wrapping arithmetic to match libFLAC's decoder exactly.
     for (i, &res) in residual.iter().enumerate() {
-        let mut predicted: i64 = 0;
-        let warmup_base = i;
+        let sample_idx = order + i;
+        let mut predicted: i32 = 0;
         for (j, &coeff) in coeffs.iter().enumerate() {
-            predicted += i64::from(coeff) * i64::from(samples[warmup_base + j]);
+            predicted = predicted.wrapping_add(coeff.wrapping_mul(samples[sample_idx - 1 - j]));
         }
-        if lpc_shift >= 0 {
-            predicted >>= lpc_shift;
+        let predicted_shifted = if lpc_shift >= 0 {
+            predicted >> lpc_shift
         } else {
-            predicted <<= (-lpc_shift) as u32;
-        }
-        let reconstructed = (predicted + i64::from(res)) as i32;
+            predicted << (-lpc_shift)
+        };
+        let reconstructed = predicted_shifted.wrapping_add(res);
         samples.push(reconstructed);
     }
 
