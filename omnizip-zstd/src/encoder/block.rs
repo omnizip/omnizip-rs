@@ -23,6 +23,30 @@ use crate::ZstdError;
 /// avoid edge cases where some decoders reject exactly-128KiB blocks.
 pub(crate) const BLOCK_MAX_SIZE: usize = 127 * 1024;
 
+/// Minimum hash log (matches ZSTD's HASH_LOG_MIN).
+const HASH_LOG_MIN: u32 = 6;
+/// Maximum hash log (matches ZSTD's HASH_LOG_MAX_32).
+const HASH_LOG_MAX: u32 = 25;
+
+/// Cap the requested hash_log based on input size, mirroring
+/// `ZSTD_adjustCParams_internal` in the C reference. The "default"
+/// table assumes input ≥ 256 KB; for smaller inputs we shrink the
+/// hash table so allocation cost (and zero-init cost) doesn't dominate.
+///
+/// Rule of thumb: hash table size never exceeds the input size. For a
+/// 4 KB input, this caps hash_log at 12 (4 KB table) instead of 25
+/// (128 MB table).
+fn cap_hash_log_for_input(hash_log: u32, input_len: usize) -> u32 {
+    if input_len == 0 {
+        return HASH_LOG_MIN;
+    }
+    // floor(log2(input_len)) — the largest hash table worth allocating
+    // for this input size.
+    let input_log = u32::try_from(64 - (input_len as u64).leading_zeros().saturating_sub(1))
+        .unwrap_or(HASH_LOG_MIN);
+    hash_log.min(input_log).max(HASH_LOG_MIN).min(HASH_LOG_MAX)
+}
+
 /// Encode `plaintext` as a complete ZSTD frame with compressed blocks.
 ///
 /// Compressed block encoder: match finder + FSE sequences + Huffman/Raw literals.
@@ -36,7 +60,8 @@ pub fn encode_frame_compressed(
     plaintext: &[u8],
     level: u8,
 ) -> Result<Vec<u8>, ZstdError> {
-    let params = crate::encoder::cparams::get_params(level);
+    let mut params = crate::encoder::cparams::get_params(level);
+    params.hash_log = cap_hash_log_for_input(params.hash_log, plaintext.len());
     let mut out = Vec::with_capacity(plaintext.len() / 2 + 64);
     let mut match_state = MatchState::new(params.hash_log);
 
@@ -106,7 +131,8 @@ pub fn encode_frame_with_dict(
     };
 
     let dict_content = dict.content();
-    let params = crate::encoder::cparams::get_params(level);
+    let mut params = crate::encoder::cparams::get_params(level);
+    params.hash_log = cap_hash_log_for_input(params.hash_log, dict_content.len() + plaintext.len());
 
     // Virtual stream: dict_content ++ plaintext. Match positions are
     // absolute within this buffer.
