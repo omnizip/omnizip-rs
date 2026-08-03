@@ -14,13 +14,17 @@
 #![forbid(unsafe_code)]
 #![warn(clippy::pedantic)]
 
+mod hc;
+
 use omnizip_codecs::{Codec, CodecId, CompressionLevel, OmnizipError};
 
 /// LZ4 fast codec. Wraps `lz4_flex::compress_prepend_size`.
 pub struct Lz4FastCodec;
 
-/// LZ4 high-compression codec. Wraps `lz4_flex::compress_prepend_size`
-/// with the HC match finder. Same decode path as [`Lz4FastCodec`].
+/// LZ4 high-compression codec. Uses an in-house hash-chain match
+/// finder + lazy parsing (see [`hc`]). Same decode path as
+/// [`Lz4FastCodec`] — produces LZ4 block-format bytes that any
+/// LZ4 decoder can read.
 pub struct Lz4HcCodec;
 
 impl Codec for Lz4FastCodec {
@@ -54,7 +58,14 @@ impl Codec for Lz4HcCodec {
         plaintext: &[u8],
         _level: CompressionLevel,
     ) -> Result<Vec<u8>, OmnizipError> {
-        Ok(lz4_flex::compress_prepend_size(plaintext))
+        // LZ4 HC: same wire format as fast LZ4 but with hash-chain match
+        // finder + lazy parsing. Implemented in-house because lz4_flex
+        // 0.11 doesn't ship HC.
+        let compressed = hc::compress(plaintext);
+        let mut out = Vec::with_capacity(4 + compressed.len());
+        out.extend_from_slice(&(plaintext.len() as u32).to_le_bytes());
+        out.extend_from_slice(&compressed);
+        Ok(out)
     }
     fn decompress(&self, compressed: &[u8], expected_len: u32) -> Result<Vec<u8>, OmnizipError> {
         decompress_lz4(compressed, expected_len, CodecId::LZ4_HC)
@@ -179,5 +190,32 @@ mod tests {
             .compress(&data, CompressionLevel::default())
             .expect("fast");
         assert!(fast.len() < data.len());
+    }
+
+    /// Regression: HC must actually use the HC match finder and produce
+    /// different output than fast. Prior to this fix, both codecs called
+    /// `compress_prepend_size` and produced identical bytes.
+    #[test]
+    fn hc_produces_different_output_than_fast() {
+        // Mixed text + binary input where the HC match finder's deeper
+        // search finds longer/optimal matches than fast's first-match heuristic.
+        let mut data: Vec<u8> = Vec::new();
+        for i in 0..5_000u32 {
+            data.extend_from_slice(b"the quick brown fox jumps over the lazy dog ");
+            data.push((i & 0xFF) as u8);
+        }
+        let fast = Lz4FastCodec
+            .compress(&data, CompressionLevel::default())
+            .expect("fast");
+        let hc = Lz4HcCodec
+            .compress(&data, CompressionLevel::default())
+            .expect("hc");
+        // HC should find longer matches and produce smaller output.
+        assert!(
+            hc.len() < fast.len(),
+            "HC must beat fast on repetitive text; hc={} fast={}",
+            hc.len(),
+            fast.len()
+        );
     }
 }
