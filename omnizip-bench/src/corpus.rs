@@ -147,16 +147,10 @@ pub fn known_corpora() -> &'static [CorpusSpec] {
             url: "http://mattmahoney.net/dc/enwik8.zip",
             files: &["enwik8"],
         },
-        CorpusSpec {
-            name: "ait2026",
-            description: "2026 Algorithmic Information Theory Challenge corpus (placeholder)",
-            approx_size: 50_000_000,
-            // TODO: replace with the official URL once the challenge
-            // organisers publish the public training corpus. See
-            // RESEARCH.md §12 (arXiv:2606.17712).
-            url: "https://example.com/ait2026.zip",
-            files: &["ait2026_corpus.bin"],
-        },
+        // NOTE: AIT 2026 corpus (TODO 90) is exposed as a synthetic
+        // `ait-mix` in `synthetic.rs` — see TODO 90 for context. Once
+        // the official zip is released, replace this spec with the
+        // real URL.
     ]
 }
 
