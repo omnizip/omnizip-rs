@@ -1,7 +1,49 @@
 # 86 — Benchmark suite (Silesia + Enwik8 + Calgary)
 
-**Priority:** High
+**Priority:** High — ✅ **DONE**
 **Source:** RESEARCH.md §9 (no benchmarks today)
+
+## Status
+
+`omnizip-bench` crate landed as a workspace member. Runs every
+registered codec against standard corpora, produces ratio +
+encode/decode throughput numbers, and verifies determinism + round-
+trip correctness on every case.
+
+## Architecture
+
+Three MECE layers, dependencies always downward:
+
+1. **`case`** — `BenchCodec`, `BenchmarkResult`, `CodecError` (pure data)
+2. **`corpus`** — `Corpus`, `CorpusFile`, downloader, `known_corpora()`
+3. **`synthetic`** — in-process corpora (zeros/random/text/mixed) for CI
+4. **`runner`** — orchestrates `(codec, level, file)` → `BenchmarkResult`
+5. **`report`** — `Reporter` trait with CSV / JSON / Markdown impls
+
+Open/closed: adding a codec = one entry in `default_codecs()`. Adding
+a corpus = one entry in `known_corpora()`. Adding a reporter = one
+`impl Reporter`. The runner never changes.
+
+## Corpora wired
+
+- `calgary` / `canterbury` — download from corpus.canterbury.ac.nz
+- `silesia` — download from sun.aei.polsl.pl
+- `enwik8` — download from mattmahoney.net
+- `ait2026` — placeholder URL (real URL pending; see TODO 90)
+- Synthetic: `zeros`, `random`, `text`, `mixed` (no network)
+
+## Usage
+
+```bash
+cargo run -p omnizip-bench --release -- --synthetic 4096
+cargo run -p omnizip-bench --release -- --corpus calgary
+cargo run -p omnizip-bench --release -- --codec zstd,lzma --level 3,6,9 --corpus calgary --format json
+```
+
+## Tests
+
+14 unit tests pass: corpus model, runner orchestration, reporter
+formats, synthetic corpora, edge cases.
 
 ## Context
 

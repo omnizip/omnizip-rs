@@ -37,3 +37,34 @@ Memory cost: ~16x the level-1 table size. For ZSTD this is ~64 KB.
 
 - `omnizip-zstd/src/fse/interleaved.rs` — new multi-byte decoder
 - `omnizip-zstd/src/fse/mod.rs` — dispatch on table size
+
+## Sequencing
+
+- **Pre-req:** complete `TODO.complete/87-differential-harness.md`
+  first. The current FSE decoder has subtle correctness corner cases
+  (we already fixed one — see commit history of
+  `omnizip-zstd/src/fse/`). Multi-byte decode doubles the surface
+  area for bugs; we need the differential harness to validate.
+- Do **after** TODO 83 (SIMD Huffman). Multi-byte FSE is more
+  complex; landing the simpler SIMD win first builds confidence.
+
+## Effort estimate
+
+- 5-7 days. The level-2 table generator is fiddly; correctness
+  verification against the C reference is essential.
+
+## Risks
+
+- The paper's ~30% throughput figure is on synthetic inputs. Real
+  ZSTD frames may show smaller gains depending on table size
+  distribution.
+- Renormalisation math is easy to get wrong. Use the C reference's
+  `FSE_decompress_wksp` as the oracle.
+
+## References
+
+- ACM (2024). *Efficient and Portable ANS Encoding for Multi-Byte
+  Integer Sequences.* https://dl.acm.org/doi/10.1145/3712285.3759825
+- Kosolobov, D. (2022). *Efficiency of ANS Entropy Encoders.*
+  https://arxiv.org/pdf/2201.02514
+

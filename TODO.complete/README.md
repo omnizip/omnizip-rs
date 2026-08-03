@@ -71,26 +71,30 @@ the new items document the path forward.
 
 | # | Title | Status |
 |---|-------|--------|
-| 81 | [ZSTD dictionary trainer (FastCover)](81-zstd-dict-trainer.md) | ⏳ |
-| 82 | [SIMD CRC-32 / XXHash-64](82-simd-crc32-xxhash.md) | ⏳ |
-| 86 | [Benchmark suite (Silesia/Enwik8/Calgary)](86-benchmark-suite.md) | ⏳ |
+| 81 | [ZSTD dictionary trainer (FastCover)](81-zstd-dict-trainer.md) | ✅ |
+| 82 | [SIMD CRC-32 / XXHash-64](82-simd-crc32-xxhash.md) | ✅ |
+| 86 | [Benchmark suite (Silesia/Enwik8/Calgary)](86-benchmark-suite.md) | ✅ |
 | 87 | [Differential parity harness vs C/Ruby refs](87-differential-harness.md) | ⏳ |
 
 ## Medium priority
 
 | # | Title | Status |
 |---|-------|--------|
-| 80 | [ZPAQ: more context-mixing sub-models](80-zpaq-more-models.md) | ⏳ |
+| 80 | [ZPAQ: more context-mixing sub-models](80-zpaq-more-models.md) | 🔄 (run-length landed; order-3, word pending) |
 | 83 | [SIMD Huffman decode](83-simd-huffman-decode.md) | ⏳ |
 | 84 | [Multi-byte FSE decoder](84-multibyte-fse.md) | ⏳ |
-| 88 | [Architecture audit (OCP/MECE/DRY)](88-architecture-audit.md) | ⏳ |
+| 88 | [Architecture audit (OCP/MECE/DRY)](88-architecture-audit.md) | 🔄 (partial — arith + hash extracted; PpmdCore pending) |
 | 89 | [Spec coverage analysis](89-spec-coverage.md) | ⏳ |
+| 90 | [Add AIT 2026 corpus to benchmark](90-ait-2026-corpus.md) | ⏳ |
+| 91 | [Add LLM-generated text corpus to benchmark](91-llm-generated-corpus.md) | ⏳ |
 
 ## Low priority
 
 | # | Title | Status |
 |---|-------|--------|
-| 85 | [Document convergent-encryption boundary](85-convergent-encryption-note.md) | ⏳ |
+| 85 | [Document convergent-encryption boundary](85-convergent-encryption-note.md) | ✅ |
+| 92 | [Track DCC 2026 proceedings quarterly](92-dcc-2026-tracking.md) | process |
+| 93 | [Track ZipServ GPU insights for future SIMD work](93-zipserv-insights.md) | process |
 
 ## How to claim a TODO
 

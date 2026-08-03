@@ -43,3 +43,38 @@ CRC32 SIMD but still meaningful for codec-heavy workloads.
 ## Files
 
 TBD — depends on which codec ships first.
+
+## Sequencing
+
+- **Pre-req:** wait for `std::simd` gather intrinsics on stable Rust
+  (track `simd_gather` feature stabilisation). Without gather, the
+  SIMD path can't beat the scalar table-lookup loop.
+- **First target:** DEFLATE (`omnizip-deflate/`), since miniz_oxide's
+  scalar Huffman decode is the existing baseline and easiest to
+  measure against.
+- **Second target:** ZSTD Huffman literal decoder
+  (`omnizip-zstd/src/huffman/`).
+
+## Effort estimate
+
+- 3-5 days once `std::simd` gather is stable.
+- 1-2 days if we accept the `wide` crate as a dependency (already
+  wraps portable SIMD with gather emulation).
+
+## Risks
+
+- Without gather intrinsics, "SIMD" Huffman decode may not actually
+  beat scalar — measure before claiming speedup.
+- Per-codec Huffman table layouts differ. Don't share the impl
+  across codecs — write per-codec and extract common patterns once
+  we have 2-3 working.
+
+## References
+
+- Shnatsel (2025). *The State of SIMD in Rust in 2025.*
+  https://shnatsel.medium.com/the-state-of-simd-in-rust-in-2025-32c263e5f53d
+- zlib-rs SIMD Huffman decode:
+  https://trifectatech.org/initiatives/data-compression/
+- ZipServ ASPLOS 2026 — design inspiration for layout-aware tables
+  (see `TODO.complete/93-zipserv-insights.md`).
+
