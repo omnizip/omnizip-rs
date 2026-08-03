@@ -81,14 +81,18 @@ pub fn encode_frame(
     let (bs_code, bs_extra): (u64, Option<u32>) = pick_block_size_code(block_size);
     writer.write_bits(bs_code, 4);
 
-    // Sample rate code (4 bits). 0 = get from STREAMINFO.
-    writer.write_bits(0, 4);
+    // Sample rate code (4 bits). Prefer direct codes over "from STREAMINFO"
+    // because libFLAC's decoder requires `has_stream_info` to be set for the
+    // 0 code path, and some decoder configurations skip STREAMINFO parsing.
+    let (sr_code, sr_extra) = pick_sample_rate_code(info.sample_rate);
+    writer.write_bits(sr_code, 4);
 
     // Channel assignment (4 bits).
     writer.write_bits(channel_assign, 4);
 
-    // Sample size (3 bits). 0 = get from STREAMINFO.
-    writer.write_bits(0, 3);
+    // Sample size code (3 bits). Same rationale — prefer direct codes.
+    let ss_code = pick_sample_size_code(info.bps());
+    writer.write_bits(ss_code, 3);
 
     // Reserved bit.
     writer.write_bits(0, 1);
@@ -105,6 +109,16 @@ pub fn encode_frame(
         }
     }
 
+    // Optional sample rate extra bytes (for codes 12, 13, 14).
+    if let Some(extra) = sr_extra {
+        match sr_code {
+            12 => writer.write_bits(u64::from(extra), 8),       // 8-bit kHz
+            13 => writer.write_bits(u64::from(extra), 16),      // 16-bit Hz
+            14 => writer.write_bits(u64::from(extra), 16),      // 16-bit decihz
+            _ => {}
+        }
+    }
+
     // CRC-8 of header bytes so far.
     let header_end = writer.position();
     let crc8 = crate::crc::crc8(&writer.as_bytes()[header_start..header_end]);
@@ -118,11 +132,10 @@ pub fn encode_frame(
     // Byte-align (pad with zero bits).
     writer.flush_byte_aligned();
 
-    // CRC-16 of all frame bytes.
+    // CRC-16 of all frame bytes (big-endian per FLAC spec — high byte first).
     let frame_end = writer.position();
     let crc16 = crate::crc::crc16(&writer.as_bytes()[header_start..frame_end]);
-    writer.write_bits(u64::from(crc16 & 0xFF), 8);
-    writer.write_bits(u64::from(crc16 >> 8), 8);
+    writer.write_bits(u64::from(crc16), 16);
 
     Ok(())
 }
@@ -191,7 +204,7 @@ fn estimate_subframe_cost(samples: &[i32]) -> u64 {
 /// Map a block size to its 4-bit code + optional extra-byte payload.
 ///
 /// Returns `(code, Some(extra))` for codes 6-7, or `(code, None)` for
-/// the fixed-size codes 1-5.
+/// the fixed-size codes 1-5, 8-15.
 fn pick_block_size_code(block_size: usize) -> (u64, Option<u32>) {
     // Fixed codes: 192, 576×2^k for k=0..3.
     let fixed: [(u64, usize); 5] = [
@@ -206,12 +219,69 @@ fn pick_block_size_code(block_size: usize) -> (u64, Option<u32>) {
             return (code, None);
         }
     }
+    // Power-of-2 codes 8..=15: 256 × 2^(code-8).
+    for code in 8u64..=15 {
+        let size = 256usize << (code - 8);
+        if size == block_size {
+            return (code, None);
+        }
+    }
     // 8-bit extra: code 6, extra = block_size - 1 (1..=256).
     if block_size <= 256 {
         return (6, Some(block_size as u32 - 1));
     }
     // 16-bit extra: code 7, extra = block_size - 1 (1..=65536).
     (7, Some(block_size as u32 - 1))
+}
+
+/// Map a sample rate to its 4-bit code + optional extra-byte payload.
+///
+/// Returns `(code, None)` for the direct-coded rates, or `(code, Some(extra))`
+/// for the codes that take an extra byte sequence from the end of the header.
+fn pick_sample_rate_code(sample_rate: u32) -> (u64, Option<u32>) {
+    // Per FLAC spec table.
+    match sample_rate {
+        88_200 => (1, None),
+        176_400 => (2, None),
+        192_000 => (3, None),
+        8_000 => (4, None),
+        16_000 => (5, None),
+        22_050 => (6, None),
+        24_000 => (7, None),
+        32_000 => (8, None),
+        44_100 => (9, None),
+        48_000 => (10, None),
+        96_000 => (11, None),
+        // 12: get 8 bit sample rate (in kHz) from end of header
+        _ if sample_rate % 1000 == 0 && sample_rate / 1000 <= 255 => {
+            (12, Some(sample_rate / 1000))
+        }
+        // 13: get 16 bit sample rate (in Hz) from end of header
+        _ if sample_rate <= u16::MAX as u32 => (13, Some(sample_rate)),
+        // 14: get 16 bit sample rate (in tens of Hz) from end of header
+        _ if sample_rate % 10 == 0 && sample_rate / 10 <= u16::MAX as u32 => {
+            (14, Some(sample_rate / 10))
+        }
+        // 0: unspecified, get from STREAMINFO metadata block. We avoid this
+        // path because libFLAC requires `has_stream_info` for it.
+        _ => (0, None),
+    }
+}
+
+/// Map a sample bit depth to its 3-bit code.
+///
+/// Returns the direct code for known bit depths, or 0 (from STREAMINFO)
+/// for unusual values.
+fn pick_sample_size_code(bps: u8) -> u64 {
+    match bps {
+        8 => 1,
+        12 => 2,
+        16 => 4,
+        20 => 5,
+        24 => 6,
+        32 => 7,
+        _ => 0, // from STREAMINFO (unusual bit depths)
+    }
 }
 
 /// Write a UTF-8 coded number (FLAC frame/sample number encoding).
@@ -323,8 +393,9 @@ mod tests {
 
     #[test]
     fn block_size_code_16bit_extra() {
+        // 4096 is now a canonical power-of-2 size (code 12).
         let (code, extra) = pick_block_size_code(4096);
-        assert_eq!(code, 7);
-        assert_eq!(extra, Some(4095));
+        assert_eq!(code, 12);
+        assert_eq!(extra, None);
     }
 }

@@ -94,7 +94,10 @@ fn choose_type(samples: &[i32], bps: u8) -> SubframeType {
     let fixed = best_fixed(samples, bps);
 
     // Compute the best LPC candidate (if block size allows).
-    let lpc = if samples.len() >= 64 {
+    // TEMPORARILY DISABLED: LPC encoding has a remaining interop bug
+    // against libFLAC (LOST_SYNC during decode). Falling back to
+    // FIXED-only until TODO 97 Phase 2B/3 isolates the issue.
+    let lpc: Option<crate::encoder::lpc::LpcSolution> = if false {
         crate::encoder::lpc::best_lpc_candidate(samples, bps)
     } else {
         None

@@ -34,7 +34,13 @@ const RICE_ESCAPE: u64 = 0b1111;
 ///
 /// libFLAC's default is 6 (== 64 partitions). Higher orders rarely
 /// help on real audio and increase per-partition k-header overhead.
-pub const MAX_PARTITION_ORDER: u8 = 6;
+///
+/// TEMPORARILY SET TO 0: partition layout has a known divergence
+/// from the spec (libFLAC puts the predictor_order subtraction in
+/// partition 0; we spread residuals evenly with ceiling division).
+/// Until that's fixed, multi-partition encoding produces invalid
+/// FLAC. See TODO 97 Phase 2B.
+pub const MAX_PARTITION_ORDER: u8 = 0;
 
 /// Pick the partition order (0..=[`MAX_PARTITION_ORDER`]) that yields
 /// the smallest encoded bit count for `residuals`.

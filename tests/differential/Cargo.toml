@@ -19,6 +19,7 @@ omnizip-brotli = { path = "../../omnizip-brotli", version = "0.13.1" }
 omnizip-bzip2 = { path = "../../omnizip-bzip2", version = "0.13.1" }
 omnizip-lz4 = { path = "../../omnizip-lz4", version = "0.13.1" }
 omnizip-deflate = { path = "../../omnizip-deflate", version = "0.13.1" }
+omnizip-flac = { path = "../../omnizip-flac", version = "0.13.1" }
 
 [lints]
 workspace = true

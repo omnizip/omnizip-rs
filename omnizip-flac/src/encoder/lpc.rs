@@ -30,7 +30,12 @@ use crate::encoder::rice;
 const TYPE_LPC_BASE: u8 = 0b100000;
 
 /// Maximum LPC order supported by FLAC.
-pub const MAX_LPC_ORDER: usize = 32;
+///
+/// The spec allows up to 32, but very high orders (24+) often produce
+/// coefficient quantization that confuses some decoders. We cap at 16
+/// (libFLAC's `-8` default upper bound for non-`--lax` mode) until
+/// we've verified our quantization is bit-exact at higher orders.
+pub const MAX_LPC_ORDER: usize = 16;
 
 /// A complete LPC solution: coefficients + residuals + chosen params.
 #[derive(Clone)]
@@ -265,6 +270,12 @@ fn quantise_and_predict(
             predicted <<= (-shift) as u32;
         }
         let residual = i64::from(samples[i]) - predicted;
+        // Reject solutions whose residuals don't fit in i32 — silently
+        // wrapping would produce an invalid FLAC stream (decoder
+        // reconstructs out-of-bounds samples).
+        if residual < i32::MIN as i64 || residual > i32::MAX as i64 {
+            return None;
+        }
         residuals.push(residual as i32);
     }
 
