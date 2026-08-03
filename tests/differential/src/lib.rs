@@ -22,6 +22,8 @@
 #![forbid(unsafe_code)]
 #![warn(clippy::pedantic)]
 
+pub mod wav;
+
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::io::Write;

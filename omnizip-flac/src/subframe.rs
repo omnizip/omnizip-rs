@@ -11,12 +11,8 @@
 
 use crate::bitreader::BitReader;
 use crate::rice;
-
-/// Subframe type codes.
-const SUBFRAME_CONSTANT: u8 = 0;
-const SUBFRAME_VERBATIM: u8 = 1;
-const SUBFRAME_FIXED: u8 = 8; // 0b001000 + order
-const SUBFRAME_LPC: u8 = 32; // 0b100000 + order
+use crate::subframe_type::{TYPE_CONSTANT as SUBFRAME_CONSTANT, TYPE_FIXED_BASE as SUBFRAME_FIXED,
+    TYPE_LPC_BASE as SUBFRAME_LPC, TYPE_VERBATIM as SUBFRAME_VERBATIM};
 
 /// Decode a single subframe. Returns the decoded samples as i32 values.
 ///

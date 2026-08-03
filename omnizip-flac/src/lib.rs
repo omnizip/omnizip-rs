@@ -54,6 +54,7 @@ pub mod pcm_header;
 pub mod rice;
 pub mod streaminfo;
 pub mod subframe;
+pub mod subframe_type;
 
 pub use pcm_header::{Endianness, PcmParams};
 

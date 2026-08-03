@@ -11,28 +11,7 @@
 use std::io::Write;
 use std::process::Command;
 
-/// Generate a WAV byte vector for `n` mono 16-bit samples from `f(i)`.
-/// The resulting WAV has the given `sample_rate` AND we use the same
-/// `sample_rate` in the encode parameters, so the libFLAC-decoded
-/// WAV has the same header as the input.
-fn mono_wav<F: Fn(usize) -> i16>(n: usize, sr: u32, f: F) -> Vec<u8> {
-    let data: Vec<u8> = (0..n).flat_map(|i| f(i).to_le_bytes()).collect();
-    let mut hdr = Vec::with_capacity(44);
-    hdr.extend_from_slice(b"RIFF");
-    hdr.extend_from_slice(&(36 + data.len() as u32).to_le_bytes());
-    hdr.extend_from_slice(b"WAVEfmt ");
-    hdr.extend_from_slice(&16u32.to_le_bytes());
-    hdr.extend_from_slice(&1u16.to_le_bytes()); // PCM
-    hdr.extend_from_slice(&1u16.to_le_bytes()); // mono
-    hdr.extend_from_slice(&sr.to_le_bytes());
-    hdr.extend_from_slice(&(sr * 2).to_le_bytes());
-    hdr.extend_from_slice(&2u16.to_le_bytes());
-    hdr.extend_from_slice(&16u16.to_le_bytes());
-    hdr.extend_from_slice(b"data");
-    hdr.extend_from_slice(&(data.len() as u32).to_le_bytes());
-    hdr.extend_from_slice(&data);
-    hdr
-}
+use omnizip_differential::wav::mono as mono_wav;
 
 fn assert_parity(label: &str, wav: &[u8]) {
     if omnizip_differential::which("flac").ok().flatten().is_none() {
