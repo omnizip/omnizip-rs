@@ -516,6 +516,13 @@ const RUN_CONFIDENCE: u16 = 54_000; // ~0.82
 ///
 /// Memory is bounded: both hashmaps evict arbitrary entries when they
 /// exceed [`WORD_TABLE_CAP`].
+///
+/// ## Performance
+///
+/// Probabilities are precomputed per-bit-position (0..8) when the
+/// word hash changes, then cached. `prob(bit_pos)` is O(1). Without
+/// this caching the model would be O(256) per bit (O(2048) per byte)
+/// — a non-starter.
 pub struct WordModel {
     /// Frequency of (current word prefix hash, byte) → count.
     /// Key = (word_hash, next_byte).
@@ -530,8 +537,12 @@ pub struct WordModel {
     in_word: bool,
     /// Total bytes processed (for warmup gate).
     bytes_processed: u64,
-    /// Last bit position used by prob_with_context.
-    last_bit_pos: u8,
+    /// Cached probabilities for the current word hash, one per bit
+    /// position (0..8). Recomputed when the hash changes or when
+    /// `next_byte_freq` is updated.
+    cached_probs: [u16; 8],
+    /// True if `cached_probs` reflects the current `current_word_hash`.
+    cache_valid: bool,
 }
 
 /// Warmup: number of bytes to process before the WordModel starts
@@ -562,14 +573,14 @@ impl WordModel {
             current_word_len: 0,
             in_word: false,
             bytes_processed: 0,
-            last_bit_pos: 0,
+            cached_probs: [DEFAULT_PROB; 8],
+            cache_valid: false,
         }
     }
 
     /// Begin a new byte: update word-state from the previous byte.
     /// Called once per byte before the bit loop.
     fn begin_byte(&mut self, prev_byte: u8) {
-        self.last_bit_pos = 0;
         // The actual word-boundary logic runs in `end_byte` so we know
         // the byte that just got coded.
         let _ = prev_byte;
@@ -577,39 +588,62 @@ impl WordModel {
 
     /// Probability for the current bit. Returns uniform during warmup
     /// or when outside a word.
-    fn prob(&self) -> u16 {
+    ///
+    /// O(1) — looks up a cached per-bit-position probability that was
+    /// precomputed when the current word hash was finalised.
+    fn prob(&self, bit_pos: u8) -> u16 {
         if self.bytes_processed < WORD_WARMUP_BYTES || !self.in_word || self.current_word_len < 3 {
             return DEFAULT_PROB;
         }
-        // Look up the current word's prefix hash and emit a prediction
-        // for "next bit = 1" based on observed byte frequencies.
-        let mut n0: u64 = 0;
-        let mut n1: u64 = 0;
-        for byte in 0..=255u16 {
-            let count = u64::from(
-                self.next_byte_freq
-                    .get(&(self.current_word_hash, byte as u8))
-                    .copied()
-                    .unwrap_or(0),
-            );
-            if (byte >> (7 - self.last_bit_pos)) & 1 == 1 {
-                n1 += count;
-            } else {
-                n0 += count;
-            }
-        }
-        if n0 + n1 == 0 {
+        if !self.cache_valid {
+            // Cache is stale; caller should have refreshed it. Return
+            // uniform as a safe fallback.
             return DEFAULT_PROB;
         }
-        let total = n0 + n1 + 2;
-        let p1 = ((n1 + 1) * (PROB_SCALE - 1)) / total + 1;
-        let cap = PROB_SCALE - 1;
-        p1.min(cap) as u16
+        self.cached_probs[usize::from(bit_pos)]
     }
 
-    /// Advance the bit position after each coded bit.
+    /// Recompute the 8 per-bit-position probabilities from
+    /// `next_byte_freq` for the current word hash. Called when the
+    /// hash changes or when a frequency entry is added/updated.
+    fn refresh_cache(&mut self) {
+        if !self.in_word || self.current_word_len < 3 {
+            self.cached_probs = [DEFAULT_PROB; 8];
+            self.cache_valid = true;
+            return;
+        }
+        // Tally n0/n1 per bit position in one pass over the
+        // (hash, byte) entries that match the current word hash.
+        let mut n0 = [0u64; 8];
+        let mut n1 = [0u64; 8];
+        let hash = self.current_word_hash;
+        for (&(h, byte), &count) in self.next_byte_freq.iter() {
+            if h != hash {
+                continue;
+            }
+            let c = u64::from(count);
+            for bit_pos in 0..8usize {
+                if ((byte as u16) >> (7 - bit_pos)) & 1 == 1 {
+                    n1[bit_pos] += c;
+                } else {
+                    n0[bit_pos] += c;
+                }
+            }
+        }
+        for bit_pos in 0..8usize {
+            let total = n0[bit_pos] + n1[bit_pos] + 2;
+            let p1 = (((n1[bit_pos] + 1) * (PROB_SCALE - 1)) / total + 1).min(PROB_SCALE - 1);
+            self.cached_probs[bit_pos] = p1 as u16;
+        }
+        self.cache_valid = true;
+    }
+
+    /// Advance the bit position after each coded bit. No-op now that
+    /// `prob(bit_pos)` takes the position as an argument and reads
+    /// from a precomputed cache.
     fn update(&mut self) {
-        self.last_bit_pos = self.last_bit_pos.saturating_add(1);
+        // Intentionally empty: the cache holds all 8 bit positions
+        // simultaneously, so there's no per-bit state to advance.
     }
 
     /// Finalise the byte: update word state and frequency tables.
@@ -617,12 +651,14 @@ impl WordModel {
         self.bytes_processed = self.bytes_processed.saturating_add(1);
         let is_alnum = byte.is_ascii_alphanumeric() || byte == b'_';
 
+        let mut hash_changed = false;
         if is_alnum {
             // Extend the current word hash.
             self.current_word_hash ^= u32::from(byte);
             self.current_word_hash = self.current_word_hash.wrapping_mul(0x0100_0193);
             self.current_word_len = self.current_word_len.saturating_add(1);
             self.in_word = true;
+            hash_changed = true;
         } else if self.in_word {
             // Word just ended. Record its frequency.
             self.flush_word_if_needed();
@@ -631,6 +667,7 @@ impl WordModel {
             self.current_word_hash = 0x811C_9DC5;
             self.current_word_len = 0;
             self.in_word = false;
+            hash_changed = true;
         }
 
         // Update next-byte frequency: given current word prefix hash,
@@ -638,14 +675,27 @@ impl WordModel {
         if self.in_word && self.current_word_len >= 3 {
             let cap_ok = self.next_byte_freq.len() < WORD_TABLE_CAP;
             if cap_ok {
-                *self.next_byte_freq
-                    .entry((self.current_word_hash, byte))
-                    .or_insert(0) += 1;
+                let key = (self.current_word_hash, byte);
+                let entry = self.next_byte_freq.entry(key).or_insert(0);
+                *entry += 1;
+                // The frequency for THIS hash changed; cache is stale
+                // only if we're currently predicting from this hash.
+                self.cache_valid = false;
             } else {
                 // Cap exceeded — flush both tables.
                 self.next_byte_freq.clear();
                 self.word_freq.clear();
+                self.cache_valid = false;
             }
+        } else if hash_changed {
+            self.cache_valid = false;
+        }
+
+        // Refresh the cache for the next byte's bit loop. After warmup
+        // this is the only per-byte O(N_active_entries) work; the
+        // per-bit `prob()` calls are then O(1).
+        if !self.cache_valid {
+            self.refresh_cache();
         }
     }
 
@@ -890,7 +940,7 @@ impl MultiModel {
             DEFAULT_PROB
         };
         let pw = if self.portfolio.includes_word() {
-            self.word.prob()
+            self.word.prob(bit_pos)
         } else {
             DEFAULT_PROB
         };

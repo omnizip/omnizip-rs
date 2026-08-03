@@ -1,0 +1,19 @@
+[package]
+name = "omnizip-libdeflate"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Pure-Rust libdeflate-compatible DEFLATE codec — faster than miniz_oxide on decode-heavy workloads"
+
+[lib]
+name = "omnizip_libdeflate"
+path = "src/lib.rs"
+
+[dependencies]
+omnizip-codecs.workspace = true
+miniz_oxide.workspace = true
+
+[lints]
+workspace = true
