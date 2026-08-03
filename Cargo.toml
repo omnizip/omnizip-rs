@@ -7,6 +7,7 @@ members = [
     "omnizip-lz4",
     "omnizip-deflate",
     "omnizip-deflate64",
+    "omnizip-libdeflate",
     "omnizip-brotli",
     "omnizip-filters",
     "omnizip-fsst",
