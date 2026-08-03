@@ -22,7 +22,6 @@ use omnizip_brotli::BrotliCodec;
 use omnizip_bzip2::Bzip2Codec;
 use omnizip_codecs::{Codec, CompressionLevel};
 use omnizip_deflate::DeflateCodec;
-use omnizip_lz4::Lz4FastCodec;
 use omnizip_differential::{
     brotli_oracle_decode, bzip2_oracle_decode, lz4_oracle_decode, python_zlib_oracle_decode,
 };

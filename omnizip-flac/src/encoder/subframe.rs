@@ -14,11 +14,7 @@
 
 use crate::encoder::bitwriter::BitWriter;
 use crate::encoder::rice;
-
-/// Subframe type codes (encoded in bits 1..6 of the subframe header byte).
-const TYPE_CONSTANT: u8 = 0b000000;
-const TYPE_VERBATIM: u8 = 0b000001;
-const TYPE_FIXED_BASE: u8 = 0b001000; // + order (0..4)
+use crate::subframe_type::{TYPE_CONSTANT, TYPE_FIXED_BASE, TYPE_VERBATIM};
 
 /// One channel's worth of audio samples, signed.
 pub type Samples<'a> = &'a [i32];
