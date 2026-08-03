@@ -28,6 +28,7 @@
 #![allow(clippy::cast_lossless)]
 
 mod bwt;
+mod bz2;
 mod codec;
 mod crc32;
 mod huffman;
@@ -42,3 +43,4 @@ pub use bwt::{bwt_decode, bwt_encode};
 pub use huffman::{huffman_decode, huffman_encode};
 pub use mtf::{mtf_decode, mtf_encode};
 pub use rle::{rle_decode, rle_encode};
+pub use bz2::compress as compress_framed;

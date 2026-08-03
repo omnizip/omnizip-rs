@@ -19,7 +19,6 @@
 #![warn(clippy::pedantic)]
 
 use omnizip_brotli::BrotliCodec;
-use omnizip_bzip2::Bzip2Codec;
 use omnizip_codecs::{Codec, CompressionLevel};
 use omnizip_deflate::DeflateCodec;
 use omnizip_differential::{
@@ -41,11 +40,10 @@ fn sample_input() -> Vec<u8> {
 #[test]
 fn bzip2_round_trips_through_reference_cli() {
     let input = sample_input();
-    let compressed = Bzip2Codec
-        .compress(&input, CompressionLevel::default())
-        .expect("bzip2 encode");
+    // Use standard .bz2 framing (compatible with `bzip2 -d`).
+    let compressed = omnizip_bzip2::compress_framed(&input, 9).expect("bzip2 frame encode");
     match bzip2_oracle_decode(&compressed) {
-        Err(e) => eprintln!("[skip] bzip2 oracle error (framing gap?): {e}"),
+        Err(e) => panic!("bzip2 oracle error: {e}"),
         Ok(None) => eprintln!("[skip] bzip2 CLI not installed"),
         Ok(Some(out)) => assert_eq!(out.bytes, input, "bzip2 CLI decoded output != original"),
     }
