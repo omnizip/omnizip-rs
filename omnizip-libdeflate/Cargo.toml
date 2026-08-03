@@ -5,7 +5,10 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
 description = "Pure-Rust libdeflate-compatible DEFLATE codec — faster than miniz_oxide on decode-heavy workloads"
+keywords = ["compression", "deflate", "libdeflate", "fast"]
+categories = ["compression"]
 
 [lib]
 name = "omnizip_libdeflate"

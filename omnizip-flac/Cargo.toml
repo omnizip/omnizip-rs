@@ -6,7 +6,9 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
-description = "Pure-Rust FLAC audio codec — PCM header parsers (WAV, AIFF) + FLAC codec skeleton"
+description = "Pure-Rust FLAC audio codec — PCM header parsers (WAV, AIFF) + full LPC + Rice encoder"
+keywords = ["compression", "flac", "audio", "pcm"]
+categories = ["compression", "multimedia::audio"]
 
 [dependencies]
 omnizip-codecs.workspace = true

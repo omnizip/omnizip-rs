@@ -7,6 +7,8 @@ license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 description = "Pure-Rust GLZA grammar-based compression codec"
+keywords = ["compression", "glza", "grammar", "grammar-based"]
+categories = ["compression"]
 
 [lib]
 name = "omnizip_glza"

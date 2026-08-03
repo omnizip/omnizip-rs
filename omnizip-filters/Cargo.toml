@@ -5,7 +5,10 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
 description = "Pure-Rust preprocessing filters — delta and BCJ (executable code) transforms"
+keywords = ["compression", "filter", "delta", "bcj"]
+categories = ["compression"]
 
 [lib]
 name = "omnizip_filters"

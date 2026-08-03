@@ -7,6 +7,8 @@ license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 description = "Pure-Rust Rice++ codec for integer-pixel data (FITS images, sensor data) — port of DwarFS ricepp"
+keywords = ["compression", "rice", "ricepp", "fits", "sensor"]
+categories = ["compression", "science"]
 
 [dependencies]
 omnizip-codecs.workspace = true

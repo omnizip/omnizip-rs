@@ -7,6 +7,8 @@ license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 description = "Pure-Rust FSST (Fast Static Symbol Table) text preprocessor — port of the FSST reference algorithm"
+keywords = ["compression", "fsst", "text", "symbol-table"]
+categories = ["compression"]
 
 [dependencies]
 omnizip-codecs.workspace = true
