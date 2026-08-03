@@ -272,15 +272,11 @@ fn adler32(data: &[u8]) -> u32 {
 }
 
 /// Standard CRC-32 (polynomial 0xEDB88320, same as zlib/gzip).
+///
+/// Delegates to the shared slice-by-8 implementation in
+/// `omnizip_codecs::checksum`. See `TODO.complete/94-dry-crc32-migration.md`.
 fn crc32(data: &[u8]) -> u32 {
-    let mut crc = 0xFFFF_FFFFu32;
-    for &byte in data {
-        crc ^= u32::from(byte);
-        for _ in 0..8 {
-            crc = (crc >> 1) ^ (0xEDB8_8320 & u32::from(crc & 1));
-        }
-    }
-    !crc
+    omnizip_codecs::checksum::crc32_iso_hdlc(data)
 }
 
 #[cfg(test)]
