@@ -8,7 +8,7 @@
 #![forbid(unsafe_code)]
 #![warn(clippy::pedantic)]
 
-use std::io::Cursor;
+use std::io::{self, Cursor};
 
 use omnizip_codecs::{Codec, CodecId, CompressionLevel, OmnizipError};
 
@@ -61,18 +61,24 @@ impl BrotliMode {
 ///     quality: Some(11),
 ///     window_size: Some(20),       // 1 MB window
 ///     mode: BrotliMode::Text,
+///     custom_dictionary: None,     // or Some(&dict_bytes)
 /// };
 /// let input = b"hello world".repeat(1000);
 /// let bytes = BrotliCodec::new().compress_with_options(&input, opts).unwrap();
 /// ```
 #[derive(Debug, Clone, Copy, Default)]
-pub struct BrotliOptions {
+pub struct BrotliOptions<'a> {
     /// Quality 0..=11. `None` uses level from `CompressionLevel` (default 11).
     pub quality: Option<i32>,
     /// Window size as `log2(bytes)` (10..=24). `None` defaults to 22 (4 MB).
     pub window_size: Option<u8>,
     /// Input content hint. `Default` is `Generic`.
     pub mode: BrotliMode,
+    /// Custom dictionary (a.k.a. shared dictionary). The encoder will
+    /// treat `dictionary` as already-decoded history at position 0,
+    /// allowing matches against its content. Caller and decoder must
+    /// agree on the same dictionary or decompression will fail.
+    pub custom_dictionary: Option<&'a [u8]>,
 }
 
 /// Brotli codec. Encodes at quality `level` (0–11); default 11.
@@ -94,7 +100,7 @@ impl BrotliCodec {
     pub fn compress_with_options(
         &self,
         plaintext: &[u8],
-        options: BrotliOptions,
+        options: BrotliOptions<'_>,
     ) -> Result<Vec<u8>, OmnizipError> {
         let quality = options.quality.unwrap_or(DEFAULT_QUALITY);
         let lgwin = options.window_size.unwrap_or(DEFAULT_WINDOW_SIZE);
@@ -112,13 +118,51 @@ impl BrotliCodec {
             mode: options.mode.as_brotli_const(),
             ..Default::default()
         };
+        let dict: &[u8] = options.custom_dictionary.unwrap_or(&[]);
         let mut output = Vec::new();
-        brotli::BrotliCompress(&mut Cursor::new(plaintext), &mut output, &params).map_err(|e| {
-            OmnizipError::EncodeFailed {
+        if dict.is_empty() {
+            brotli::BrotliCompress(&mut Cursor::new(plaintext), &mut output, &params).map_err(|e| {
+                OmnizipError::EncodeFailed {
+                    codec: CodecId::BROTLI,
+                    reason: format!(
+                        "brotli compress (quality {quality}, lgwin {lgwin}) failed: {e}"
+                    ),
+                }
+            })?;
+        } else {
+            // Use the custom-dictionary variant of the brotli encoder.
+            use brotli::enc::{BrotliCompressCustomIoCustomDict, StandardAlloc};
+            use brotli::{IoReaderWrapper, IoWriterWrapper};
+            let alloc = StandardAlloc::default();
+            let mut input_buf = [0u8; 4096];
+            let mut output_buf = [0u8; 4096];
+            let mut callback = |_pm: &mut brotli::enc::interface::PredictionModeContextMap<
+                brotli::enc::interface::InputReferenceMut,
+            >,
+                                _cmds: &mut [brotli::enc::interface::StaticCommand],
+                                _pair: brotli::enc::interface::InputPair,
+                                _alloc: &mut StandardAlloc| {};
+            let mut reader = Cursor::new(plaintext);
+            let mut writer: Vec<u8> = Vec::new();
+            BrotliCompressCustomIoCustomDict(
+                &mut IoReaderWrapper(&mut reader),
+                &mut IoWriterWrapper(&mut writer),
+                &mut input_buf,
+                &mut output_buf,
+                &params,
+                alloc,
+                &mut callback,
+                dict,
+                io::Error::new(io::ErrorKind::UnexpectedEof, "brotli"),
+            )
+            .map_err(|e| OmnizipError::EncodeFailed {
                 codec: CodecId::BROTLI,
-                reason: format!("brotli compress (quality {quality}, lgwin {lgwin}) failed: {e}"),
-            }
-        })?;
+                reason: format!(
+                    "brotli compress with dict (quality {quality}, lgwin {lgwin}) failed: {e}"
+                ),
+            })?;
+            output = writer;
+        }
         Ok(output)
     }
 }
