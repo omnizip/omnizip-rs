@@ -35,7 +35,7 @@ fn mono_wav<F: Fn(usize) -> i16>(n: usize, sr: u32, f: F) -> Vec<u8> {
 }
 
 fn assert_parity(label: &str, wav: &[u8]) {
-    if which("flac").is_none() {
+    if omnizip_differential::which("flac").ok().flatten().is_none() {
         eprintln!("[skip] {label}: flac CLI not installed");
         return;
     }
@@ -94,14 +94,7 @@ fn assert_parity(label: &str, wav: &[u8]) {
     eprintln!("[ok] {label}: libFLAC decodes our output byte-identically ({} bytes)", out.stdout.len());
 }
 
-fn which(cmd: &str) -> Option<String> {
-    let out = Command::new("which").arg(cmd).output().ok()?;
-    if out.status.success() {
-        Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
-    } else {
-        None
-    }
-}
+// `which` is provided by `omnizip_differential::which` — no local copy needed.
 
 #[test]
 fn parity_constant_zero() {

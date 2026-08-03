@@ -202,6 +202,20 @@ impl<'a> ArithDecoder<'a> {
 /// `1..=65535`; `PROB_SCALE = 65536` represents certainty.
 pub const PROB_SCALE: u64 = 65_536;
 
+/// Scale a frequency to a probability in `[1, PROB_SCALE-1]`.
+///
+/// Returns `count / total` scaled to `PROB_SCALE`, with rounding.
+/// Used by PPMd7 and PPMd8 to compute per-symbol probabilities for
+/// the arithmetic coder. Extracted here to avoid duplication.
+#[must_use]
+pub fn scaled_prob(count: u32, total: u32) -> u16 {
+    if total == 0 {
+        return 1;
+    }
+    let p = (u64::from(count) * PROB_SCALE + u64::from(total) / 2) / u64::from(total);
+    p.min(PROB_SCALE - 1).max(1) as u16
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

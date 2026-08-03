@@ -47,7 +47,7 @@
 // `omnizip_codecs::arith`. We re-import it here under the same names
 // so the rest of this file reads naturally.
 
-use omnizip_codecs::arith::{ArithDecoder, ArithEncoder, PROB_SCALE};
+use omnizip_codecs::arith::{scaled_prob, ArithDecoder, ArithEncoder, PROB_SCALE};
 
 // ── Bit probability model ───────────────────────────────────────────
 
@@ -379,11 +379,7 @@ impl Ppmd8Model {
 
     /// 16-bit probability for "is the byte s_i?" given remaining weight.
     fn prob16(c_i: u32, remaining: u32) -> u16 {
-        if remaining == 0 {
-            return 1;
-        }
-        let p = (u64::from(c_i) * 65_536 + u64::from(remaining) / 2) / u64::from(remaining);
-        p.min(65_535).max(1) as u16
+        scaled_prob(c_i, remaining)
     }
 
     /// Encode one byte using byte-level PPM through the context trie.

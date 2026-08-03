@@ -34,7 +34,7 @@ pub struct OracleOutput {
 
 /// Look up `cmd` on `$PATH`. Returns `Ok(None)` if not found (not an
 /// error — callers decide whether the oracle is mandatory).
-fn which(cmd: &str) -> std::io::Result<Option<String>> {
+pub fn which(cmd: &str) -> std::io::Result<Option<String>> {
     let output = Command::new("which").arg(cmd).output();
     match output {
         Ok(o) if o.status.success() => Ok(Some(

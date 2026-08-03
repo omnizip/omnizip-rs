@@ -53,7 +53,7 @@
 )]
 
 use super::context_tree::{ContextTree, NodeId};
-use omnizip_codecs::arith::{ArithDecoder, ArithEncoder, PROB_SCALE};
+use omnizip_codecs::arith::{scaled_prob, ArithDecoder, ArithEncoder, PROB_SCALE};
 
 // ── PPM model ───────────────────────────────────────────────────────
 
@@ -182,12 +182,7 @@ impl PpmModel {
     /// 16-bit probability for "is the byte s_i?" given current
     /// cumulative weight `remaining` and symbol count `c_i`.
     fn prob16(c_i: u32, remaining: u32) -> u16 {
-        if remaining == 0 {
-            return 1;
-        }
-        let p = (u64::from(c_i) * u64::from(PROB_SCALE) + u64::from(remaining) / 2)
-            / u64::from(remaining);
-        p.min(u64::from(PROB_SCALE) - 1).max(1) as u16
+        scaled_prob(c_i, remaining)
     }
 
     /// Encode one byte. Walks the context trie from the deepest

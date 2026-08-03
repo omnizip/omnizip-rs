@@ -27,7 +27,7 @@ mod level;
 mod registry;
 pub mod xxhash;
 
-pub use arith::{ArithDecoder, ArithEncoder, PROB_SCALE as ARITH_PROB_SCALE};
+pub use arith::{scaled_prob, ArithDecoder, ArithEncoder, PROB_SCALE as ARITH_PROB_SCALE};
 pub use checksum::{crc32_iso_hdlc, crc32_iso_hdlc_raw, crc32_iso_hdlc_update};
 pub use codec::{Codec, CodecId};
 pub use error::OmnizipError;
