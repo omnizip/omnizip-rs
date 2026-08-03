@@ -1,7 +1,38 @@
 # 81 — ZSTD dictionary trainer (FastCover algorithm)
 
-**Priority:** High
+**Priority:** High — ✅ **DONE**
 **Source:** RESEARCH.md §3 (Learned compression with random access)
+
+## Status
+
+Landed two trainers behind a pluggable `DictTrainer` trait (OCP):
+
+- **`FrequencyTrainer`** — top-K substrings by frequency × length.
+  Preserved as the default; existing `train_dictionary(samples,
+  target_size)` API unchanged.
+- **`FastCoverTrainer`** — dmer-frequency segment scoring per
+  Facebook's FastCover algorithm. Each K-byte segment is scored by
+  the sum of D-byte dmer frequencies inside it; top segments are
+  concatenated. K clamps to the longest sample so small corpora
+  still produce useful output.
+
+Both are deterministic (sorted passes, total-order tie-breaking).
+13 unit tests pass including determinism, edge cases, and
+round-trip-through-serialization.
+
+## Public API
+
+```rust
+pub trait DictTrainer {
+    fn train(&self, samples: &[&[u8]], target_size: usize) -> Vec<u8>;
+}
+
+pub struct FrequencyTrainer;
+pub struct FastCoverTrainer { /* opts: FastCoverOptions */ }
+
+pub fn train_dictionary(samples, target_size) -> Vec<u8>;  // backward-compat
+pub fn train_dictionary_with(trainer, samples, target_size) -> Vec<u8>;
+```
 
 ## Context
 

@@ -132,6 +132,32 @@ Highlights:
   (minor OCP violation).
 - No benchmark suite (see `TODO.complete/86-benchmark-suite.md`).
 
+## Convergent encryption boundary
+
+omnizip-rs is the **codec layer only**. Convergent encryption (CE) —
+where the encryption key is derived deterministically from the
+plaintext hash, enabling cross-user dedup while preserving
+confidentiality — lives in the **storage layer** (e.g. LimniFS).
+
+The boundary is deliberate:
+
+- omnizip-rs codecs are **content-defined**: same input + same params
+  ⇒ byte-identical output. This is the foundation that CE builds on.
+- `DropId = BLAKE3(plaintext)` (LimniFS) is convergent in spirit: the
+  identity is a pure function of the content, so two clients storing
+  the same plaintext converge on the same id. That property enables
+  dedup at the storage layer without coordination.
+- omnizip-rs codecs never see keys, IVs, or authentication tags.
+  Adding crypto here would couple two orthogonal concerns and break
+  the layered design.
+
+**Reference:** *Convergent Encryption Enabled Secure Data Deduplication*
+(Wiley 2024, https://onlinelibrary.wiley.com/doi/10.1002/cpe.8205)
+surveys modern CE schemes (CE-1, CE-2, Dekey) and the known attacks
+they address. The architectural split documented here means omnizip-rs
+can be dropped into any of these schemes — the codec layer is
+agnostic to which CE variant the storage layer picks.
+
 ## References
 
 - `CLAUDE.md` — project invariants and workflow

@@ -54,3 +54,35 @@ CI installs all reference CLIs in `.github/workflows/differential.yml`.
 - `tests/differential/` — already exists; populate with test files
 - `.github/workflows/differential.yml` — CI integration
 - `tests/differential/README.md` — how to run locally
+
+## Sequencing
+
+- **Do first** — this is the foundation that #83, #84, and any future
+  codec work needs. Without it, regressions ship silently.
+- The omnizip-bench crate (TODO 86, ✅) provides the determinism
+  check but not the cross-language parity. Both are needed.
+
+## Effort estimate
+
+- 3-5 days for the core harness (8 codecs × 1 test file each).
+- +1-2 days for CI integration (`.github/workflows/differential.yml`
+  needs `apt install xz-utils zstd bzip2 gzip brotli libsnappy-dev
+  liblz4-tool flac` on Ubuntu runners).
+
+## Risks
+
+- Some CLIs add framing that our Rust decoders don't expect (e.g.
+  `gzip` headers, `bzip2` magic). Handle by either (a) using the
+  "raw" format on both sides, or (b) parsing the framing in the
+  test.
+- macOS vs Linux CLI quirks (BSD vs GNU). Pin specific CLI versions
+  in CI to avoid drift.
+- Reference CLIs are not always installed on dev machines. Document
+  install instructions per-platform in `tests/differential/README.md`.
+
+## References
+
+- CLAUDE.md — original spec for the differential gate.
+- `tests/differential/ruby_reference/` — existing Ruby-runner
+  scaffolding (used by the LZMA xz interop work).
+

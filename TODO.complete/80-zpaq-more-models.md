@@ -1,7 +1,18 @@
 # 80 — ZPAQ: add more context-mixing sub-models
 
-**Priority:** Medium
+**Priority:** Medium — 🔄 **PARTIAL (run-length landed)**
 **Source:** RESEARCH.md §2 (cmix / PAQ lineage)
+
+## Status
+
+**Run-length model landed** (NUM_MODELS bumped 4 → 5). The new model
+emits a strongly-biased probability toward the previous byte when
+the recent history is a run of identical bytes (≥ 2). Mixer starts
+its weight at 0; adaptation boosts it on RLE-friendly inputs.
+
+**Order-3 and word-level models are pending.** They need careful
+weight initialisation so the order-2 baseline doesn't regress on
+short inputs (kilobytes where adaptation hasn't converged).
 
 ## Context
 

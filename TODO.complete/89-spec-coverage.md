@@ -49,3 +49,33 @@ This is tedious to produce but extremely valuable:
 - `docs/spec-coverage/` — new directory
 - `docs/spec-coverage/README.md` — methodology
 - `docs/spec-coverage/{codec}.md` — per-codec matrix
+
+## Sequencing
+
+- **Do last** — this is documentation work that benefits from having
+  the differential harness (#87) and benchmark suite (#86, ✅) in
+  place. It's most useful when the codebase is stable enough that
+  the matrices don't go stale immediately.
+- Optional: automate by parsing test files for clause references
+  (regex `§\d+\.\d+` or `RFC \d+ §\d+`).
+
+## Effort estimate
+
+- 1-2 hours per codec × 9 codecs = 9-18 hours.
+- Mostly reading RFCs and grepping test files. Tedious but bounded.
+
+## Risks
+
+- Matrices go stale as tests evolve. Mitigation: a CI lint that
+  fails when a test file references a clause not in the matrix, or
+  vice versa.
+
+## References
+
+- RFC 1950 (zlib), 1951 (DEFLATE), 1952 (gzip)
+- RFC 7932 (Brotli)
+- RFC 8878 (ZSTD)
+- LZMA spec (Dorogoy 2015)
+- FLAC spec (https://xiph.org/flac/format.html)
+- BZip2 spec (https://sourceware.org/bzip2/)
+

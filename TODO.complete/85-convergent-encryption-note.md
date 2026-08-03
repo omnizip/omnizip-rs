@@ -1,9 +1,21 @@
 # 85 — Document convergent-encryption boundary
 
-**Priority:** Low (informational)
+**Priority:** Low (informational) — **✅ DONE**
 **Source:** RESEARCH.md §7 (Convergent encryption + dedup)
 
-## Context
+## Status
+
+Landed in `docs/ARCHITECTURE.md` ("Convergent encryption boundary"
+section). The doc explains:
+
+- omnizip-rs is the codec layer; CE lives in the storage layer
+  (LimniFS).
+- `DropId = BLAKE3(plaintext)` is convergent in spirit.
+- omnizip-rs never sees keys/IVs/tags — adding crypto here would
+  violate layered design.
+- References the Wiley 2024 CE survey paper.
+
+## Original context
 
 omnizip-rs is the **codec layer** for LimniFS, which is a
 content-addressed FS using `DropId = BLAKE3(plaintext)`. Recent
@@ -12,30 +24,8 @@ schemes that combine dedup with confidentiality.
 
 omnizip-rs does NOT do encryption. But the determinism invariant
 (required for content addressing) is the same property CE schemes
-rely on. Documenting this prevents confusion:
-
-- Users asking "is omnizip-rs secure?" — answer: it's deterministic,
-  not encrypted. Encryption is LimniFS's responsibility.
-- Security researchers looking at CE should know omnizip-rs is the
-  layer below.
-
-## Action
-
-Add a short paragraph to:
-
-- `README.md` — under "Security" section
-- `CLAUDE.md` — under "Invariants"
-
-Documenting:
-
-1. omnizip-rs provides deterministic compression only.
-2. Content addressing is the consumer's responsibility (LimniFS).
-3. Encryption (CE or otherwise) is the consumer's responsibility.
-4. The determinism invariant makes omnizip-rs compatible with CE
-   schemes — same plaintext always produces same compressed bytes,
-   which always hashes to the same `DropId`.
+rely on.
 
 ## Files
 
-- `README.md` — add Security section
-- `CLAUDE.md` — expand Invariants section
+- `docs/ARCHITECTURE.md` — new "Convergent encryption boundary" section.

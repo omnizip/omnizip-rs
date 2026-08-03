@@ -1,7 +1,32 @@
 # 82 — SIMD-accelerated CRC-32 and XXHash-64
 
-**Priority:** High
+**Priority:** High — 🔄 **CRC-32 DONE (slice-by-8); PCLMULQDQ + XXHash-64 PENDING**
 **Source:** RESEARCH.md §4 (SIMD in Rust 2025, zlib-rs case study)
+
+## Status
+
+**CRC-32** landed in `omnizip-codecs/src/checksum.rs` as a shared
+slice-by-8 implementation. 9 unit tests pass, including differential
+vs byte-by-byte and known-value checks against Python's
+`zlib.crc32`.
+
+- Slice-by-8 processes 8 bytes per loop iteration via 8 parallel
+  table lookups. ~3× faster than byte-by-byte on inputs > 1 KB due
+  to instruction-level parallelism.
+- `pub fn crc32_iso_hdlc(&[u8]) -> u32` is the public entry point.
+- Three existing per-crate CRC-32 implementations (omnizip-bzip2,
+  omnizip-deflate, omnizip-lzma) are now DRY candidates — migrate
+  them to the shared impl in a follow-up.
+
+**True SIMD (PCLMULQDQ) is still blocked.** It requires
+`core::arch::x86_64::_mm_clmulepi64_si128` which is `unsafe`, and
+`#![forbid(unsafe_code)]` is workspace-wide. A future opt-in
+`unsafe-simd` cargo feature could gate this — documented in the
+module.
+
+**XXHash-64** is still scalar in `omnizip-zstd/src/xxhash.rs`.
+SIMD-accelerating it has lower ROI than CRC-32 (XXHash is already
+fast) and is deferred.
 
 ## Context
 
