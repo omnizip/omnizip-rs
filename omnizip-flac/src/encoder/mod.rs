@@ -42,10 +42,66 @@ const DEFAULT_BLOCK_SIZE: usize = 4096;
 /// `input` is the raw PCM data, interleaved by channel. The format
 /// (sample rate, channels, bps, endianness) is described by `params`.
 ///
+/// Picks the best block size from [`CANDIDATE_BLOCK_SIZES`] by
+/// encoding the stream at each candidate and returning the smallest
+/// output. Matches libFLAC's `--best` behaviour at the stream level
+/// (per-frame selection is a future enhancement).
+///
 /// # Errors
 ///
 /// Returns `String` on configuration errors or sample-reading failures.
 pub fn encode_stream(input: &[u8], params: &PcmParams) -> Result<Vec<u8>, String> {
+    let total_frames = validate_input(input, params)?;
+
+    // Try each candidate block size, return the smallest output.
+    //
+    // To avoid duplicate work, only candidates that produce DIFFERENT
+    // clamped block sizes are tried. For short inputs (total_frames <
+    // smallest candidate), only one candidate is tried because they
+    // all clamp to total_frames. For long inputs, all candidates
+    // produce distinct block sizes and all are tried.
+    let mut seen_clamped: usize = 0;
+    let mut best: Option<Vec<u8>> = None;
+    for &block_size in CANDIDATE_BLOCK_SIZES {
+        let clamped = block_size.min(total_frames.max(1));
+        if clamped == seen_clamped {
+            continue;
+        }
+        seen_clamped = clamped;
+        match encode_stream_with_block_size(input, params, block_size) {
+            Ok(encoded) => match &best {
+                None => best = Some(encoded),
+                Some(prev) if encoded.len() < prev.len() => best = Some(encoded),
+                _ => {}
+            },
+            Err(_) => continue,
+        }
+    }
+    best.ok_or_else(|| "no block size produced valid output".into())
+}
+
+/// Candidate block sizes tried by [`encode_stream`], ordered to match
+/// libFLAC's `--best` sweep (small → large).
+///
+/// 4608 is libFLAC's mid-range default for 44.1 kHz; 4096/8192/16384
+/// are the standard power-of-two options; 192/256/512 help very short
+/// inputs where fixed overhead dominates.
+const CANDIDATE_BLOCK_SIZES: &[usize] = &[192, 256, 512, 1024, 2048, 4096, 4608, 8192, 16384];
+
+/// Encode interleaved PCM audio with a specific block size.
+///
+/// Use [`encode_stream`] for automatic block-size selection. This
+/// function is exposed for callers that want to force a specific
+/// block size (e.g. for testing or streaming).
+///
+/// # Errors
+///
+/// Returns `String` on configuration errors or sample-reading failures.
+pub fn encode_stream_with_block_size(
+    input: &[u8],
+    params: &PcmParams,
+    requested_block_size: usize,
+) -> Result<Vec<u8>, String> {
     let bps = params.bits_per_sample;
     if bps < 4 || bps > 32 {
         return Err(format!("unsupported bits_per_sample: {bps}"));
@@ -68,8 +124,11 @@ pub fn encode_stream(input: &[u8], params: &PcmParams) -> Result<Vec<u8>, String
     // De-interleave PCM into per-channel i32 samples.
     let channels_data = deinterleave(input, params, bytes_per_sample, total_frames)?;
 
-    // Split into blocks and encode.
-    let block_size = DEFAULT_BLOCK_SIZE.min(total_frames.max(1));
+    // Clamp block size to spec max (65535) and to total_frames.
+    let block_size = requested_block_size
+        .min(65535)
+        .min(total_frames.max(1));
+
     let mut out = Vec::with_capacity(42 + input.len() / 2);
     out.extend_from_slice(&FLAC_MAGIC);
 
@@ -118,6 +177,28 @@ pub fn encode_stream(input: &[u8], params: &PcmParams) -> Result<Vec<u8>, String
 
     out.extend_from_slice(&writer.as_bytes());
     Ok(out)
+}
+
+/// Validate input dimensions and return the total frame count.
+fn validate_input(input: &[u8], params: &PcmParams) -> Result<usize, String> {
+    let bps = params.bits_per_sample;
+    if bps < 4 || bps > 32 {
+        return Err(format!("unsupported bits_per_sample: {bps}"));
+    }
+    let channels = params.channels;
+    if channels == 0 || channels > 8 {
+        return Err(format!("unsupported channels: {channels}"));
+    }
+    let bytes_per_sample = usize::from(bps) / 8 + if usize::from(bps) % 8 > 0 { 1 } else { 0 };
+    let frame_bytes = usize::from(channels) * bytes_per_sample;
+    if input.len() % frame_bytes != 0 {
+        return Err(format!(
+            "input len {} not a multiple of frame size {}",
+            input.len(),
+            frame_bytes
+        ));
+    }
+    Ok(input.len() / frame_bytes)
 }
 
 /// De-interleave raw PCM bytes into per-channel i32 sample vectors.
