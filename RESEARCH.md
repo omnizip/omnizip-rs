@@ -208,3 +208,149 @@ Ranked by impact × feasibility × omnizip-rs fit:
 - MaskRay (2025). *Benchmarking Compression Programs.* https://maskray.me/blog/2025-08-31-benchmarking-compression-programs
 - arXiv (2025). *Performance Evaluation of Efficient Hybrid Compression.* https://arxiv.org/html/2504.20747v1
 - Hutter Prize. http://prize.hutter1.net/
+
+---
+
+# Update — 2026 academic literature
+
+A new wave of 2026 papers and conferences. Adding 6 new items below.
+
+## 11. Tsai 2026 — Revisiting Data Compression with Language Modeling
+
+**Paper:** *Revisiting Data Compression with Language Modeling*
+**Author:** Chen-Han Tsai (2026)
+**URL:** https://arxiv.org/abs/2601.02875
+
+**Finding:** Continues the DeepMind 2024 line of work on LLM-as-compressor.
+Explores different methods to achieve lower adjusted compression rate
+using LLMs. Cited by 1 — recent.
+
+**Fit for omnizip-rs: ❌ Same constraints as DeepMind 2024**
+- Requires LLM weights
+- Non-deterministic across GPU architectures
+- Incompatible with content-addressed determinism
+
+## 12. 2026 Algorithmic Information Theory Data Compression Challenge
+
+**Paper:** *The 2026 Algorithmic Information Theory Data Compression Challenge*
+**URL:** https://arxiv.org/abs/2606.17712
+
+**Finding:** New 2026 benchmark for general-purpose lossless compression.
+16 heterogeneous files, 117 valid submissions. Standard metrics:
+compression ratio, encode time, decode time. Public training set +
+hidden test set.
+
+**Fit for omnizip-rs: ✅ Critical**
+- This is a current SOTA benchmark suite
+- We should download the corpus and add to our `omnizip-bench` (TODO 86)
+- Compare omnizip-rs ratios against the leaderboard
+- Identify whether our codecs are competitive or lagging
+
+**Action:** update TODO 86 to include the AIT 2026 corpus alongside
+Silesia / Enwik8 / Calgary.
+
+## 13. ZipServ — ASPLOS 2026
+
+**Paper:** *ZipServ: Fast and Memory-Efficient LLM Inference with Hardware-Aware Lossless Compression*
+**Authors:** Ruibo Fan et al. (HKUST Guangzhou)
+**URL:** https://arxiv.org/abs/2603.17435
+**Code:** https://github.com/HPMLL/ZipServ_ASPLOS26
+
+**Finding:** First hardware-aware lossless compression framework co-designed
+for LLM inference on GPUs. Reduces model size by up to 30% while
+accelerating inference.
+
+**Fit for omnizip-rs: ⚠️ Informational**
+- omnizip-rs targets CPU; ZipServ is GPU-specific
+- But the insight (compression designed for hardware decompressors)
+  is applicable: if we ever target embedded CPU/GPU, the same
+  co-design principle applies
+- Document as architectural inspiration for future SIMD work
+
+## 14. LDG-PCGC — Lossless point cloud compression
+
+**Paper:** *LDG-PCGC: Lossless Dynamically Grouped Point Cloud Compression*
+**URL:** https://ieeexplore.ieee.org/abstract/document/11463998/
+
+**Finding:** Lossless point cloud compression with 48.4% ratio. Uses
+dynamic grouping + entropy coding.
+
+**Fit for omnizip-rs: ❌ Out of scope**
+- Point clouds are a domain-specific data type (3D scanning, LiDAR)
+- No plans for a 3D-geometry codec in omnizip-rs
+- However, if LimniFS ever stores volumetric data, this could
+  become relevant
+
+## 15. DCC 2026 (Data Compression Conference)
+
+**Venue:** DCC 2026, Snowbird, Utah, March 24–27, 2026
+**URL:** https://signalprocessingsociety.org/events/2026-dcc-2026-data-compression-conference
+**Proceedings:** IEEE, ISBN 979-8-3315-8261-6
+
+**Finding:** Premier compression venue. 2026 papers cover:
+- Volumetric data compression
+- Point cloud geometry compression
+- Improvements to LZ77, ANS, arithmetic coding
+
+**Fit for omnizip-rs: ✅ Worth tracking**
+- DCC papers often become the next RFCs / codec standards
+- No immediate action — bookmark the proceedings page and review
+  quarterly
+
+## 16. LLM-generated data lossless compression
+
+**Paper:** *Lossless Compression of Large Language Model (LLM)-Generated Data*
+**URL:** https://arxiv.org/html/2505.06297v1
+
+**Finding:** LLM-generated text has different statistical properties
+than human text — more repetitive, more "templated". Standard
+compressors underperform on it. Paper proposes LLM-aware dictionary
+preprocessing.
+
+**Fit for omnizip-rs: ⚠️ Emerging**
+- If LimniFS users store AI-generated content (likely!), our codecs
+  should be tuned for it
+- Action: add LLM-generated corpus to benchmark suite (TODO 86)
+- The "in-context dictionary" idea from arXiv 2604.13066 (de Campos
+  2026) is essentially our existing ZSTD dictionary support — we
+  already have the infrastructure
+
+## 17. L3TC — RWKV-based learned text compression
+
+**Paper:** *L3TC: Leveraging RWKV for Learned Lossless Low-Complexity Text Compression*
+**URL:** https://github.com/alipay/L3TC-leveraging-rwkv-for-learned-lossless-low-complexity-text-compression
+
+**Finding:** 48% bit saving vs gzip. RWKV is a small RNN architecture
+(50× smaller than other learned compressors).
+
+**Fit for omnizip-rs: ⚠️ Research project**
+- RWKV is small enough that we COULD embed it (~10 MB)
+- Still requires model weights
+- Still non-deterministic on different hardware
+- Future candidate if we ever relax determinism for offline-only use
+
+---
+
+## Synthesis — 2026 prioritized roadmap
+
+Adding to the 2024–2025 roadmap:
+
+| # | Enhancement | Impact | Effort | Status |
+|---|-------------|--------|--------|--------|
+| 90 | Add AIT 2026 corpus to benchmark suite | High | Low | TODO 86 (updated) |
+| 91 | Add LLM-generated text corpus to benchmark | Medium | Low | TODO 86 (updated) |
+| 92 | Track DCC 2026 proceedings quarterly | Low | Low | process |
+| 93 | Track ZipServ GPU insights for future SIMD work | Low | Low | process |
+
+---
+
+## Updated references (2026)
+
+- Tsai, C.-H. (2026). *Revisiting Data Compression with Language Modeling.* arXiv:2601.02875.
+- (2026). *The 2026 Algorithmic Information Theory Data Compression Challenge.* arXiv:2606.17712.
+- Fan, R. et al. (2026). *ZipServ: Fast and Memory-Efficient LLM Inference with Hardware-Aware Lossless Compression.* ASPLOS 2026. arXiv:2603.17435.
+- (2026). *LDG-PCGC: Lossless Dynamically Grouped Point Cloud Compression.* IEEE.
+- DCC 2026. *Data Compression Conference proceedings.* IEEE, ISBN 979-8-3315-8261-6.
+- (2025). *Lossless Compression of Large Language Model (LLM)-Generated Data.* arXiv:2505.06297.
+- de Campos, A.R. (2026). *Enabling Cost-Effective LLM Analysis of Repetitive Data via In-Context Dictionary.* arXiv:2604.13066.
+- Zhang, J. (2025). *L3TC: Leveraging RWKV for Learned Lossless Low-Complexity Text Compression.* AAAI 2025.
