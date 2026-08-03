@@ -87,6 +87,8 @@ the new items document the path forward.
 | 89 | [Spec coverage analysis](89-spec-coverage.md) | ⏳ |
 | 90 | [Add AIT 2026 corpus to benchmark](90-ait-2026-corpus.md) | ⏳ |
 | 91 | [Add LLM-generated text corpus to benchmark](91-llm-generated-corpus.md) | ⏳ |
+| 94 | [DRY CRC-32 migration to shared checksum module](94-dry-crc32-migration.md) | ⏳ |
+| 96 | [Shared XXHash-64 in omnizip-codecs](96-shared-xxhash.md) | ⏳ |
 
 ## Low priority
 
@@ -95,6 +97,7 @@ the new items document the path forward.
 | 85 | [Document convergent-encryption boundary](85-convergent-encryption-note.md) | ✅ |
 | 92 | [Track DCC 2026 proceedings quarterly](92-dcc-2026-tracking.md) | process |
 | 93 | [Track ZipServ GPU insights for future SIMD work](93-zipserv-insights.md) | process |
+| 95 | [Wire FSST/Rice++/FLAC/BLOSC/GLZA/Deflate64 into omnizip-bench](95-more-bench-codecs.md) | ⏳ |
 
 ## How to claim a TODO
 

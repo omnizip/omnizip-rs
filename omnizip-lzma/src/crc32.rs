@@ -1,42 +1,13 @@
-//! CRC32 (IEEE 802.3 polynomial `0xEDB88320`) — used by XZ stream
+//! CRC-32 (IEEE 802.3 polynomial `0xEDB88320`) — used by XZ stream
 //! headers, block headers, and the lzip trailing checksum.
+//!
+//! Delegates to the shared slice-by-8 implementation in
+//! `omnizip_codecs::checksum`. See `TODO.complete/82-simd-crc32-xxhash.md`
+//! and `TODO.complete/94-dry-crc32-migration.md`.
 
 #![forbid(unsafe_code)]
 
-use std::sync::OnceLock;
-
-static TABLE: OnceLock<[u32; 256]> = OnceLock::new();
-
-#[must_use]
-pub fn crc32(data: &[u8]) -> u32 {
-    let table = TABLE.get_or_init(build_table);
-    let mut crc = 0xFFFF_FFFFu32;
-    for &byte in data {
-        let idx = ((crc ^ u32::from(byte)) & 0xFF) as usize;
-        crc = (crc >> 8) ^ table[idx];
-    }
-    crc ^ 0xFFFF_FFFF
-}
-
-const fn build_table() -> [u32; 256] {
-    let mut table = [0u32; 256];
-    let mut i = 0usize;
-    while i < 256 {
-        let mut crc = i as u32;
-        let mut j = 0;
-        while j < 8 {
-            if crc & 1 != 0 {
-                crc = (crc >> 1) ^ 0xEDB8_8320;
-            } else {
-                crc >>= 1;
-            }
-            j += 1;
-        }
-        table[i] = crc;
-        i += 1;
-    }
-    table
-}
+pub use omnizip_codecs::checksum::crc32_iso_hdlc as crc32;
 
 #[cfg(test)]
 mod tests {

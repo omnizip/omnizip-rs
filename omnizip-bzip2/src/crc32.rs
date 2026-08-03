@@ -1,28 +1,12 @@
-//! CRC32 (IEEE 802.3 / `bzip2` polynomial).
+//! CRC-32 (IEEE 802.3 / zlib polynomial `0xEDB88320`).
 //!
-//! The Ruby reference uses `Omnizip::Checksums::Crc32` which is the standard
-//! zlib-compatible CRC32 (polynomial `0xEDB88320`, init `0xFFFFFFFF`, final
-//! XOR `0xFFFFFFFF`, reflected). This module provides a table-free
-//! implementation matching that exactly.
+//! Delegates to the shared slice-by-8 implementation in
+//! `omnizip_codecs::checksum`. See `TODO.complete/82-simd-crc32-xxhash.md`
+//! and `TODO.complete/94-dry-crc32-migration.md`.
 
-const POLY: u32 = 0xEDB8_8320;
+#![forbid(unsafe_code)]
 
-/// Compute the CRC32 of `data`.
-#[must_use]
-pub fn crc32(data: &[u8]) -> u32 {
-    let mut crc: u32 = 0xFFFF_FFFF;
-    for &byte in data {
-        crc ^= u32::from(byte);
-        for _ in 0..8 {
-            crc = if crc & 1 != 0 {
-                (crc >> 1) ^ POLY
-            } else {
-                crc >> 1
-            };
-        }
-    }
-    crc ^ 0xFFFF_FFFF
-}
+pub use omnizip_codecs::checksum::crc32_iso_hdlc as crc32;
 
 #[cfg(test)]
 mod tests {

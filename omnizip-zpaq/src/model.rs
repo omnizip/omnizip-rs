@@ -178,9 +178,9 @@ impl Order2Model {
 
 /// Number of models feeding the [`Mixer`](crate::mixer::Mixer).
 ///
-/// Must agree with [`crate::mixer::NUM_MODELS`]. Five models:
-/// order-0, order-1, order-2, match, run-length.
-pub const NUM_MODELS: usize = 5;
+/// Must agree with [`crate::mixer::NUM_MODELS`]. Six models:
+/// order-0, order-1, order-2, order-3, match, run-length.
+pub const NUM_MODELS: usize = 6;
 
 /// Maximum count before a counter pair is halved. Same value as the
 /// order-2 model uses, kept consistent so all models forget at the same rate.
@@ -500,21 +500,80 @@ impl RunLengthModel {
 /// match (the run is *current*, the match is recalled).
 const RUN_CONFIDENCE: u16 = 54_000; // ~0.82
 
+// ---------------------------------------------------------------------------
+// Order-3 model.
+// ---------------------------------------------------------------------------
+
+/// Order-3 model: context = three previous bytes packed into a `u32` +
+/// bit position. Sparse storage via `HashMap` — only contexts that
+/// actually occur are stored.
+///
+/// Order-3 catches longer-range dependencies than order-2 (e.g.
+/// distinguishing "the " from "the" + 'm'). Diminishing returns
+/// beyond order-3 for byte-level prediction on text-sized inputs,
+/// but useful in the mix when the corpus has repetitive triples.
+pub struct Order3Model {
+    table: HashMap<(u32, u8), CounterPair>,
+}
+
+impl Default for Order3Model {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Order3Model {
+    #[must_use]
+    pub fn new() -> Self {
+        Self { table: HashMap::new() }
+    }
+
+    /// Probability lookup with an explicit 3-byte context (used by
+    /// [`MultiModel`] which manages its own byte history).
+    fn prob_with_context(&self, prev2: u8, prev1: u8, last: u8, bit_pos: u8) -> u16 {
+        let ctx = make_order3_ctx(prev2, prev1, last);
+        match self.table.get(&(ctx, bit_pos)) {
+            Some(c) => c.prob_one(),
+            None => DEFAULT_PROB,
+        }
+    }
+
+    fn update_with_context(
+        &mut self,
+        prev2: u8,
+        prev1: u8,
+        last: u8,
+        bit_pos: u8,
+        bit: bool,
+    ) {
+        let ctx = make_order3_ctx(prev2, prev1, last);
+        let entry = self.table.entry((ctx, bit_pos)).or_default();
+        entry.observe(bit);
+    }
+}
+
+/// Pack three bytes into a u32 context key (prev2 in the high byte).
+fn make_order3_ctx(prev2: u8, prev1: u8, last: u8) -> u32 {
+    (u32::from(prev2) << 16) | (u32::from(prev1) << 8) | u32::from(last)
+}
+
 /// Combined context-mixing model driving the arithmetic coder.
 ///
-/// Wraps five sub-models (order-0, order-1, order-2, match, run-length)
-/// and an adaptive [`Mixer`](crate::mixer::Mixer). The model is stateless
-/// across encode/decode — both sides rebuild it identically because all
-/// state depends only on already-coded bytes.
+/// Wraps six sub-models (order-0, order-1, order-2, order-3, match,
+/// run-length) and an adaptive [`Mixer`](crate::mixer::Mixer). The
+/// model is stateless across encode/decode — both sides rebuild it
+/// identically because all state depends only on already-coded bytes.
 pub struct MultiModel {
     order0: Order0Model,
     order1: Order1Model,
     order2: Order2Model,
+    order3: Order3Model,
     matcher: MatchModel,
     runlen: RunLengthModel,
     mixer: crate::mixer::Mixer,
     last_byte: u8,
     prev_byte: u8,
+    prev2_byte: u8,
 }
 
 impl Default for MultiModel {
@@ -530,11 +589,13 @@ impl MultiModel {
             order0: Order0Model::new(),
             order1: Order1Model::new(),
             order2: Order2Model::new(),
+            order3: Order3Model::new(),
             matcher: MatchModel::new(),
             runlen: RunLengthModel::new(),
             mixer: crate::mixer::Mixer::new(),
             last_byte: 0,
             prev_byte: 0,
+            prev2_byte: 0,
         }
     }
 
@@ -544,9 +605,12 @@ impl MultiModel {
         let p2 = self
             .order2
             .prob_with_context(self.prev_byte, self.last_byte, bit_pos);
+        let p3 = self
+            .order3
+            .prob_with_context(self.prev2_byte, self.prev_byte, self.last_byte, bit_pos);
         let pm = self.matcher.prob();
         let pr = self.runlen.prob();
-        [p0, p1, p2, pm, pr]
+        [p0, p1, p2, p3, pm, pr]
     }
 
     /// Encode one byte MSB-first using the mixed model probability.
@@ -566,6 +630,13 @@ impl MultiModel {
             self.order1.update(self.prev_byte, bit_pos, bit);
             self.order2
                 .update_with_context(self.prev_byte, self.last_byte, bit_pos, bit);
+            self.order3.update_with_context(
+                self.prev2_byte,
+                self.prev_byte,
+                self.last_byte,
+                bit_pos,
+                bit,
+            );
             self.mixer.update(bit);
             self.matcher.update();
             self.runlen.update();
@@ -574,6 +645,7 @@ impl MultiModel {
         // Finalise: advance byte context and history.
         self.matcher.end_byte(byte);
         self.runlen.end_byte(byte);
+        self.prev2_byte = self.prev_byte;
         self.prev_byte = self.last_byte;
         self.last_byte = byte;
     }
@@ -593,6 +665,13 @@ impl MultiModel {
             self.order1.update(self.prev_byte, bit_pos, bit);
             self.order2
                 .update_with_context(self.prev_byte, self.last_byte, bit_pos, bit);
+            self.order3.update_with_context(
+                self.prev2_byte,
+                self.prev_byte,
+                self.last_byte,
+                bit_pos,
+                bit,
+            );
             self.mixer.update(bit);
             self.matcher.update();
             self.runlen.update();
@@ -604,6 +683,7 @@ impl MultiModel {
 
         self.matcher.end_byte(byte);
         self.runlen.end_byte(byte);
+        self.prev2_byte = self.prev_byte;
         self.prev_byte = self.last_byte;
         self.last_byte = byte;
         byte
