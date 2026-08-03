@@ -25,6 +25,7 @@
 
 pub mod case;
 pub mod corpus;
+pub mod llm_corpus;
 pub mod report;
 pub mod runner;
 pub mod synthetic;
