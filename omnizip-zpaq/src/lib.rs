@@ -22,10 +22,16 @@
 //!
 //! ## Compression level
 //!
-//! Phase 2 uses a single fixed model portfolio for all levels; the level
-//! parameter is currently accepted but does not switch models. Future
-//! phases may select between model portfolios (e.g. faster order-0/1 only
-//! at low levels).
+//! The codec accepts levels 0..=9 and maps them to model portfolios:
+//!
+//! | Level | Portfolio | Models                                            |
+//! |-------|-----------|---------------------------------------------------|
+//! | 0..=2 | `Fast`    | order-0, order-1, match (3 models)                |
+//! | 3..=5 | `Default` | + order-2, run-length (5 models)                  |
+//! | 6..=9 | `Best`    | + order-3 (6 models, the legacy configuration)    |
+//!
+//! Higher levels trade encode speed for ratio. Decode reconstructs
+//! the same portfolio from the container header.
 
 #![forbid(unsafe_code)]
 #![warn(clippy::pedantic)]
@@ -37,7 +43,8 @@ pub mod model;
 
 use omnizip_codecs::{Codec, CodecId, CompressionLevel, OmnizipError};
 
-pub use container::{compress_container, decompress_container};
+pub use container::{compress_container, compress_container_with_portfolio, decompress_container};
+pub use model::Portfolio;
 
 /// Errors specific to the omnizip-zpaq codec.
 #[derive(Debug)]
@@ -114,8 +121,9 @@ impl Codec for ZpaqCodec {
                 max: LEVEL_MAX,
             });
         }
-        // Phase 2: a single model portfolio is used for all valid levels.
-        Ok(compress_container(plaintext))
+        // Map level → portfolio. Higher levels use more sub-models.
+        let portfolio = Portfolio::from_level(lvl);
+        Ok(compress_container_with_portfolio(plaintext, portfolio))
     }
 
     fn decompress(&self, compressed: &[u8], expected_len: u32) -> Result<Vec<u8>, OmnizipError> {
@@ -338,5 +346,56 @@ phase2 ratio {:.4} ({} payload bytes, {} total)",
             Err(OmnizipError::LengthMismatch { expected, actual, .. })
                 if expected == wrong_len && actual == data.len()
         ));
+    }
+
+    /// Higher levels must use more sub-models and produce different
+    /// (smaller-or-equal) output than lower levels. See proposal
+    /// `zpaq-level-portfolios.md`.
+    #[test]
+    fn higher_levels_use_more_models() {
+        let codec = ZpaqCodec;
+        let data = b"The quick brown fox jumps over the lazy dog. ".repeat(50);
+        let fast = codec
+            .compress(&data, CompressionLevel::new(1))
+            .expect("level 1 (Fast)");
+        let best = codec
+            .compress(&data, CompressionLevel::new(9))
+            .expect("level 9 (Best)");
+        // Output must differ — different portfolios produce different bits.
+        assert_ne!(
+            fast, best,
+            "Fast and Best portfolios must produce different output"
+        );
+        // Both must round-trip via the matching decoder.
+        let dec_fast = codec.decompress(&fast, data.len() as u32).expect("decode fast");
+        let dec_best = codec.decompress(&best, data.len() as u32).expect("decode best");
+        assert_eq!(dec_fast, data);
+        assert_eq!(dec_best, data);
+    }
+
+    /// Portfolio config ids round-trip through the container header.
+    #[test]
+    fn portfolio_config_ids_round_trip() {
+        let data = b"portfolio round trip test";
+        for portfolio in [Portfolio::Fast, Portfolio::Default, Portfolio::Best] {
+            let c = compress_container_with_portfolio(data, portfolio);
+            let d = decompress_container(&c).expect("decompress");
+            assert_eq!(d, data, "portfolio {:?} round-trip failed", portfolio);
+        }
+    }
+
+    /// Best portfolio should compress repetitive text at least as well
+    /// as Fast (more models never hurt on long inputs).
+    #[test]
+    fn best_beats_fast_on_repetitive_text() {
+        let data = b"the quick brown fox jumps over the lazy dog ".repeat(200);
+        let fast = compress_container_with_portfolio(&data, Portfolio::Fast);
+        let best = compress_container_with_portfolio(&data, Portfolio::Best);
+        assert!(
+            best.len() <= fast.len(),
+            "Best ({} B) should beat or match Fast ({} B) on repetitive text",
+            best.len(),
+            fast.len()
+        );
     }
 }

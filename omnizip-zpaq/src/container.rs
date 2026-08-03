@@ -4,21 +4,31 @@
 //! Header (11 bytes):
 //!   magic:              b"ZPAQ\0"     (5 bytes)
 //!   version:            u8 = 2
-//!   config_id:          u8 = 2        (identifies the multi-model config)
+//!   config_id:          u8            (identifies the model portfolio)
 //!   uncompressed_size:  u32 LE
 //! Body:
 //!   arithmetic-coded bitstream
 //! ```
 //!
 //! The container is intentionally minimal: no per-block metadata, no
-//! journaling. The version byte distinguishes Phase 1 (v1, single order-2
-//! model) from Phase 2 (v2, multi-model context mixing); both remain
-//! decodable so legacy streams stay readable.
+//! journaling. The version byte distinguishes Phase 1 (v1, single
+//! order-2 model) from Phase 2 (v2, multi-model context mixing); both
+//! remain decodable so legacy streams stay readable.
+//!
+//! ## Config id allocation
+//!
+//! | id | Portfolio                                           |
+//! |----|-----------------------------------------------------|
+//! | 1  | Phase 1 order-2 (legacy)                            |
+//! | 2  | Phase 2 all-6-models (legacy, equivalent to id 5)   |
+//! | 3  | Phase 2 Fast (3 models)                              |
+//! | 4  | Phase 2 Default (5 models)                           |
+//! | 5  | Phase 2 Best (6 models)                              |
 
 #![forbid(unsafe_code)]
 
 use crate::arithmetic::{ArithmeticDecoder, ArithmeticEncoder};
-use crate::model::{MultiModel, Order2Model};
+use crate::model::{MultiModel, Order2Model, Portfolio};
 
 /// Magic bytes identifying an omnizip-zpaq container.
 pub const MAGIC: &[u8; 5] = b"ZPAQ\0";
@@ -74,10 +84,17 @@ impl std::error::Error for ContainerError {}
 /// re-encode the body — it prefixes the header.
 #[must_use]
 pub fn wrap(payload: &[u8], uncompressed_size: u32) -> Vec<u8> {
+    wrap_with_config(payload, uncompressed_size, CONFIG_ID_MULTIMODEL)
+}
+
+/// Like [`wrap`] but writes a specific `config_id` (used by portfolio
+/// selection — see [`Portfolio::config_id`]).
+#[must_use]
+pub fn wrap_with_config(payload: &[u8], uncompressed_size: u32, config_id: u8) -> Vec<u8> {
     let mut out = Vec::with_capacity(HEADER_LEN + payload.len());
     out.extend_from_slice(MAGIC);
     out.push(VERSION);
-    out.push(CONFIG_ID_MULTIMODEL);
+    out.push(config_id);
     out.extend_from_slice(&uncompressed_size.to_le_bytes());
     out.extend_from_slice(payload);
     out
@@ -87,7 +104,7 @@ pub fn wrap(payload: &[u8], uncompressed_size: u32) -> Vec<u8> {
 /// version, config_id)`.
 ///
 /// The version and config id are returned so the caller can dispatch to
-/// the correct model portfolio (Phase 1 vs Phase 2).
+/// the correct model portfolio (Phase 1 vs Phase 2 vs Fast/Default/Best).
 ///
 /// # Errors
 ///
@@ -104,8 +121,9 @@ fn parse_header(data: &[u8]) -> Result<(u32, &[u8], u8, u8), ContainerError> {
         return Err(ContainerError::UnsupportedVersion(version));
     }
     let config = data[6];
-    // Accept either config id; the model selection happens at decode time.
-    if config != CONFIG_ID_ORDER2 && config != CONFIG_ID_MULTIMODEL {
+    // Accept any known config id; the model selection happens at decode time.
+    let is_known = matches!(config, 1 | 2 | 3 | 4 | 5);
+    if !is_known {
         return Err(ContainerError::UnknownConfig(config));
     }
     let size = u32::from_le_bytes([data[7], data[8], data[9], data[10]]);
@@ -126,26 +144,46 @@ pub fn unwrap(data: &[u8]) -> Result<(u32, &[u8]), ContainerError> {
 }
 
 /// Convenience: compress a byte slice into a complete container using the
-/// Phase 2 multi-model portfolio.
+/// Phase 2 multi-model portfolio (legacy "Best" 6-model configuration).
+///
+/// Writes the legacy config id `CONFIG_ID_MULTIMODEL` (=2) for backwards
+/// compatibility with readers that don't know about Fast/Default/Best.
+/// Use [`compress_container_with_portfolio`] to emit the new ids.
 ///
 /// Deterministic: identical inputs produce byte-identical outputs.
 #[must_use]
 pub fn compress_container(input: &[u8]) -> Vec<u8> {
     let mut enc = ArithmeticEncoder::new();
-    let mut model = MultiModel::new();
+    let mut model = MultiModel::with_portfolio(Portfolio::Best);
     for &b in input {
         model.encode_byte(b, &mut enc);
     }
     let payload = enc.finish();
     let size = u32::try_from(input.len()).unwrap_or(u32::MAX);
-    wrap(&payload, size)
+    // Emit legacy config id so old decoders still work.
+    wrap_with_config(&payload, size, CONFIG_ID_MULTIMODEL)
+}
+
+/// Like [`compress_container`] but with an explicit model [`Portfolio`].
+/// The portfolio is encoded in the container header so the matching
+/// decoder can reconstruct it.
+#[must_use]
+pub fn compress_container_with_portfolio(input: &[u8], portfolio: Portfolio) -> Vec<u8> {
+    let mut enc = ArithmeticEncoder::new();
+    let mut model = MultiModel::with_portfolio(portfolio);
+    for &b in input {
+        model.encode_byte(b, &mut enc);
+    }
+    let payload = enc.finish();
+    let size = u32::try_from(input.len()).unwrap_or(u32::MAX);
+    wrap_with_config(&payload, size, portfolio.config_id())
 }
 
 /// Convenience: decompress a complete container.
 ///
-/// Both Phase 1 (order-2 only) and Phase 2 (multi-model) streams are
-/// supported; the appropriate model is selected based on the header's
-/// version + config id.
+/// Phase 1 (order-2 only), Phase 2 (legacy all-6-models), and the new
+/// Fast/Default/Best portfolio streams are all supported; the
+/// appropriate model is selected based on the header's config id.
 ///
 /// # Errors
 ///
@@ -154,22 +192,24 @@ pub fn decompress_container(data: &[u8]) -> Result<Vec<u8>, ContainerError> {
     let (size, body, version, config) = parse_header(data)?;
     let size_us = usize::try_from(size).map_err(|_| ContainerError::SizeOverflow)?;
 
-    // Dispatch to the matching model portfolio.
-    let use_multimodel = version >= VERSION || config == CONFIG_ID_MULTIMODEL;
-
     let mut out = Vec::with_capacity(size_us);
-    if use_multimodel {
-        let mut dec = ArithmeticDecoder::new(body);
-        let mut model = MultiModel::new();
-        for _ in 0..size_us {
-            out.push(model.decode_byte(&mut dec));
-        }
-    } else {
+
+    // Phase 1 (v1, config 1) → legacy single order-2 model.
+    if version == VERSION_PHASE1 || config == CONFIG_ID_ORDER2 {
         let mut dec = ArithmeticDecoder::new(body);
         let mut model = Order2Model::new();
         for _ in 0..size_us {
             out.push(model.decode_byte(&mut dec));
         }
+        return Ok(out);
+    }
+
+    // Phase 2: dispatch by portfolio config id.
+    let portfolio = Portfolio::from_config_id(config).ok_or(ContainerError::UnknownConfig(config))?;
+    let mut dec = ArithmeticDecoder::new(body);
+    let mut model = MultiModel::with_portfolio(portfolio);
+    for _ in 0..size_us {
+        out.push(model.decode_byte(&mut dec));
     }
     Ok(out)
 }
