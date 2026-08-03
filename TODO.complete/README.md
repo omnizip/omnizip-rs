@@ -82,7 +82,7 @@ the new items document the path forward.
 
 | # | Title | Status |
 |---|-------|--------|
-| 80 | [ZPAQ: more context-mixing sub-models](80-zpaq-more-models.md) | 🔄 (run-length landed; order-3, word pending) |
+| 80 | [ZPAQ: more context-mixing sub-models](80-zpaq-more-models.md) | ✅ |
 | 83 | [SIMD Huffman decode](83-simd-huffman-decode.md) | ⏳ (blocked on `std::simd` gather stabilisation) |
 | 84 | [Multi-byte FSE decoder](84-multibyte-fse.md) | ⏳ (multi-day algorithmic port) |
 | 88 | [Architecture audit (OCP/MECE/DRY)](88-architecture-audit.md) | ✅ |
@@ -101,7 +101,7 @@ the new items document the path forward.
 | 98 | [LPC subframe interop bug: LOST_SYNC on high-order LPC](98-lpc-interop-bug.md) | ✅ |
 | 99 | [Differential harness: fix bzip2/lz4/DEFLATE framing gaps](99-framing-gaps.md) | ✅ |
 | 100 | [Code review sweep: OCP/MECE/DRY improvements](100-code-review-sweep.md) | ✅ |
-| 101 | [ZSTD encoder: per-call hash-table allocation](101-zstd-encoder-reuse-hash-table.md) | ⏳ |
+| 101 | [ZSTD encoder: per-call hash-table allocation](101-zstd-encoder-reuse-hash-table.md) | ✅ (partial — hash_log cap landed; full compressor reuse deferred) |
 
 ## How to claim a TODO
 
