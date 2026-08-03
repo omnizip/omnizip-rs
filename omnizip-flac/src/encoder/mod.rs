@@ -34,9 +34,6 @@ use crate::streaminfo::StreamInfo;
 /// FLAC stream magic bytes ("fLaC").
 const FLAC_MAGIC: [u8; 4] = *b"fLaC";
 
-/// Default block size in samples per channel.
-const DEFAULT_BLOCK_SIZE: usize = 4096;
-
 /// Encode interleaved PCM audio as a full FLAC stream.
 ///
 /// `input` is the raw PCM data, interleaved by channel. The format

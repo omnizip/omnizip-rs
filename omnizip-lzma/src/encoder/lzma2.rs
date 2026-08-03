@@ -11,8 +11,11 @@ use crate::LzmaError;
 use super::alone::LzmaOptions;
 
 /// Default LZMA parameters (matches lzip/xz-utils defaults).
+#[allow(dead_code)]
 const DEFAULT_LC: u32 = 3;
+#[allow(dead_code)]
 const DEFAULT_LP: u32 = 0;
+#[allow(dead_code)]
 const DEFAULT_PB: u32 = 2;
 #[allow(dead_code)] const DEFAULT_DICT_SIZE: u32 = 16 * 1024 * 1024;
 

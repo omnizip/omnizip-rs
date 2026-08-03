@@ -205,27 +205,6 @@ fn fixed_cost(len: usize, _bps: u8, order: u8, residuals: &[i32]) -> u32 {
     bits.min(u32::MAX as u64) as u32
 }
 
-fn best_k(partition: &[i32]) -> u8 {
-    if partition.is_empty() {
-        return 15;
-    }
-    let mut mapped_sum: u64 = 0;
-    for &r in partition {
-        mapped_sum += u64::from(map_to_unsigned(r));
-    }
-    let mean = mapped_sum / partition.len() as u64;
-    if mean <= 1 {
-        return 0;
-    }
-    let half_mean = mean / 2;
-    let k = if half_mean == 0 { 0 } else { 63 - half_mean.leading_zeros() };
-    k.clamp(0, 14) as u8
-}
-
-fn map_to_unsigned(r: i32) -> u32 {
-    ((r as u32) << 1) ^ ((r >> 31) as u32)
-}
-
 /// Write the 8-bit subframe header: 1 bit (0) + 6 bits (type) + 1 bit
 /// (wasted-bits-flag = 0).
 fn write_header(writer: &mut BitWriter, type_code: u8) {

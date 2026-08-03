@@ -37,6 +37,7 @@ pub const MIN_BLOCK_SIZE: usize = 100_000;
 pub const MAX_BLOCK_SIZE: usize = 900_000;
 
 /// Default block size — Ruby `DEFAULT_BLOCK_SIZE`.
+#[allow(dead_code)]
 pub const DEFAULT_BLOCK_SIZE: usize = 900_000;
 
 /// `BZip2` codec. Block size is derived from the compression level: level 1
