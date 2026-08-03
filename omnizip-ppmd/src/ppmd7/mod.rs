@@ -58,4 +58,8 @@ pub use codec::{
     compress, compress_default, compress_with_budget, decompress, decompress_with_budget,
     Ppmd7Codec, DEFAULT_MAX_ORDER, DEFAULT_MEMORY_BUDGET_BYTES, MAX_ORDER, MIN_ORDER,
 };
-pub use model::{ArithDecoder, ArithEncoder, PpmModel};
+pub use model::PpmModel;
+// Re-export the shared binary arithmetic coder so callers that
+// build their own PpmModel pipelines don't need to reach into
+// omnizip_codecs::arith directly.
+pub use omnizip_codecs::arith::{ArithDecoder, ArithEncoder};

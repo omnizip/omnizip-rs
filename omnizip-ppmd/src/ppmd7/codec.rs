@@ -28,8 +28,9 @@
 
 use omnizip_codecs::{Codec, CodecId, CompressionLevel, OmnizipError};
 
-use super::model::{ArithDecoder, ArithEncoder, PpmModel};
+use super::model::PpmModel;
 use super::{Ppmd7Error, PPMD7_CODEC_ID, PPMD7_MAGIC};
+use omnizip_codecs::arith::{ArithDecoder, ArithEncoder};
 
 /// Minimum context order.
 pub const MIN_ORDER: u8 = 1;
@@ -90,7 +91,7 @@ pub fn compress_with_budget(
 
     let mut model = PpmModel::with_memory_budget(usize::from(max_order), memory_budget_bytes);
     {
-        let mut enc = ArithEncoder::new(&mut out);
+        let mut enc = ArithEncoder::new();
         for &b in input {
             model.encode_byte(&mut enc, b);
         }
