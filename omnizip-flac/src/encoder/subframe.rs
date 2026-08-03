@@ -57,7 +57,7 @@ pub fn encode_subframe(
             for &s in &samples[..order as usize] {
                 writer.write_signed(i64::from(s), bps);
             }
-            rice::encode_residuals(writer, &residuals, 0, bps)?;
+            rice::encode_residuals_best(writer, &residuals, bps)?;
         }
         SubframeType::Lpc { solution } => {
             crate::encoder::lpc::encode_from_solution(writer, &solution, bps)?;
@@ -194,22 +194,15 @@ fn compute_fixed_residuals(samples: &[i32], order: u8) -> Vec<i32> {
     out
 }
 
-/// Estimate the bit cost of encoding `residuals` via Rice coding at
-/// partition_order = 0. Uses the same k-selection as the encoder.
+/// Estimate the bit cost of encoding `residuals` via partitioned Rice
+/// coding. Uses the actual best-partition-order search so the estimate
+/// matches what the encoder actually writes.
 fn fixed_cost(_len: usize, _bps: u8, _order: u8, residuals: &[i32]) -> u32 {
-    // Header: 2 bits method + 4 bits partition order + 4 bits k = 10 bits.
-    // Plus per-residual: unary(q) + binary(r, k) = q + 1 + k bits.
     if residuals.is_empty() {
         return 10;
     }
-    let k = best_k(residuals);
-    let mut total = 10u32;
-    for &r in residuals {
-        let mapped = map_to_unsigned(r);
-        let q = mapped >> k;
-        total = total.saturating_add(q + 1 + u32::from(k));
-    }
-    total
+    let (_, bits) = rice::best_partition_order(residuals);
+    bits.min(u32::MAX as u64) as u32
 }
 
 fn best_k(partition: &[i32]) -> u8 {
