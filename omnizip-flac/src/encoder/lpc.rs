@@ -252,15 +252,12 @@ fn quantise_and_predict(
     let max_coeff = (1i64 << (precision_bits - 1)) - 1;
     let min_coeff = -(1i64 << (precision_bits - 1));
 
-    // FLAC stores coefficients in REVERSE lag order AND with negated
-    // sign relative to standard Levinson-Durbin output. Standard LPC:
-    //   x_hat[n] = -Σ a[k] * x[n-k]
-    // FLAC convention:
-    //   predicted = Σ coeff[j] * x[i - order + j]
-    // Matching the two: coeff[j] = -lpc[order-1-j].
-    // So we reverse AND negate the lpc array.
+    // FLAC convention: coeff[j] multiplies sample[i-1-j] (coeff[0] =
+    // most recent, coeff[order-1] = oldest). Standard Levinson-Durbin:
+    //   x_hat[n] = -Σ lpc[k] * x[n-1-k]
+    // So coeff[j] = -lpc[j], in the SAME order (no reversal needed).
     let mut qlpc = Vec::with_capacity(order);
-    for i in (0..order).rev() {
+    for i in 0..order {
         let scaled = -lpc[i] * scale;
         let rounded = scaled.round() as i64;
         if rounded > max_coeff || rounded < min_coeff {
@@ -269,28 +266,23 @@ fn quantise_and_predict(
         qlpc.push(rounded as i32);
     }
 
-    // Compute residuals. Match the decoder's convention: coeff[j] is
-    // applied to samples[i - order + j] (the j-th sample counting from
-    // the oldest in the prediction window).
+    // Compute residuals using i32 wrapping arithmetic to EXACTLY match
+    // libFLAC's decoder. coeff[j] multiplies sample[i-1-j] per spec.
     let mut residuals = Vec::with_capacity(samples.len() - order);
     for i in order..samples.len() {
-        let mut predicted: i64 = 0;
+        let mut predicted: i32 = 0;
         for j in 0..order {
-            predicted += i64::from(qlpc[j]) * i64::from(samples[i - order + j]);
+            predicted = predicted.wrapping_add(
+                qlpc[j].wrapping_mul(samples[i - 1 - j])
+            );
         }
-        if shift >= 0 {
-            predicted >>= shift;
+        let predicted_shifted = if shift >= 0 {
+            predicted >> shift
         } else {
-            predicted <<= (-shift) as u32;
-        }
-        let residual = i64::from(samples[i]) - predicted;
-        // Reject solutions whose residuals don't fit in i32 — silently
-        // wrapping would produce an invalid FLAC stream (decoder
-        // reconstructs out-of-bounds samples).
-        if residual < i32::MIN as i64 || residual > i32::MAX as i64 {
-            return None;
-        }
-        residuals.push(residual as i32);
+            predicted << (-shift)
+        };
+        let residual = samples[i].wrapping_sub(predicted_shifted);
+        residuals.push(residual);
     }
 
     let estimated_residual_bits = estimate_residual_bits(&residuals, samples.len(), order as u32);
