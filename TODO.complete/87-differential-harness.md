@@ -1,5 +1,7 @@
 # 87 — Differential parity harness vs C/Ruby references
 
+**Status**: ✅ Resolved — 2026-08-03.
+
 **Priority:** High
 **Source:** CLAUDE.md (release blocker per existing TODO)
 
