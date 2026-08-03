@@ -86,9 +86,15 @@ pub fn best_lpc_candidate(samples: &[i32], bps: u8) -> Option<LpcSolution> {
 }
 
 /// Encode an LPC subframe from a pre-computed `LpcSolution`.
+///
+/// `samples_len` is the subframe's block size (== `sol.warmup.len() +
+/// sol.residuals.len()`). Required so the residual partition layout
+/// can subtract `sol.order` from partition 0's residual count
+/// without underflow.
 pub fn encode_from_solution(
     writer: &mut BitWriter,
     sol: &LpcSolution,
+    samples_len: usize,
     bps: u8,
 ) -> Result<(), String> {
     let order = sol.order;
@@ -124,7 +130,13 @@ pub fn encode_from_solution(
     }
 
     // Residual.
-    let _order_used = rice::encode_residuals_best(writer, &sol.residuals, bps)?;
+    let _order_used = rice::encode_residuals_best(
+        writer,
+        &sol.residuals,
+        samples_len,
+        sol.order as u32,
+        bps,
+    )?;
 
     Ok(())
 }
@@ -217,12 +229,14 @@ fn levinson_durbin_quantise(acf: &[f64], order: usize, samples: &[i32]) -> Optio
 ///
 /// Uses the actual best-partition-order search so the estimate matches
 /// what the encoder writes — critical for the order/precision/shift
-/// DP to pick the actually-cheapest solution.
-fn estimate_residual_bits(residuals: &[i32]) -> u32 {
+/// DP to pick the actually-cheapest solution. The `predictor_order`
+/// here is the LPC order itself (each LPC subframe's warm-up equals
+/// the order).
+fn estimate_residual_bits(residuals: &[i32], block_size: usize, predictor_order: u32) -> u32 {
     if residuals.is_empty() {
         return 10;
     }
-    let (_, bits) = rice::best_partition_order(residuals);
+    let (_, bits) = rice::best_partition_order(residuals, block_size, predictor_order);
     bits.min(u32::MAX as u64) as u32
 }
 
@@ -279,7 +293,7 @@ fn quantise_and_predict(
         residuals.push(residual as i32);
     }
 
-    let estimated_residual_bits = estimate_residual_bits(&residuals);
+    let estimated_residual_bits = estimate_residual_bits(&residuals, samples.len(), order as u32);
     let warmup = samples[..order].to_vec();
 
     Some(LpcSolution {
@@ -302,7 +316,7 @@ mod tests {
     fn round_trip(samples: &[i32], bps: u8) {
         let sol = best_lpc_candidate(samples, bps).expect("LPC solution exists");
         let mut w = BitWriter::new();
-        encode_from_solution(&mut w, &sol, bps).expect("encode");
+        encode_from_solution(&mut w, &sol, samples.len(), bps).expect("encode");
         w.flush_byte_aligned();
         let bytes = w.finish();
 

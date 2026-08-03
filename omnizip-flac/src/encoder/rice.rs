@@ -34,24 +34,23 @@ const RICE_ESCAPE: u64 = 0b1111;
 ///
 /// libFLAC's default is 6 (== 64 partitions). Higher orders rarely
 /// help on real audio and increase per-partition k-header overhead.
-///
-/// TEMPORARILY SET TO 0: partition layout has a known divergence
-/// from the spec (libFLAC puts the predictor_order subtraction in
-/// partition 0; we spread residuals evenly with ceiling division).
-/// Until that's fixed, multi-partition encoding produces invalid
-/// FLAC. See TODO 97 Phase 2B.
-pub const MAX_PARTITION_ORDER: u8 = 0;
+pub const MAX_PARTITION_ORDER: u8 = 6;
 
 /// Pick the partition order (0..=[`MAX_PARTITION_ORDER`]) that yields
 /// the smallest encoded bit count for `residuals`.
 ///
-/// This is the libFLAC pattern: try every order, score each with the
-/// actual sum of `unary(q) + binary(r, k)` bits per residual (not a
-/// heuristic), and pick the cheapest.
+/// `block_size` is the subframe's block size in samples
+/// (= `residuals.len() + predictor_order`); `predictor_order` is the
+/// predictor order (FIXED or LPC). The cost estimation uses the libFLAC
+/// partition layout (predictor_order subtraction in partition 0).
 ///
 /// Returns `(order, total_bits_including_header)`.
 #[must_use]
-pub fn best_partition_order(residuals: &[i32]) -> (u8, u64) {
+pub fn best_partition_order(
+    residuals: &[i32],
+    block_size: usize,
+    predictor_order: u32,
+) -> (u8, u64) {
     let n = residuals.len();
     if n == 0 {
         return (0, 10);
@@ -60,10 +59,17 @@ pub fn best_partition_order(residuals: &[i32]) -> (u8, u64) {
     let mut best_bits = u64::MAX;
     for order in 0..=MAX_PARTITION_ORDER {
         let n_parts = 1usize << order;
-        if n_parts > n {
+        if n_parts > block_size {
             break;
         }
-        let bits = encoded_bits_for_order(residuals, order);
+        let samples_per_partition = (block_size + n_parts - 1) / n_parts;
+        // libFLAC rejects layouts where partition 0 would have zero
+        // or negative residuals (samples_per_partition <
+        // predictor_order). Skip those orders entirely.
+        if samples_per_partition < predictor_order as usize {
+            break;
+        }
+        let bits = encoded_bits_for_order(residuals, block_size, order, predictor_order);
         if bits < best_bits {
             best_bits = bits;
             best_order = order;
@@ -74,28 +80,39 @@ pub fn best_partition_order(residuals: &[i32]) -> (u8, u64) {
 
 /// Compute the encoded bit count for `residuals` at a fixed `partition_order`.
 ///
-/// Includes the 10-bit residual-section header.
-fn encoded_bits_for_order(residuals: &[i32], partition_order: u8) -> u64 {
+/// Includes the 10-bit residual-section header. Uses the libFLAC
+/// partition layout: partition 0 has
+/// `(block_size >> partition_order) - predictor_order` residuals
+/// (the `predictor_order` is subtracted from partition 0 only);
+/// later partitions each have `block_size >> partition_order`
+/// residuals.
+fn encoded_bits_for_order(
+    residuals: &[i32],
+    block_size: usize,
+    partition_order: u8,
+    predictor_order: u32,
+) -> u64 {
     let n_parts = 1usize << partition_order;
-    let n = residuals.len();
-    let samples_per_partition = (n + n_parts - 1) / n_parts;
+    let samples_per_partition = (block_size + n_parts - 1) / n_parts;
 
     let mut total: u64 = 10; // method (2) + partition_order (4) + reserved
     let mut offset = 0usize;
-    for _ in 0..n_parts {
-        let end = (offset + samples_per_partition).min(n);
-        let part = &residuals[offset..end];
-        offset = end;
+    for part_idx in 0..n_parts {
+        let part_size = if part_idx == 0 {
+            samples_per_partition.saturating_sub(predictor_order as usize)
+        } else {
+            samples_per_partition
+        };
+        let part_end = (offset + part_size).min(residuals.len());
+        let part = &residuals[offset..part_end];
+        offset = part_end;
         if part.is_empty() {
-            // libFLAC encodes escape for empty partitions in some cases;
-            // we treat as zero additional bits.
             continue;
         }
         let k = best_rice_parameter(part);
         total += 4; // k parameter field
         if k >= 15 {
-            // Escape: 5-bit bps field + bps bits per residual. Use a
-            // large upper bound (32) since bps isn't known here.
+            // Escape: 5-bit bps field + bps bits per residual.
             total += 5;
             total += 32 * part.len() as u64;
         } else {
@@ -112,8 +129,12 @@ fn encoded_bits_for_order(residuals: &[i32], partition_order: u8) -> u64 {
 /// Encode a partitioned Rice residual block.
 ///
 /// `residuals` is the full residual array (across all partitions).
-/// `partition_order` controls how many partitions to split into
-/// (0 = single partition, 1 = 2 partitions, ..., up to 15).
+/// `block_size` is the subframe's block size in samples
+/// (= `residuals.len() + predictor_order`). The decoder computes
+/// `partition_samples = block_size >> partition_order` and reads
+/// `partition_samples - predictor_order` residuals from partition 0,
+/// then `partition_samples` from each subsequent partition.
+/// `predictor_order` is the subframe's predictor order.
 /// `bps` is the sample bit depth — used for the escape code path.
 ///
 /// # Errors
@@ -122,6 +143,8 @@ fn encoded_bits_for_order(residuals: &[i32], partition_order: u8) -> u64 {
 pub fn encode_residuals(
     writer: &mut BitWriter,
     residuals: &[i32],
+    block_size: usize,
+    predictor_order: u32,
     partition_order: u8,
     bps: u8,
 ) -> Result<(), String> {
@@ -129,10 +152,9 @@ pub fn encode_residuals(
     if residuals.is_empty() {
         return Err("residuals must be non-empty".into());
     }
-    if n_parts > residuals.len() {
+    if n_parts > block_size {
         return Err(format!(
-            "partition count {n_parts} exceeds residuals len {}",
-            residuals.len()
+            "partition count {n_parts} exceeds block size {block_size}"
         ));
     }
 
@@ -140,17 +162,23 @@ pub fn encode_residuals(
     writer.write_bits(RICE_METHOD, 2);
     writer.write_bits(u64::from(partition_order), 4);
 
-    // Match the decoder's ceiling-division sample-per-partition layout.
-    let samples_per_partition =
-        (residuals.len() + n_parts - 1) / n_parts;
-
+    // Sample count per partition. This is `block_size >> partition_order`,
+    // NOT `residuals.len() >> partition_order`. The libFLAC spec subtracts
+    // `predictor_order` from partition 0's residual count separately,
+    // so the partition sizing is based on the full block size.
+    let samples_per_partition = (block_size + n_parts - 1) / n_parts;
     let mut offset = 0usize;
-    let mut remaining = residuals.len();
-    for _ in 0..n_parts {
-        let partition_samples = remaining.min(samples_per_partition);
-        let part = &residuals[offset..offset + partition_samples];
-        offset += partition_samples;
-        remaining = remaining.saturating_sub(partition_samples);
+    for part_idx in 0..n_parts {
+        let part_size = if part_idx == 0 {
+            samples_per_partition.saturating_sub(predictor_order as usize)
+        } else {
+            samples_per_partition
+        };
+        // The last partition may need fewer residuals if there aren't
+        // enough left.
+        let part_end = (offset + part_size).min(residuals.len());
+        let part = &residuals[offset..part_end];
+        offset = part_end;
 
         let k = best_rice_parameter(part);
         if k >= 15 {
@@ -183,10 +211,12 @@ pub fn encode_residuals(
 pub fn encode_residuals_best(
     writer: &mut BitWriter,
     residuals: &[i32],
+    block_size: usize,
+    predictor_order: u32,
     bps: u8,
 ) -> Result<u8, String> {
-    let (order, _) = best_partition_order(residuals);
-    encode_residuals(writer, residuals, order, bps)?;
+    let (order, _) = best_partition_order(residuals, block_size, predictor_order);
+    encode_residuals(writer, residuals, block_size, predictor_order, order, bps)?;
     Ok(order)
 }
 
@@ -252,7 +282,7 @@ mod tests {
     fn zero_residuals_uses_k0() {
         let mut w = BitWriter::new();
         let residuals = vec![0i32; 16];
-        encode_residuals(&mut w, &residuals, 0, 16).expect("encode");
+        encode_residuals(&mut w, &residuals, 16, 0, 0, 16).expect("encode");
         let bytes = w.finish();
         // method=0 (2 bits), order=0 (4 bits), k=0 (4 bits) → first byte 0x00.
         // Each residual = 0 → unary(0) = just "0" (zero ones, then terminator 0).
@@ -283,12 +313,12 @@ mod tests {
             0, 1, -1, 2, -2, 3, -3, 100, -100, 0, 0, 0, 5, -5, 10, -10,
         ];
         let mut w = BitWriter::new();
-        encode_residuals(&mut w, &residuals, 0, 16).expect("encode");
+        encode_residuals(&mut w, &residuals, 16, 0, 0, 16).expect("encode");
         w.flush_byte_aligned();
         let bytes = w.finish();
 
         let mut reader = BitReader::new(&bytes);
-        let decoded = rice::decode_residual(&mut reader, residuals.len())
+        let decoded = rice::decode_residual(&mut reader, residuals.len(), 0)
             .expect("decode");
         assert_eq!(decoded, residuals);
     }
@@ -297,12 +327,12 @@ mod tests {
     fn round_trip_multi_partition() {
         let residuals: Vec<i32> = (0..256).map(|i| (i - 128) * 3).collect();
         let mut w = BitWriter::new();
-        encode_residuals(&mut w, &residuals, 2, 16).expect("encode");
+        encode_residuals(&mut w, &residuals, 256, 0, 2, 16).expect("encode");
         w.flush_byte_aligned();
         let bytes = w.finish();
 
         let mut reader = BitReader::new(&bytes);
-        let decoded = rice::decode_residual(&mut reader, residuals.len())
+        let decoded = rice::decode_residual(&mut reader, residuals.len(), 0)
             .expect("decode");
         assert_eq!(decoded, residuals);
     }

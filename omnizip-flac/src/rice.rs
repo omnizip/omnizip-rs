@@ -9,11 +9,24 @@ use crate::bitreader::BitReader;
 
 /// Decode the residual for a subframe.
 ///
+/// Uses the libFLAC partition layout: partition 0 holds
+/// `(block_size >> partition_order) - predictor_order` residuals;
+/// later partitions each hold `block_size >> partition_order`
+/// residuals. This matches what our encoder writes per the FLAC spec.
+///
+/// `block_size` is the subframe's block size in samples (= the
+/// `block_size` argument to `decode_subframe`); `predictor_order`
+/// is the subframe's predictor order.
+///
 /// # Errors
 ///
 /// Returns `String` error on malformed residual data.
-pub fn decode_residual(reader: &mut BitReader, sample_count: usize) -> Result<Vec<i32>, String> {
-    if sample_count == 0 {
+pub fn decode_residual(
+    reader: &mut BitReader,
+    block_size: usize,
+    predictor_order: u32,
+) -> Result<Vec<i32>, String> {
+    if block_size == 0 {
         return Ok(Vec::new());
     }
 
@@ -30,23 +43,26 @@ pub fn decode_residual(reader: &mut BitReader, sample_count: usize) -> Result<Ve
     let partition_order = reader.read_bits(4) as usize;
     let num_partitions = 1usize << partition_order;
 
-    // Samples per partition (ceiling division).
-    let samples_per_partition = (sample_count + num_partitions - 1) / num_partitions;
-    let mut residual = Vec::with_capacity(sample_count);
-    let mut remaining = sample_count;
+    // Samples per partition (based on block_size, not residual_count).
+    // Partition 0 has `samples_per_partition - predictor_order`
+    // residuals; later partitions each have `samples_per_partition`.
+    let samples_per_partition = (block_size + num_partitions - 1) / num_partitions;
+    let mut residual = Vec::with_capacity(block_size);
 
-    for _ in 0..num_partitions {
-        let partition_samples = remaining.min(samples_per_partition);
+    for part_idx in 0..num_partitions {
+        let part_size = if part_idx == 0 {
+            samples_per_partition.saturating_sub(predictor_order as usize)
+        } else {
+            samples_per_partition
+        };
         let rice_param = reader.read_bits(param_bits);
 
         if rice_param == escape_value {
             // Escape: raw samples at bps bits each.
-            // Read the escape bps (5 bits).
             let bps = reader.read_bits(5) as usize;
-            for _ in 0..partition_samples {
+            for _ in 0..part_size {
                 let raw = reader.read_bits(bps as u32);
                 let val = if bps > 0 && raw & (1 << (bps - 1)) != 0 {
-                    // Sign extend.
                     let mask = u32::MAX << bps;
                     (raw | mask) as i32
                 } else {
@@ -55,13 +71,10 @@ pub fn decode_residual(reader: &mut BitReader, sample_count: usize) -> Result<Ve
                 residual.push(val);
             }
         } else {
-            // Rice-coded partition.
-            for _ in 0..partition_samples {
+            for _ in 0..part_size {
                 residual.push(reader.read_rice_signed(rice_param));
             }
         }
-
-        remaining = remaining.saturating_sub(partition_samples);
     }
 
     Ok(residual)
@@ -75,7 +88,7 @@ mod tests {
     fn decode_empty_residual() {
         // Should handle gracefully.
         let mut reader = BitReader::new(&[]);
-        let result = decode_residual(&mut reader, 0);
+        let result = decode_residual(&mut reader, 0, 0);
         assert!(result.is_ok());
         assert!(result.unwrap().is_empty());
     }
