@@ -55,6 +55,35 @@ fn map_encode_error(e: LzmaError) -> OmnizipError {
 /// Matches liblzma's convention where level ≥ 6 uses optimal parsing.
 const OPTIMAL_PARSER_LEVEL_THRESHOLD: u8 = 6;
 
+/// Map a compression level to match-finder tuning knobs.
+///
+/// Mirrors liblzma's `lzma_lzma_lz_preset` table (see `lz_encoder.c`):
+/// higher levels walk deeper chains and accept longer "nice" matches
+/// before bailing out. Level 0 is excluded from the table — it forces
+/// stored blocks upstream — so the lowest entry is 1.
+///
+/// Returns `(max_chain_length, nice_match)`. `(0, 0)` means "use the
+/// encoder default" (`MatchFinder::new` sets chain=256, nice=0).
+#[must_use]
+pub const fn match_finder_tuning(level: u8) -> (u32, u32) {
+    match level {
+        // Fast: minimal chain walk, low nice_match.
+        1 => (4, 8),
+        2 => (8, 16),
+        3 => (32, 32),
+        4 => (64, 64),
+        5 => (128, 128),
+        // Default-ish optimal parsing.
+        6 => (256, 128),
+        7 => (1024, 273),
+        // Highest compression: full chain (capped at 4096 to bound
+        // worst-case encode time on adversarial inputs), max nice_match
+        // (273 = LZMA max match length).
+        8 => (4096, 273),
+        9 | _ => (4096, 273),
+    }
+}
+
 impl Codec for LzmaCodec {
     fn id(&self) -> CodecId {
         CodecId::LZMA
@@ -69,11 +98,13 @@ impl Codec for LzmaCodec {
         plaintext: &[u8],
         level: CompressionLevel,
     ) -> Result<Vec<u8>, OmnizipError> {
-        // Level → parser dispatch. Higher levels trade encode speed
-        // for ratio by using the DP-based optimal parser (see TODO 106).
-        let use_optimal = level.as_u8() >= OPTIMAL_PARSER_LEVEL_THRESHOLD;
+        let lv = level.as_u8();
+        let use_optimal = lv >= OPTIMAL_PARSER_LEVEL_THRESHOLD;
+        let (max_chain_length, nice_match) = match_finder_tuning(lv);
         let opts = LzmaOptions {
             use_optimal_parser: use_optimal,
+            max_chain_length,
+            nice_match,
             ..Default::default()
         };
         xz_compress_with_options(plaintext, &opts).map_err(map_encode_error)

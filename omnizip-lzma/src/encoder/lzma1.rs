@@ -96,6 +96,39 @@ impl Lzma1Encoder {
         self.encode_with_parser(input, true)
     }
 
+    /// Lazy parser with explicit match-finder tuning knobs.
+    ///
+    /// `max_chain_length > 0` overrides the default chain depth;
+    /// `nice_match > 0` stops the chain walk once a match this long
+    /// is found. Pass 0 for either to use the encoder default.
+    #[must_use]
+    pub fn encode_with_tuning(self, input: &[u8], max_chain_length: u32, nice_match: u32) -> Vec<u8> {
+        if max_chain_length == 0 && nice_match == 0 {
+            return self.encode_with_parser(input, false);
+        }
+        if input.is_empty() {
+            return self.encode_with_parser(input, false);
+        }
+        self.encode_via_lazy_tuned(input, max_chain_length, nice_match)
+    }
+
+    /// Optimal parser with explicit match-finder tuning knobs.
+    #[must_use]
+    pub fn encode_optimal_with_tuning(
+        self,
+        input: &[u8],
+        max_chain_length: u32,
+        nice_match: u32,
+    ) -> Vec<u8> {
+        if max_chain_length == 0 && nice_match == 0 {
+            return self.encode_with_parser(input, true);
+        }
+        if input.is_empty() {
+            return self.encode_with_parser(input, true);
+        }
+        self.encode_via_optimal_tuned(input, max_chain_length, nice_match)
+    }
+
     /// Internal encode: dispatches between lazy and optimal parsing.
     fn encode_with_parser(mut self, input: &[u8], use_optimal: bool) -> Vec<u8> {
         if input.is_empty() {
@@ -162,6 +195,67 @@ impl Lzma1Encoder {
         self.range_encoder.finish()
     }
 
+    /// Lazy parser with explicit match-finder tuning.
+    fn encode_via_lazy_tuned(
+        mut self,
+        input: &[u8],
+        max_chain_length: u32,
+        nice_match: u32,
+    ) -> Vec<u8> {
+        let mut mf = MatchFinder::new(input, self.dict_size);
+        if max_chain_length > 0 {
+            mf.set_max_chain_length(max_chain_length);
+        }
+        if nice_match > 0 {
+            mf.set_nice_match(nice_match);
+        }
+
+        while let Some(pos) = mf.advance() {
+            let m1 = if pos + FULL_MATCH_LEN_MIN as usize <= input.len() {
+                mf.find_match(pos)
+            } else {
+                None
+            };
+
+            if let Some(m1) = m1 {
+                let better_at_next = if pos + 1 < input.len() {
+                    let m2 = if pos + 1 + FULL_MATCH_LEN_MIN as usize <= input.len() {
+                        mf.find_match(pos + 1)
+                    } else {
+                        None
+                    };
+                    match m2 {
+                        Some(m2) => m2.length > m1.length + 1,
+                        None => false,
+                    }
+                } else {
+                    false
+                };
+
+                if better_at_next {
+                    let prev_byte = if pos > 0 { input[pos - 1] } else { 0 };
+                    let match_byte = self.get_match_byte(input, pos);
+                    self.encode_literal_byte(input[pos], prev_byte, match_byte, pos);
+                } else {
+                    self.encode_match(m1.distance, m1.length, pos);
+                    for _ in 0..m1.length.saturating_sub(1) {
+                        if mf.advance().is_none() {
+                            break;
+                        }
+                    }
+                }
+            } else {
+                let prev_byte = if pos > 0 { input[pos - 1] } else { 0 };
+                let match_byte = self.get_match_byte(input, pos);
+                self.encode_literal_byte(input[pos], prev_byte, match_byte, pos);
+            }
+        }
+
+        self.encode_eopm(input.len());
+        self.range_encoder.flush();
+        self.range_encoder.finish()
+    }
+
     /// Optimal parser: use the DP-based parse planner, then emit.
     fn encode_via_optimal(mut self, input: &[u8]) -> Vec<u8> {
         use crate::encoder::optimal::{optimal_parse_actions, ParseAction};
@@ -181,6 +275,39 @@ impl Lzma1Encoder {
                 ParseAction::Rep0Match { length } => {
                     // Encode a rep0 match. rep0 distance is already set
                     // from the last encode_match call.
+                    self.encode_rep0_match(length, pos);
+                }
+            }
+        }
+
+        self.encode_eopm(input.len());
+        self.range_encoder.flush();
+        self.range_encoder.finish()
+    }
+
+    /// Optimal parser with explicit match-finder tuning.
+    fn encode_via_optimal_tuned(
+        mut self,
+        input: &[u8],
+        max_chain_length: u32,
+        nice_match: u32,
+    ) -> Vec<u8> {
+        use crate::encoder::optimal::{optimal_parse_actions_tuned, ParseAction};
+
+        let actions =
+            optimal_parse_actions_tuned(input, self.dict_size, max_chain_length, nice_match);
+
+        for (pos, action) in actions {
+            match action {
+                ParseAction::Literal(byte) => {
+                    let prev_byte = if pos > 0 { input[pos - 1] } else { 0 };
+                    let match_byte = self.get_match_byte(input, pos);
+                    self.encode_literal_byte(byte, prev_byte, match_byte, pos);
+                }
+                ParseAction::Match { distance, length } => {
+                    self.encode_match(distance, length, pos);
+                }
+                ParseAction::Rep0Match { length } => {
                     self.encode_rep0_match(length, pos);
                 }
             }
@@ -364,6 +491,34 @@ mod tests {
         let a = encode_once();
         let b = encode_once();
         assert_eq!(a, b, "LZMA1 encoder non-deterministic");
+    }
+
+    #[test]
+    fn tuned_encoder_is_deterministic() {
+        let input: Vec<u8> = (0..4096)
+            .map(|i| if i % 100 < 50 { (i % 26 + b'a' as i32) as u8 } else { (i % 256) as u8 })
+            .collect();
+        let encode = || {
+            Lzma1Encoder::new(3, 0, 2)
+                .encode_with_tuning(&input, 128, 64)
+        };
+        let a = encode();
+        let b = encode();
+        assert_eq!(a, b, "tuned encoder non-deterministic");
+    }
+
+    #[test]
+    fn tuned_optimal_is_deterministic() {
+        let input: Vec<u8> = (0..4096)
+            .map(|i| if i % 100 < 50 { (i % 26 + b'a' as i32) as u8 } else { (i % 256) as u8 })
+            .collect();
+        let encode = || {
+            Lzma1Encoder::new(3, 0, 2)
+                .encode_optimal_with_tuning(&input, 256, 128)
+        };
+        let a = encode();
+        let b = encode();
+        assert_eq!(a, b, "tuned optimal encoder non-deterministic");
     }
 
     #[test]

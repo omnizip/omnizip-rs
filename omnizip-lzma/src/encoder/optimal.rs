@@ -62,6 +62,34 @@ fn find_all_matches(input: &[u8], dict_size: u32) -> Vec<Vec<Match>> {
     all_matches
 }
 
+/// Tuned variant of [`find_all_matches`]: passes the chain depth and
+/// nice-match knobs through to the match finder.
+fn find_all_matches_tuned(
+    input: &[u8],
+    dict_size: u32,
+    max_chain_length: u32,
+    nice_match: u32,
+) -> Vec<Vec<Match>> {
+    let mut mf = MatchFinder::new(input, dict_size);
+    if max_chain_length > 0 {
+        mf.set_max_chain_length(max_chain_length);
+    }
+    if nice_match > 0 {
+        mf.set_nice_match(nice_match);
+    }
+    let mut all_matches = vec![Vec::new(); input.len()];
+
+    while let Some(pos) = mf.advance() {
+        if pos + 3 <= input.len() {
+            if let Some(m) = mf.find_match(pos) {
+                all_matches[pos].push(m);
+            }
+        }
+    }
+
+    all_matches
+}
+
 // Legacy per-symbol price helpers (`literal_price`, `match_price`)
 // were replaced by the state-conditioned functions in
 // `prob_state.rs` (see TODO 106). The DP now carries an
@@ -82,6 +110,32 @@ fn optimal_parse(input: &[u8], dict_size: u32) -> Vec<(usize, ParseAction)> {
     }
 
     let matches = find_all_matches(input, dict_size);
+    optimal_parse_with_matches(input, &matches)
+}
+
+/// Tuned variant of [`optimal_parse`] that takes explicit match-finder
+/// parameters. Used by [`optimal_parse_actions_tuned`].
+fn optimal_parse_tuned(
+    input: &[u8],
+    dict_size: u32,
+    max_chain_length: u32,
+    nice_match: u32,
+) -> Vec<(usize, ParseAction)> {
+    if input.is_empty() {
+        return Vec::new();
+    }
+
+    let matches = find_all_matches_tuned(input, dict_size, max_chain_length, nice_match);
+    optimal_parse_with_matches(input, &matches)
+}
+
+/// Shared DP body — given a candidate-match table, run the forward
+/// pass and backtrack. Split out from [`optimal_parse`] so the tuned
+/// variant can reuse it without duplicating the DP logic.
+fn optimal_parse_with_matches(
+    input: &[u8],
+    matches: &[Vec<Match>],
+) -> Vec<(usize, ParseAction)> {
     let n = input.len();
 
     // DP table: opt[i] = cheapest cost to encode input[0..i].
@@ -231,6 +285,18 @@ fn prob_state_rep0_price(state: LzmaProbState, length: u32) -> Price {
 /// methods to emit the bits.
 pub fn optimal_parse_actions(input: &[u8], dict_size: u32) -> Vec<(usize, ParseAction)> {
     optimal_parse(input, dict_size)
+}
+
+/// Tuned variant of [`optimal_parse_actions`] — passes the chain
+/// depth and nice-match knobs through to the match finder.
+#[must_use]
+pub fn optimal_parse_actions_tuned(
+    input: &[u8],
+    dict_size: u32,
+    max_chain_length: u32,
+    nice_match: u32,
+) -> Vec<(usize, ParseAction)> {
+    optimal_parse_tuned(input, dict_size, max_chain_length, nice_match)
 }
 
 #[cfg(test)]
