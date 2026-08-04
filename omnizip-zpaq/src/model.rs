@@ -520,13 +520,25 @@ const RUN_CONFIDENCE: u16 = 54_000; // ~0.82
 /// ## Performance
 ///
 /// Probabilities are precomputed per-bit-position (0..8) when the
-/// word hash changes, then cached. `prob(bit_pos)` is O(1). Without
-/// this caching the model would be O(256) per bit (O(2048) per byte)
-/// — a non-starter.
+/// word hash changes, then cached. `prob(bit_pos)` is O(1).
+///
+/// The expensive operation is `refresh_cache`, called whenever the
+/// current word hash changes or its frequency table is updated.
+/// Without incremental aggregation this would be O(N) per refresh
+/// (where N is the total number of `(hash, byte)` entries — up to
+/// 65_536). To make it O(8) instead, we maintain a parallel
+/// `bit_aggregate` table that tracks `(n0, n1)` counts per bit
+/// position **per hash**. Updates cost O(8) on every insertion;
+/// refresh costs O(8) per call.
 pub struct WordModel {
     /// Frequency of (current word prefix hash, byte) → count.
     /// Key = (word_hash, next_byte).
     next_byte_freq: HashMap<(u32, u8), u16>,
+    /// Per-hash, per-bit-position aggregate counts.
+    /// `bit_aggregate[h]` = 8 `(n0, n1)` pairs summarising all
+    /// `(h, byte)` frequencies for hash `h`. Maintained incrementally
+    /// on every `next_byte_freq` update.
+    bit_aggregate: HashMap<u32, [(u64, u64); 8]>,
     /// Frequency of (current word prefix hash) → count.
     word_freq: HashMap<u32, u16>,
     /// Hash of the current word's accumulated bytes (FNV-1a).
@@ -568,6 +580,7 @@ impl WordModel {
     pub fn new() -> Self {
         Self {
             next_byte_freq: HashMap::new(),
+            bit_aggregate: HashMap::new(),
             word_freq: HashMap::new(),
             current_word_hash: 0x811C_9DC5, // FNV-1a offset basis
             current_word_len: 0,
@@ -604,38 +617,49 @@ impl WordModel {
     }
 
     /// Recompute the 8 per-bit-position probabilities from
-    /// `next_byte_freq` for the current word hash. Called when the
+    /// `bit_aggregate` for the current word hash. Called when the
     /// hash changes or when a frequency entry is added/updated.
+    ///
+    /// O(8): looks up the per-hash aggregate (maintained incrementally
+    /// on every `next_byte_freq` update) and folds it into the
+    /// Laplace-smoothed probability for each bit position.
     fn refresh_cache(&mut self) {
         if !self.in_word || self.current_word_len < 3 {
             self.cached_probs = [DEFAULT_PROB; 8];
             self.cache_valid = true;
             return;
         }
-        // Tally n0/n1 per bit position in one pass over the
-        // (hash, byte) entries that match the current word hash.
-        let mut n0 = [0u64; 8];
-        let mut n1 = [0u64; 8];
         let hash = self.current_word_hash;
-        for (&(h, byte), &count) in self.next_byte_freq.iter() {
-            if h != hash {
-                continue;
+        match self.bit_aggregate.get(&hash) {
+            None => {
+                self.cached_probs = [DEFAULT_PROB; 8];
             }
-            let c = u64::from(count);
-            for bit_pos in 0..8usize {
-                if ((byte as u16) >> (7 - bit_pos)) & 1 == 1 {
-                    n1[bit_pos] += c;
-                } else {
-                    n0[bit_pos] += c;
+            Some(agg) => {
+                for bit_pos in 0..8usize {
+                    let (n0, n1) = agg[bit_pos];
+                    let total = n0 + n1 + 2;
+                    let p1 = (((n1 + 1) * (PROB_SCALE - 1)) / total + 1).min(PROB_SCALE - 1);
+                    self.cached_probs[bit_pos] = p1 as u16;
                 }
             }
         }
-        for bit_pos in 0..8usize {
-            let total = n0[bit_pos] + n1[bit_pos] + 2;
-            let p1 = (((n1[bit_pos] + 1) * (PROB_SCALE - 1)) / total + 1).min(PROB_SCALE - 1);
-            self.cached_probs[bit_pos] = p1 as u16;
-        }
         self.cache_valid = true;
+    }
+
+    /// Update `bit_aggregate` for the given `(hash, byte)` frequency
+    /// delta. O(8): touches one entry per bit position.
+    fn update_bit_aggregate(&mut self, hash: u32, byte: u8, delta: u64) {
+        let agg = self
+            .bit_aggregate
+            .entry(hash)
+            .or_insert_with(|| [(0u64, 0u64); 8]);
+        for bit_pos in 0..8usize {
+            if ((byte as u16) >> (7 - bit_pos)) & 1 == 1 {
+                agg[bit_pos].1 = agg[bit_pos].1.saturating_add(delta);
+            } else {
+                agg[bit_pos].0 = agg[bit_pos].0.saturating_add(delta);
+            }
+        }
     }
 
     /// Advance the bit position after each coded bit. No-op now that
@@ -678,12 +702,14 @@ impl WordModel {
                 let key = (self.current_word_hash, byte);
                 let entry = self.next_byte_freq.entry(key).or_insert(0);
                 *entry += 1;
-                // The frequency for THIS hash changed; cache is stale
-                // only if we're currently predicting from this hash.
+                // Maintain the parallel bit-aggregate so refresh_cache
+                // is O(8) instead of O(N).
+                self.update_bit_aggregate(self.current_word_hash, byte, 1);
                 self.cache_valid = false;
             } else {
-                // Cap exceeded — flush both tables.
+                // Cap exceeded — flush all tables.
                 self.next_byte_freq.clear();
+                self.bit_aggregate.clear();
                 self.word_freq.clear();
                 self.cache_valid = false;
             }

@@ -63,9 +63,13 @@ pub fn encode_lzma2_stream_with_options(
 
         let encoder = crate::encoder::Lzma1Encoder::new(lc, lp, pb);
         let compressed = if use_optimal {
-            encoder.encode_optimal(chunk)
+            encoder.encode_optimal_with_tuning(
+                chunk,
+                options.max_chain_length,
+                options.nice_match,
+            )
         } else {
-            encoder.encode(chunk)
+            encoder.encode_with_tuning(chunk, options.max_chain_length, options.nice_match)
         };
 
         let usable_compressed_size = compressed.len().saturating_sub(5);

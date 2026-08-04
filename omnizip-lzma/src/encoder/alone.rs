@@ -52,6 +52,7 @@ pub const MAX_DICT_SIZE: u32 = u32::MAX;
 ///     pb: 2,                      // position bits (default 2)
 ///     dict_size: 16 * 1024 * 1024, // 16 MB (default)
 ///     use_optimal_parser: true,  // slower but better ratio
+///     ..LzmaOptions::default()
 /// };
 /// let bytes = lzma_alone_compress_with_options(b"input", &opts).unwrap();
 /// ```
@@ -70,6 +71,14 @@ pub struct LzmaOptions {
     /// If true, use the optimal (DP) parser — slower but better ratio.
     /// If false, use the lazy parser — faster, slightly worse ratio.
     pub use_optimal_parser: bool,
+    /// Match-finder chain depth. Larger = better matches, slower encode.
+    /// 0 = use the encoder default (`DEFAULT_CHAIN_LENGTH`).
+    pub max_chain_length: u32,
+    /// Stop the chain walk once a match this long is found. 0 = disabled
+    /// (always walk the full chain). Larger = faster encode, slightly
+    /// worse ratio on inputs where the chain has progressively longer
+    /// matches (rare).
+    pub nice_match: u32,
 }
 
 impl Default for LzmaOptions {
@@ -80,6 +89,8 @@ impl Default for LzmaOptions {
             pb: DEFAULT_PB,
             dict_size: DEFAULT_DICT_SIZE,
             use_optimal_parser: false,
+            max_chain_length: 0,
+            nice_match: 0,
         }
     }
 }
@@ -149,9 +160,17 @@ pub fn lzma_alone_compress_with_options(
 
     let encoder = Lzma1Encoder::new(lc, lp, pb);
     let stream = if options.use_optimal_parser {
-        encoder.encode_optimal(input)
+        encoder.encode_optimal_with_tuning(
+            input,
+            options.max_chain_length,
+            options.nice_match,
+        )
     } else {
-        encoder.encode(input)
+        encoder.encode_with_tuning(
+            input,
+            options.max_chain_length,
+            options.nice_match,
+        )
     };
     out.extend_from_slice(&stream);
 
