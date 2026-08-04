@@ -126,6 +126,30 @@ impl MatchState {
         7
     }
 
+    /// Resize the hash table for a different `hash_log`. Frees the old
+    /// table only if the new size is larger (otherwise reuses the
+    /// existing allocation and just tracks the new logical size).
+    ///
+    /// Called by [`ZstdCompressor`](crate::ZstdCompressor) when the
+    /// input size or compression level changes between calls. After
+    /// `resize_for`, callers should also call [`clear`](Self::clear) to
+    /// zero out any stale entries.
+    pub fn resize_for(&mut self, hash_log: u32) {
+        if hash_log == self.hash_log {
+            return;
+        }
+        let new_size = 1usize << hash_log;
+        self.hash_table.resize(new_size, 0);
+        self.hash_log = hash_log;
+        self.next_to_update = 0;
+    }
+
+    /// Current hash log (table size = `1 << hash_log`).
+    #[must_use]
+    pub fn hash_log(&self) -> u32 {
+        self.hash_log
+    }
+
     /// Clear all hash entries. Call between blocks to prevent stale
     /// position references (positions are block-relative).
     pub fn clear(&mut self) {

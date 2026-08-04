@@ -57,6 +57,100 @@ pub use huffman::{HuffmanDecoder, HuffmanTable};
 pub use literals::decode_literals_section;
 pub use sequences::{decode_sequences_section, Sequence, SequenceExecutor,
                     SequencesSection};
+
+pub use encoder::match_finder::MatchState;
+
+/// Reusable ZSTD compressor that caches the match-finder hash table
+/// across calls.
+///
+/// The free function [`compress`] allocates a fresh `MatchState` on
+/// every call. At high levels (≥19) the table is `1 << hash_log` up
+/// to 128 MB; allocating and zeroing it dominates wall-time for small
+/// inputs.
+///
+/// `ZstdCompressor` caches the table. On each call:
+///
+/// 1. If the input size or level changed, [`MatchState::resize_for`]
+///    grows or shrinks the table (amortised via `Vec::resize`).
+/// 2. [`MatchState::clear`] zeroes the table.
+/// 3. The encode pipeline runs without allocating.
+///
+/// For batch workloads (many small inputs at the same level), this
+/// eliminates per-call allocation entirely after the first call.
+///
+/// ## Example
+///
+/// ```no_run
+/// use omnizip_zstd::{ZstdCompressor, ZstdLevel};
+///
+/// let mut compressor = ZstdCompressor::new();
+/// let inputs: &[&[u8]] = &[b"foo", b"bar", b"baz"];
+/// for input in inputs {
+///     let compressed = compressor.compress(input, ZstdLevel::Default).unwrap();
+///     // ... use compressed
+/// }
+/// ```
+#[derive(Debug)]
+pub struct ZstdCompressor {
+    match_state: MatchState,
+}
+
+impl Default for ZstdCompressor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ZstdCompressor {
+    /// Construct a new compressor with a default-size match-state
+    /// table (hash_log = 7, suitable for small inputs).
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            match_state: MatchState::new(MatchState::default_hash_log()),
+        }
+    }
+
+    /// Compress `input` at the given level, reusing the cached
+    /// `MatchState`. The output is a complete ZSTD frame, byte-
+    /// compatible with what [`compress`] produces.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ZstdError::Corrupt`] on internal encoder failures.
+    pub fn compress(
+        &mut self,
+        input: &[u8],
+        level: ZstdLevel,
+    ) -> Result<Vec<u8>, ZstdError> {
+        let level_u8 = level.as_reference_level();
+        let mut params = crate::encoder::cparams::get_params(level_u8);
+        params.hash_log =
+            crate::encoder::block::cap_hash_log_for_input(params.hash_log, input.len());
+
+        if self.match_state.hash_log() != params.hash_log {
+            self.match_state.resize_for(params.hash_log);
+        }
+
+        let mut out = Vec::with_capacity(input.len() / 2 + 64);
+        crate::encoder::block::encode_frame_into_pub(
+            &mut out,
+            input,
+            &params,
+            &mut self.match_state,
+        )?;
+        Ok(out)
+    }
+
+    /// Current hash_log of the cached match-state table. Useful for
+    /// diagnostics and for callers that want to pre-warm the
+    /// allocation.
+    #[must_use]
+    pub fn hash_log(&self) -> u32 {
+        self.match_state.hash_log()
+    }
+}
+
 /// ZSTD compression level. Mirrors the reference `zstd` encoder scale.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
 pub enum ZstdLevel {
@@ -204,6 +298,57 @@ mod tests {
         let compressed = compress(input, ZstdLevel::Default).expect("encode");
         let decompressed = decompress(&compressed, input.len() as u32).expect("decode");
         assert_eq!(decompressed, input);
+    }
+
+    /// ZstdCompressor: reuses MatchState across calls. Output must be
+    /// byte-identical to the free-function `compress` (same encoder,
+    /// same input ⇒ same output, regardless of state caching).
+    #[test]
+    fn zstd_compressor_matches_free_function() {
+        let input = b"the quick brown fox jumps over the lazy dog ".repeat(50);
+        let mut compressor = ZstdCompressor::new();
+
+        for level in [ZstdLevel::Fastest, ZstdLevel::Default, ZstdLevel::Best] {
+            let via_free = compress(&input, level).expect("free fn");
+            let via_compressor = compressor.compress(&input, level).expect("compressor");
+            assert_eq!(
+                via_free, via_compressor,
+                "ZstdCompressor output must match free function for {:?}",
+                level
+            );
+        }
+    }
+
+    /// ZstdCompressor: round-trips through the decoder.
+    #[test]
+    fn zstd_compressor_round_trips() {
+        let mut compressor = ZstdCompressor::new();
+        let inputs: Vec<Vec<u8>> = vec![
+            b"hello world".to_vec(),
+            b"the quick brown fox ".repeat(100),
+            (0..10_000).map(|i| (i % 251) as u8).collect(),
+        ];
+        for input in &inputs {
+            let compressed = compressor.compress(input, ZstdLevel::Default).expect("compress");
+            let decoded = decompress(&compressed, input.len() as u32).expect("decompress");
+            assert_eq!(decoded, *input, "round-trip mismatch");
+        }
+    }
+
+    /// ZstdCompressor: resize handles varying input sizes. A small
+    /// input after a large one must still produce correct output.
+    #[test]
+    fn zstd_compressor_resizes_for_varying_input_sizes() {
+        let mut compressor = ZstdCompressor::new();
+        // First compress a large input (forces large hash_log).
+        let big: Vec<u8> = (0..50_000).map(|i| (i & 0xFF) as u8).collect();
+        let big_out = compressor.compress(&big, ZstdLevel::Default).expect("big");
+        // Then a small input (forces small hash_log via cap).
+        let small = b"tiny";
+        let small_out = compressor.compress(small, ZstdLevel::Default).expect("small");
+        // Both must round-trip.
+        assert_eq!(decompress(&big_out, big.len() as u32).unwrap(), big);
+        assert_eq!(decompress(&small_out, small.len() as u32).unwrap(), small);
     }
 
     // ---- Dictionary integration tests ----

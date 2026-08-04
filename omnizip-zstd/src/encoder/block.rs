@@ -36,7 +36,15 @@ const HASH_LOG_MAX: u32 = 25;
 /// Rule of thumb: hash table size never exceeds the input size. For a
 /// 4 KB input, this caps hash_log at 12 (4 KB table) instead of 25
 /// (128 MB table).
-fn cap_hash_log_for_input(hash_log: u32, input_len: usize) -> u32 {
+/// Cap the requested hash_log based on input size, mirroring
+/// `ZSTD_adjustCParams_internal` in the C reference. The "default"
+/// table assumes input ≥ 256 KB; for smaller inputs we shrink the
+/// hash table so allocation cost (and zero-init cost) doesn't dominate.
+///
+/// Rule of thumb: hash table size never exceeds the input size. For a
+/// 4 KB input, this caps hash_log at 12 (4 KB table) instead of 25
+/// (128 MB table).
+pub fn cap_hash_log_for_input(hash_log: u32, input_len: usize) -> u32 {
     if input_len == 0 {
         return HASH_LOG_MIN;
     }
@@ -64,12 +72,46 @@ pub fn encode_frame_compressed(
     params.hash_log = cap_hash_log_for_input(params.hash_log, plaintext.len());
     let mut out = Vec::with_capacity(plaintext.len() / 2 + 64);
     let mut match_state = MatchState::new(params.hash_log);
+    encode_frame_into(&mut out, plaintext, &params, &mut match_state)?;
+    Ok(out)
+}
+
+/// Like [`encode_frame_compressed`] but writes into a caller-provided
+/// `out` vector and uses a caller-provided `MatchState`. The match
+/// state is cleared on entry (so the caller can reuse it across calls
+/// via [`crate::ZstdCompressor`]).
+///
+/// `params.hash_log` should already be capped to the input size; the
+/// caller is responsible for that (see [`cap_hash_log_for_input`]).
+pub fn encode_frame_into_pub(
+    out: &mut Vec<u8>,
+    plaintext: &[u8],
+    params: &crate::encoder::cparams::CompressionParams,
+    match_state: &mut MatchState,
+) -> Result<(), ZstdError> {
+    encode_frame_into(out, plaintext, params, match_state)
+}
+
+/// Like [`encode_frame_compressed`] but writes into a caller-provided
+/// `out` vector and uses a caller-provided `MatchState`. The match
+/// state is cleared on entry (so the caller can reuse it across calls
+/// via [`crate::ZstdCompressor`]).
+///
+/// `params.hash_log` should already be capped to the input size; the
+/// caller is responsible for that (see [`cap_hash_log_for_input`]).
+fn encode_frame_into(
+    out: &mut Vec<u8>,
+    plaintext: &[u8],
+    params: &crate::encoder::cparams::CompressionParams,
+    match_state: &mut MatchState,
+) -> Result<(), ZstdError> {
+    match_state.clear();
 
     // Magic.
     out.extend_from_slice(&crate::constants::MAGIC_BYTES);
 
     // Frame header: descriptor + optional window_descriptor + FCS.
-    write_frame_header(&mut out, plaintext.len(), None);
+    write_frame_header(out, plaintext.len(), None);
 
     // Blocks.
     let mut rep_offsets = [1u32, 4, 8];
@@ -81,7 +123,7 @@ pub fn encode_frame_compressed(
         let is_last = offset + chunk_size == plaintext.len();
         let chunk = &plaintext[offset..offset + chunk_size];
 
-        write_block(&mut out, chunk, is_last, &mut match_state, &mut rep_offsets, &params, &mut last_huf_weights)?;
+        write_block(out, chunk, is_last, match_state, &mut rep_offsets, params, &mut last_huf_weights)?;
         offset += chunk_size;
     }
 
@@ -95,7 +137,7 @@ pub fn encode_frame_compressed(
     let checksum = xxhash::zstd_frame_checksum(plaintext);
     out.extend_from_slice(&checksum.to_le_bytes());
 
-    Ok(out)
+    Ok(())
 }
 
 /// Encode `plaintext` as a complete ZSTD frame primed with a
