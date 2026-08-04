@@ -41,6 +41,8 @@
 #![forbid(unsafe_code)]
 #![warn(clippy::pedantic)]
 
+mod inflate;
+
 use omnizip_codecs::{Codec, CodecId, CompressionLevel, OmnizipError};
 
 /// Libdeflate-compatible DEFLATE codec.
@@ -83,29 +85,68 @@ impl Codec for LibdeflateCodec {
         compressed: &[u8],
         expected_len: u32,
     ) -> Result<Vec<u8>, OmnizipError> {
-        // Phase 1 skeleton: delegate to miniz_oxide. auto-detect
-        // zlib/gzip/raw via wbits=0 (which means "auto" in our wrapper).
-        // Phase 2 will replace this with an in-house decoder.
         let expected_us = usize::try_from(expected_len).map_err(|_| OmnizipError::Corrupt {
             codec: CodecId::LIBDEFLATE,
             reason: format!("expected_len {expected_len} exceeds usize"),
         })?;
-        // Try zlib first (most common), then raw.
-        let decoded = miniz_oxide::inflate::decompress_to_vec_zlib(compressed)
-            .or_else(|_| miniz_oxide::inflate::decompress_to_vec(compressed))
-            .map_err(|e| OmnizipError::DecodeFailed {
-                codec: CodecId::LIBDEFLATE,
-                reason: format!("inflate failed: {e}"),
-            })?;
-        if decoded.len() != expected_us {
-            return Err(OmnizipError::LengthMismatch {
+
+        // Phase 2 (in-house RFC 1951 decoder): strip zlib wrapper if
+        // present (2-byte header + 4-byte adler32 trailer), then run
+        // our own inflate. Fall back to miniz_oxide if the in-house
+        // path errors — that gives us correct behavior on all current
+        // inputs while Phase 2 stabilises.
+        let raw = strip_zlib_wrapper(compressed);
+        match inflate::inflate(raw, expected_us) {
+            Ok(decoded) if decoded.len() == expected_us => Ok(decoded),
+            Ok(decoded) => Err(OmnizipError::LengthMismatch {
                 codec: CodecId::LIBDEFLATE,
                 expected: expected_len,
                 actual: decoded.len(),
-            });
+            }),
+            Err(_) => {
+                // Fallback: try miniz_oxide with zlib first, then raw.
+                let decoded = miniz_oxide::inflate::decompress_to_vec_zlib(compressed)
+                    .or_else(|_| miniz_oxide::inflate::decompress_to_vec(compressed))
+                    .map_err(|e| OmnizipError::DecodeFailed {
+                        codec: CodecId::LIBDEFLATE,
+                        reason: format!("inflate failed: {e}"),
+                    })?;
+                if decoded.len() != expected_us {
+                    return Err(OmnizipError::LengthMismatch {
+                        codec: CodecId::LIBDEFLATE,
+                        expected: expected_len,
+                        actual: decoded.len(),
+                    });
+                }
+                Ok(decoded)
+            }
         }
-        Ok(decoded)
     }
+}
+
+/// Strip a zlib wrapper (RFC 1950) if present, returning a slice
+/// containing just the raw DEFLATE stream.
+///
+/// Zlib wrapper layout:
+/// - 2-byte header: CMF + FLG (CM=8, CINFO=7 typical).
+/// - 4-byte adler32 trailer.
+fn strip_zlib_wrapper(data: &[u8]) -> &[u8] {
+    // Zlib header is 2 bytes; CMF & 0x0F should be 8 (deflate).
+    // CMF & 0xF0 = CINFO << 4; CINFO ≤ 7 for window size ≤ 32K.
+    if data.len() >= 6 {
+        let cmf = data[0];
+        let flg = data[1];
+        let cm = cmf & 0x0F;
+        let cinfo = (cmf >> 4) & 0x0F;
+        if cm == 8 && cinfo <= 7 {
+            // Verify CMF + FLG is a multiple of 31 (RFC 1950 §2.2).
+            if (u16::from(cmf) * 256 + u16::from(flg)) % 31 == 0 {
+                return &data[2..data.len() - 4];
+            }
+        }
+    }
+    // Not zlib; assume raw DEFLATE.
+    data
 }
 
 #[cfg(test)]
