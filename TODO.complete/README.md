@@ -101,7 +101,7 @@ the new items document the path forward.
 | 98 | [LPC subframe interop bug: LOST_SYNC on high-order LPC](98-lpc-interop-bug.md) | ✅ |
 | 99 | [Differential harness: fix bzip2/lz4/DEFLATE framing gaps](99-framing-gaps.md) | ✅ |
 | 100 | [Code review sweep: OCP/MECE/DRY improvements](100-code-review-sweep.md) | ✅ |
-| 101 | [ZSTD encoder: per-call hash-table allocation](101-zstd-encoder-reuse-hash-table.md) | ✅ (partial — hash_log cap landed; full compressor reuse deferred) |
+| 101 | [ZSTD encoder: per-call hash-table allocation](101-zstd-encoder-reuse-hash-table.md) | ✅ (hash_log cap + `ZstdCompressor` reuse) |
 | 102 | [SIMD Huffman via `wide` crate](102-simd-huffman-wide.md) | 🔄 (Phase 1 landed; Phase 2-3 rejected — `wide` lacks gather) |
 | 103 | [Multi-byte FSE — decoupled impl](103-multibyte-fse-unblocked.md) | ✅ (existing 2-state interleave addresses the goal) |
 | 104 | [Libdeflate pure-Rust codec](104-libdeflate-codec.md) | 🔄 (Phase 1 skeleton landed; Phase 2-3 multi-day) |
