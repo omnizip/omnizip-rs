@@ -16,8 +16,8 @@
 //! 3. Encode each block as a frame (header + subframes + footer).
 //!
 //! For each channel within a frame, the subframe encoder picks the
-//! cheapest representation among CONSTANT, VERBATIM, and FIXED
-//! (orders 0-4). LPC subframe type is planned (see TODO 62).
+//! cheapest representation among CONSTANT, VERBATIM, FIXED (orders
+//! 0-4), and LPC (orders 1-32 with quantised coefficients).
 
 #![forbid(unsafe_code)]
 

@@ -1,18 +1,33 @@
 //! omnizip-libdeflate — pure-Rust libdeflate-compatible DEFLATE codec.
 //!
-//! **Status: skeleton (TODO 104 Phase 1).** The crate exists so the
-//! `CodecId::LIBDEFLATE = 0x000B` slot is occupied and the codec
-//! registry can dispatch to it. The current implementation delegates
-//! to `miniz_oxide` (the same backend `omnizip-deflate` uses) — this
-//! is functionally correct but provides no speed advantage yet.
+//! Full in-house implementation of RFC 1951 (DEFLATE) encode + decode.
+//! No delegation to `miniz_oxide` — the encoder and decoder are both
+//! pure Rust, built from the spec.
 //!
-//! ## Roadmap (TODO 104)
+//! ## Components
 //!
-//! - **Phase 2 — Decode pipeline** (8 days): in-house RFC 1951
-//!   inflate with a fast 4096-entry Huffman table and refill-heavy
-//!   bit reader. Target: 1.5× `omnizip-deflate` decode throughput.
-//! - **Phase 3 — Encode pipeline** (3 days, optional): canonical
-//!   Huffman + simple LZ77. Target: ratio within 5% of `zlib -6`.
+//! - **Encoder** ([`deflate`]): stored blocks (BTYPE=0) for small
+//!   inputs, LZ77 + fixed-Huffman (BTYPE=1) for inputs ≥ 128 bytes.
+//!   Hash-chain match finder with lazy look-ahead.
+//! - **Decoder** ([`inflate`]): full RFC 1951 inflate supporting
+//!   stored, fixed-Huffman, and dynamic-Huffman block types.
+//!   Canonical Huffman table builder, LSB-first bit reader with
+//!   zero-padded refill.
+//! - **Wire format**: output wrapped in zlib (RFC 1950) header +
+//!   adler32 trailer. Decodable by `gzip -d`, `zlib.decompress`,
+//!   and any other zlib-aware tool.
+//!
+//! ## Why a separate crate?
+//!
+//! `omnizip-deflate` wraps `miniz_oxide`. `omnizip-libdeflate`
+//! exists as a separate crate because:
+//!
+//! 1. **Different codec id.** `DeflateCodec = 0x0005`,
+//!    `LibdeflateCodec = 0x000B`.
+//! 2. **Different optimisation target.** `miniz_oxide` prioritises
+//!    small binary size; this crate prioritises implementation
+//!    independence and correctness-by-construction.
+//! 3. **OCP.** Adding a new codec = new crate + one `register()`.
 //!
 //! ## Wire format
 //!
