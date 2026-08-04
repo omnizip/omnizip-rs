@@ -25,6 +25,7 @@
 #![forbid(unsafe_code)]
 
 use crate::encoder::match_finder::{Match, MatchFinder};
+use crate::encoder::prob_state::LzmaProbState;
 
 /// Maximum match length to consider at each position.
 const OPT_MAX_MATCH_LEN: usize = 273;
@@ -41,15 +42,6 @@ pub enum ParseAction {
     Match { distance: u32, length: u32 },
     /// Encode a rep0 match (reuse last distance).
     Rep0Match { length: u32 },
-}
-
-/// DP node: cost + back-pointer.
-#[derive(Clone)]
-struct OptNode {
-    /// Total accumulated price to reach this position.
-    price: Price,
-    /// Action that led here, and the position it started from.
-    action: Option<(ParseAction, usize)>,
 }
 
 /// Find all candidate matches at each position using the match finder.
@@ -70,63 +62,20 @@ fn find_all_matches(input: &[u8], dict_size: u32) -> Vec<Vec<Match>> {
     all_matches
 }
 
-/// Estimate the price (in 1/8 bits) of encoding a literal byte.
-fn literal_price(byte: u8, prev_byte: u8, match_byte: u8, is_match_context: bool) -> Price {
-    // Without full probability model access, use a simplified estimate:
-    // - Unmatched literal: ~8 bits (flat).
-    // - Matched literal: ~4-6 bits depending on agreement with match_byte.
-    if is_match_context {
-        let mut price: Price = 0;
-        let mut same = 0u32;
-        for bit in 0..8 {
-            let lit_bit = (byte >> bit) & 1;
-            let match_bit = (match_byte >> bit) & 1;
-            let prev_bit = (prev_byte >> bit) & 1;
-            let _ctx = (u32::from(prev_bit) << 1) | (same & 1);
-            price += if lit_bit == match_bit { 16 } else { 40 };
-            same = same.wrapping_add(u32::from(lit_bit));
-        }
-        price
-    } else {
-        // Unmatched: roughly 8 bits per byte, slightly less for common values.
-        64
-    }
-}
-
-/// Estimate the price of encoding a match (distance, length).
-fn match_price(distance: u32, length: u32) -> Price {
-    // Length encoding: shorter matches cost more per byte.
-    // The length coder uses ~3-8 bits for the length slot.
-    let len_bits: Price = if length < 3 { 40 } else if length < 8 { 24 } else { 32 };
-
-    // Distance encoding: farther distances need more bits.
-    let dist_bits: Price = if distance == 0 {
-        0 // rep0 — no distance bits needed
-    } else {
-        let slots = [0, 0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 12, 13, 14, 15, 16, 17, 17, 18, 18, 19, 19, 20, 20, 21, 21, 22];
-        let slot = dist_slot(distance);
-        let extra = if (slot as usize) < slots.len() { slots[slot as usize] } else { 24 };
-        (6 + extra) * 8
-    };
-
-    // is_match flag + is_rep flag ≈ 8 bits each.
-    len_bits + dist_bits + 16
-}
-
-/// Compute the distance slot for a given 1-based distance.
-fn dist_slot(distance: u32) -> u32 {
-    // LZMA distance slot table.
-    let d = distance;
-    if d < 4 {
-        d
-    } else {
-        let bits = 31 - (d - 1).leading_zeros();
-        (bits << 1) + ((d >> (bits - 1)) & 1)
-    }
-}
+// Legacy per-symbol price helpers (`literal_price`, `match_price`)
+// were replaced by the state-conditioned functions in
+// `prob_state.rs` (see TODO 106). The DP now carries an
+// `LzmaProbState` through each transition so the prices reflect the
+// actual encoder state.
 
 /// Run the forward DP pass. Returns the optimal parse as a sequence
 /// of (start_pos, action) pairs.
+///
+/// Prices come from the [`prob_state`](crate::encoder::prob_state)
+/// module — state-conditioned estimates that mirror the C reference's
+/// length/distance slot decomposition. The state machine (literal →
+/// match → rep) is tracked through the DP so prices reflect the
+/// actual encoder state at each position.
 fn optimal_parse(input: &[u8], dict_size: u32) -> Vec<(usize, ParseAction)> {
     if input.is_empty() {
         return Vec::new();
@@ -136,30 +85,52 @@ fn optimal_parse(input: &[u8], dict_size: u32) -> Vec<(usize, ParseAction)> {
     let n = input.len();
 
     // DP table: opt[i] = cheapest cost to encode input[0..i].
-    let mut opt = vec![OptNode { price: Price::MAX, action: None }; n + 1];
-    opt[0] = OptNode { price: 0, action: None };
+    // Each node carries the prob state it ended in, so successors
+    // can compute state-conditioned prices.
+    #[derive(Clone)]
+    struct Node {
+        price: Price,
+        action: Option<(ParseAction, usize)>,
+        state: LzmaProbState,
+    }
 
-    let mut rep0: u32 = 0;
+    let start_state = LzmaProbState::new();
+    let mut opt = vec![
+        Node {
+            price: Price::MAX,
+            action: None,
+            state: start_state,
+        };
+        n + 1
+    ];
+    opt[0] = Node {
+        price: 0,
+        action: None,
+        state: start_state,
+    };
 
     for i in 0..n {
         if opt[i].price == Price::MAX {
             continue;
         }
+        let cur_state = opt[i].state;
 
         let prev_byte = if i > 0 { input[i - 1] } else { 0 };
-        let match_byte = if rep0 > 0 && rep0 < i as u32 {
-            input[i - rep0 as usize - 1]
-        } else {
-            0
-        };
 
         // Option A: emit a literal.
-        let lit_price = literal_price(input[i], prev_byte, match_byte, rep0 > 0);
+        let lit_state = LzmaProbState {
+            prev_byte,
+            match_byte: cur_state.match_byte,
+            rep0: cur_state.rep0,
+            state: cur_state.state,
+        };
+        let lit_price = prob_state_literal_price(lit_state, input[i]);
         let new_price = opt[i].price.saturating_add(lit_price);
         if new_price < opt[i + 1].price {
-            opt[i + 1] = OptNode {
+            opt[i + 1] = Node {
                 price: new_price,
                 action: Some((ParseAction::Literal(input[i]), i)),
+                state: lit_state.after_literal(input[i]),
             };
         }
 
@@ -169,27 +140,28 @@ fn optimal_parse(input: &[u8], dict_size: u32) -> Vec<(usize, ParseAction)> {
             if i + len as usize > n {
                 continue;
             }
-            let m_price = match_price(m.distance, len);
+            let m_price = prob_state_match_price(cur_state, m.distance, len);
             let per_byte = m_price / len.max(1);
             // Only take the match if it's cheaper than literals per byte.
             if per_byte < 64 {
                 let end = i + len as usize;
                 let new_price = opt[i].price.saturating_add(m_price);
                 if new_price < opt[end].price {
-                    opt[end] = OptNode {
+                    let new_state = cur_state.after_match(m.distance);
+                    opt[end] = Node {
                         price: new_price,
                         action: Some((
                             ParseAction::Match { distance: m.distance, length: len },
                             i,
                         )),
+                        state: new_state,
                     };
-                    // Update rep0 for subsequent positions.
-                    rep0 = m.distance;
                 }
             }
         }
 
         // Option C: rep0 match (reuse last distance, if it gives a match).
+        let rep0 = cur_state.rep0;
         if rep0 > 0 && rep0 < i as u32 {
             let back = i - rep0 as usize - 1;
             let max_len = (n - i).min(OPT_MAX_MATCH_LEN);
@@ -201,14 +173,15 @@ fn optimal_parse(input: &[u8], dict_size: u32) -> Vec<(usize, ParseAction)> {
                 match_len += 1;
             }
             if match_len >= 2 {
-                // Rep matches are cheaper (no distance coding).
-                let rep_price = match_price(0, match_len) - 24; // rep flag saves ~3 bits.
+                let rep_price = prob_state_rep0_price(cur_state, match_len);
                 let end = i + match_len as usize;
                 let new_price = opt[i].price.saturating_add(rep_price);
                 if new_price < opt[end].price {
-                    opt[end] = OptNode {
+                    let new_state = cur_state.after_rep();
+                    opt[end] = Node {
                         price: new_price,
                         action: Some((ParseAction::Rep0Match { length: match_len }, i)),
+                        state: new_state,
                     };
                 }
             }
@@ -228,6 +201,26 @@ fn optimal_parse(input: &[u8], dict_size: u32) -> Vec<(usize, ParseAction)> {
     }
     actions.reverse();
     actions
+}
+
+/// Wrapper for the prob_state literal price that falls back to a
+/// simple constant when the state has no recent match (Phase 2 stub
+/// matches the original heuristic).
+fn prob_state_literal_price(state: LzmaProbState, byte: u8) -> Price {
+    use crate::encoder::prob_state::literal_price as ps_lit;
+    ps_lit(state, byte) as Price
+}
+
+/// Wrapper for the prob_state match price.
+fn prob_state_match_price(state: LzmaProbState, distance: u32, length: u32) -> Price {
+    use crate::encoder::prob_state::match_price as ps_match;
+    ps_match(state, distance, length) as Price
+}
+
+/// Wrapper for the prob_state rep0 price.
+fn prob_state_rep0_price(state: LzmaProbState, length: u32) -> Price {
+    use crate::encoder::prob_state::rep0_price as ps_rep0;
+    ps_rep0(state, length) as Price
 }
 
 /// Encode `input` using the optimal parser. Returns the LZMA1 byte
