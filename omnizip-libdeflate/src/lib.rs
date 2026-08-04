@@ -42,6 +42,7 @@
 #![warn(clippy::pedantic)]
 
 pub mod deflate;
+pub mod deflate_lz77;
 mod inflate;
 
 use omnizip_codecs::{Codec, CodecId, CompressionLevel, OmnizipError};
@@ -75,13 +76,11 @@ impl Codec for LibdeflateCodec {
         level: CompressionLevel,
     ) -> Result<Vec<u8>, OmnizipError> {
         let _ = level;
-        // Phase 3 (in-house encoder): stored-block format. Wraps the
-        // raw DEFLATE output in a zlib header (RFC 1950) so it's
-        // decodable by `gzip -d`, `zlib.decompress`, etc.
-        //
-        // Stored blocks don't compress; ratio is ~100%. A future
-        // optimisation pass would add Huffman + LZ77 (target: within
-        // 5% of `zlib -6`). See TODO 104 Phase 3 follow-up.
+        // Uses stored blocks (correct, ~100% ratio). The LZ77 +
+        // fixed-Huffman path exists in `deflate_lz77` but has
+        // bit-order issues in the match encoder that need debugging.
+        // Once fixed, this will switch to the LZ77 path for inputs
+        // ≥ 128 bytes for ~50-60% ratio on text.
         let raw = deflate::deflate_stored(plaintext)?;
         Ok(wrap_zlib(&raw))
     }
