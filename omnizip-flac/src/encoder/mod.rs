@@ -25,6 +25,7 @@ pub mod bitwriter;
 pub mod frame;
 pub mod lpc;
 pub mod rice;
+pub mod simd;
 pub mod streaminfo;
 pub mod subframe;
 

@@ -31,6 +31,7 @@ omnizip-bzip2 = { path = "../omnizip-bzip2", version = "0.14.7" }
 omnizip-ppmd = { path = "../omnizip-ppmd", version = "0.14.7" }
 omnizip-zpaq = { path = "../omnizip-zpaq", version = "0.14.7" }
 omnizip-glza = { path = "../omnizip-glza", version = "0.14.7" }
+omnizip-flac = { path = "../omnizip-flac", version = "0.14.7" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 clap = { version = "4.5", features = ["derive"] }
@@ -42,3 +43,7 @@ unsafe_code = "forbid"
 
 [lints.clippy]
 pedantic = "warn"
+
+[features]
+# Forward to omnizip-flac's SIMD path for quick_perf comparison.
+simd-lpc = ["omnizip-flac/simd-lpc"]

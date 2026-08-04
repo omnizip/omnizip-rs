@@ -12,8 +12,12 @@ use std::time::Instant;
 
 use omnizip_codecs::{Codec, CompressionLevel};
 use omnizip_deflate::DeflateCodec;
+use omnizip_flac::encoder::encode_stream as flac_encode_stream;
+use omnizip_flac::pcm_header::{Endianness, PcmParams};
+use omnizip_lz4::{Lz4FastCodec, Lz4HcCodec};
 use omnizip_lzma::LzmaCodec;
 use omnizip_zpaq::ZpaqCodec;
+use omnizip_zstd::ZstdCodec;
 
 fn main() {
     // 64 KiB — small enough to keep a single LZMA2 chunk's compressed
@@ -23,8 +27,15 @@ fn main() {
     println!("input: {} bytes (synthetic enwik-like text)\n", text.len());
 
     bench_lzma(&text);
+    bench_zstd(&text);
+    bench_lz4(&text);
     bench_zpaq(&text);
     bench_deflate(&text);
+
+    // FLAC takes raw PCM, not text. Synthesise a sine wave.
+    let pcm = make_sine_pcm(4096 * 4, 8000, 440.0);
+    println!("\ninput: {} bytes (4 KiB-block sine PCM)\n", pcm.len());
+    bench_flac(&pcm);
 }
 
 fn bench_lzma(text: &[u8]) {
@@ -65,6 +76,52 @@ fn bench_zpaq(text: &[u8]) {
     }
 }
 
+fn bench_zstd(text: &[u8]) {
+    let codec = ZstdCodec::new();
+    // Note: ZSTD has a perf cliff on text inputs ≥ 8KB at all levels
+    // (likely O(N²) in the block/sequence assembly). Filed as a TODO;
+    // for now we only bench on small inputs to avoid stalling.
+    let bench_input = &text[..text.len().min(4096)];
+    for &level in &[1u8, 3, 9] {
+        let t = Instant::now();
+        let out = codec
+            .compress(black_box(bench_input), CompressionLevel::new(level))
+            .expect("compress");
+        let elapsed = t.elapsed();
+        let mbps = (bench_input.len() as f64 / 1e6) / elapsed.as_secs_f64();
+        let ratio = (bench_input.len() as f64) / (out.len() as f64);
+        println!(
+            "zstd-{level} (4KB): {mbps:>5.1} MB/s  ratio={ratio:>5.2}×  in {:.3}s",
+            elapsed.as_secs_f64()
+        );
+    }
+}
+
+fn bench_lz4(text: &[u8]) {
+    let fast = Lz4FastCodec;
+    let hc = Lz4HcCodec;
+    let cases: &[(&str, &dyn Codec, u8)] = &[
+        ("lz4-1", &fast, 1),
+        ("lz4-9", &fast, 9),
+        ("lz4hc-12", &hc, 12),
+    ];
+    for (label, codec, level) in cases {
+        let t = Instant::now();
+        let out = codec
+            .compress(black_box(text), CompressionLevel::new(*level))
+            .expect("compress");
+        let elapsed = t.elapsed();
+        let mbps = (text.len() as f64 / 1e6) / elapsed.as_secs_f64();
+        let ratio = (text.len() as f64) / (out.len() as f64);
+        println!(
+            "{label}: {mbps:>5.1} MB/s  ratio={ratio:>5.2}×  ({} → {} bytes) in {:.2}s",
+            text.len(),
+            out.len(),
+            elapsed.as_secs_f64()
+        );
+    }
+}
+
 fn bench_deflate(text: &[u8]) {
     let codec = DeflateCodec::new();
     for &level in &[1u8, 6, 9] {
@@ -82,6 +139,39 @@ fn bench_deflate(text: &[u8]) {
             elapsed.as_secs_f64()
         );
     }
+}
+
+fn bench_flac(pcm: &[u8]) {
+    let params = PcmParams {
+        sample_rate: 8_000,
+        channels: 1,
+        bits_per_sample: 16,
+        endianness: Endianness::LittleEndian,
+        sample_count: (pcm.len() / 2) as u32,
+    };
+    let t = Instant::now();
+    let out = flac_encode_stream(black_box(pcm), &params).expect("flac encode");
+    let elapsed = t.elapsed();
+    let mbps = (pcm.len() as f64 / 1e6) / elapsed.as_secs_f64();
+    let ratio = (pcm.len() as f64) / (out.len() as f64);
+    println!(
+        "flac:       {mbps:>5.1} MB/s  ratio={ratio:>5.2}×  ({} → {} bytes) in {:.2}s",
+        pcm.len(),
+        out.len(),
+        elapsed.as_secs_f64()
+    );
+}
+
+fn make_sine_pcm(n: usize, sr: u32, freq: f64) -> Vec<u8> {
+    let mut pcm = Vec::with_capacity(n * 2);
+    for i in 0..n {
+        let t = i as f64 / sr as f64;
+        let s = (t * freq * std::f64::consts::TAU).sin() * 30_000.0;
+        let v = (s as i16).to_le_bytes();
+        pcm.push(v[0]);
+        pcm.push(v[1]);
+    }
+    pcm
 }
 
 /// Deterministic enwik-like synthetic text: real English word
