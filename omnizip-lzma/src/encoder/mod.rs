@@ -18,3 +18,4 @@ pub use match_finder::MatchFinder;
 pub use optimal::optimal_parse_actions;
 pub use prob_state::{LzmaProbState, LzmaState};
 pub use xz::xz_compress;
+pub use xz::xz_compress_with_options;
