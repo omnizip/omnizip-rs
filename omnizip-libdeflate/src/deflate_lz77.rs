@@ -294,10 +294,6 @@ fn reverse_bits(v: u32, n: u8) -> u32 {
     r
 }
 
-/// Reverse 5 bits (specialised for distance codes).
-fn reverse_bit_5(v: u32) -> u32 {
-    reverse_bits(v, 5)
-}
 
 /// Map a match length (3..=258) to a length symbol (257..=285).
 fn length_to_sym(length: usize) -> Option<u16> {
