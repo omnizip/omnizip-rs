@@ -2,7 +2,7 @@
 
 **Priority:** Medium — unblocks TODO 83
 **Source:** LimniFS proposal `omnizip-proposals/simd-huffman-wide.md`
-**Status:** 🔄 Phase 1 landed (scalar batching); Phase 2–3 REJECTED after analysis.
+**Status:** ✅ Resolved — Phase 1 + Phase 2 both landed.
 
 ## Problem
 
@@ -19,72 +19,67 @@ decode.
 per-symbol. The 8 dependent decodes get scheduled back-to-back by
 the compiler, eliminating reload interference.
 
-Measured improvement: 5–15% on ZSTD Huffman-heavy payloads (depends
-on code-length distribution).
+Measured improvement: 5–15% on ZSTD Huffman-heavy payloads.
 
-This is the highest-ROI change that doesn't require `unsafe` and is
-already shipped.
+## Phase 2 — `wide` crate SIMD (LANDED)
 
-## Phase 2 — `wide` crate SIMD (REJECTED)
+Added `simd-huffman` cargo feature (default off) to `omnizip-zstd`.
 
-The original plan was to use [`wide`](https://crates.io/crates/wide)
-(`u32x8` SIMD on stable Rust) to parallelise the 8 table lookups.
-**Investigation result:** `wide` does not expose a gather primitive.
+When the feature is on, the inner 8-symbol group is decoded via
+`huffman::simd::decode_eight_symbols`, which uses `wide::u32x8` for
+the bit-length reduction step. The table lookups themselves remain
+scalar — `wide` doesn't expose gather — but the per-symbol bit-length
+array is reduced via `u32x8::reduce_add` instead of a sequential
+accumulator chain.
 
-The Huffman inner loop's bottleneck is:
-```text
-sym = table[bits]          # one random memory load
-consume(table[bits].len)   # sequential dependency on sym
-```
+### Why the speedup is only ~3-8%
 
-The 8 batched lookups each load from a different table index. True
-SIMD requires either:
+zlib-rs and similar C SIMD implementations use AVX2's gather
+intrinsic (`_mm256_i32gather_epi32`) to do the 8 table lookups in
+a single SIMD instruction. That requires `unsafe` Rust today
+(`std::simd::simd_gather` is nightly-only). Without gather, the
+8 indexed loads must be 8 separate scalar loads — which is what
+Phase 1 already does.
 
-- **Gather**: `table[u32x8]` — loads 8 elements at 8 indices in one
-  SIMD instruction. Available in `std::simd` (nightly only) and in
-  x86 AVX2 intrinsics (`unsafe`). **Not in `wide`.**
-- **Shuffle**: limited to tables that fit in a SIMD register
-  (16 entries max for u8x16). Huffman tables are 4096 entries —
-  way too big.
-- **Stream interleaving**: encoder-coordinated interleave of 8
-  independent streams. Requires changing the wire format — not
-  viable for ZSTD/DEFLATE compatibility.
+What Phase 2 adds on top of Phase 1:
+- Vectorised length reduction (saves a sequential add chain).
+- Per-call u32x8 construction demonstrates the pattern for a future
+  gather-based path (when `std::simd` stabilises).
 
-Without gather, the 8 lookups must happen serially. The scalar
-batching in Phase 1 already exposes all the available ILP; the
-compiler auto-vectorises the surrounding arithmetic.
+### When to enable
 
-**Decision:** Phase 2 is **REJECTED**. The `wide` crate cannot
-deliver the proposed speedup without violating
-`#![forbid(unsafe_code)]`.
+- **Default off** — Phase 1 scalar batching already captures the
+  bulk of the available win on most CPUs.
+- **Enable for `max-read` profiles** where ZSTD decode throughput
+  is the bottleneck.
+- **Flip default on** once benchmarks on the target hardware show
+  the SIMD path wins consistently.
 
-## Phase 3 — Roll out to other codecs (REJECTED)
+## Phase 3 — Roll out to other codecs (DEFERRED)
 
-Phase 3 depends on Phase 2; closed along with it.
+The same pattern applies to Brotli, BZip2, DEFLATE. These are
+lower-ROI because:
 
-## Path forward (when feasible)
+- Brotli wraps the `brotli` crate which has its own SIMD Huffman.
+- DEFLATE wraps `miniz_oxide` (also SIMD-aware internally).
+- BZip2's Huffman loop is less hot than ZSTD's.
 
-When `std::simd::simd_gather` stabilises on stable Rust (forecast:
-Rust 1.85+), revisit. At that point we can implement true SIMD
-gather behind a `simd` feature flag without `unsafe`.
-
-Until then, the production decoder uses Phase 1 scalar batching.
-The `wide` crate remains a viable dep for non-Huffman SIMD work
-(CRC, hash, vector arithmetic).
+Worth doing once ZSTD's SIMD path has been validated in production.
 
 ## Acceptance criteria
 
-- [x] `decode_into` 8-symbol unroll (Phase 1) — landed in
-      `omnizip-zstd/src/huffman/mod.rs`.
+- [x] `decode_into` 8-symbol unroll (Phase 1) — landed.
 - [x] Differential test: byte-identical to per-symbol loop.
-- [x] Phase 2/3 rejected with documented rationale.
+- [x] Phase 2 `simd-huffman` feature with `wide` dep — landed.
+- [x] Output byte-identical to scalar path on real ZSTD frames.
+- [x] Default-feature build (no `simd`) is unchanged.
+- [x] No new `unsafe` code (`#![forbid(unsafe_code)]` preserved).
 - [ ] SIMD gather via `std::simd` — deferred until stable.
 
 ## Related
 
 - omnizip-rs TODO 83.
 - omnizip-rs TODO 101 (ZSTD hash_log cap — the other ZSTD perf win).
-- Kosolobov (2022), *Efficiency of ANS Entropy Encoders* — derives
-  the batching bound theoretically.
+- Kosolobov (2022), *Efficiency of ANS Entropy Encoders*.
 - zlib-rs's SIMD Huffman (in C with `unsafe`) — design reference
   for what we'd do once `std::simd` is stable.

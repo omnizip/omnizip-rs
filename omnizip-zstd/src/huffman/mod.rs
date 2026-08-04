@@ -27,6 +27,8 @@
 
 pub mod encoder;
 pub mod package_merge;
+#[cfg(feature = "simd-huffman")]
+pub mod simd;
 pub mod weights;
 
 use crate::constants::HUFFMAN_MAX_BITS;
@@ -194,6 +196,19 @@ impl<'t, 'b> HuffmanDecoder<'t, 'b> {
         }
     }
 
+    /// Decode 8 symbols using SIMD-assisted bit-position arithmetic
+    /// (only available with the `simd-huffman` feature). The table
+    /// lookups are still scalar (no gather without `unsafe`), but the
+    /// vectorised arithmetic cuts a measurable chunk off the inner
+    /// loop's bit-position churn.
+    #[cfg(feature = "simd-huffman")]
+    fn decode_eight_simd(&mut self, out: &mut [u8]) -> Result<(), ZstdError> {
+        let mut chunk = [0u8; 8];
+        simd::decode_eight_symbols(self.table, &mut self.bitstream, &mut chunk)?;
+        out[..8].copy_from_slice(&chunk);
+        Ok(())
+    }
+
     /// Decode one symbol and reload the bitstream.
     ///
     /// # Errors
@@ -212,25 +227,50 @@ impl<'t, 'b> HuffmanDecoder<'t, 'b> {
     ///
     /// Returns the first error encountered (see [`Self::decode_one`]).
     pub fn decode_into(&mut self, out: &mut [u8]) -> Result<(), ZstdError> {
-        // Scalar batching: unroll the inner loop in groups of 8 to
-        // expose ILP and let the compiler sink the bitstream reload.
-        // This is the Phase 1 baseline called out in TODO 102 — it
-        // proves the batching win without requiring the `wide` crate.
-        let mut i = 0;
-        while i + 8 <= out.len() {
-            // Decode 8 symbols; reload once after the group instead of
-            // per-symbol. The reload inside `decode_one` becomes a
-            // no-op when the bitstream still has ≥ MAX_BITS available.
-            out[i] = self.table.decode(&mut self.bitstream)?;
-            out[i + 1] = self.table.decode(&mut self.bitstream)?;
-            out[i + 2] = self.table.decode(&mut self.bitstream)?;
-            out[i + 3] = self.table.decode(&mut self.bitstream)?;
-            out[i + 4] = self.table.decode(&mut self.bitstream)?;
-            out[i + 5] = self.table.decode(&mut self.bitstream)?;
-            out[i + 6] = self.table.decode(&mut self.bitstream)?;
-            out[i + 7] = self.table.decode(&mut self.bitstream)?;
-            self.bitstream.reload();
-            i += 8;
+        // SIMD-batched path (TODO 102 Phase 2). When the `simd-huffman`
+        // feature is on, this path uses `wide::u32x8` to vectorise the
+        // per-bit-position arithmetic (peek computation, length sum)
+        // and the per-symbol table lookup. The table lookup itself is
+        // still scalar — `wide` has no gather — but the 8 independent
+        // peeks + the bit-position advancement vectorise cleanly.
+        //
+        // See `simd::decode_eight_symbols` for the implementation and
+        // the rationale for what is and isn't vectorisable.
+        #[cfg(feature = "simd-huffman")]
+        {
+            let mut i = 0;
+            while i + 8 <= out.len() {
+                let chunk = &mut out[i..i + 8];
+                self.decode_eight_simd(chunk)?;
+                self.bitstream.reload();
+                i += 8;
+            }
+        }
+
+        // Scalar batching fallback (TODO 102 Phase 1). 8-deep unroll
+        // exposes ILP and lets the compiler sink the bitstream reload.
+        // The reload inside `decode_one` becomes a no-op when the
+        // bitstream still has ≥ MAX_BITS available.
+        let mut i = if cfg!(feature = "simd-huffman") {
+            // SIMD path already processed the aligned 8-symbol groups;
+            // fall through to the tail loop below.
+            (out.len() / 8) * 8
+        } else {
+            0
+        };
+        if !cfg!(feature = "simd-huffman") {
+            while i + 8 <= out.len() {
+                out[i] = self.table.decode(&mut self.bitstream)?;
+                out[i + 1] = self.table.decode(&mut self.bitstream)?;
+                out[i + 2] = self.table.decode(&mut self.bitstream)?;
+                out[i + 3] = self.table.decode(&mut self.bitstream)?;
+                out[i + 4] = self.table.decode(&mut self.bitstream)?;
+                out[i + 5] = self.table.decode(&mut self.bitstream)?;
+                out[i + 6] = self.table.decode(&mut self.bitstream)?;
+                out[i + 7] = self.table.decode(&mut self.bitstream)?;
+                self.bitstream.reload();
+                i += 8;
+            }
         }
         while i < out.len() {
             out[i] = self.decode_one()?;

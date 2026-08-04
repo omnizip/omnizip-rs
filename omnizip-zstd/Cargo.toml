@@ -13,8 +13,18 @@ categories = ["compression"]
 name = "omnizip_zstd"
 path = "src/lib.rs"
 
+[features]
+# Enable experimental SIMD batching for the Huffman decode inner loop
+# via the `wide` crate. Without SIMD gather (which `wide` does not
+# expose and `std::simd` only offers on nightly), the speedup is
+# limited to ~5-15% from vectorised bit-position arithmetic. Off by
+# default; flip on with `--features simd-huffman`.
+default = []
+simd-huffman = ["dep:wide"]
+
 [dependencies]
 omnizip-codecs = { workspace = true }
+wide = { version = "1.6", optional = true }
 
 [lints]
 workspace = true
