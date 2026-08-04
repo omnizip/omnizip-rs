@@ -103,6 +103,10 @@ pub struct MatchState {
     /// Hash table: `hash_table[h]` = last position with hash `h`, or 0.
     pub(crate) hash_table: Vec<u32>,
     pub(crate) hash_log: u32,
+    /// Hash chain for deeper match search. Lazily allocated.
+    pub(crate) chain: Vec<u32>,
+    /// Max chain entries to walk (0 = single probe only).
+    pub(crate) max_chain: u32,
     /// Next position to insert into the hash table.
     pub(crate) next_to_update: u32,
 }
@@ -115,8 +119,23 @@ impl MatchState {
         Self {
             hash_table: vec![0; size],
             hash_log,
+            chain: Vec::new(),
+            max_chain: 0,
             next_to_update: 0,
         }
+    }
+
+    /// Enable hash chain walking. Allocates the chain table.
+    pub fn enable_chain(&mut self, max_chain: u32) {
+        self.max_chain = max_chain;
+        if max_chain > 0 && self.chain.is_empty() {
+            self.chain = vec![0; crate::constants::BLOCK_MAX_SIZE + 1];
+        }
+    }
+
+    /// Disable chain walking (revert to single-probe).
+    pub fn disable_chain(&mut self) {
+        self.max_chain = 0;
     }
 
     /// Default hash log for level-1 fast mode. ZSTD uses ~hashLog 6-7
@@ -154,6 +173,9 @@ impl MatchState {
     /// position references (positions are block-relative).
     pub fn clear(&mut self) {
         self.hash_table.fill(0);
+        if !self.chain.is_empty() {
+            self.chain.fill(0);
+        }
         self.next_to_update = 0;
     }
 
@@ -475,6 +497,12 @@ fn find_best_match(
         return None;
     }
 
+    // Chain-walking path (lazy/lazy2 strategies with max_chain > 0).
+    if ms.max_chain > 0 && !ms.chain.is_empty() {
+        return find_best_match_chain(src, ip, h_bits, ms, min_match, limit);
+    }
+
+    // Single-probe path (Fast/Greedy strategies — unchanged).
     // Hash probe.
     let h = hash4(src, ip, h_bits);
     let candidate = ms.hash_table[h as usize] as usize;
@@ -502,6 +530,70 @@ fn find_best_match(
 
     if m_len >= min_match {
         Some((dist, m_len))
+    } else {
+        None
+    }
+}
+
+/// Chain-walking match finder. Walks up to `ms.max_chain` entries in
+/// the hash chain to find the longest match at `ip`.
+///
+/// Called by `find_best_match` when `ms.max_chain > 0`. The
+/// single-probe path (Fast/Greedy) is in `find_best_match` and is
+/// completely unaffected by this function.
+fn find_best_match_chain(
+    src: &[u8],
+    ip: usize,
+    h_bits: u32,
+    ms: &mut MatchState,
+    min_match: usize,
+    limit: usize,
+) -> Option<(usize, usize)> {
+    let h = hash4(src, ip, h_bits);
+
+    // Insert into hash chain BEFORE searching so subsequent positions
+    // can find this one.
+    let mut candidate = ms.hash_table[h as usize] as usize;
+    if ip < ms.chain.len() {
+        ms.chain[ip] = ms.hash_table[h as usize];
+    }
+    ms.hash_table[h as usize] = ip as u32;
+
+    let max_extend = limit.saturating_sub(ip).min(BLOCK_MAX_SIZE);
+    let mut best_len: usize = 0;
+    let mut best_dist: usize = 0;
+    let max_walk = ms.max_chain;
+
+    for _ in 0..max_walk {
+        if candidate == 0 || candidate >= ip {
+            break;
+        }
+        let dist = ip - candidate;
+        if dist >= BLOCK_MAX_SIZE {
+            break;
+        }
+        if candidate + MIN_MATCH <= src.len()
+            && src[ip..ip + MIN_MATCH] == src[candidate..candidate + MIN_MATCH]
+        {
+            let m_len = MIN_MATCH + count_match(
+                src, ip + MIN_MATCH, src, candidate + MIN_MATCH,
+                max_extend.saturating_sub(MIN_MATCH),
+            );
+            if m_len > best_len {
+                best_len = m_len;
+                best_dist = dist;
+            }
+        }
+        // Walk to previous entry in chain.
+        if candidate < ms.chain.len() {
+            candidate = ms.chain[candidate] as usize;
+        } else {
+            break;
+        }
+    }
+
+    if best_len >= min_match && best_dist > 0 {
+        Some((best_dist, best_len))
     } else {
         None
     }
@@ -557,16 +649,21 @@ fn probe_match(
 /// position (the C fast parser inserts positions `ip` and `ip+2` after
 /// a match, for performance).
 fn insert_range(ms: &mut MatchState, src: &[u8], start: usize, len: usize) {
-    // The C fast parser inserts two hash entries after each match:
-    // position `ip-2` (already passed) and `ip+2` (ahead of match end).
-    // For simplicity, insert at `start` and `start + len - 2` (if valid).
+    // Insert hash entries for positions within a match. Also maintain
+    // the hash chain if enabled, so subsequent chain walks find these.
     if start + MIN_MATCH <= src.len() {
         let h = hash4(src, start, ms.hash_log);
+        if start < ms.chain.len() {
+            ms.chain[start] = ms.hash_table[h as usize];
+        }
         ms.hash_table[h as usize] = start as u32;
     }
     if start + len >= 2 && start + len - 2 + MIN_MATCH <= src.len() {
         let pos = start + len - 2;
         let h = hash4(src, pos, ms.hash_log);
+        if pos < ms.chain.len() {
+            ms.chain[pos] = ms.hash_table[h as usize];
+        }
         ms.hash_table[h as usize] = pos as u32;
     }
 }

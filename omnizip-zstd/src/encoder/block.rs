@@ -401,8 +401,24 @@ fn write_block(
     seq_store.reset(*rep_offsets);
     let min_match = params.min_match.max(4) as usize;
 
-    // Dispatch to the appropriate parser based on the strategy field.
+    // Configure match finder depth based on strategy.
+    // search_log controls hash-chain walking depth (1 << search_log).
     use crate::encoder::cparams::Strategy;
+    match params.strategy {
+        Strategy::Fast | Strategy::DoubleFast => {
+            ms.disable_chain();
+        }
+        Strategy::Greedy => {
+            ms.disable_chain();
+        }
+        Strategy::Lazy => {
+            ms.enable_chain(1 << params.search_log.min(4));
+        }
+        Strategy::Lazy2 | Strategy::Btlazy2 | Strategy::Btopt | Strategy::Btultra | Strategy::Btultra2 => {
+            ms.enable_chain(1 << params.search_log);
+        }
+    }
+
     match params.strategy {
         Strategy::Fast | Strategy::DoubleFast => {
             compress_block_with_min_match(chunk, &mut seq_store, ms, min_match);
@@ -414,8 +430,6 @@ fn write_block(
             compress_block_lazy(chunk, &mut seq_store, ms, min_match);
         }
         Strategy::Lazy2 | Strategy::Btlazy2 | Strategy::Btopt | Strategy::Btultra | Strategy::Btultra2 => {
-            // Lazy2 gives good results for all higher levels. A full
-            // binary-tree optimal parser would improve L16-22 by ~1-2%.
             compress_block_lazy2(chunk, &mut seq_store, ms, min_match);
         }
     }
