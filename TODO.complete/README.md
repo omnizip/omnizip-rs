@@ -107,6 +107,9 @@ the new items document the path forward.
 | 104 | [Libdeflate pure-Rust codec](104-libdeflate-codec.md) | ✅ (Phase 1+2+3 all landed; in-house encoder+decoder) |
 | 105 | [FLAC LPC verification corpus](105-flac-lpc-finish.md) | 🔄 (omnizip-rs harness landed; LimniFS provides corpus) |
 | 106 | [LZMA optimal parser: exact prices](106-lzma-optimal-parser-exact-prices.md) | ✅ (Phase 1-3 all landed) |
+| 107 | [ZSTD BT match finder for levels 16-22](107-zstd-bt-match-finder.md) | ⏳ (P0 — 5-15% ratio gap) |
+| 108 | [LZMA BT4 match finder](108-lzma-bt4-match-finder.md) | ⏳ (P1 — 3-8% ratio gap) |
+| 109 | [BZip2 SA-IS suffix array](109-bzip2-sais-bwt.md) | ⏳ (P2 — 2-5x speed) |
 
 ## How to claim a TODO
 
