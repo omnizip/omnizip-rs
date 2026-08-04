@@ -119,12 +119,12 @@ impl Lz77Encoder {
                             self.emit_match(d2, l2)?;
                             // Skip past the match.
                             mf.insert(input, i + 1);
-                            for k in (i + 2)..(i + 2 + l2) {
+                            for k in (i + 2)..(i + 1 + l2) {
                                 if k < input.len() {
                                     mf.insert(input, k);
                                 }
                             }
-                            i += 2 + l2;
+                            i += 1 + l2;
                             continue;
                         }
                     }
@@ -486,12 +486,23 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "off-by-one in last match boundary; repetitive data round-trips correctly"]
     fn round_trips_text_input_through_inflate() {
         let input = b"the quick brown fox jumps over the lazy dog ".repeat(20);
         let compressed = deflate_fixed_huffman(&input).unwrap().expect("non-trivial output");
-        let decoded = crate::inflate::inflate(&compressed, input.len()).unwrap();
-        assert_eq!(decoded, input);
+        let decoded = crate::inflate::inflate(&compressed, input.len()).unwrap_or_else(|e| {
+            panic!("inflate error: {e}");
+        });
+        if decoded != input {
+            // Find the first divergence point for diagnostics.
+            let diverge = decoded.iter().zip(input.iter()).position(|(a, b)| a != b);
+            let dlen = decoded.len();
+            let ilen = input.len();
+            panic!(
+                "round-trip mismatch: decoded {dlen} bytes vs input {ilen} bytes; \
+                 first divergence at {:?}",
+                diverge
+            );
+        }
     }
 
     #[test]
