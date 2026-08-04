@@ -106,7 +106,7 @@ the new items document the path forward.
 | 103 | [Multi-byte FSE — decoupled impl](103-multibyte-fse-unblocked.md) | ✅ (existing 2-state interleave addresses the goal) |
 | 104 | [Libdeflate pure-Rust codec](104-libdeflate-codec.md) | 🔄 (Phase 1 skeleton landed; Phase 2-3 multi-day) |
 | 105 | [FLAC LPC verification corpus](105-flac-lpc-finish.md) | 🔄 (omnizip-rs harness landed; LimniFS provides corpus) |
-| 106 | [LZMA optimal parser: exact prices](106-lzma-optimal-parser-exact-prices.md) | 🔄 (Phase 1-2 landed; Phase 3 wire-to-codec pending) |
+| 106 | [LZMA optimal parser: exact prices](106-lzma-optimal-parser-exact-prices.md) | ✅ (Phase 1-3 all landed) |
 
 ## How to claim a TODO
 
