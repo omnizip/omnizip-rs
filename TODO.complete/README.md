@@ -102,11 +102,11 @@ the new items document the path forward.
 | 99 | [Differential harness: fix bzip2/lz4/DEFLATE framing gaps](99-framing-gaps.md) | ✅ |
 | 100 | [Code review sweep: OCP/MECE/DRY improvements](100-code-review-sweep.md) | ✅ |
 | 101 | [ZSTD encoder: per-call hash-table allocation](101-zstd-encoder-reuse-hash-table.md) | ✅ (partial — hash_log cap landed; full compressor reuse deferred) |
-| 102 | [SIMD Huffman via `wide` crate](102-simd-huffman-wide.md) | ⏳ (unblocks TODO 83) |
-| 103 | [Multi-byte FSE — decoupled impl](103-multibyte-fse-unblocked.md) | ⏳ (unblocks TODO 84) |
-| 104 | [Libdeflate pure-Rust codec](104-libdeflate-codec.md) | ⏳ |
-| 105 | [FLAC LPC verification corpus](105-flac-lpc-finish.md) | ⏳ (omnizip-rs side; LimniFS provides corpus) |
-| 106 | [LZMA optimal parser: exact prices](106-lzma-optimal-parser-exact-prices.md) | ⏳ (TODO 64 completion) |
+| 102 | [SIMD Huffman via `wide` crate](102-simd-huffman-wide.md) | 🔄 (Phase 1 landed; Phase 2-3 rejected — `wide` lacks gather) |
+| 103 | [Multi-byte FSE — decoupled impl](103-multibyte-fse-unblocked.md) | ✅ (existing 2-state interleave addresses the goal) |
+| 104 | [Libdeflate pure-Rust codec](104-libdeflate-codec.md) | 🔄 (Phase 1 skeleton landed; Phase 2-3 multi-day) |
+| 105 | [FLAC LPC verification corpus](105-flac-lpc-finish.md) | 🔄 (omnizip-rs harness landed; LimniFS provides corpus) |
+| 106 | [LZMA optimal parser: exact prices](106-lzma-optimal-parser-exact-prices.md) | 🔄 (Phase 1-2 landed; Phase 3 wire-to-codec pending) |
 
 ## How to claim a TODO
 
