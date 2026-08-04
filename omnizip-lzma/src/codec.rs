@@ -5,7 +5,8 @@
 
 use omnizip_codecs::{Codec, CodecId, CompressionLevel, OmnizipError};
 
-use crate::encoder::xz_compress;
+use crate::encoder::alone::LzmaOptions;
+use crate::encoder::xz_compress_with_options;
 use crate::xz_container::xz_decompress;
 use crate::LzmaError;
 
@@ -16,6 +17,15 @@ impl LzmaCodec {
     #[must_use]
     pub const fn new() -> Self {
         Self
+    }
+
+    /// True if `level` should use the optimal (DP) parser.
+    ///
+    /// Public so the dispatch rule is observable from tests and from
+    /// downstream consumers that build `LzmaOptions` directly.
+    #[must_use]
+    pub const fn uses_optimal_parser(level: u8) -> bool {
+        level >= OPTIMAL_PARSER_LEVEL_THRESHOLD
     }
 }
 
@@ -39,6 +49,12 @@ fn map_encode_error(e: LzmaError) -> OmnizipError {
     }
 }
 
+/// Level threshold above which the optimal (DP) parser is used.
+/// Below this, the faster lazy parser is selected.
+///
+/// Matches liblzma's convention where level ≥ 6 uses optimal parsing.
+const OPTIMAL_PARSER_LEVEL_THRESHOLD: u8 = 6;
+
 impl Codec for LzmaCodec {
     fn id(&self) -> CodecId {
         CodecId::LZMA
@@ -51,9 +67,16 @@ impl Codec for LzmaCodec {
     fn compress(
         &self,
         plaintext: &[u8],
-        _level: CompressionLevel,
+        level: CompressionLevel,
     ) -> Result<Vec<u8>, OmnizipError> {
-        xz_compress(plaintext).map_err(map_encode_error)
+        // Level → parser dispatch. Higher levels trade encode speed
+        // for ratio by using the DP-based optimal parser (see TODO 106).
+        let use_optimal = level.as_u8() >= OPTIMAL_PARSER_LEVEL_THRESHOLD;
+        let opts = LzmaOptions {
+            use_optimal_parser: use_optimal,
+            ..Default::default()
+        };
+        xz_compress_with_options(plaintext, &opts).map_err(map_encode_error)
     }
 
     fn decompress(&self, compressed: &[u8], expected_len: u32) -> Result<Vec<u8>, OmnizipError> {
@@ -93,5 +116,28 @@ mod tests {
             .decompress(&compressed, input.len() as u32)
             .expect("decode");
         assert_eq!(decompressed, input);
+    }
+
+    /// Higher levels use the optimal parser; lower levels use the lazy
+    /// parser. The decision is encoded into `LzmaOptions.use_optimal_parser`
+    /// which the LZMA2 chunk encoder consults (see `encoder/lzma2.rs`).
+    ///
+    /// The byte-level difference between the two parsers depends on the
+    /// input — for very small or very repetitive inputs both parsers may
+    /// make the same decisions. This test just verifies the parser flag
+    /// gets through; the `encoder/lzma2.rs` tests cover the actual
+    /// parse-decision divergence.
+    #[test]
+    fn level_threshold_selects_optimal_parser() {
+        // Level below threshold → use_optimal_parser = false.
+        let mut opts = LzmaOptions::default();
+        opts.use_optimal_parser = LzmaCodec::uses_optimal_parser(3);
+        assert!(!opts.use_optimal_parser, "level 3 must use lazy");
+
+        // Level at/above threshold → use_optimal_parser = true.
+        opts.use_optimal_parser = LzmaCodec::uses_optimal_parser(6);
+        assert!(opts.use_optimal_parser, "level 6 must use optimal");
+        opts.use_optimal_parser = LzmaCodec::uses_optimal_parser(9);
+        assert!(opts.use_optimal_parser, "level 9 must use optimal");
     }
 }
