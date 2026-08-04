@@ -41,6 +41,7 @@
 #![forbid(unsafe_code)]
 #![warn(clippy::pedantic)]
 
+pub mod deflate;
 mod inflate;
 
 use omnizip_codecs::{Codec, CodecId, CompressionLevel, OmnizipError};
@@ -73,11 +74,16 @@ impl Codec for LibdeflateCodec {
         plaintext: &[u8],
         level: CompressionLevel,
     ) -> Result<Vec<u8>, OmnizipError> {
-        // Phase 1 skeleton: delegate to miniz_oxide with zlib wrapping.
-        // Phase 3 will replace this with an in-house encoder.
         let _ = level;
-        let deflate = miniz_oxide::deflate::compress_to_vec_zlib(plaintext, 6);
-        Ok(deflate)
+        // Phase 3 (in-house encoder): stored-block format. Wraps the
+        // raw DEFLATE output in a zlib header (RFC 1950) so it's
+        // decodable by `gzip -d`, `zlib.decompress`, etc.
+        //
+        // Stored blocks don't compress; ratio is ~100%. A future
+        // optimisation pass would add Huffman + LZ77 (target: within
+        // 5% of `zlib -6`). See TODO 104 Phase 3 follow-up.
+        let raw = deflate::deflate_stored(plaintext)?;
+        Ok(wrap_zlib(&raw))
     }
 
     fn decompress(
@@ -147,6 +153,34 @@ fn strip_zlib_wrapper(data: &[u8]) -> &[u8] {
     }
     // Not zlib; assume raw DEFLATE.
     data
+}
+
+/// Wrap a raw DEFLATE stream in a zlib header + adler32 trailer
+/// (RFC 1950). The result is decodable by `gzip -d`, Python's
+/// `zlib.decompress`, and any other zlib-aware tool.
+fn wrap_zlib(deflate_stream: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(deflate_stream.len() + 6);
+    // CMF: CM=8 (deflate), CINFO=7 (32K window) → 0x78.
+    // FLG: 0x9C = (CMF * 256 + FLG) % 31 == 0 with FCHECK.
+    // 0x78 0x9C is the standard zlib header for level 6 / default.
+    out.push(0x78);
+    out.push(0x9C);
+    out.extend_from_slice(deflate_stream);
+    let checksum = adler32(deflate_stream);
+    out.extend_from_slice(&checksum.to_be_bytes());
+    out
+}
+
+/// Compute the Adler-32 checksum of `data` (RFC 1950 §9).
+fn adler32(data: &[u8]) -> u32 {
+    const MOD_ADLER: u32 = 65521;
+    let mut a: u32 = 1;
+    let mut b: u32 = 0;
+    for &byte in data {
+        a = (a + u32::from(byte)) % MOD_ADLER;
+        b = (b + a) % MOD_ADLER;
+    }
+    (b << 16) | a
 }
 
 #[cfg(test)]
