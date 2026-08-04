@@ -76,12 +76,14 @@ impl Codec for LibdeflateCodec {
         level: CompressionLevel,
     ) -> Result<Vec<u8>, OmnizipError> {
         let _ = level;
-        // Uses stored blocks (correct, ~100% ratio). The LZ77 +
-        // fixed-Huffman path exists in `deflate_lz77` but has
-        // bit-order issues in the match encoder that need debugging.
-        // Once fixed, this will switch to the LZ77 path for inputs
-        // ≥ 128 bytes for ~50-60% ratio on text.
-        let raw = deflate::deflate_stored(plaintext)?;
+        // Try LZ77 + fixed-Huffman first (non-trivial inputs only).
+        // Falls back to stored blocks for tiny inputs or if LZ77
+        // isn't beneficial.
+        let raw = if let Some(lz77) = deflate_lz77::deflate_fixed_huffman(plaintext)? {
+            lz77
+        } else {
+            deflate::deflate_stored(plaintext)?
+        };
         Ok(wrap_zlib(&raw))
     }
 

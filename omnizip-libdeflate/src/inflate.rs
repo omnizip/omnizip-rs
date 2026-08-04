@@ -42,6 +42,11 @@ fn corrupt(reason: impl Into<String>) -> Error {
 pub fn inflate(input: &[u8], expected_len: usize) -> Result<Vec<u8>, Error> {
     let mut reader = BitReader::new(input);
     let mut out = Vec::with_capacity(expected_len);
+    // Safety cap: if the decoder produces more than 4× the expected
+    // output (or 1 MB minimum), something is wrong. Prevents
+    // infinite loops from corrupt/truncated input with zero-padded
+    // refill.
+    let max_out = expected_len.saturating_mul(4).max(1_000_000);
 
     loop {
         let bfinal = reader.read_bits(1)?;
@@ -51,11 +56,11 @@ pub fn inflate(input: &[u8], expected_len: usize) -> Result<Vec<u8>, Error> {
             1 => {
                 let lit = fixed_lit_table();
                 let dist = fixed_dist_table();
-                inflate_block(&mut reader, &mut out, &lit, &dist)?;
+                inflate_block(&mut reader, &mut out, &lit, &dist, max_out)?;
             }
             2 => {
                 let (lit, dist) = read_dynamic_tables(&mut reader)?;
-                inflate_block(&mut reader, &mut out, &lit, &dist)?;
+                inflate_block(&mut reader, &mut out, &lit, &dist, max_out)?;
             }
             _ => return Err(corrupt("DEFLATE: invalid BTYPE 3 (reserved)")),
         }
@@ -86,10 +91,13 @@ impl<'a> BitReader<'a> {
     fn refill(&mut self, n: u32) -> Result<(), Error> {
         while self.nbits < n {
             if self.pos >= self.data.len() {
-                return Err(corrupt(format!(
-                    "DEFLATE: bitstream truncated (need {n} bits, have {})",
-                    self.nbits
-                )));
+                // Not enough input bytes. Zero-extend: the high bits
+                // of `bits` are already zero, so we just pretend we
+                // have more bits available. The Huffman lookup will
+                // either find a valid code (short codes match zero-
+                // padded extensions) or report a table miss.
+                self.nbits = n;
+                return Ok(());
             }
             let byte = u64::from(self.data[self.pos]);
             self.pos += 1;
@@ -173,8 +181,14 @@ fn inflate_block(
     out: &mut Vec<u8>,
     lit_table: &HuffmanTable,
     dist_table: &HuffmanTable,
+    max_out: usize,
 ) -> Result<(), Error> {
     loop {
+        if out.len() > max_out {
+            return Err(corrupt(format!(
+                "DEFLATE: output exceeds safety cap ({max_out} bytes) — likely corrupt stream"
+            )));
+        }
         let sym = lit_table.decode(reader)? as u32;
         match sym {
             0..=255 => out.push(sym as u8),
@@ -244,7 +258,7 @@ pub struct HuffmanTable {
     /// Lookup: `(symbol, code_length)` indexed by the reversed next
     /// `max_bits` bits. Short codes are duplicated across all
     /// extensions.
-    table: Vec<(u8, u8)>,
+    table: Vec<(u16, u8)>,
     max_bits: u32,
 }
 
@@ -278,7 +292,7 @@ impl HuffmanTable {
         }
 
         let table_size = 1usize << max_bits;
-        let mut table = vec![(0u8, 0u8); table_size];
+        let mut table = vec![(0u16, 0u8); table_size];
         for (sym, &len) in code_lengths.iter().enumerate() {
             if len == 0 {
                 continue;
@@ -296,7 +310,7 @@ impl HuffmanTable {
                         "DEFLATE: Huffman table overflow at symbol {sym} (idx {idx})"
                     )));
                 }
-                table[idx] = (sym as u8, len);
+                table[idx] = (sym as u16, len);
             }
         }
 
@@ -305,7 +319,7 @@ impl HuffmanTable {
 
     /// Decode one symbol from the bit reader.
     #[inline]
-    pub(crate) fn decode(&self, reader: &mut BitReader<'_>) -> Result<u8, Error> {
+    pub(crate) fn decode(&self, reader: &mut BitReader<'_>) -> Result<u16, Error> {
         let peek = reader.peek_bits(self.max_bits)?;
         let (sym, len) = self.table[peek as usize];
         if len == 0 {
@@ -393,7 +407,7 @@ fn read_dynamic_tables(
     while lengths.len() < total {
         let sym = cl_table.decode(reader)?;
         match sym {
-            0..=15 => lengths.push(sym),
+            0..=15 => lengths.push(sym as u8),
             16 => {
                 let repeat = 3 + reader.read_bits(2)?;
                 let prev = *lengths.last().ok_or_else(|| {
@@ -406,13 +420,13 @@ fn read_dynamic_tables(
             17 => {
                 let repeat = 3 + reader.read_bits(3)?;
                 for _ in 0..repeat {
-                    lengths.push(0);
+                    lengths.push(0u8);
                 }
             }
             18 => {
                 let repeat = 11 + reader.read_bits(7)?;
                 for _ in 0..repeat {
-                    lengths.push(0);
+                    lengths.push(0u8);
                 }
             }
             _ => {
