@@ -13,5 +13,16 @@ categories = ["compression", "multimedia::audio"]
 [dependencies]
 omnizip-codecs.workspace = true
 
+[features]
+# Enable wide::i32x8 vectorisation of the LPC residual loop and the
+# autocorrelation inner product. Off by default; turn on with
+# --features omnizip-flac/simd-lpc. Adds a dependency on `wide`.
+default = []
+simd-lpc = ["dep:wide"]
+
+[dependencies.wide]
+version = "1.6"
+optional = true
+
 [lints]
 workspace = true

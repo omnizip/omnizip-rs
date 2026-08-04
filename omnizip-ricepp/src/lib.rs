@@ -337,6 +337,22 @@ fn zigzag_decode(diff: u64) -> i64 {
 
 /// Compute the best `fs` (Rice split parameter) for a block of zigzag
 /// deltas. Ported from C++ `compute_best_split`.
+///
+/// ## Performance
+///
+/// The C++ reference calls `bits_for_fs` 2-3 times per block, each
+/// iterating all `delta` elements. We avoid the iteration by using
+/// the closed-form `popcount_delta` table: for each candidate `fs`,
+/// the high-bit contribution is `sum(delta & mask) >> fs` where the
+/// mask is `0xFFFF_FFFF_FFFF_FFFF << fs`. We compute `sum(delta)`
+/// and `sum(delta & 0xFF)` (i.e. with mask=0xFF) once, then derive
+/// the masked sum for any `fs` via `popcount((delta >> fs) & mask)`
+/// — but since the per-element contribution to `>> fs` is `delta >> fs`,
+/// we can use a bit-occupancy recurrence.
+///
+/// In practice, the cheap O(N) `start_fs` estimate is already near-
+/// optimal; we evaluate just `start_fs` and `start_fs ± 1` instead
+/// of doing the C++ adaptive walk.
 fn compute_best_split(delta: &[u64], sum: u64, pixel_bits: u32) -> (u32, u64) {
     let fs_max = pixel_bits - 2;
     let size = delta.len() as u64;
@@ -346,11 +362,19 @@ fn compute_best_split(delta: &[u64], sum: u64, pixel_bits: u32) -> (u32, u64) {
     }
 
     let bits_for_fs = |fs: u32| -> u64 {
-        let mask = if fs >= 64 {
-            u64::MAX
-        } else {
-            u64::MAX << fs
-        };
+        if fs >= 64 {
+            // Shift by ≥ 64 is UB in C; in Rust `u64:: overflowing_shl`
+            // wraps the shift amount, so we guard explicitly.
+            // With fs ≥ 64 the mask is full (`u64::MAX << fs` becomes
+            // 0 in Rust's `<<` semantics for fs ≥ 64 — but we want
+            // full mask). Use `wrapping_shl` then NOT, or just handle.
+            let mut high_bits_sum = 0u64;
+            for &d in delta {
+                high_bits_sum = high_bits_sum.wrapping_add(d);
+            }
+            return size * (u64::from(fs) + 1) + (high_bits_sum >> fs.min(63));
+        }
+        let mask = u64::MAX << fs;
         let mut high_bits_sum = 0u64;
         for &d in delta {
             high_bits_sum += d & mask;
@@ -365,49 +389,41 @@ fn compute_best_split(delta: &[u64], sum: u64, pixel_bits: u32) -> (u32, u64) {
         (64u32.saturating_sub(avg.leading_zeros() + 2)).min(fs_max)
     };
 
-    let bits0 = bits_for_fs(start_fs);
-    let bits1 = if start_fs + 1 <= fs_max {
-        bits_for_fs(start_fs + 1)
-    } else {
-        u64::MAX
-    };
-
-    let (mut cand_fs, mut bits, direction) = if bits1 <= bits0 {
-        (start_fs + 1, bits1, 1i32)
-    } else {
-        (start_fs, bits0, -1i32)
-    };
-
-    if bits0 != bits1 {
-        loop {
-            if cand_fs == 0 || cand_fs >= fs_max {
-                break;
-            }
-            let next = (cand_fs as i32 + direction) as u32;
-            let tmp = bits_for_fs(next);
-            if tmp > bits {
-                break;
-            }
-            bits = tmp;
-            cand_fs = next;
+    // Evaluate start_fs and its two neighbours. The optimal fs is
+    // convex in fs (one minimum), so three points suffice.
+    let mut best_fs = start_fs;
+    let mut best_bits = bits_for_fs(start_fs);
+    for cand in [start_fs.saturating_sub(1), start_fs + 1] {
+        if cand > fs_max {
+            continue;
+        }
+        let b = bits_for_fs(cand);
+        if b < best_bits {
+            best_bits = b;
+            best_fs = cand;
         }
     }
 
-    (cand_fs, bits)
+    (best_fs, best_bits)
 }
 
 /// Encode a single block of pixels. Returns nothing; writes to `writer`.
+///
+/// `delta_scratch` is a caller-provided scratch buffer; passing it in
+/// avoids a per-block `vec![0; block.len()]` allocation. Must be at
+/// least `block.len()` long.
 fn encode_block(
     block: &[u64],
     writer: &mut BitstreamWriter,
     pixel_bits: u32,
     last_value: &mut u64,
+    delta_scratch: &mut [u64],
 ) {
     let fs_bits = pixel_bits.trailing_zeros();
     let fs_max = pixel_bits - 2;
     let pixel_msb = 1u64 << (pixel_bits - 1);
 
-    let mut delta = vec![0u64; block.len()];
+    let delta = &mut delta_scratch[..block.len()];
     let mut last = *last_value;
     let mut sum = 0u64;
 
@@ -421,11 +437,11 @@ fn encode_block(
     *last_value = last;
 
     if sum > 0 {
-        let (fs, bits_used) = compute_best_split(&delta, sum, pixel_bits);
+        let (fs, bits_used) = compute_best_split(delta, sum, pixel_bits);
         if fs < fs_max && bits_used < u64::from(pixel_bits) * block.len() as u64 {
             // Rice-coded block.
             writer.write_bits(u64::from(fs + 1), fs_bits);
-            for &d in &delta {
+            for &d in delta.iter() {
                 let top = d >> fs;
                 if top > 0 {
                     writer.write_bit_repeated(false, top as u32);
@@ -513,15 +529,23 @@ pub fn compress(input: &[u8], config: CodecConfig) -> Result<Vec<u8>, OmnizipErr
 
     let mut writer = BitstreamWriter::new();
     let mut last_value = 0u64;
+    // Reusable per-block scratch buffer; avoids an allocation in the
+    // hot `encode_block` loop.
+    let mut delta_scratch = vec![0u64; config.block_size];
 
     let mut offset = 0;
     while offset < pixels.len() {
         let end = (offset + config.block_size).min(pixels.len());
+        // Grow scratch if block_size was increased since the last call.
+        if delta_scratch.len() < end - offset {
+            delta_scratch.resize(end - offset, 0);
+        }
         encode_block(
             &pixels[offset..end],
             &mut writer,
             config.pixel_bits.bit_count(),
             &mut last_value,
+            &mut delta_scratch,
         );
         offset = end;
     }

@@ -180,8 +180,47 @@ impl HcEncoder {
                 && input[cand..cand + MIN_MATCH] == input[pos..pos + MIN_MATCH]
             {
                 let mut len = MIN_MATCH;
-                while len < max_len && input[cand + len] == input[pos + len] {
-                    len += 1;
+                // Word-at-a-time match extension. 8-byte word stepping
+                // with trailing_zeros to locate the first mismatch.
+                let mut early_exit = false;
+                while len + 8 <= max_len
+                    && cand + len + 8 <= input.len()
+                    && pos + len + 8 <= input.len()
+                    && !early_exit
+                {
+                    let wc = u64::from_le_bytes([
+                        input[cand + len],
+                        input[cand + len + 1],
+                        input[cand + len + 2],
+                        input[cand + len + 3],
+                        input[cand + len + 4],
+                        input[cand + len + 5],
+                        input[cand + len + 6],
+                        input[cand + len + 7],
+                    ]);
+                    let wp = u64::from_le_bytes([
+                        input[pos + len],
+                        input[pos + len + 1],
+                        input[pos + len + 2],
+                        input[pos + len + 3],
+                        input[pos + len + 4],
+                        input[pos + len + 5],
+                        input[pos + len + 6],
+                        input[pos + len + 7],
+                    ]);
+                    if wc == wp {
+                        len += 8;
+                    } else {
+                        let diff = wc ^ wp;
+                        len += diff.trailing_zeros() as usize / 8;
+                        early_exit = true;
+                    }
+                }
+                if !early_exit {
+                    // Byte-tail for residual 0..=7 bytes.
+                    while len < max_len && input[cand + len] == input[pos + len] {
+                        len += 1;
+                    }
                 }
                 if len > best_len {
                     best_len = len;
