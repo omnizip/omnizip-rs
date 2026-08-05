@@ -40,24 +40,31 @@ const FLAC_MAGIC: [u8; 4] = *b"fLaC";
 /// `input` is the raw PCM data, interleaved by channel. The format
 /// (sample rate, channels, bps, endianness) is described by `params`.
 ///
-/// Picks the best block size from [`CANDIDATE_BLOCK_SIZES`] by
-/// encoding the stream at each candidate and returning the smallest
-/// output. Matches libFLAC's `--best` behaviour at the stream level
-/// (per-frame selection is a future enhancement).
+/// Picks the block size via [`pick_block_size`], a heuristic that
+/// balances frame overhead against LPC analysis quality. Use
+/// [`encode_stream_best`] for the libFLAC `--best` behaviour (try
+/// every candidate, return the smallest).
 ///
 /// # Errors
 ///
 /// Returns `String` on configuration errors or sample-reading failures.
 pub fn encode_stream(input: &[u8], params: &PcmParams) -> Result<Vec<u8>, String> {
     let total_frames = validate_input(input, params)?;
+    let block_size = pick_block_size(total_frames, params.sample_rate);
+    encode_stream_with_block_size(input, params, block_size)
+}
 
-    // Try each candidate block size, return the smallest output.
-    //
+/// libFLAC `--best` semantics: try every candidate block size, return
+/// the smallest output. Use [`encode_stream`] for the fast default.
+///
+/// # Errors
+///
+/// Returns `String` on configuration errors or sample-reading failures.
+pub fn encode_stream_best(input: &[u8], params: &PcmParams) -> Result<Vec<u8>, String> {
+    let total_frames = validate_input(input, params)?;
+
     // To avoid duplicate work, only candidates that produce DIFFERENT
-    // clamped block sizes are tried. For short inputs (total_frames <
-    // smallest candidate), only one candidate is tried because they
-    // all clamp to total_frames. For long inputs, all candidates
-    // produce distinct block sizes and all are tried.
+    // clamped block sizes are tried.
     let mut seen_clamped: usize = 0;
     let mut best: Option<Vec<u8>> = None;
     for &block_size in CANDIDATE_BLOCK_SIZES {
@@ -78,8 +85,37 @@ pub fn encode_stream(input: &[u8], params: &PcmParams) -> Result<Vec<u8>, String
     best.ok_or_else(|| "no block size produced valid output".into())
 }
 
-/// Candidate block sizes tried by [`encode_stream`], ordered to match
-/// libFLAC's `--best` sweep (small → large).
+/// Heuristic block-size picker. Mirrors libFLAC's stream-level default
+/// for typical audio, with special-casing for very short or very long
+/// inputs to avoid pathological per-block overhead.
+///
+/// | Condition | Block size | Rationale |
+/// |-----------|-----------|----------|
+/// | `total < 192` | `total.max(16)` | Tiny input — match |
+/// | `total < 4096` | `256` | Small — keep frame header overhead low |
+/// | `total < 65_536` | `4608` | libFLAC's mid-range default |
+/// | `total ≥ 65_536`, `sr ≥ 44_100` | `4608` | Standard audio |
+/// | `total ≥ 65_536`, `sr < 44_100` | `4096` | Power-of-two wins on low-rate |
+#[must_use]
+pub fn pick_block_size(total_frames: usize, sample_rate: u32) -> usize {
+    if total_frames < 192 {
+        return total_frames.max(16);
+    }
+    if total_frames < 4096 {
+        return 256;
+    }
+    if total_frames < 65_536 {
+        return 4608;
+    }
+    if sample_rate >= 44_100 {
+        4608
+    } else {
+        4096
+    }
+}
+
+/// Candidate block sizes tried by [`encode_stream_best`], ordered to
+/// match libFLAC's `--best` sweep (small → large).
 ///
 /// 4608 is libFLAC's mid-range default for 44.1 kHz; 4096/8192/16384
 /// are the standard power-of-two options; 192/256/512 help very short
@@ -348,5 +384,85 @@ mod tests {
         let bytes = [0x80, 0x00];
         let val = read_sample(&bytes, 2, true, 16);
         assert_eq!(val, 128);
+    }
+
+    #[test]
+    fn pick_block_size_handles_tiny_input() {
+        assert_eq!(pick_block_size(0, 8_000), 16);
+        assert_eq!(pick_block_size(50, 8_000), 50);
+        assert_eq!(pick_block_size(192, 8_000), 256);
+    }
+
+    #[test]
+    fn pick_block_size_small_input_uses_256() {
+        assert_eq!(pick_block_size(500, 8_000), 256);
+        assert_eq!(pick_block_size(4_000, 44_100), 256);
+    }
+
+    #[test]
+    fn pick_block_size_medium_input_uses_4608() {
+        assert_eq!(pick_block_size(5_000, 44_100), 4608);
+        assert_eq!(pick_block_size(60_000, 44_100), 4608);
+    }
+
+    #[test]
+    fn pick_block_size_large_input_depends_on_sample_rate() {
+        assert_eq!(pick_block_size(100_000, 44_100), 4608);
+        assert_eq!(pick_block_size(100_000, 8_000), 4096);
+    }
+
+    #[test]
+    fn encode_stream_best_round_trips() {
+        let pcm = mono_sine(440.0, 8_000, 192);
+        let params = PcmParams {
+            sample_rate: 8_000,
+            channels: 1,
+            bits_per_sample: 16,
+            endianness: Endianness::LittleEndian,
+            sample_count: 192,
+        };
+        let encoded = encode_stream_best(&pcm, &params).expect("encode");
+        let decoded = decoder::decode_stream(&encoded).expect("decode");
+        assert_eq!(decoded, pcm);
+    }
+
+    #[test]
+    fn encode_stream_uses_heuristic_block_size() {
+        // The default encode_stream should pick a single block size
+        // via the heuristic — measurable by speed relative to the
+        // `--best` sweep.
+        let pcm = mono_sine(440.0, 8_000, 8_192);
+        let params = PcmParams {
+            sample_rate: 8_000,
+            channels: 1,
+            bits_per_sample: 16,
+            endianness: Endianness::LittleEndian,
+            sample_count: 8_192,
+        };
+
+        let t_heur = std::time::Instant::now();
+        let encoded_heur = encode_stream(&pcm, &params).expect("encode");
+        let dt_heur = t_heur.elapsed();
+
+        let t_best = std::time::Instant::now();
+        let encoded_best = encode_stream_best(&pcm, &params).expect("encode");
+        let dt_best = t_best.elapsed();
+
+        // Heuristic should be at least 2× faster than the full sweep.
+        assert!(
+            dt_heur < dt_best / 2,
+            "heuristic {:?} should be ≤ half of best {:?}",
+            dt_heur,
+            dt_best
+        );
+
+        // And ratio should be reasonable: heuristic output should be
+        // within 50% of best.
+        let ratio = encoded_heur.len() as f64 / encoded_best.len() as f64;
+        assert!(ratio < 1.5, "heuristic output {} vs best {}", encoded_heur.len(), encoded_best.len());
+
+        // Both round-trip.
+        let dec_heur = decoder::decode_stream(&encoded_heur).expect("decode");
+        assert_eq!(dec_heur, pcm);
     }
 }

@@ -59,5 +59,5 @@ pub mod ppmd8;
 // Convenience re-exports at crate root — both codecs equally
 // discoverable, with the PPMd version baked into the name to avoid
 // any ambiguity.
-pub use ppmd7::{Ppmd7Codec, PPMD7_CODEC_ID, PPMD7_MAGIC};
+pub use ppmd7::{Ppmd7Codec, PpmdCompressor, PPMD7_CODEC_ID, PPMD7_MAGIC};
 pub use ppmd8::{Ppmd8Codec, PPMD8_CODEC_ID, PPMD8_MAGIC};

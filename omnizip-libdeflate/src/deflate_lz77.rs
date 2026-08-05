@@ -30,18 +30,87 @@
 use omnizip_codecs::{CodecId, OmnizipError};
 
 /// Minimum match length for LZ77 (RFC 1951 spec).
-const MIN_MATCH: usize = 3;
+pub const MIN_MATCH: usize = 3;
 /// Maximum match length for LZ77 (RFC 1951 spec).
-const MAX_MATCH: usize = 258;
+pub const MAX_MATCH: usize = 258;
 /// Sliding window size (RFC 1951 spec).
-const WINDOW_SIZE: usize = 32 * 1024;
+pub const WINDOW_SIZE: usize = 32 * 1024;
 /// Hash table size (16-bit hash, 64K entries).
 const HASH_BITS: u32 = 15;
 const HASH_SIZE: usize = 1 << HASH_BITS;
 /// Maximum chain walks per match attempt.
 const MAX_CHAIN: usize = 32;
 /// Threshold: inputs below this go through stored blocks instead.
-const LZ77_MIN_INPUT: usize = 128;
+pub const LZ77_MIN_INPUT: usize = 128;
+
+/// One LZ77 token — literal or back-reference. Codec-agnostic; the
+/// dynamic-Huffman and fixed-Huffman encoders consume the same token
+/// stream so the match-finder logic isn't duplicated.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Lz77Token {
+    /// A single literal byte.
+    Literal(u8),
+    /// A back-reference (length, distance).
+    Match { length: u16, distance: u16 },
+}
+
+/// Run the hash-chain LZ77 match finder + lazy look-ahead and return
+/// the resulting token stream. Used by both the fixed-Huffman and
+/// dynamic-Huffman block writers so the match-finder logic stays in
+/// one place.
+pub fn collect_tokens(input: &[u8]) -> Vec<Lz77Token> {
+    if input.is_empty() {
+        return Vec::new();
+    }
+    let mut mf = MatchFinder::new(input.len());
+    let mut out = Vec::with_capacity(input.len() / 2);
+    let mut i = 0;
+    while i < input.len() {
+        let m = mf.find_match(input, i);
+        mf.insert(input, i);
+        if let Some((dist, len)) = m {
+            // Lazy look-ahead: if i+1 has a strictly longer match, emit
+            // a literal at i and take the deferred match.
+            if i + 1 < input.len() {
+                if let Some((d2, l2)) = mf.find_match(input, i + 1) {
+                    if l2 > len + 1 {
+                        out.push(Lz77Token::Literal(input[i]));
+                        let len2 = l2.min(u16::MAX as usize) as u16;
+                        let dist2 = d2.min(u16::MAX as usize) as u16;
+                        out.push(Lz77Token::Match {
+                            length: len2,
+                            distance: dist2,
+                        });
+                        mf.insert(input, i + 1);
+                        for k in (i + 2)..(i + 1 + l2) {
+                            if k < input.len() {
+                                mf.insert(input, k);
+                            }
+                        }
+                        i += 1 + l2;
+                        continue;
+                    }
+                }
+            }
+            let len16 = len.min(u16::MAX as usize) as u16;
+            let dist16 = dist.min(u16::MAX as usize) as u16;
+            out.push(Lz77Token::Match {
+                length: len16,
+                distance: dist16,
+            });
+            for k in (i + 1)..(i + len) {
+                if k < input.len() {
+                    mf.insert(input, k);
+                }
+            }
+            i += len;
+        } else {
+            out.push(Lz77Token::Literal(input[i]));
+            i += 1;
+        }
+    }
+    out
+}
 
 /// Encode `input` as a single RFC 1951 fixed-Huffman block. The
 /// output is raw DEFLATE (no zlib wrapper).

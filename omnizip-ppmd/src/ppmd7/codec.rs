@@ -237,6 +237,89 @@ impl Codec for Ppmd7Codec {
     }
 }
 
+/// Reusable PPMd7 compressor that caches the context-tree allocation
+/// across calls. Mirrors `omnizip_zstd::ZstdCompressor`.
+///
+/// ## When to use
+///
+/// For batch workloads with many small inputs at the same `max_order`,
+/// `PpmdCompressor` eliminates the per-call context-tree allocation
+/// (which dominates wall-time for inputs < 4 KiB).
+///
+/// Each call resets adaptation via `PpmModel::reset` but reuses the
+/// underlying `Vec`s. Output is byte-identical to
+/// [`Ppmd7Codec::compress`].
+pub struct PpmdCompressor {
+    model: PpmModel,
+    last_order: u8,
+}
+
+impl Default for PpmdCompressor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl PpmdCompressor {
+    /// Construct a reusable PPMd7 compressor with the default memory
+    /// budget (`DEFAULT_MEMORY_BUDGET_BYTES`).
+    #[must_use]
+    pub fn new() -> Self {
+        Self::with_order(4)
+    }
+
+    /// Construct with a specific `max_order`. Subsequent calls can use
+    /// a different order; the model is rebuilt only on order change.
+    #[must_use]
+    pub fn with_order(max_order: u8) -> Self {
+        let order = usize::from(max_order.clamp(1, 16));
+        Self {
+            model: PpmModel::with_memory_budget(order, DEFAULT_MEMORY_BUDGET_BYTES),
+            last_order: max_order,
+        }
+    }
+
+    /// Compress `input` with the given level. If the level maps to a
+    /// different `max_order` than the previous call, the model is
+    /// reallocated. Otherwise it's reset and reused.
+    pub fn compress(
+        &mut self,
+        input: &[u8],
+        level: CompressionLevel,
+    ) -> Result<Vec<u8>, OmnizipError> {
+        let order = Ppmd7Codec::level_to_order(level);
+        if order != self.last_order {
+            self.model =
+                PpmModel::with_memory_budget(usize::from(order), DEFAULT_MEMORY_BUDGET_BYTES);
+            self.last_order = order;
+        } else {
+            self.model.reset();
+        }
+
+        let mut out = Vec::with_capacity(64);
+        out.extend_from_slice(PPMD7_MAGIC);
+        out.push(order);
+        let uncompressed_size = u32::try_from(input.len()).map_err(|_| OmnizipError::Corrupt {
+            codec: PPMD7_CODEC_ID,
+            reason: format!("input len {} overflows u32", input.len()),
+        })?;
+        out.extend_from_slice(&uncompressed_size.to_le_bytes());
+
+        if input.is_empty() {
+            return Ok(out);
+        }
+
+        {
+            let mut enc = ArithEncoder::new();
+            for &b in input {
+                self.model.encode_byte(&mut enc, b);
+            }
+            enc.flush(&mut out);
+        }
+        Ok(out)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -290,6 +373,39 @@ mod tests {
     fn round_trip_long_text() {
         let big: Vec<u8> = TEXT.bytes().cycle().take(20_000).collect();
         round_trip(&big, 4);
+    }
+
+    #[test]
+    fn ppmd_compressor_matches_one_shot_api() {
+        // Same input + same level → byte-identical output between the
+        // reusable `PpmdCompressor` and the one-shot `Ppmd7Codec`.
+        let input: Vec<u8> = TEXT.bytes().cycle().take(2048).collect();
+        let one_shot = Ppmd7Codec
+            .compress(&input, CompressionLevel::default())
+            .expect("one-shot");
+
+        let mut comp = PpmdCompressor::new();
+        let reusable = comp
+            .compress(&input, CompressionLevel::default())
+            .expect("reusable");
+
+        assert_eq!(
+            one_shot, reusable,
+            "PpmdCompressor must produce identical output to Ppmd7Codec"
+        );
+    }
+
+    #[test]
+    fn ppmd_compressor_round_trips_across_calls() {
+        // Multiple calls in sequence should each round-trip cleanly.
+        let mut comp = PpmdCompressor::new();
+        for input in ["foo", "bar", "baz", "the quick brown fox"] {
+            let c = comp
+                .compress(input.as_bytes(), CompressionLevel::default())
+                .expect("compress");
+            let d = decompress(&c, input.len()).expect("decompress");
+            assert_eq!(d.as_slice(), input.as_bytes());
+        }
     }
     #[test]
     fn round_trip_binary_zero_inclusive() {
