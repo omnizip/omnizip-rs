@@ -341,10 +341,7 @@ mod tests {
 
     fn round_trip(input: &[u8]) {
         let compressed = compress(input);
-        let mut with_size = Vec::with_capacity(4 + compressed.len());
-        with_size.extend_from_slice(&(input.len() as u32).to_le_bytes());
-        with_size.extend_from_slice(&compressed);
-        let decoded = lz4_flex::decompress_size_prepended(&with_size).expect("decode");
+        let decoded = crate::block::decompress_block(&compressed, input.len()).expect("decode");
         assert_eq!(decoded, input);
     }
 
