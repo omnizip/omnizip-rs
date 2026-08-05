@@ -161,6 +161,13 @@ the new items document the path forward.
 | 158 | [FSST v2 + GLZA tuning](158-fsst-v2-glza-tuning.md) | ⏳ (P2) |
 | 159 | [Filter-Codec composition](159-filter-codec-composition.md) | ⏳ (P2) |
 | 160 | [Release automation](160-release-automation.md) | ⏳ (P2) |
+| 161 | [Deflate64 encoder](161-deflate64-encoder.md) | ⏳ (P2 — LimniFS-flagged) |
+| 162 | [FSST preprocessor wiring](162-fsst-preprocessor-wiring.md) | ⏳ (P2) |
+| 163 | [GLZA O(N²) cap → linear-time](163-glza-linear-time.md) | ⏳ (P2) |
+| 164 | [Snappy encoder](164-snappy-encoder.md) | ⏳ (P1 — LimniFS-flagged) |
+| 165 | [LZMA real reusable state](165-lzma-real-reusable-state.md) | ⏳ (P1 — LimniFS-flagged) |
+| 166 | [FLAC remainder — finish 10× gap](166-flac-remainder.md) | ⏳ (P2) |
+| 167 | [ricepp remainder — unary emission](167-ricepp-remainder.md) | ⏳ (P2) |
 
 ## How to claim a TODO
 

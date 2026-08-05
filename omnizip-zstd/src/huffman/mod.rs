@@ -115,6 +115,11 @@ impl HuffmanTable {
     /// `length` is its bit width. Used by the literals encoder.
     ///
     /// Returns `(0, 0)` for absent symbols.
+    ///
+    /// **Performance note**: rebuilds the code table on every call
+    /// (O(N) per symbol). For bulk literal encoding, use
+    /// [`HuffmanTable::build_encode_table`] once and index into the
+    /// returned `Vec<(u32, u8)>` directly.
     #[must_use]
     pub fn encode_symbol(&self, symbol: u8) -> (u32, u8) {
         if self.weights.is_empty() {
@@ -131,6 +136,29 @@ impl HuffmanTable {
         } else {
             (0, 0)
         }
+    }
+
+    /// Build a flat per-symbol `(code, length)` lookup table from
+    /// the stored weights. Indexed by symbol byte value (0..256).
+    ///
+    /// Use this once per `HuffmanTable` and index into the result
+    /// for bulk literal encoding — avoids the O(N) per-call cost
+    /// of [`encode_symbol`](Self::encode_symbol). The returned
+    /// vector always has exactly 256 entries.
+    #[must_use]
+    pub fn build_encode_table(&self) -> Vec<(u32, u8)> {
+        if self.weights.is_empty() {
+            return vec![(0, 0); 256];
+        }
+        let table_log = match compute_table_log(&self.weights) {
+            Ok(tl) => tl,
+            Err(_) => return vec![(0, 0); 256],
+        };
+        let mut table = build_zstd_code_table(&self.weights, table_log);
+        if table.len() < 256 {
+            table.resize(256, (0, 0));
+        }
+        table
     }
 
     /// Peek-decode one symbol from a reverse (`BIT_DStream`) bitstream
