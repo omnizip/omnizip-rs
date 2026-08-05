@@ -105,9 +105,25 @@ mod tests {
         assert!(result.is_err());
     }
 
-    // Note: cross-compat with the upstream `snap` crate requires
-    // matching the exact wire-format offset encoding convention
-    // (dist-1 vs raw dist per tag type). The in-house encoder +
-    // decoder round-trip perfectly; snap compat is tracked as a
-    // follow-up.
+    #[test]
+    fn in_house_decodes_snap_encoded_output() {
+        let data = b"the quick brown fox jumps over the lazy dog. ".repeat(20);
+        let mut snap_enc = snap::raw::Encoder::new();
+        let snap_compressed = snap_enc.compress_vec(&data).expect("snap encode");
+        let decoded = SnappyCodec
+            .decompress(&snap_compressed, data.len() as u32)
+            .expect("in-house decode");
+        assert_eq!(decoded, data);
+    }
+
+    #[test]
+    fn snap_decodes_in_house_encoded_output() {
+        let data = b"the quick brown fox jumps over the lazy dog. ".repeat(20);
+        let compressed = SnappyCodec
+            .compress(&data, CompressionLevel::default())
+            .expect("in-house encode");
+        let mut snap_dec = snap::raw::Decoder::new();
+        let decoded = snap_dec.decompress_vec(&compressed).expect("snap decode");
+        assert_eq!(decoded, data);
+    }
 }
