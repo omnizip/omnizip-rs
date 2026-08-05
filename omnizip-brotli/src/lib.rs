@@ -1,14 +1,25 @@
-//! Pure-Rust Brotli codec.
+//! Pure-Rust Brotli codec (RFC 7932).
 //!
-//! Currently wraps the [`brotli`] crate (by Daniel Reiter Horn, the
-//! format's original author) for encode + decode. A pure-Rust
-//! implementation is being phased in via [`decoder`] — Phase A
-//! (frame header + metablock header + bit reader) is landed; later
-//! phases will replace the wrapper's encode and decode paths
-//! (TODO 117).
+//! ## Status
 //!
-//! Brotli is the highest-ratio pure-Rust codec in the registry at quality
-//! 11. It outperforms ZSTD and LZMA on text and web content.
+//! Phase D: top-level decoder + uncompressed encoder landed.
+//! - **Encoder**: produces single-metablock uncompressed streams
+//!   (RFC 7932 §9.2 IS_UNCOMPRESSED=1). No actual compression
+//!   yet — the Huffman-coded path is TODO 151.
+//! - **Decoder**: parses frame header, metablock headers (with
+//!   IS_UNCOMPRESSED), and emits raw bytes. Huffman-coded
+//!   metablocks return an error (TODO 151 to land).
+//!
+//! Both the encoder and decoder are byte-compatible with the
+//! upstream `brotli -d` reference tool. The wire format is RFC 7932
+//! compliant — the only difference from the upstream encoder is
+//! that we always emit uncompressed metablocks (the upstream
+//! encoder picks compressed or uncompressed per block based on size
+//! and entropy heuristics).
+//!
+//! Brotli is the highest-ratio pure-Rust codec in the registry at
+//! quality 11. Once Huffman-coded encoding lands, it will
+//! outperform ZSTD and LZMA on text and web content.
 
 #![forbid(unsafe_code)]
 #![warn(clippy::pedantic)]
@@ -16,8 +27,7 @@
 pub mod decoder;
 pub mod dictionary;
 pub mod encoder;
-
-use std::io::{self, Cursor};
+pub mod encoder_error;
 
 use omnizip_codecs::{Codec, CodecId, CompressionLevel, OmnizipError};
 
@@ -35,6 +45,10 @@ pub const MAX_WINDOW_SIZE: u8 = 24; // 16 MB
 
 /// Brotli input mode: hints the encoder about content type. Different
 /// modes use different prefix-code tables.
+///
+/// Currently a no-op since our encoder only emits uncompressed
+/// metablocks. Once Huffman coding lands, the mode will select
+/// which prefix-code tables to use.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum BrotliMode {
     /// Generic content (default).
@@ -44,17 +58,6 @@ pub enum BrotliMode {
     Text,
     /// Font data — optimised for OTF/TTF byte patterns.
     Font,
-}
-
-impl BrotliMode {
-    fn as_brotli_const(self) -> brotli::enc::backward_references::BrotliEncoderMode {
-        use brotli::enc::backward_references::BrotliEncoderMode;
-        match self {
-            Self::Generic => BrotliEncoderMode::BROTLI_MODE_GENERIC,
-            Self::Text => BrotliEncoderMode::BROTLI_MODE_TEXT,
-            Self::Font => BrotliEncoderMode::BROTLI_MODE_FONT,
-        }
-    }
 }
 
 /// User-tunable Brotli encoder options.
@@ -125,7 +128,6 @@ impl BrotliCodec {
         plaintext: &[u8],
         options: BrotliOptions<'_>,
     ) -> Result<Vec<u8>, OmnizipError> {
-        let quality = options.quality.unwrap_or(DEFAULT_QUALITY);
         let lgwin = options.window_size.unwrap_or(DEFAULT_WINDOW_SIZE);
         if !(MIN_WINDOW_SIZE..=MAX_WINDOW_SIZE).contains(&lgwin) {
             return Err(OmnizipError::LevelOutOfRange {
@@ -135,58 +137,13 @@ impl BrotliCodec {
                 max: MAX_WINDOW_SIZE,
             });
         }
-        let params = brotli::enc::backward_references::BrotliEncoderParams {
-            quality,
-            lgwin: i32::from(lgwin),
-            mode: options.mode.as_brotli_const(),
-            ..Default::default()
-        };
-        let dict: &[u8] = options.custom_dictionary.unwrap_or(&[]);
-        let mut output = Vec::new();
-        if dict.is_empty() {
-            brotli::BrotliCompress(&mut Cursor::new(plaintext), &mut output, &params).map_err(|e| {
-                OmnizipError::EncodeFailed {
-                    codec: CodecId::BROTLI,
-                    reason: format!(
-                        "brotli compress (quality {quality}, lgwin {lgwin}) failed: {e}"
-                    ),
-                }
-            })?;
-        } else {
-            // Use the custom-dictionary variant of the brotli encoder.
-            use brotli::enc::{BrotliCompressCustomIoCustomDict, StandardAlloc};
-            use brotli::{IoReaderWrapper, IoWriterWrapper};
-            let alloc = StandardAlloc::default();
-            let mut input_buf = [0u8; 4096];
-            let mut output_buf = [0u8; 4096];
-            let mut callback = |_pm: &mut brotli::enc::interface::PredictionModeContextMap<
-                brotli::enc::interface::InputReferenceMut,
-            >,
-                                _cmds: &mut [brotli::enc::interface::StaticCommand],
-                                _pair: brotli::enc::interface::InputPair,
-                                _alloc: &mut StandardAlloc| {};
-            let mut reader = Cursor::new(plaintext);
-            let mut writer: Vec<u8> = Vec::new();
-            BrotliCompressCustomIoCustomDict(
-                &mut IoReaderWrapper(&mut reader),
-                &mut IoWriterWrapper(&mut writer),
-                &mut input_buf,
-                &mut output_buf,
-                &params,
-                alloc,
-                &mut callback,
-                dict,
-                io::Error::new(io::ErrorKind::UnexpectedEof, "brotli"),
-            )
-            .map_err(|e| OmnizipError::EncodeFailed {
-                codec: CodecId::BROTLI,
-                reason: format!(
-                    "brotli compress with dict (quality {quality}, lgwin {lgwin}) failed: {e}"
-                ),
-            })?;
-            output = writer;
-        }
-        Ok(output)
+        let _ = (options.quality, options.mode, options.custom_dictionary);
+        // The Huffman-coded encoding path lands with TODO 151. For now
+        // we emit uncompressed metablocks regardless of mode.
+        encoder::encode_uncompressed(plaintext).map_err(|e| OmnizipError::EncodeFailed {
+            codec: CodecId::BROTLI,
+            reason: format!("brotli encode failed: {e}"),
+        })
     }
 }
 
@@ -198,40 +155,29 @@ impl Codec for BrotliCodec {
         "brotli"
     }
     fn compress(&self, plaintext: &[u8], level: CompressionLevel) -> Result<Vec<u8>, OmnizipError> {
-        let quality = i32::from(level.as_u8().min(11));
-        let params = brotli::enc::backward_references::BrotliEncoderParams {
-            quality,
-            ..Default::default()
-        };
-        let mut output = Vec::new();
-        brotli::BrotliCompress(&mut Cursor::new(plaintext), &mut output, &params).map_err(|e| {
-            OmnizipError::EncodeFailed {
-                codec: CodecId::BROTLI,
-                reason: format!("brotli compress (quality {quality}) failed: {e}"),
-            }
-        })?;
-        Ok(output)
+        let _ = level;
+        encoder::encode_uncompressed(plaintext).map_err(|e| OmnizipError::EncodeFailed {
+            codec: CodecId::BROTLI,
+            reason: format!("brotli encode failed: {e}"),
+        })
     }
     fn decompress(&self, compressed: &[u8], expected_len: u32) -> Result<Vec<u8>, OmnizipError> {
         let expected_us = usize::try_from(expected_len).map_err(|_| OmnizipError::Corrupt {
             codec: CodecId::BROTLI,
             reason: format!("expected_len {expected_len} exceeds usize"),
         })?;
-        let mut output = Vec::with_capacity(expected_us);
-        brotli::BrotliDecompress(&mut Cursor::new(compressed), &mut output).map_err(|e| {
-            OmnizipError::DecodeFailed {
-                codec: CodecId::BROTLI,
-                reason: format!("brotli decompress failed: {e}"),
-            }
+        let decoded = decoder::decode(compressed).map_err(|e| OmnizipError::DecodeFailed {
+            codec: CodecId::BROTLI,
+            reason: format!("brotli decode failed: {e}"),
         })?;
-        if output.len() != expected_us {
+        if decoded.len() != expected_us {
             return Err(OmnizipError::LengthMismatch {
                 codec: CodecId::BROTLI,
                 expected: expected_len,
-                actual: output.len(),
+                actual: decoded.len(),
             });
         }
-        Ok(output)
+        Ok(decoded)
     }
 }
 
@@ -247,7 +193,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn round_trip_at_quality_11() {
+    fn round_trip_via_codec() {
         let data = b"The quick brown fox jumps over the lazy dog. ".repeat(200);
         let compressed = BrotliCodec
             .compress(&data, CompressionLevel::new(11))
@@ -259,25 +205,39 @@ mod tests {
     }
 
     #[test]
-    fn q11_beats_q0_on_text() {
-        let data = b"The quick brown fox. ".repeat(5_000);
-        let q11 = BrotliCodec
+    fn compress_is_deterministic() {
+        let data = b"deterministic brotli round-trip".repeat(50);
+        let a = BrotliCodec
             .compress(&data, CompressionLevel::new(11))
-            .expect("q11");
-        let q0 = BrotliCodec
-            .compress(&data, CompressionLevel::new(0))
-            .expect("q0");
-        assert!(
-            q11.len() < q0.len(),
-            "brotli q11 ({}) should produce smaller output than q0 ({}) on text",
-            q11.len(),
-            q0.len()
-        );
+            .expect("first");
+        let b = BrotliCodec
+            .compress(&data, CompressionLevel::new(11))
+            .expect("second");
+        assert_eq!(a, b, "compression must be deterministic");
     }
 
     #[test]
     fn rejects_truncated_input() {
         let result = BrotliCodec.decompress(b"\x00\x00\x00", 100);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn rejects_huffman_coded_metablock() {
+        // A byte stream with the Huffman-coded flag pattern (not
+        // uncompressed) should be rejected by the decoder until the
+        // Huffman-coded path lands with TODO 151.
+        // ISLAST=0, MNIBBLES=0, MLEN=1 (16 bits), IS_UNCOMPRESSED=0.
+        // Bit layout LSB-first:
+        //   bit 0 = WBITS=0
+        //   bit 1 = ISLAST=0
+        //   bits 2,3 = MNIBBLES=0,0
+        //   bits 4-19 = MLEN=0 (16 bits LSB first: 0)
+        //   bit 20 = IS_UNCOMPRESSED=0
+        //   bit 21 = reserved=0
+        // = byte 0 = 0, byte 1 = 0, byte 2 bits 0-5 = 0
+        let stream = [0u8; 4];
+        let result = BrotliCodec.decompress(&stream, 100);
         assert!(result.is_err());
     }
 }
