@@ -11,7 +11,7 @@ categories = ["compression"]
 
 [dependencies]
 omnizip-codecs.workspace = true
-lz4_flex.workspace = true
+omnizip-lz4.workspace = true
 
 [lints]
 workspace = true

@@ -67,13 +67,16 @@ pub fn compress_block(input: &[u8]) -> Vec<u8> {
                 // Emit literals + match.
                 let lit_len = pos - anchor;
                 let offset = pos - candidate;
+                let match_code = mlen - MIN_MATCH;
                 // Token: (lit_code << 4) | m_code.
                 let lit_code = lit_len.min(15);
-                let m_code = (mlen - MIN_MATCH).min(15);
+                let m_code = match_code.min(15);
                 out.push(((lit_code as u8) << 4) | (m_code as u8));
 
-                // Literal length extension.
-                write_length_ext(&mut out, lit_len.saturating_sub(15));
+                // Literal length extension (only when code nibble == 15).
+                if lit_len >= 15 {
+                    write_length_ext(&mut out, lit_len - 15);
+                }
 
                 // Literal bytes.
                 out.extend_from_slice(&input[anchor..pos]);
@@ -81,8 +84,10 @@ pub fn compress_block(input: &[u8]) -> Vec<u8> {
                 // Offset (2 bytes LE).
                 out.extend_from_slice(&(offset as u16).to_le_bytes());
 
-                // Match length extension.
-                write_length_ext(&mut out, (mlen - MIN_MATCH).saturating_sub(15));
+                // Match length extension (only when code nibble == 15).
+                if match_code >= 15 {
+                    write_length_ext(&mut out, match_code - 15);
+                }
 
                 // Insert hash for a few positions inside the match.
                 let end = pos + mlen;
@@ -197,19 +202,21 @@ pub fn decompress_block(compressed: &[u8], expected_len: usize) -> Result<Vec<u8
 fn write_token_literals(out: &mut Vec<u8>, lit_len: usize) {
     let lit_code = lit_len.min(15);
     out.push((lit_code as u8) << 4);
-    write_length_ext(out, lit_len.saturating_sub(15));
+    // LZ4 spec: extension bytes ONLY present when code nibble == 15.
+    if lit_len >= 15 {
+        write_length_ext(out, lit_len - 15);
+    }
 }
 
-/// Write a variable-length extension: 0xFF bytes until remaining < 255,
-/// then one final byte with the remainder.
+/// Write a variable-length extension. ALWAYS writes at least one byte
+/// (the final 0 if remainder is 0). Caller MUST only call this when
+/// the code nibble == 15.
 fn write_length_ext(out: &mut Vec<u8>, mut remaining: usize) {
     while remaining >= 255 {
         out.push(255);
         remaining -= 255;
     }
-    if remaining > 0 {
-        out.push(remaining as u8);
-    }
+    out.push(remaining as u8);
 }
 
 /// 4-byte hash into a 16-bit table.
@@ -294,5 +301,74 @@ mod tests {
         let bad = [0x00u8, 0x00, 0x00];
         let result = decompress_block(&bad, 10);
         assert!(result.is_err());
+    }
+
+    /// Regression test for the LimniFS-discovered bug where the LZ4
+    /// block encoder failed to write an extension byte when the code
+    /// nibble was exactly 15 (match length 19, or literal length 15).
+    /// The decoder expected at least one extension byte but the encoder
+    /// wrote none, corrupting the stream.
+    #[test]
+    fn block_extension_byte_at_boundary_15() {
+        // Construct an input that produces a match of length exactly 19
+        // (MIN_MATCH + 15 = 19). Match code = 15 → extension byte
+        // required.
+        let pattern: Vec<u8> = (0..19u8).collect();
+        let mut input = pattern.clone();
+        input.extend_from_slice(&pattern);
+        input.extend_from_slice(b"trailing unique data to pad length");
+        let compressed = compress_block(&input);
+        let decompressed = decompress_block(&compressed, input.len()).expect("decode");
+        assert_eq!(decompressed, input);
+    }
+
+    #[test]
+    fn block_extension_byte_for_long_literal_15() {
+        // Literal run of exactly 15 bytes → lit_code = 15 → extension
+        // byte required.
+        let input: Vec<u8> = (0..15).collect::<Vec<u8>>().iter().cycle().take(64).copied().collect();
+        let compressed = compress_block(&input);
+        let decompressed = decompress_block(&compressed, input.len()).expect("decode");
+        assert_eq!(decompressed, input);
+    }
+
+    #[test]
+    fn block_handles_large_input_64_bytes() {
+        // Specifically tests the LimniFS threshold: inputs ≥ 64 bytes.
+        let input: Vec<u8> = (0..64u32).map(|i| i.wrapping_mul(2654435761) as u8).collect();
+        let compressed = compress_block(&input);
+        let decompressed = decompress_block(&compressed, input.len()).expect("decode");
+        assert_eq!(decompressed, input);
+    }
+
+    #[test]
+    fn block_handles_very_long_match() {
+        // Match > 255 bytes (triggers multiple 0xFF extension bytes).
+        let pattern: Vec<u8> = (0..100).map(|i| (i % 251) as u8).collect();
+        let mut input = pattern.clone();
+        input.extend_from_slice(&pattern);
+        input.extend_from_slice(&pattern);
+        let compressed = compress_block(&input);
+        let decompressed = decompress_block(&compressed, input.len()).expect("decode");
+        assert_eq!(decompressed, input);
+    }
+
+    #[test]
+    fn block_round_trip_128_bytes_various_patterns() {
+        // Comprehensive test at the 128-byte boundary with 5 different
+        // patterns that historically triggered the extension byte bug.
+        let patterns: Vec<Vec<u8>> = vec![
+            vec![0u8; 128],                                              // all-zero
+            (0..128).map(|i| (i % 7) as u8).collect(),                  // periodic
+            (0..128).map(|i| (i * 31 % 251) as u8).collect(),           // pseudo-random
+            b"the quick brown fox jumps over the lazy dog. ".repeat(3).to_vec(),  // text
+            (0..128).map(|i| if i % 100 < 50 { 0u8 } else { 0xFF }).collect(), // binary
+        ];
+        for (idx, input) in patterns.iter().enumerate() {
+            let compressed = compress_block(input);
+            let decompressed = decompress_block(&compressed, input.len())
+                .unwrap_or_else(|e| panic!("pattern {idx} decode failed: {e}"));
+            assert_eq!(decompressed.as_slice(), input.as_slice(), "pattern {idx} mismatch");
+        }
     }
 }

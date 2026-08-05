@@ -158,10 +158,12 @@ pub fn compress(
         reason: format!("shuffled size {} exceeds u32::MAX", shuffled.len()),
     })?;
 
-    // LZ4-compress the shuffled body. `compress_prepend_size` writes a
-    // 4-byte LE original-size prefix that the decoder uses to allocate
-    // the exact output buffer.
-    let lz4_body = lz4_flex::compress_prepend_size(&shuffled);
+    // LZ4-compress the shuffled body using the in-house block encoder.
+    // Write a 4-byte LE original-size prefix that the decoder uses.
+    let lz4_block = omnizip_lz4::block::compress_block(&shuffled);
+    let mut lz4_body = Vec::with_capacity(4 + lz4_block.len());
+    lz4_body.extend_from_slice(&(shuffled.len() as u32).to_le_bytes());
+    lz4_body.extend_from_slice(&lz4_block);
 
     // Assemble the header + body.
     let mut out = Vec::with_capacity(HEADER_LEN + lz4_body.len());
@@ -192,13 +194,21 @@ pub fn decompress(compressed: &[u8]) -> Result<Vec<u8>, OmnizipError> {
     let header = parse_header(compressed)?;
     let body = &compressed[HEADER_LEN..];
 
-    // LZ4-decompress the body. `decompress_size_prepended` reads the
-    // 4-byte LE size prefix written by `compress_prepend_size`.
-    let shuffled =
-        lz4_flex::decompress_size_prepended(body).map_err(|e| OmnizipError::DecodeFailed {
+    // LZ4-decompress the body using the in-house block decoder.
+    // The first 4 bytes are the LE size prefix.
+    if body.len() < 4 {
+        return Err(OmnizipError::Corrupt {
+            codec: CodecId::BLOSC,
+            reason: "body too short for size prefix".into(),
+        });
+    }
+    let stored_len = u32::from_le_bytes([body[0], body[1], body[2], body[3]]) as usize;
+    let shuffled = omnizip_lz4::block::decompress_block(&body[4..], stored_len).map_err(|e| {
+        OmnizipError::DecodeFailed {
             codec: CodecId::BLOSC,
             reason: format!("lz4 decompress failed: {e}"),
-        })?;
+        }
+    })?;
 
     if u32::try_from(shuffled.len()).unwrap_or(u32::MAX) != header.shuffled_size {
         return Err(OmnizipError::LengthMismatch {
