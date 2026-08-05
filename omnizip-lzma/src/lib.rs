@@ -49,7 +49,7 @@ pub mod xz_container;
 use std::fmt;
 
 pub use bit_model::{BitModel, BitModelArray};
-pub use codec::LzmaCodec;
+pub use codec::{LzmaCodec, LzmaCompressor};
 pub use coder::{DistanceDecoder, DistanceEncoder, LengthDecoder, LengthEncoder,
                  LiteralDecoder, LiteralEncoder};
 pub use constants::{COMPRESSION_LEVEL_MAX, COMPRESSION_LEVEL_MIN};

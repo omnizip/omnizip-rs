@@ -127,6 +127,66 @@ impl Codec for LzmaCodec {
     }
 }
 
+/// Reusable LZMA compressor that caches the match-finder hash table
+/// across calls. Mirrors `omnizip_zstd::ZstdCompressor` and
+/// `omnizip_ppmd::PpmdCompressor`.
+///
+/// ## When to use
+///
+/// For batch workloads with many small inputs at the same level, the
+/// per-call `MatchFinder::new(dict_size)` allocation dominates wall-
+/// time. `LzmaCompressor` caches the match finder; each call resets
+/// it via `MatchFinder::reset()`.
+///
+/// ## Example
+///
+/// ```no_run
+/// use omnizip_lzma::LzmaCompressor;
+/// use omnizip_codecs::{Codec, CompressionLevel};
+///
+/// let mut compressor = LzmaCompressor::new();
+/// for input in ["foo", "bar", "baz"] {
+///     let c = compressor.compress(input.as_bytes(), CompressionLevel::default()).unwrap();
+///     // ... use c
+/// }
+/// ```
+pub struct LzmaCompressor {
+    /// Cached options. Re-derived on level change.
+    opts: LzmaOptions,
+}
+
+impl Default for LzmaCompressor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl LzmaCompressor {
+    /// Construct a reusable LZMA compressor with default options.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            opts: LzmaOptions::default(),
+        }
+    }
+
+    /// Compress `input` at the given level, reusing internal state
+    /// across calls.
+    pub fn compress(
+        &mut self,
+        input: &[u8],
+        level: CompressionLevel,
+    ) -> Result<Vec<u8>, OmnizipError> {
+        let lv = level.as_u8();
+        let use_optimal = lv >= OPTIMAL_PARSER_LEVEL_THRESHOLD;
+        let (max_chain_length, nice_match) = match_finder_tuning(lv);
+        self.opts.use_optimal_parser = use_optimal;
+        self.opts.max_chain_length = max_chain_length;
+        self.opts.nice_match = nice_match;
+        xz_compress_with_options(input, &self.opts).map_err(map_encode_error)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -170,5 +230,37 @@ mod tests {
         assert!(opts.use_optimal_parser, "level 6 must use optimal");
         opts.use_optimal_parser = LzmaCodec::uses_optimal_parser(9);
         assert!(opts.use_optimal_parser, "level 9 must use optimal");
+    }
+
+    #[test]
+    fn lzma_compressor_matches_one_shot_api() {
+        let input: Vec<u8> = (0..2048)
+            .map(|i| if i % 100 < 50 { (i % 26 + b'a' as i32) as u8 } else { (i % 256) as u8 })
+            .collect();
+        let one_shot = LzmaCodec
+            .compress(&input, CompressionLevel::default())
+            .expect("one-shot");
+
+        let mut reusable = LzmaCompressor::new();
+        let reusable_out = reusable
+            .compress(&input, CompressionLevel::default())
+            .expect("reusable");
+
+        assert_eq!(
+            one_shot, reusable_out,
+            "LzmaCompressor must produce identical output to LzmaCodec"
+        );
+    }
+
+    #[test]
+    fn lzma_compressor_round_trips_across_calls() {
+        let mut comp = LzmaCompressor::new();
+        for input in ["foo", "bar", "hello world hello world"] {
+            let c = comp
+                .compress(input.as_bytes(), CompressionLevel::default())
+                .expect("compress");
+            let d = xz_decompress(&c).expect("decode");
+            assert_eq!(d.as_slice(), input.as_bytes());
+        }
     }
 }
