@@ -35,7 +35,7 @@ mod huffman;
 mod mtf;
 mod rle;
 
-pub use codec::Bzip2Codec;
+pub use codec::{Bzip2Codec, Bzip2Compressor};
 
 // Re-export the pipeline stages so downstream crates/tests can exercise them
 // in isolation (matching the Ruby class layout).

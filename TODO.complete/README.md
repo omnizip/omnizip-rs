@@ -159,7 +159,7 @@ the new items document the path forward.
 | 156 | [Coverage measurement](156-coverage-measurement.md) | ⏳ (P2) |
 | 157 | [Architecture guide + ADRs](157-architecture-guide-adrs.md) | ⏳ (P2) |
 | 158 | [FSST v2 + GLZA tuning](158-fsst-v2-glza-tuning.md) | ⏳ (P2) |
-| 159 | [Filter-Codec composition](159-filter-codec-composition.md) | ⏳ (P2) |
+| 159 | [Filter-Codec composition](159-filter-codec-composition.md) | ✅ (`FilteredCodec<C, F>` adapter landed in omnizip-filters) |
 | 160 | [Release automation](160-release-automation.md) | ⏳ (P2) |
 | 161 | [Deflate64 encoder](161-deflate64-encoder.md) | ⏳ (P2 — LimniFS-flagged) |
 | 162 | [FSST preprocessor wiring](162-fsst-preprocessor-wiring.md) | ⏳ (P2) |

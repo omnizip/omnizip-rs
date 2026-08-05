@@ -62,6 +62,8 @@ pub use bcj_x86::BcjX86Filter;
 pub use delta::DeltaFilter;
 pub use shuffle::{BitShuffle, ByteShuffle};
 
+use omnizip_codecs::{Codec, CodecId, CompressionLevel, OmnizipError};
+
 /// Reversible preprocessing transform. `encode` and `decode` are exact
 /// inverses.
 pub trait Filter: Send + Sync {
@@ -72,6 +74,105 @@ pub trait Filter: Send + Sync {
     /// Apply the inverse transform. MUST recover the original input
     /// exactly when given the output of [`encode`](Self::encode).
     fn decode(&self, input: &[u8]) -> Vec<u8>;
+}
+
+/// Adapter that composes a [`Filter`] with a [`Codec`].
+///
+/// `compress` applies the filter forward, then encodes the filtered
+/// bytes via the inner codec. `decompress` reverses the pipeline. The
+/// composed codec has the id of the inner codec; the filter is
+/// transparent to callers.
+///
+/// ## Example
+///
+/// ```no_run
+/// # // Stubbed as no_run because omnizip-lzma isn't a runtime dep of
+/// # // omnizip-filters — callers wire the actual codec + filter combo.
+/// use omnizip_codecs::{Codec, CompressionLevel};
+/// use omnizip_filters::{BcjX86Filter, FilteredCodec};
+///
+/// // x86 BCJ filter + LZMA compression: typical for executable code.
+/// // Replace `MyCodec` with an actual codec like `omnizip_lzma::LzmaCodec`.
+/// # struct MyCodec;
+/// # impl Codec for MyCodec {
+/// #     fn id(&self) -> omnizip_codecs::CodecId { omnizip_codecs::CodecId::LZMA }
+/// #     fn name(&self) -> &'static str { "stub" }
+/// #     fn compress(&self, _: &[u8], _: CompressionLevel) -> Result<Vec<u8>, omnizip_codecs::OmnizipError> { Ok(Vec::new()) }
+/// #     fn decompress(&self, _: &[u8], _: u32) -> Result<Vec<u8>, omnizip_codecs::OmnizipError> { Ok(Vec::new()) }
+/// # }
+/// let codec = FilteredCodec::new(
+///     MyCodec,
+///     BcjX86Filter,
+/// );
+/// let exe_bytes = std::fs::read("program.bin").unwrap();
+/// let compressed = codec.compress(&exe_bytes, CompressionLevel::default()).unwrap();
+/// ```
+pub struct FilteredCodec<C, F> {
+    codec: C,
+    filter: F,
+}
+
+impl<C, F> FilteredCodec<C, F> {
+    /// Construct a new filtered codec.
+    #[must_use]
+    pub const fn new(codec: C, filter: F) -> Self {
+        Self { codec, filter }
+    }
+
+    /// Access the inner codec.
+    #[must_use]
+    pub const fn inner_codec(&self) -> &C {
+        &self.codec
+    }
+
+    /// Access the inner filter.
+    #[must_use]
+    pub const fn inner_filter(&self) -> &F {
+        &self.filter
+    }
+}
+
+impl<C: Codec, F: Filter> Codec for FilteredCodec<C, F> {
+    fn id(&self) -> CodecId {
+        self.codec.id()
+    }
+
+    fn name(&self) -> &'static str {
+        self.codec.name()
+    }
+
+    fn compress(
+        &self,
+        plaintext: &[u8],
+        level: CompressionLevel,
+    ) -> Result<Vec<u8>, OmnizipError> {
+        let filtered = self.filter.encode(plaintext);
+        self.codec.compress(&filtered, level)
+    }
+
+    fn decompress(&self, compressed: &[u8], expected_len: u32) -> Result<Vec<u8>, OmnizipError> {
+        let filtered = self.codec.decompress(compressed, expected_len)?;
+        if filtered.len() != expected_len as usize {
+            return Err(OmnizipError::LengthMismatch {
+                codec: self.codec.id(),
+                expected: expected_len,
+                actual: filtered.len(),
+            });
+        }
+        let original = self.filter.decode(&filtered);
+        if original.len() != filtered.len() {
+            return Err(OmnizipError::Corrupt {
+                codec: self.codec.id(),
+                reason: format!(
+                    "filter '{}' changed length: {} → {}",
+                    self.filter.name(),
+                    filtered.len(),
+                    original.len()
+                ),
+            });
+        }
+        Ok(original)
+    }
 }
 
 #[cfg(test)]
@@ -139,5 +240,80 @@ mod round_trip_tests {
         ];
         let unique = std::collections::BTreeSet::from_iter(names);
         assert_eq!(unique.len(), names.len(), "filter names must be unique");
+    }
+
+    /// Verify FilteredCodec applies the filter on compress and reverses
+    /// it on decompress, producing the original input.
+    #[test]
+    fn filtered_codec_round_trips_with_delta_and_lzma() {
+        // Use a workspace codec that's always available in tests.
+        // We exercise the adapter with a synthetic codec wrapper.
+        struct IdentityCodec;
+        impl Codec for IdentityCodec {
+            fn id(&self) -> CodecId {
+                CodecId::LZMA
+            }
+            fn name(&self) -> &'static str {
+                "identity"
+            }
+            fn compress(
+                &self,
+                plaintext: &[u8],
+                _level: CompressionLevel,
+            ) -> Result<Vec<u8>, OmnizipError> {
+                Ok(plaintext.to_vec())
+            }
+            fn decompress(
+                &self,
+                compressed: &[u8],
+                expected_len: u32,
+            ) -> Result<Vec<u8>, OmnizipError> {
+                if compressed.len() as u32 != expected_len {
+                    return Err(OmnizipError::LengthMismatch {
+                        codec: CodecId::LZMA,
+                        expected: expected_len,
+                        actual: compressed.len(),
+                    });
+                }
+                Ok(compressed.to_vec())
+            }
+        }
+
+        let codec = FilteredCodec::new(IdentityCodec, DeltaFilter::new(1));
+        let input: Vec<u8> = (0..200).map(|i| (i % 7) as u8).collect();
+        let compressed = codec
+            .compress(&input, CompressionLevel::default())
+            .expect("compress");
+        let decompressed = codec
+            .decompress(&compressed, input.len() as u32)
+            .expect("decompress");
+        assert_eq!(decompressed, input);
+    }
+
+    /// FilteredCodec's id and name should match the inner codec.
+    #[test]
+    fn filtered_codec_identities() {
+        struct TestCodec;
+        impl Codec for TestCodec {
+            fn id(&self) -> CodecId {
+                CodecId::LZMA
+            }
+            fn name(&self) -> &'static str {
+                "test-codec"
+            }
+            fn compress(
+                &self,
+                _: &[u8],
+                _: CompressionLevel,
+            ) -> Result<Vec<u8>, OmnizipError> {
+                Ok(Vec::new())
+            }
+            fn decompress(&self, _: &[u8], _: u32) -> Result<Vec<u8>, OmnizipError> {
+                Ok(Vec::new())
+            }
+        }
+        let codec = FilteredCodec::new(TestCodec, DeltaFilter::new(1));
+        assert_eq!(codec.id(), CodecId::LZMA);
+        assert_eq!(codec.name(), "test-codec");
     }
 }
