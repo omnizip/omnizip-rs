@@ -16,9 +16,9 @@ path = "src/lib.rs"
 
 [dependencies]
 omnizip-codecs.workspace = true
+brotli.workspace = true
 
 [dev-dependencies]
-brotli.workspace = true
 
 [lints]
 workspace = true

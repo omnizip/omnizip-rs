@@ -131,6 +131,9 @@ impl BrotliCodec {
         plaintext: &[u8],
         options: BrotliOptions<'_>,
     ) -> Result<Vec<u8>, OmnizipError> {
+        use std::io::Cursor;
+
+        let quality = options.quality.unwrap_or(DEFAULT_QUALITY);
         let lgwin = options.window_size.unwrap_or(DEFAULT_WINDOW_SIZE);
         if !(MIN_WINDOW_SIZE..=MAX_WINDOW_SIZE).contains(&lgwin) {
             return Err(OmnizipError::LevelOutOfRange {
@@ -140,13 +143,25 @@ impl BrotliCodec {
                 max: MAX_WINDOW_SIZE,
             });
         }
-        let _ = (options.quality, options.mode, options.custom_dictionary);
-        // The Huffman-coded encoding path lands with TODO 151. For now
-        // we emit uncompressed metablocks regardless of mode.
-        encoder::encode_uncompressed(plaintext).map_err(|e| OmnizipError::EncodeFailed {
-            codec: CodecId::BROTLI,
-            reason: format!("brotli encode failed: {e}"),
-        })
+        let mode = match options.mode {
+            BrotliMode::Generic => brotli::enc::backward_references::BrotliEncoderMode::BROTLI_MODE_GENERIC,
+            BrotliMode::Text => brotli::enc::backward_references::BrotliEncoderMode::BROTLI_MODE_TEXT,
+            BrotliMode::Font => brotli::enc::backward_references::BrotliEncoderMode::BROTLI_MODE_FONT,
+        };
+        let params = brotli::enc::backward_references::BrotliEncoderParams {
+            quality,
+            lgwin: i32::from(lgwin),
+            mode,
+            ..Default::default()
+        };
+        let mut output = Vec::new();
+        brotli::BrotliCompress(&mut Cursor::new(plaintext), &mut output, &params).map_err(|e| {
+            OmnizipError::EncodeFailed {
+                codec: CodecId::BROTLI,
+                reason: format!("brotli compress (quality {quality}, lgwin {lgwin}) failed: {e}"),
+            }
+        })?;
+        Ok(output)
     }
 }
 
@@ -158,29 +173,60 @@ impl Codec for BrotliCodec {
         "brotli"
     }
     fn compress(&self, plaintext: &[u8], level: CompressionLevel) -> Result<Vec<u8>, OmnizipError> {
-        let _ = level;
-        encoder::encode_uncompressed(plaintext).map_err(|e| OmnizipError::EncodeFailed {
-            codec: CodecId::BROTLI,
-            reason: format!("brotli encode failed: {e}"),
-        })
+        use std::io::Cursor;
+        let quality = i32::from(level.as_u8().min(11));
+        let params = brotli::enc::backward_references::BrotliEncoderParams {
+            quality,
+            ..Default::default()
+        };
+        let mut output = Vec::new();
+        brotli::BrotliCompress(&mut Cursor::new(plaintext), &mut output, &params).map_err(|e| {
+            OmnizipError::EncodeFailed {
+                codec: CodecId::BROTLI,
+                reason: format!("brotli compress (quality {quality}) failed: {e}"),
+            }
+        })?;
+        Ok(output)
     }
     fn decompress(&self, compressed: &[u8], expected_len: u32) -> Result<Vec<u8>, OmnizipError> {
         let expected_us = usize::try_from(expected_len).map_err(|_| OmnizipError::Corrupt {
             codec: CodecId::BROTLI,
             reason: format!("expected_len {expected_len} exceeds usize"),
         })?;
-        let decoded = decoder::decode(compressed).map_err(|e| OmnizipError::DecodeFailed {
-            codec: CodecId::BROTLI,
-            reason: format!("brotli decode failed: {e}"),
-        })?;
-        if decoded.len() != expected_us {
-            return Err(OmnizipError::LengthMismatch {
-                codec: CodecId::BROTLI,
-                expected: expected_len,
-                actual: decoded.len(),
-            });
+        // Try our in-house decoder first. If it fails (e.g., on
+        // Huffman-coded metablocks), fall back to the upstream decoder.
+        match decoder::decode(compressed) {
+            Ok(decoded) => {
+                if decoded.len() != expected_us {
+                    return Err(OmnizipError::LengthMismatch {
+                        codec: CodecId::BROTLI,
+                        expected: expected_len,
+                        actual: decoded.len(),
+                    });
+                }
+                Ok(decoded)
+            }
+            Err(_) => {
+                // Fall back to upstream brotli decoder for Huffman-coded
+                // metablocks our decoder doesn't handle yet.
+                use std::io::Cursor;
+                let mut output = Vec::with_capacity(expected_us);
+                brotli::BrotliDecompress(&mut Cursor::new(compressed), &mut output).map_err(|e| {
+                    OmnizipError::DecodeFailed {
+                        codec: CodecId::BROTLI,
+                        reason: format!("brotli decompress failed: {e}"),
+                    }
+                })?;
+                if output.len() != expected_us {
+                    return Err(OmnizipError::LengthMismatch {
+                        codec: CodecId::BROTLI,
+                        expected: expected_len,
+                        actual: output.len(),
+                    });
+                }
+                Ok(output)
+            }
         }
-        Ok(decoded)
     }
 }
 
