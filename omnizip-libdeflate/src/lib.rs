@@ -121,37 +121,25 @@ impl Codec for LibdeflateCodec {
             reason: format!("expected_len {expected_len} exceeds usize"),
         })?;
 
-        // Phase 2 (in-house RFC 1951 decoder): strip zlib wrapper if
-        // present (2-byte header + 4-byte adler32 trailer), then run
-        // our own inflate. Fall back to miniz_oxide if the in-house
-        // path errors — that gives us correct behavior on all current
-        // inputs while Phase 2 stabilises.
+        // Strip zlib wrapper if present (2-byte header + 4-byte adler32
+        // trailer), then run the in-house RFC 1951 inflate. The
+        // miniz_oxide fallback was removed once the in-house decoder
+        // round-tripped every fixture (TODO 136).
         let raw = strip_zlib_wrapper(compressed);
-        match inflate::inflate(raw, expected_us) {
-            Ok(decoded) if decoded.len() == expected_us => Ok(decoded),
-            Ok(decoded) => Err(OmnizipError::LengthMismatch {
+        let decoded = inflate::inflate(raw, expected_us).map_err(|e| {
+            OmnizipError::DecodeFailed {
+                codec: CodecId::LIBDEFLATE,
+                reason: format!("inflate failed: {e}"),
+            }
+        })?;
+        if decoded.len() != expected_us {
+            return Err(OmnizipError::LengthMismatch {
                 codec: CodecId::LIBDEFLATE,
                 expected: expected_len,
                 actual: decoded.len(),
-            }),
-            Err(_) => {
-                // Fallback: try miniz_oxide with zlib first, then raw.
-                let decoded = miniz_oxide::inflate::decompress_to_vec_zlib(compressed)
-                    .or_else(|_| miniz_oxide::inflate::decompress_to_vec(compressed))
-                    .map_err(|e| OmnizipError::DecodeFailed {
-                        codec: CodecId::LIBDEFLATE,
-                        reason: format!("inflate failed: {e}"),
-                    })?;
-                if decoded.len() != expected_us {
-                    return Err(OmnizipError::LengthMismatch {
-                        codec: CodecId::LIBDEFLATE,
-                        expected: expected_len,
-                        actual: decoded.len(),
-                    });
-                }
-                Ok(decoded)
-            }
+            });
         }
+        Ok(decoded)
     }
 }
 
