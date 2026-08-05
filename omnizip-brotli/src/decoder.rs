@@ -218,6 +218,258 @@ pub fn parse_metablock_header(
     ))
 }
 
+// ---------------------------------------------------------------------------
+// Phase B: block-type header (RFC 7932 §9.3)
+// ---------------------------------------------------------------------------
+
+/// Maximum number of block types per category (RFC 7932 §9.3).
+pub const MAX_BLOCK_TYPES: u32 = 256;
+
+/// Block-type category: literals, insert-and-copy, or distance.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BlockTypeCategory {
+    /// Literal block types (§9.3.1).
+    Literal,
+    /// Insert-and-copy block types (§9.3.2).
+    InsertCopy,
+    /// Distance block types (§9.3.3).
+    Distance,
+}
+
+/// Per-category block-type header (RFC 7932 §9.3).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BlockTypeHeader {
+    /// `NBLTYPES` — number of block types in this category (1..=256).
+    pub num_block_types: u32,
+    /// Block-type 0 (initial).
+    pub initial_block_type: u32,
+    /// `NBLTYPESL` (literal) / `NBLTYPESI` (insert-copy) / `NBLTYPESD`
+    /// (distance) — the count of Huffman trees in this category.
+    pub num_huffman_trees: u32,
+}
+
+/// Parse a per-category block-type header (RFC 7932 §9.3).
+///
+/// Returns the parsed header and the bit position past the header.
+/// When `num_block_types == 1`, the encoder omits the block-type
+/// jump table; this function returns `num_huffman_trees = 1` in
+/// that case.
+pub fn parse_block_type_header(
+    data: &[u8],
+    bit_pos: usize,
+    _category: BlockTypeCategory,
+) -> Result<(BlockTypeHeader, usize), &'static str> {
+    let mut br = BitReader::new(data);
+    br.bit_pos = bit_pos;
+
+    let num_block_types_raw = br.read_bits(2);
+    let num_block_types = num_block_types_raw + 1;
+
+    if num_block_types == 1 {
+        return Ok((
+            BlockTypeHeader {
+                num_block_types: 1,
+                initial_block_type: 0,
+                num_huffman_trees: 1,
+            },
+            br.bit_pos(),
+        ));
+    }
+
+    // Block-type context: initial type + jump table (3 varint-coded
+    // Huffman trees for type-0, type-1, type-switch).
+    let initial_block_type = br.read_bits(ceil_log2(num_block_types));
+
+    // Read the block-type jump table: 3 entries, each ceil_log2
+    // bits wide.
+    for _ in 0..3 {
+        let _ = br.read_bits(ceil_log2(num_block_types));
+    }
+
+    Ok((
+        BlockTypeHeader {
+            num_block_types,
+            initial_block_type,
+            num_huffman_trees: num_block_types,
+        },
+        br.bit_pos(),
+    ))
+}
+
+/// ceil(log2(n)) for n ≥ 2, defined per RFC 7932 §1.4.
+fn ceil_log2(n: u32) -> u32 {
+    if n <= 1 {
+        return 0;
+    }
+    32 - (n - 1).leading_zeros()
+}
+
+// ---------------------------------------------------------------------------
+// Phase B: distance-code header (RFC 7932 §9.4)
+// ---------------------------------------------------------------------------
+
+/// Distance-code header (RFC 7932 §9.4).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DistanceHeader {
+    /// `NDIRECT` — number of direct distance codes.
+    pub num_direct: u32,
+    /// `NMPOSTFIX` — number of postfix bits.
+    pub num_postfix: u32,
+}
+
+/// Parse the distance header (RFC 7932 §9.4). Only present when the
+/// metablock uses distance codes (i.e., not a literal-only block).
+pub fn parse_distance_header(
+    data: &[u8],
+    bit_pos: usize,
+) -> Result<(DistanceHeader, usize), &'static str> {
+    let mut br = BitReader::new(data);
+    br.bit_pos = bit_pos;
+
+    let npostfix_raw = br.read_bits(2);
+    // NDIRECT is NPOSTFIX + 1 4-bit groups.
+    // Each group: high bit set → continue reading; low 4 bits → value.
+    // For simplicity (Phase B), support the 1-group form.
+    let ndirect_msb = br.read_bits(1);
+    let ndirect_lo = br.read_bits(4);
+    let ndirect = ndirect_lo | if ndirect_msb != 0 { 16 } else { 0 };
+
+    Ok((
+        DistanceHeader {
+            num_direct: ndirect,
+            num_postfix: npostfix_raw,
+        },
+        br.bit_pos(),
+    ))
+}
+
+// ---------------------------------------------------------------------------
+// Phase B: Huffman table reader (RFC 7932 §9.5, simple form)
+// ---------------------------------------------------------------------------
+
+/// Maximum Huffman code length per RFC 7932 §9.5.
+pub const MAX_HUFFMAN_CODE_LENGTH: u8 = 15;
+
+/// Canonical Huffman table built from per-symbol code lengths.
+#[derive(Clone, Debug)]
+pub struct HuffmanTable {
+    /// Per-symbol code length (0 = symbol not in alphabet).
+    pub lengths: Vec<u8>,
+    /// Per-symbol canonical code (only valid for symbols with length > 0).
+    pub codes: Vec<u16>,
+}
+
+impl HuffmanTable {
+    /// Build a canonical Huffman table from per-symbol code lengths
+    /// (RFC 7932 §9.5, also used by DEFLATE / ZSTD).
+    ///
+    /// Symbols are assigned codes in alphabetical order within each
+    /// code-length bucket.
+    #[must_use]
+    pub fn from_lengths(lengths: &[u8]) -> Self {
+        let n = lengths.len();
+        let mut codes = vec![0u16; n];
+
+        // Count occurrences of each code length.
+        let mut bl_count = [0u32; 17];
+        for &l in lengths {
+            if l > 0 {
+                bl_count[usize::from(l)] += 1;
+            }
+        }
+
+        // Compute the next code per length.
+        let mut next_code = [0u16; 17];
+        let mut code = 0u16;
+        for bits in 1..=16usize {
+            code = (code + bl_count[bits - 1] as u16) << 1;
+            next_code[bits] = code;
+        }
+
+        // Assign codes per symbol in alphabetical order.
+        for i in 0..n {
+            let l = lengths[i];
+            if l > 0 {
+                codes[i] = next_code[usize::from(l)];
+                next_code[usize::from(l)] += 1;
+            }
+        }
+
+        Self {
+            lengths: lengths.to_vec(),
+            codes,
+        }
+    }
+
+    /// Read a Huffman-coded symbol from the bit reader.
+    ///
+    /// Walks one bit at a time, comparing against canonical codes.
+    /// Returns the symbol value or `None` if the code isn't in the
+    /// alphabet (shouldn't happen for well-formed streams).
+    pub fn read_symbol(&self, br: &mut BitReader) -> Option<u32> {
+        let mut code: u32 = 0;
+        for len in 1..=MAX_HUFFMAN_CODE_LENGTH {
+            code = (code << 1) | br.read_bits(1);
+            // Look for a symbol with this length whose canonical code
+            // matches. Canonical assignment is alphabetical within
+            // length buckets, so we walk symbols in order.
+            for (sym, &sym_len) in self.lengths.iter().enumerate() {
+                if sym_len == len && u32::from(self.codes[sym]) == code {
+                    return Some(sym as u32);
+                }
+            }
+        }
+        None
+    }
+}
+
+/// Read a Huffman table from the bitstream using the "simple" form
+/// (RFC 7932 §9.5.1, NSYM=1/2/3/4 with optional symbol order swap).
+///
+/// Returns the table and the bit position past the table.
+pub fn read_huffman_table_simple(
+    data: &[u8],
+    bit_pos: usize,
+) -> Result<(HuffmanTable, usize), &'static str> {
+    let mut br = BitReader::new(data);
+    br.bit_pos = bit_pos;
+
+    let nsym_raw = br.read_bits(2);
+    let nsym = nsym_raw + 1;
+
+    // Symbol alphabet size — Phase B assumes 256 for literals.
+    // Production code takes this as a parameter.
+    let alphabet_size = 256usize;
+    let mut lengths = vec![0u8; alphabet_size];
+
+    match nsym {
+        1 => {
+            let sym = br.read_bits(ceil_log2(alphabet_size as u32));
+            lengths[usize::try_from(sym).unwrap_or(0)] = 1;
+        }
+        2 => {
+            let s1 = br.read_bits(ceil_log2(alphabet_size as u32));
+            let s2 = br.read_bits(ceil_log2(alphabet_size as u32));
+            let tree_select = br.read_bits(1);
+            // tree_select=0: both symbols get 1-bit codes.
+            // tree_select=1: both symbols get 2-bit codes (with unused code).
+            let len = if tree_select == 0 { 1 } else { 2 };
+            lengths[usize::try_from(s1).unwrap_or(0)] = len;
+            lengths[usize::try_from(s2).unwrap_or(0)] = len;
+        }
+        _ => {
+            // NSYM=3 or 4 — read each symbol + assign 2-bit codes.
+            for _ in 0..nsym {
+                let sym = br.read_bits(ceil_log2(alphabet_size as u32));
+                lengths[usize::try_from(sym).unwrap_or(0)] = 2;
+            }
+        }
+    }
+
+    let table = HuffmanTable::from_lengths(&lengths);
+    Ok((table, br.bit_pos()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -334,5 +586,135 @@ mod tests {
         data[2] |= 0b0000_1000; // bit 19 = 1 (reserved)
         let result = parse_metablock_header(&data, 0);
         assert!(result.is_err(), "reserved bit must error");
+    }
+
+    // --- Phase B tests ---
+
+    #[test]
+    fn ceil_log2_handles_small_values() {
+        assert_eq!(ceil_log2(0), 0);
+        assert_eq!(ceil_log2(1), 0);
+        assert_eq!(ceil_log2(2), 1);
+        assert_eq!(ceil_log2(3), 2);
+        assert_eq!(ceil_log2(4), 2);
+        assert_eq!(ceil_log2(5), 3);
+        assert_eq!(ceil_log2(8), 3);
+        assert_eq!(ceil_log2(256), 8);
+    }
+
+    #[test]
+    fn parse_block_type_header_single_type() {
+        // NBLOCKTYPES bits = 00 → num_block_types = 1.
+        let data = [0b0000_0000u8];
+        let (hdr, _) =
+            parse_block_type_header(&data, 0, BlockTypeCategory::Literal).expect("parse");
+        assert_eq!(hdr.num_block_types, 1);
+        assert_eq!(hdr.num_huffman_trees, 1);
+    }
+
+    #[test]
+    fn parse_block_type_header_two_types() {
+        // NBLOCKTYPES = 01 → num_block_types = 2. ceil_log2(2) = 1,
+        // so initial_type is 1 bit, jump table is 3 × 1 bit = 3 bits.
+        // Bits LSB-first: bit 0 = 1 (NBLOCKTYPES lo), bit 1 = 0 (hi),
+        // bit 2 = 0 (initial_type), bits 3-5 = jump table.
+        //   byte = 1 + 0 + 0 + 0 + 16 + 0 + 0 + 0 = 0x11
+        let data = [0x11u8];
+        let (hdr, _) =
+            parse_block_type_header(&data, 0, BlockTypeCategory::Literal).expect("parse");
+        assert_eq!(hdr.num_block_types, 2);
+        assert_eq!(hdr.num_huffman_trees, 2);
+    }
+
+    #[test]
+    fn parse_distance_header_reads_npostfix_and_ndirect() {
+        // NPOSTFIX (2 bits) = 1, NDIRECT_MSB = 0, NDIRECT_LO (4 bits) = 5.
+        // Bits LSB-first:
+        //   bit 0 = 1 (NPOSTFIX bit 0)
+        //   bit 1 = 0 (NPOSTFIX bit 1)
+        //   bit 2 = 0 (NDIRECT_MSB)
+        //   bit 3 = 1 (NDIRECT_LO bit 0) → contributes 8
+        //   bit 4 = 0
+        //   bit 5 = 1 (NDIRECT_LO bit 2) → contributes 32
+        //   bits 6,7 = 0
+        // = 1 + 8 + 32 = 41 = 0x29
+        let data = [0x29u8];
+        let (hdr, _) = parse_distance_header(&data, 0).expect("parse");
+        assert_eq!(hdr.num_postfix, 1);
+        assert_eq!(hdr.num_direct, 5);
+    }
+
+    #[test]
+    fn huffman_table_from_lengths_assigns_canonical_codes() {
+        // Standard example: 4 symbols with lengths [2, 1, 3, 3].
+        // Canonical: sym 0 → 00, sym 1 → 1, sym 2 → 010, sym 3 → 011.
+        // Wait, that's not standard canonical. Let me use the spec:
+        // sort by length, then by symbol:
+        //   len=1: sym 1 → code 0
+        //   len=2: sym 0 → code 10
+        //   len=3: sym 2 → code 110, sym 3 → code 111
+        let table = HuffmanTable::from_lengths(&[2, 1, 3, 3]);
+        assert_eq!(table.lengths, vec![2, 1, 3, 3]);
+        // Code for sym 1 (len 1) = 0.
+        assert_eq!(table.codes[1], 0b0);
+        // Code for sym 0 (len 2) = 0b10 = 2.
+        assert_eq!(table.codes[0], 0b10);
+        // Code for sym 2 (len 3) = 0b110 = 6.
+        assert_eq!(table.codes[2], 0b110);
+        // Code for sym 3 (len 3) = 0b111 = 7.
+        assert_eq!(table.codes[3], 0b111);
+    }
+
+    #[test]
+    fn huffman_table_read_symbol_walks_canonical_assignment() {
+        // Sym 0 → 0, sym 1 → 10, sym 2 → 11. Lengths: [1, 2, 2].
+        let table = HuffmanTable::from_lengths(&[1, 2, 2]);
+
+        // Sym 0 code = "0" (1 bit).
+        // Bitstream "0" → sym 0. Bit 0 = 0.
+        let mut br = BitReader::new(&[0b0000_0000]);
+        assert_eq!(table.read_symbol(&mut br), Some(0));
+
+        // Sym 1 code = "10" (2 bits). read_symbol reads bit 0 as MSB
+        // of code, so for code "10" we need bit_0=1, bit_1=0.
+        // Byte with bit 0 = 1: 0b0000_0001 = 0x01.
+        let mut br = BitReader::new(&[0b0000_0001]);
+        assert_eq!(table.read_symbol(&mut br), Some(1));
+
+        // Sym 2 code = "11" (2 bits). bit_0=1, bit_1=1.
+        // Byte: 0b0000_0011 = 0x03.
+        let mut br = BitReader::new(&[0b0000_0011]);
+        assert_eq!(table.read_symbol(&mut br), Some(2));
+    }
+
+    #[test]
+    fn read_huffman_table_simple_single_symbol() {
+        // NSYM=1 (NSYM bits = 00). For alphabet_size=256, ceil_log2=8.
+        // Symbol = 0x42 = 'B' (8 bits).
+        // Bits (LSB-first): 0,0 (NSYM=00), then 8 bits of symbol.
+        //   byte 0 bits 0-1: NSYM=00
+        //   byte 0 bits 2-7: sym low 6 bits = 0x42 mod 64 = 0b00_0010
+        //   byte 1 bits 0-1: sym high 2 bits = 0x42 / 64 = 1 = 0b01
+        // Packed: byte 0 = bits 2-7 of 0x42 in LSB-first = 0b0000_1000 = 0x08,
+        //         byte 1 = 0b0000_0001 = 0x01.
+        // Actually let me just lay it out bit by bit:
+        //   bit 0: 0  (NSYM bit 0)
+        //   bit 1: 0  (NSYM bit 1)
+        //   bit 2: 0  (sym bit 0)
+        //   bit 3: 1  (sym bit 1)
+        //   bit 4: 0  (sym bit 2)
+        //   bit 5: 0  (sym bit 3)
+        //   bit 6: 0  (sym bit 4)
+        //   bit 7: 0  (sym bit 5)
+        //   bit 8: 1  (sym bit 6)
+        //   bit 9: 0  (sym bit 7)
+        // For sym 0x42 = 0b0100_0010: bit 0=0, bit 1=1, bit 2=0,
+        // bit 3=0, bit 4=0, bit 5=0, bit 6=1, bit 7=0.
+        // So bits 2-9 in stream = 0,1,0,0,0,0,1,0.
+        // Byte 0: bits 0-7 = 0,0,0,1,0,0,0,0 = 0b0000_1000 = 0x08.
+        // Byte 1: bits 8-9 + padding = 1,0,0,0,0,0,0,0 = 0b0000_0001 = 0x01.
+        let data = [0x08u8, 0x01];
+        let (table, _) = read_huffman_table_simple(&data, 0).expect("parse");
+        assert_eq!(table.lengths[0x42], 1);
     }
 }
