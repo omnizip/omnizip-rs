@@ -130,7 +130,27 @@ the new items document the path forward.
 | 127 | [Codec parallel batch](127-codec-parallel-batch.md) | ⏳ (P2 — throughput) |
 | 128 | [Per-codec memory budgets](128-per-codec-memory-budgets.md) | ⏳ (P2 — embedded) |
 | 129 | [Shared checksum finish](129-shared-checksum-finish.md) | ⏳ (P2 — DRY) |
-| 130 | [Brotli Phase B — Huffman + block-type](130-brotli-phase-b-huffman-blocktype.md) | ⏳ (P0 — TODO 117 continuation) |
+| 130 | [Brotli Phase B — Huffman + block-type](130-brotli-phase-b-huffman-blocktype.md) | 🔄 (Phase B + B-cont landed in #92, #94) |
+| 131 | [Snappy pure-Rust port](131-snappy-pure-rust-port.md) | ⏳ (P1) |
+| 132 | [LZ4 pure-Rust port](132-lz4-pure-rust-port.md) | ⏳ (P1) |
+| 133 | [DEFLATE pure-Rust port](133-deflate-pure-rust-port.md) | ⏳ (P1 — likely merge into libdeflate) |
+| 134 | [BLOSC pure-Rust port](134-blosc-pure-rust-port.md) | ⏳ (P2 — depends on 132) |
+| 135 | [Filters — drop lz4_flex](135-filters-no-external-lz4.md) | ⏳ (P2 — depends on 132) |
+| 136 | [libdeflate — drop miniz_oxide fallback](136-libdeflate-no-miniz-fallback.md) | ⏳ (P1) |
+| 137 | [Async Codec trait](137-async-codec-trait.md) | ⏳ (P2) |
+| 138 | [Codec observability](138-codec-observability.md) | ⏳ (P2) |
+| 139 | [Per-codec proptests](139-per-codec-proptests.md) | ⏳ (P1) |
+| 140 | [Spec compliance matrix](140-spec-compliance-matrix.md) | ⏳ (P2) |
+| 141 | [GHA differential workflow](141-gha-differential-workflow.md) | ⏳ (P1) |
+| 142 | [Benchmark regression detection](142-benchmark-regression-detection.md) | ⏳ (P2) |
+| 143 | [Error type unification](143-error-type-unification.md) | ⏳ (P2) |
+| 144 | [Wire-format conformance corpus](144-wire-format-corpus.md) | ⏳ (P2) |
+| 145 | [Hash function quality audit](145-hash-function-audit.md) | ⏳ (P2) |
+| 146 | [Reusable-state pattern sweep](146-reusable-compressor-pattern.md) | ⏳ (P1) |
+| 147 | [Determinism cross-platform audit](147-determinism-cross-platform-audit.md) | ⏳ (P1) |
+| 148 | [Code review sweep OCP/MECE/DRY](148-code-review-sweep-ocp-mece-dry.md) | ⏳ (P2) |
+| 149 | [Per-codec READMEs](149-per-codec-readmes.md) | ⏳ (P2) |
+| 150 | [Multi-platform CI matrix](150-multi-platform-ci.md) | ⏳ (P1) |
 
 ## How to claim a TODO
 
