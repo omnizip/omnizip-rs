@@ -375,20 +375,43 @@ pub fn encode_huffman(input: &[u8]) -> Result<Vec<u8>, EncodeError> {
         return encode_uncompressed(input);
     }
 
-    // ----- Static command Huffman tree (59 bits total) -----
-    bw.write_bits(0x0092_6244_1630_7003u64, 56);
-    bw.write_bits(0, 3);
+    // ----- Command Huffman tree (simple form for small command sets) -----
+    // Build a histogram of command symbols. For inputs with few unique
+    // commands, simple-form emission works and avoids needing the
+    // complex-form RLE encoder.
+    let mut cmd_histogram = vec![0u32; 704];
+    for cmd in &commands {
+        cmd_histogram[cmd.cmd_prefix as usize] += 1;
+    }
+    let (cmd_emitted, cmd_depth, cmd_bits) =
+        huffman::build_and_store_simple(&cmd_histogram, 704, 10, &mut bw);
+    if !cmd_emitted {
+        return encode_uncompressed(input);
+    }
 
-    // ----- Static distance Huffman tree (28 bits) -----
-    bw.write_bits(0x0369_dc03u64, 28);
+    // ----- Distance Huffman tree (simple form) -----
+    let mut dist_histogram = vec![0u32; 64];
+    for cmd in &commands {
+        if cmd.copy_len > 0 {
+            let dist_code = (cmd.dist_prefix & 0x3ff) as usize;
+            if dist_code < 64 {
+                dist_histogram[dist_code] += 1;
+            }
+        }
+    }
+    let (dist_emitted, dist_depth, dist_bits) =
+        huffman::build_and_store_simple(&dist_histogram, 64, 6, &mut bw);
+    if !dist_emitted {
+        return encode_uncompressed(input);
+    }
 
     // ----- Emit data: commands + literals + distances -----
     pos = 0;
     for cmd in &commands {
         let cmd_code = cmd.cmd_prefix as usize;
         bw.write_bits(
-            u64::from(static_codes::K_STATIC_COMMAND_CODE_BITS[cmd_code]),
-            u32::from(static_codes::K_STATIC_COMMAND_CODE_DEPTH[cmd_code]),
+            u64::from(cmd_bits[cmd_code]),
+            u32::from(cmd_depth[cmd_code]),
         );
 
         let inscode = commands::get_insert_length_code(cmd.insert_len as usize);
@@ -418,8 +441,8 @@ pub fn encode_huffman(input: &[u8]) -> Result<Vec<u8>, EncodeError> {
             let distnumextra = u32::from(cmd.dist_prefix >> 10);
             let distextra = cmd.dist_extra & 0x00FF_FFFF;
             bw.write_bits(
-                u64::from(static_codes::K_STATIC_DISTANCE_CODE_BITS[dist_code]),
-                u32::from(static_codes::K_STATIC_DISTANCE_CODE_DEPTH[dist_code]),
+                u64::from(dist_bits[dist_code]),
+                u32::from(dist_depth[dist_code]),
             );
             if distnumextra > 0 {
                 bw.write_bits(u64::from(distextra), distnumextra);
