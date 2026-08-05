@@ -292,7 +292,15 @@ pub fn encode_huffman(input: &[u8]) -> Result<Vec<u8>, EncodeError> {
     }
 
     let commands = build_commands(input);
-    if commands.is_empty() {
+    // Only attempt Huffman coding if we found at least one real LZ77
+    // match (not just the synthetic trailing command). Otherwise the
+    // trailing command would produce extra bytes the decoder would
+    // have to discard, and our encoder doesn't handle that case
+    // correctly. Fall back to uncompressed.
+    let has_real_match = commands
+        .iter()
+        .any(|c| !c.use_last_distance && c.copy_len >= 4);
+    if !has_real_match {
         return encode_uncompressed(input);
     }
 
