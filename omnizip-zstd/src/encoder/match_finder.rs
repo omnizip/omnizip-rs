@@ -619,7 +619,14 @@ fn find_best_match_chain(
     }
     ms.hash_table[h as usize] = ip as u32;
 
-    let max_extend = limit.saturating_sub(ip).min(BLOCK_MAX_SIZE);
+    // Use the SAME count_match limit as `probe_match` so lazy / lazy2
+    // look-ahead comparisons aren't biased by inconsistent length
+    // caps. Previously this used `limit - ip` which gave chain-found
+    // matches a tighter cap than probe matches, causing the lazy2
+    // deferral check to spuriously fire on long matches and stall
+    // the encoder at one-position-at-a-time on highly repetitive
+    // inputs (TODO: ZSTD L12+ regression).
+    let max_extend = (limit + MIN_MATCH).saturating_sub(ip).min(BLOCK_MAX_SIZE);
     let mut best_len: usize = 0;
     let mut best_dist: usize = 0;
     let max_walk = ms.max_chain;
