@@ -168,7 +168,8 @@ the new items document the path forward.
 | 165 | [LZMA real reusable state](165-lzma-real-reusable-state.md) | ✅ (`LzmaCompressor` + `MatchFinder::reuse` landed) |
 | 166 | [FLAC remainder — finish 10× gap](166-flac-remainder.md) | ⏳ (P2) |
 | 167 | [ricepp remainder — unary emission](167-ricepp-remainder.md) | ⏳ (P2) |
-| 168 | [Brotli Huffman-coded encoder — static tree path](168-brotli-huffman-static-tree.md) | ⏳ (P0 — TODO 117 Phase C.3a) |
+| 168 | [Brotli Huffman-coded encoder — static tree path](168-brotli-huffman-static-tree.md) | 🔄 (foundation landed: static_codes + commands + huffman modules; wire-format bugs being traced) |
+| 169 | [Brotli Huffman wire-format debugging](169-brotli-huffman-wire-format-debug.md) | ⏳ (P0 — TODO 168 continuation; isolates the remaining bit-level bugs) |
 
 ## How to claim a TODO
 
