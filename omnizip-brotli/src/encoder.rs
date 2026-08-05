@@ -220,7 +220,7 @@ fn build_commands(input: &[u8]) -> Vec<commands::BrotliCommand> {
                     // (our simplification), distance `d` maps to code
                     // `d + NUM_DISTANCE_SHORT_CODES - 1` = `d + 15`.
                     let dist_code = (max_dist + 15) as u32;
-                    let (dist_prefix, dist_nbits, dist_extra_value) =
+                    let (dist_code_packed, _dist_nbits, dist_extra_value) =
                         prefix_encode_copy_distance(dist_code, 0, 0);
                     let cmd_prefix = get_length_code(insert_len, mlen, false);
                     cmds.push(BrotliCommand {
@@ -229,8 +229,9 @@ fn build_commands(input: &[u8]) -> Vec<commands::BrotliCommand> {
                         distance: max_dist as u32,
                         use_last_distance: false,
                         cmd_prefix,
-                        dist_prefix,
-                        dist_extra: (dist_nbits << 24) | dist_extra_value,
+                        // dist_prefix packs (nbits << 10) | code, matching upstream.
+                        dist_prefix: dist_code_packed,
+                        dist_extra: dist_extra_value,
                     });
                     let end = pos + mlen;
                     let mut ip = pos + 1;
@@ -317,14 +318,12 @@ pub fn encode_huffman(input: &[u8]) -> Result<Vec<u8>, EncodeError> {
     // ----- Frame header -----
     bw.write_bit(false);
 
-    // ----- Metablock header (ISLAST=1) -----
+    // ----- Metablock header (ISLAST=0 path, matching upstream's pattern) -----
     let mlen_field = (input.len() as u64).saturating_sub(1);
-    bw.write_bit(true); // ISLAST
-    bw.write_bit(false); // ISLASTEMPTY
+    bw.write_bit(false); // ISLAST=0
     bw.write_bits(0, 2); // MNIBBLES=0 → 4 nibbles
     bw.write_bits(mlen_field, 16);
     bw.write_bit(false); // IS_UNCOMPRESSED=0
-    bw.write_bit(false); // reserved
 
     // ----- 13 zero bits (block-types + distance + context prelude) -----
     bw.write_bits(0, 13);
@@ -389,6 +388,12 @@ pub fn encode_huffman(input: &[u8]) -> Result<Vec<u8>, EncodeError> {
     }
 
     bw.pad_to_byte();
+
+    // ----- Terminator: ISLAST=1, ISLASTEMPTY=1, byte-align -----
+    bw.write_bit(true); // ISLAST
+    bw.write_bit(true); // ISLASTEMPTY
+    bw.pad_to_byte();
+
     Ok(bw.finish())
 }
 
