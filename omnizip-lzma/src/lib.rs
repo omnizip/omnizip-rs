@@ -59,7 +59,7 @@ pub use dictionary::Dictionary;
 pub use encoder::{lzma_alone_compress, lzip_compress, xz_compress, Lzma1Encoder,
                    MatchFinder};
 pub use encoder::alone::{
-    lzma_alone_compress_with_options, LzmaOptions, LC_LP_SUM_MAX, MAX_DICT_SIZE,
+    lzma_alone_compress_with_options, LzmaOptions, ResetMode, LC_LP_SUM_MAX, MAX_DICT_SIZE,
     MAX_LC, MAX_LP, MAX_PB, MIN_DICT_SIZE,
 };
 pub use encoder::lzma2::encode_lzma2_stream_with_options;
