@@ -1,0 +1,67 @@
+name: Differential
+
+# Differential parity tests against reference implementations.
+#
+# Pins for the reference C tools:
+# - xz-utils: required for xz + lzma + lzip tests
+# - zstd: required for zstd round-trips
+# - bzip2: required for bzip2 tests
+# - flac: required for flac tests
+# - brotli: required for brotli tests
+#
+# The Ruby omnizip reference (for cross-language parity) is pinned in
+# tests/differential/ruby-ref.txt. It runs only on Linux where Ruby is
+# readily available.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    # Nightly at 03:00 UTC — catches reference-SHA drift.
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  differential-linux:
+    name: differential (linux)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry + index
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install C reference tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            xz-utils zstd libflac-dev bzip2 brotli
+
+      - name: Install Ruby + omnizip
+        run: |
+          sudo apt-get install -y --no-install-recommends ruby ruby-dev
+          gem install bundler
+          (cd /tmp && git clone --depth 1 "$(awk 'NR==1' tests/differential/ruby-ref.txt | tr -d '\n' || echo 'https://github.com/omnizip/omnizip')" omnizip-ruby || true)
+
+      - name: Build
+        run: cargo build --workspace --release
+
+      - name: Run differential harness
+        run: cargo test --workspace --release --test differential
+        timeout-minutes: 30
+
+      - name: Upload failure artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: differential-failures
+          path: tests/differential/failures/
+          retention-days: 30
