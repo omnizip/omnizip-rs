@@ -117,10 +117,20 @@ the new items document the path forward.
 | 114 | [Shared match-finder (DRY)](114-shared-match-finder.md) | ⏳ (P1 — pure DRY) |
 | 115 | [Shared bitstream (DRY)](115-shared-bitstream.md) | ⏳ (P2 — DRY) |
 | 116 | [DEFLATE dynamic-Huffman](116-deflate-dynamic-huffman.md) | ⏳ (P1 — 10-20% ratio) |
-| 117 | [Brotli full pure-Rust port](117-brotli-full-port.md) | ⏳ (P0 — workspace convention) |
-| 118 | [PPMd context-tree init profiling](118-ppmd-context-tree-init.md) | ⏳ (P2 — small-chunk overhead) |
+| 117 | [Brotli full pure-Rust port](117-brotli-full-port.md) | 🔄 (Phase A landed in #89) |
+| 118 | [PPMd context-tree init profiling](118-ppmd-context-tree-init.md) | ✅ (`PpmdCompressor` landed in #87) |
 | 119 | [Codec streaming API](119-codec-streaming-api.md) | ⏳ (P2 — LimniFS scaling) |
 | 120 | [Continuous differential harness](120-continuous-differential-harness.md) | ⏳ (P1 — regression safety) |
+| 121 | [ZSTD L12+ repetition regression](121-zstd-l12-repetition-regression.md) | ✅ (length-cap alignment fix in #90) |
+| 122 | [LZMA → shared match finder](122-lzma-use-shared-match-finder.md) | ⏳ (P2 — DRY) |
+| 123 | [LZ4 HC → shared match finder](123-lz4-hc-use-shared-match-finder.md) | ⏳ (P2 — DRY) |
+| 124 | [libdeflate → shared match finder](124-libdeflate-use-shared-match-finder.md) | ⏳ (P2 — DRY) |
+| 125 | [ZSTD → shared match finder](125-zstd-use-shared-match-finder.md) | ⏳ (P1 — biggest DRY) |
+| 126 | [Differential fuzz testing](126-differential-fuzz-testing.md) | ⏳ (P1 — regression safety) |
+| 127 | [Codec parallel batch](127-codec-parallel-batch.md) | ⏳ (P2 — throughput) |
+| 128 | [Per-codec memory budgets](128-per-codec-memory-budgets.md) | ⏳ (P2 — embedded) |
+| 129 | [Shared checksum finish](129-shared-checksum-finish.md) | ⏳ (P2 — DRY) |
+| 130 | [Brotli Phase B — Huffman + block-type](130-brotli-phase-b-huffman-blocktype.md) | ⏳ (P0 — TODO 117 continuation) |
 
 ## How to claim a TODO
 
