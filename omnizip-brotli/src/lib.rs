@@ -14,6 +14,7 @@
 #![warn(clippy::pedantic)]
 
 pub mod decoder;
+pub mod dictionary;
 
 use std::io::{self, Cursor};
 

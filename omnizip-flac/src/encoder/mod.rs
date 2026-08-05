@@ -22,6 +22,7 @@
 #![forbid(unsafe_code)]
 
 pub mod bitwriter;
+pub mod fft;
 pub mod frame;
 pub mod lpc;
 pub mod rice;

@@ -19,6 +19,11 @@ omnizip-codecs.workspace = true
 # --features omnizip-flac/simd-lpc. Adds a dependency on `wide`.
 default = []
 simd-lpc = ["dep:wide"]
+# Enable FFT-based autocorrelation (O(N log N) instead of O(N*max_order)).
+# Off by default to keep the scalar path as the deterministic baseline;
+# turn on with --features omnizip-flac/fft-acf. Adds no deps (pure-Rust
+# iterative radix-2 FFT in encoder/fft.rs).
+fft-acf = []
 
 [dependencies.wide]
 version = "1.6"
