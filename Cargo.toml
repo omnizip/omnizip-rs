@@ -20,6 +20,7 @@ members = [
     "omnizip-bzip2",
     "omnizip-bench",
     "tests/differential",
+    "tests/determinism",
 ]
 resolver = "2"
 
