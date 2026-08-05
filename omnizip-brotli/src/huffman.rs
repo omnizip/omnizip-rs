@@ -61,30 +61,53 @@ fn set_depth(p0: i32, pool: &mut [HuffmanTree], depth: &mut [u8], max_depth: i32
     true
 }
 
+/// Reverse the low `num_bits` bits of `bits`. Used by
+/// `BrotliConvertBitDepthsToSymbols` to produce MSB-first Huffman
+/// codes for emission into the LSB-first bitstream. Mirrors upstream
+/// `BrotliReverseBits` from entropy_encode.rs.
+fn reverse_bits(num_bits: usize, mut bits: u16) -> u16 {
+    const LUT: [u16; 16] = [
+        0x0, 0x8, 0x4, 0xc, 0x2, 0xa, 0x6, 0xe, 0x1, 0x9, 0x5, 0xd, 0x3, 0xb, 0x7, 0xf,
+    ];
+    let mut retval: u16 = LUT[(bits & 0xf) as usize];
+    let mut i = 4;
+    while i < num_bits {
+        retval <<= 4;
+        bits >>= 4;
+        retval |= LUT[(bits & 0xf) as usize];
+        i += 4;
+    }
+    retval >> (4 - (num_bits & 3)) * 1
+}
+
 /// Build canonical Huffman codes from per-symbol code lengths.
 ///
-/// Mirrors `BrotliConvertBitDepthsToSymbols`. Returns the codes array.
+/// Mirrors `BrotliConvertBitDepthsToSymbols`. **Codes are bit-reversed**
+/// before being stored, because brotli's bitstream is LSB-first within
+/// each byte but Huffman codes are conventionally MSB-first.
 #[must_use]
 pub fn convert_bit_depths_to_symbols(depth: &[u8]) -> Vec<u16> {
+    const MAX_HUFFMAN_BITS: usize = 16;
     let n = depth.len();
     let mut codes = vec![0u16; n];
-    let mut bl_count = vec![0u32; MAX_HUFFMAN_CODE_LENGTH as usize + 2];
+    let mut bl_count = [0u16; MAX_HUFFMAN_BITS];
     for &d in depth {
         if d > 0 {
             bl_count[d as usize] += 1;
         }
     }
-    let mut next_code = vec![0u16; MAX_HUFFMAN_CODE_LENGTH as usize + 2];
-    let mut code = 0u16;
-    for bits in 1..=MAX_HUFFMAN_CODE_LENGTH as usize {
-        code = (code + bl_count[bits - 1] as u16) << 1;
-        next_code[bits] = code;
+    bl_count[0] = 0;
+    let mut next_code = [0u16; MAX_HUFFMAN_BITS];
+    let mut code: i32 = 0;
+    for i in 1..MAX_HUFFMAN_BITS {
+        code = (code + bl_count[i - 1] as i32) << 1;
+        next_code[i] = code as u16;
     }
     for i in 0..n {
-        let l = depth[i];
-        if l > 0 {
-            codes[i] = next_code[l as usize];
-            next_code[l as usize] += 1;
+        if depth[i] != 0 {
+            let d = depth[i] as usize;
+            codes[i] = reverse_bits(d, next_code[d]);
+            next_code[d] += 1;
         }
     }
     codes
@@ -198,12 +221,17 @@ pub fn store_simple_form(
     }
     if count == 1 {
         // HSKIP=1, NSYM=0 → 4 bits = 0b0001.
+        // The "1" in the 2-bit HSKIP position is the decoder's marker
+        // for "simple form". Setting HSKIP=1 here matches upstream
+        // `BrotliBuildAndStoreHuffmanTreeFast` exactly.
         bw.write_bits(1, 4);
         bw.write_bits(symbols[0], u32::from(max_bits));
         return true;
     }
-    // HSKIP=0 (2 bits) + NSYM-1 (2 bits).
-    bw.write_bits(0, 2);
+    // HSKIP=1 (the "simple form" marker) + NSYM_raw=count-1.
+    // Upstream: `BrotliWriteBits(2, 1, ...)` for HSKIP, then
+    // `BrotliWriteBits(2, count-1, ...)` for NSYM-1.
+    bw.write_bits(1, 2);
     bw.write_bits((count - 1) as u64, 2);
 
     // Sort symbols by descending depth (upstream convention).
@@ -298,16 +326,32 @@ mod tests {
 
     #[test]
     fn convert_bit_depths_basic() {
+        // Canonical assignment + bit reversal (brotli emits Huffman
+        // codes MSB-first into the LSB-first bitstream).
+        // depth [2, 1, 3, 3]:
+        //   len=1: sym 1 → next_code=0 → reverse_bits(1, 0) = 0
+        //   len=2: sym 0 → next_code=0+0=0... wait, next_code[2] = 0
+        //          Hmm actually next_code[2] is set by (0+0)<<1 = 0.
+        //          next_code[3] = (0+1)<<1 = 2.
+        //   So sym 0 (len 2): code 0 → reverse_bits(2, 0) = 0b00 reversed = 0b00 = 0
+        //   Wait, code 0 for len 2 = "00" MSB-first. Reversed for 2 bits: "00" = 0.
+        //   Hmm let me just compute via the algorithm.
         let depth = vec![2, 1, 3, 3];
         let bits = convert_bit_depths_to_symbols(&depth);
-        // Canonical: sorted by length then symbol.
-        // len=1: sym 1 → 0
-        // len=2: sym 0 → 10
-        // len=3: sym 2 → 110, sym 3 → 111
-        assert_eq!(bits[1], 0);
-        assert_eq!(bits[0], 0b10);
-        assert_eq!(bits[2], 0b110);
-        assert_eq!(bits[3], 0b111);
+        // Canonical codes (before reversal):
+        //   sym 1 (len 1): code 0
+        //   sym 0 (len 2): code 10 = 2
+        //   sym 2 (len 3): code 110 = 6
+        //   sym 3 (len 3): code 111 = 7
+        // After bit-reversal for emission:
+        //   sym 1: 0 → 0 (1 bit reversed)
+        //   sym 0: 10 → 01 = 1 (2 bits reversed)
+        //   sym 2: 110 → 011 = 3 (3 bits reversed)
+        //   sym 3: 111 → 111 = 7 (3 bits reversed)
+        assert_eq!(bits[1], 0); // reversed 0
+        assert_eq!(bits[0], 1); // reversed 10
+        assert_eq!(bits[2], 3); // reversed 110
+        assert_eq!(bits[3], 7); // reversed 111
     }
 
     #[test]
