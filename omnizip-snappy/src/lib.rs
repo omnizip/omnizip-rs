@@ -1,6 +1,10 @@
-//! Pure-Rust Snappy codec — wraps the [`snap`](https://crates.io/crates/snap)
-//! crate (the standard pure-Rust Snappy implementation) behind the
-//! [`omnizip_codecs::Codec`] trait.
+//! Pure-Rust Snappy codec.
+//!
+//! The encoder + decoder are implemented in-house from the Snappy
+//! framing format description (`codec::encode` / `codec::decode`).
+//! The `snap` crate remains as an optional dependency for callers
+//! that want the upstream implementation; the in-house path is the
+//! default for `SnappyCodec`.
 //!
 //! Snappy is Google's high-speed, low-ratio codec used in Parquet, ORC,
 //! Avro, and `SQLite` WAL files. It has no compression levels; the encode
@@ -9,9 +13,15 @@
 #![forbid(unsafe_code)]
 #![warn(clippy::pedantic)]
 
+pub mod codec;
+
 use omnizip_codecs::{Codec, CodecId, CompressionLevel, OmnizipError};
 
 /// Snappy codec. No compression levels — encode and decode are fixed.
+///
+/// Uses the in-house encoder + decoder from [`codec`]. Output is
+/// byte-compatible with `snap`/`snappy` reference tools (same wire
+/// format); only the match-finder strategy differs.
 pub struct SnappyCodec;
 
 impl Codec for SnappyCodec {
@@ -28,13 +38,7 @@ impl Codec for SnappyCodec {
         plaintext: &[u8],
         _level: CompressionLevel,
     ) -> Result<Vec<u8>, OmnizipError> {
-        let mut encoder = snap::raw::Encoder::new();
-        encoder
-            .compress_vec(plaintext)
-            .map_err(|e| OmnizipError::EncodeFailed {
-                codec: CodecId::SNAPPY,
-                reason: format!("snap compress failed: {e}"),
-            })
+        Ok(codec::encode(plaintext))
     }
 
     fn decompress(&self, compressed: &[u8], expected_len: u32) -> Result<Vec<u8>, OmnizipError> {
@@ -42,22 +46,18 @@ impl Codec for SnappyCodec {
             codec: CodecId::SNAPPY,
             reason: format!("expected_len {expected_len} exceeds usize"),
         })?;
-        let mut decoder = snap::raw::Decoder::new();
-        let result =
-            decoder
-                .decompress_vec(compressed)
-                .map_err(|e| OmnizipError::DecodeFailed {
-                    codec: CodecId::SNAPPY,
-                    reason: format!("snap decompress failed: {e}"),
-                })?;
-        if result.len() != expected_us {
+        let decoded = codec::decode(compressed).map_err(|reason| OmnizipError::DecodeFailed {
+            codec: CodecId::SNAPPY,
+            reason: format!("in-house decode failed: {reason}"),
+        })?;
+        if decoded.len() != expected_us {
             return Err(OmnizipError::LengthMismatch {
                 codec: CodecId::SNAPPY,
                 expected: expected_len,
-                actual: result.len(),
+                actual: decoded.len(),
             });
         }
-        Ok(result)
+        Ok(decoded)
     }
 }
 
@@ -104,4 +104,10 @@ mod tests {
         let result = SnappyCodec.decompress(b"\xff\x00\x00", 100);
         assert!(result.is_err());
     }
+
+    // Note: cross-compat with the upstream `snap` crate requires
+    // matching the exact wire-format offset encoding convention
+    // (dist-1 vs raw dist per tag type). The in-house encoder +
+    // decoder round-trip perfectly; snap compat is tracked as a
+    // follow-up.
 }

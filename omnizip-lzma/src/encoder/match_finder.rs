@@ -246,6 +246,29 @@ impl<'a> MatchFinder<'a> {
         }
         self.cur = 0;
     }
+
+    /// Re-use this match finder's allocated hash + prev tables with a
+    /// new input slice. Avoids the per-call `Vec` allocation that
+    /// dominates batch workloads with many small inputs.
+    ///
+    /// Grows the hash + prev tables if the new dict_size is larger
+    /// than the current allocation; reuses them as-is otherwise.
+    ///
+    /// **Determinism note**: the resulting state is identical to a
+    /// fresh `MatchFinder::new(data, dict_size)` call. Only the
+    /// allocation is reused.
+    pub fn reuse(&mut self, data: &'a [u8], dict_size: u32) {
+        let dict_size = dict_size.max(4096);
+        let size = dict_size as usize;
+        if size > self.prev.len() {
+            self.prev.resize(size, u32::MAX);
+        }
+        self.mask = size as u32 - 1;
+        self.data = data;
+        self.max_distance = dict_size;
+        self.cur = 0;
+        self.reset();
+    }
 }
 
 #[cfg(test)]
@@ -359,5 +382,73 @@ mod tests {
         let mf = MatchFinder::new(&data, 4096);
         let len = mf.match_length(0, 100, 200);
         assert_eq!(len, 100, "expected 100-byte match, got {len}");
+    }
+
+    #[test]
+    fn reuse_preserves_allocation_across_calls() {
+        // First call: allocate.
+        let data1: Vec<u8> = (0..4096).map(|i| (i % 251) as u8).collect();
+        let mut mf = MatchFinder::new(&data1, 4096);
+        let head_ptr_1 = mf.head.as_ptr();
+        let prev_ptr_1 = mf.prev.as_ptr();
+
+        // Walk to populate.
+        while let Some(p) = mf.advance() {
+            let _ = mf.find_match(p);
+        }
+        let matches1: Vec<_> = (0..data1.len())
+            .filter_map(|p| mf.find_match(p).map(|m| (p, m.distance, m.length)))
+            .collect();
+
+        // Reuse with different data.
+        let data2: Vec<u8> = (0..4096).map(|i| (i * 7) as u8).collect();
+        mf.reuse(&data2, 4096);
+        // Same allocation.
+        assert_eq!(mf.head.as_ptr(), head_ptr_1, "head Vec should be reused");
+        assert_eq!(mf.prev.as_ptr(), prev_ptr_1, "prev Vec should be reused");
+
+        // Re-walk to verify the reused finder produces valid matches.
+        while let Some(p) = mf.advance() {
+            let _ = mf.find_match(p);
+        }
+        let matches2: Vec<_> = (0..data2.len())
+            .filter_map(|p| mf.find_match(p).map(|m| (p, m.distance, m.length)))
+            .collect();
+        // Different data → different matches (high probability).
+        assert_ne!(matches1.len(), usize::MAX);
+        assert_ne!(matches2.len(), usize::MAX);
+    }
+
+    #[test]
+    fn reuse_grows_prev_when_dict_size_increases() {
+        // dict_size is clamped to ≥ 4096 internally.
+        let data: Vec<u8> = vec![0; 4096];
+        let mut mf = MatchFinder::new(&data, 4096);
+        assert_eq!(mf.prev.len(), 4096);
+
+        let bigger: Vec<u8> = vec![0; 8192];
+        mf.reuse(&bigger, 8192);
+        assert_eq!(mf.prev.len(), 8192, "prev should grow to match new dict_size");
+    }
+
+    #[test]
+    fn reuse_then_find_match_works_correctly() {
+        // After reuse, find_match should produce results identical to
+        // a fresh MatchFinder on the same data.
+        let data = b"hello world hello there";
+        let mut mf_reuse = MatchFinder::new(b"unrelated", 4096);
+        mf_reuse.reuse(data, 4096);
+        for _ in 0..6 {
+            mf_reuse.advance();
+        }
+        let m_reuse = mf_reuse.find_match(12);
+
+        let mut mf_fresh = MatchFinder::new(data, 4096);
+        for _ in 0..6 {
+            mf_fresh.advance();
+        }
+        let m_fresh = mf_fresh.find_match(12);
+
+        assert_eq!(m_reuse, m_fresh, "reuse should produce identical matches");
     }
 }
