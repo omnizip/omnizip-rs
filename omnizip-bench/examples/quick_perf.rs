@@ -78,20 +78,20 @@ fn bench_zpaq(text: &[u8]) {
 
 fn bench_zstd(text: &[u8]) {
     let codec = ZstdCodec::new();
-    // Note: ZSTD has a perf cliff on text inputs ≥ 8KB at all levels
-    // (likely O(N²) in the block/sequence assembly). Filed as a TODO;
-    // for now we only bench on small inputs to avoid stalling.
-    let bench_input = &text[..text.len().min(4096)];
-    for &level in &[1u8, 3, 9] {
+    // Now that the backward-extension infinite-loop bug is fixed,
+    // ZSTD runs at full speed on text inputs.
+    for &level in &[1u8, 3, 9, 19] {
         let t = Instant::now();
         let out = codec
-            .compress(black_box(bench_input), CompressionLevel::new(level))
+            .compress(black_box(text), CompressionLevel::new(level))
             .expect("compress");
         let elapsed = t.elapsed();
-        let mbps = (bench_input.len() as f64 / 1e6) / elapsed.as_secs_f64();
-        let ratio = (bench_input.len() as f64) / (out.len() as f64);
+        let mbps = (text.len() as f64 / 1e6) / elapsed.as_secs_f64();
+        let ratio = (text.len() as f64) / (out.len() as f64);
         println!(
-            "zstd-{level} (4KB): {mbps:>5.1} MB/s  ratio={ratio:>5.2}×  in {:.3}s",
+            "zstd-{level:>2}: {mbps:>5.1} MB/s  ratio={ratio:>5.2}×  ({} → {} bytes) in {:.2}s",
+            text.len(),
+            out.len(),
             elapsed.as_secs_f64()
         );
     }
