@@ -24,10 +24,13 @@
 #![forbid(unsafe_code)]
 #![warn(clippy::pedantic)]
 
+pub mod commands;
 pub mod decoder;
 pub mod dictionary;
 pub mod encoder;
 pub mod encoder_error;
+pub mod huffman;
+pub mod static_codes;
 
 use omnizip_codecs::{Codec, CodecId, CompressionLevel, OmnizipError};
 
