@@ -113,10 +113,10 @@ pub fn build_huffman_tree(histogram: &[u32], alphabet_size: usize) -> (Vec<u8>, 
         return (depth, bits);
     }
     if active.len() == 1 {
-        // Brotli's simple-form convention for 1-symbol alphabets:
-        // the symbol gets code length 0 (no bits emitted per use).
-        // All other symbols have code length 0 (not in alphabet).
-        depth[active[0].1] = 0;
+        // Single-symbol case: assign 1-bit code. The encoder typically
+        // adds a dummy second symbol (handled at the call site) to
+        // avoid the encoder/decoder mismatch in NSYM=1 simple-form.
+        depth[active[0].1] = 1;
         let bits = convert_bit_depths_to_symbols(&depth);
         return (depth, bits);
     }
@@ -262,14 +262,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn single_symbol_alphabet_gets_zero_depth() {
-        // Brotli's simple-form convention: 1-symbol alphabets use
-        // code length 0 (no bits per use). Matches upstream
-        // `BrotliBuildAndStoreHuffmanTreeFast`.
+    fn single_symbol_alphabet_gets_one_bit_code() {
+        // Single-symbol case: 1-bit code. The encoder's call site
+        // adds a dummy second symbol to keep the decoder's simple-form
+        // path well-defined (see encode_huffman).
         let mut histo = vec![0u32; 4];
         histo[2] = 10;
         let (depth, _bits) = build_huffman_tree(&histo, 4);
-        assert_eq!(depth[2], 0);
+        assert_eq!(depth[2], 1);
     }
 
     #[test]

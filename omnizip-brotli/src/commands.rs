@@ -101,6 +101,40 @@ pub fn get_length_code(insertlen: usize, copylen: usize, use_last_distance: bool
     combine_length_codes(inscode, copycode, use_last_distance)
 }
 
+/// Initial distance cache values used by both the encoder and
+/// decoder. The decoder's `dist_rb` is the reverse of this
+/// (dist_rb = [16, 15, 11, 4]), but `ComputeDistanceCode` and the
+/// decoder's `TakeDistanceFromRingBuffer` agree on the semantics.
+pub const INITIAL_DIST_CACHE: [i32; 4] = [4, 11, 15, 16];
+
+/// Compute the distance code for a raw distance given the current
+/// dist cache. Ported from upstream `ComputeDistanceCode`.
+///
+/// Returns a value in 0..15 (short code, references the cache) or
+/// 16+ (complex code, direct distance encoding).
+#[must_use]
+pub fn compute_distance_code(distance: u32, max_distance: u32, dist_cache: &[i32; 4]) -> u32 {
+    if distance <= max_distance {
+        let distance_plus_3 = distance.wrapping_add(3);
+        let offset0 = distance_plus_3.wrapping_sub(dist_cache[0] as u32);
+        let offset1 = distance_plus_3.wrapping_sub(dist_cache[1] as u32);
+        if distance == dist_cache[0] as u32 {
+            return 0;
+        } else if distance == dist_cache[1] as u32 {
+            return 1;
+        } else if offset0 < 7 {
+            return u32::try_from(0x0975_0468_i32 >> (4 * offset0) & 0xF).unwrap_or(16);
+        } else if offset1 < 7 {
+            return u32::try_from(0x0fdb_1ace_i32 >> (4 * offset1) & 0xF).unwrap_or(16);
+        } else if distance == dist_cache[2] as u32 {
+            return 2;
+        } else if distance == dist_cache[3] as u32 {
+            return 3;
+        }
+    }
+    distance.wrapping_add(16).wrapping_sub(1)
+}
+
 /// Distance code prefix encoding (RFC 7932 §10.4).
 ///
 /// Returns `(code, extra_bits_count, extra_bits_value)`.
