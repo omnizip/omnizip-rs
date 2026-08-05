@@ -6,7 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
-description = "Pure-Rust Brotli codec — wraps the brotli crate behind the omnizip Codec trait"
+description = "Pure-Rust Brotli codec — from-spec RFC 7932 implementation behind the omnizip Codec trait"
 keywords = ["compression", "brotli", "codec"]
 categories = ["compression"]
 
@@ -16,7 +16,6 @@ path = "src/lib.rs"
 
 [dependencies]
 omnizip-codecs.workspace = true
-brotli.workspace = true
 
 [lints]
 workspace = true

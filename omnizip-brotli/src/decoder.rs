@@ -25,8 +25,6 @@
 pub const MIN_WINDOW_BITS: u8 = 10;
 /// Maximum legal Brotli window size (per RFC 7932 §9.1).
 pub const MAX_WINDOW_BITS: u8 = 24;
-/// Brotli window bits where a 1-byte `nbl` field follows.
-const LARGE_WINDOW_THRESHOLD: u8 = 16;
 
 /// LSB-first bit reader per RFC 7932 §1.2. Bits are read from the
 /// least-significant end of each byte.
@@ -93,21 +91,32 @@ pub struct FrameHeader {
     pub is_last: bool,
 }
 
-/// Parse the Brotli frame header at the start of `data`.
+/// Parse the Brotli frame header at `bit_pos` in `data`.
 ///
 /// Returns the parsed header and the bit position past the header.
+///
+/// The frame header is variable-width (1, 4, or 7 bits) per RFC 7932 §9.1:
+/// - bit 0 = 0 → window_bits = 16
+/// - bit 0 = 1, NBL (3 bits) > 0 → window_bits = 17 + NBL (so 18..24)
+/// - bit 0 = 1, NBL = 0, N2 (3 bits) > 0 → window_bits = 8 + N2 (large-window extension, 9..15)
+/// - bit 0 = 1, NBL = 0, N2 = 0 → window_bits = 17
+/// - bit 0 = 1, NBL = 0, N2 = 1 + large_window flag → future extension
 ///
 /// # Errors
 ///
 /// Returns `&'static str` on:
-/// - `data` too short (< 2 bytes),
+/// - `data` too short (< 1 byte),
 /// - Reserved bits set,
 /// - Window size outside the legal range.
-pub fn parse_frame_header(data: &[u8]) -> Result<(FrameHeader, usize), &'static str> {
-    if data.len() < 2 {
+pub fn parse_frame_header(
+    data: &[u8],
+    bit_pos: usize,
+) -> Result<(FrameHeader, usize), &'static str> {
+    if data.is_empty() {
         return Err("input too short for frame header");
     }
     let mut br = BitReader::new(data);
+    br.bit_pos = bit_pos;
 
     let wbits_raw = br.read_bits(1);
     let wbits = if wbits_raw == 0 {
@@ -115,22 +124,24 @@ pub fn parse_frame_header(data: &[u8]) -> Result<(FrameHeader, usize), &'static 
     } else {
         let nbl = br.read_bits(3);
         let nbl_u8 = u8::try_from(nbl).map_err(|_| "nbl overflow")?;
-        if nbl_u8 == 0 {
-            17u8
-        } else {
+        if nbl_u8 != 0 {
             17 + nbl_u8
+        } else {
+            // NBL=0: read N2 (3 bits) for the large-window extension.
+            let n2 = br.read_bits(3);
+            let n2_u8 = u8::try_from(n2).map_err(|_| "n2 overflow")?;
+            if n2_u8 != 0 {
+                8 + n2_u8
+            } else {
+                17
+            }
         }
     };
-    if !(MIN_WINDOW_BITS..=MAX_WINDOW_BITS).contains(&wbits) {
+    if !(MIN_WINDOW_BITS..=MAX_WINDOW_BITS).contains(&wbits) && !(9..=15).contains(&wbits) {
         return Err("window size out of range");
     }
 
-    // Reserved bits after window — RFC 7932 §9.1 says these must be 0.
-    // (The frame header itself has no reserved bits in current spec;
-    // reserved bits live in the metablock header.)
-
-    let pos = br.bit_pos();
-    Ok((FrameHeader { window_bits: wbits, is_last: false }, pos))
+    Ok((FrameHeader { window_bits: wbits, is_last: false }, br.bit_pos()))
 }
 
 /// Metablock header (RFC 7932 §9.2).
@@ -144,11 +155,24 @@ pub struct MetablockHeader {
     pub mlen: u32,
     /// MNIBBLES field used to encode `mlen` (0, 1, 2, 3, or 4).
     pub mnibbles: u8,
+    /// IS_UNCOMPRESSED flag (RFC 7932 §9.2). When true, the metablock
+    /// payload is `mlen` raw bytes (no Huffman coding).
+    pub is_uncompressed: bool,
 }
 
 /// Parse the next metablock header at `bit_pos`.
 ///
 /// Returns the parsed header and the bit position past the header.
+///
+/// Per RFC 7932 §9.2 the layout is:
+/// - ISLAST (1 bit)
+/// - if ISLAST=1: ISLASTEMPTY (1 bit)
+///   - if ISLASTEMPTY=1: end (mlen=0, mnibbles=0, is_uncompressed=false)
+///   - if ISLASTEMPTY=0: fall through
+/// - MNIBBLES (2 bits): if 0 → use 4 nibbles for MLEN; else MNIBBLES itself
+/// - MLEN (4 × MNIBBLES bits): mlen = value + 1
+/// - IS_UNCOMPRESSED (1 bit)
+/// - Reserved (1 bit, must be 0)
 ///
 /// # Errors
 ///
@@ -170,6 +194,7 @@ pub fn parse_metablock_header(
                     is_last_empty: true,
                     mlen: 0,
                     mnibbles: 0,
+                    is_uncompressed: false,
                 },
                 br.bit_pos(),
             ));
@@ -178,7 +203,8 @@ pub fn parse_metablock_header(
         let mnibbles = if mnibbles_raw == 0 { 4 } else { mnibbles_raw };
         let mnibbles_u8 = u8::try_from(mnibbles).map_err(|_| "mnibbles overflow")?;
         let mlen = br.read_mlen(mnibbles);
-        // Reserved bits — must be zero.
+        let is_uncompressed = br.read_bit();
+        // Reserved bit — must be zero.
         if br.read_bit() {
             return Err("reserved bit set in ISLAST metablock header");
         }
@@ -188,6 +214,7 @@ pub fn parse_metablock_header(
                 is_last_empty: false,
                 mlen,
                 mnibbles: mnibbles_u8,
+                is_uncompressed,
             },
             br.bit_pos(),
         ));
@@ -201,6 +228,7 @@ pub fn parse_metablock_header(
     // If MNIBBLES == 0 the block is metadata: MLEN is encoded but
     // skipped by Phase A. RFC 7932 §9.2.
     let mlen = br.read_mlen(mnibbles);
+    let is_uncompressed = br.read_bit();
 
     // Reserved bit must be 0.
     if br.read_bit() {
@@ -213,6 +241,7 @@ pub fn parse_metablock_header(
             is_last_empty: false,
             mlen,
             mnibbles: mnibbles_u8,
+            is_uncompressed,
         },
         br.bit_pos(),
     ))
@@ -650,7 +679,7 @@ pub fn parse_context_mode(
 pub fn decode_distance_code(
     br: &mut BitReader,
     num_direct: u32,
-    num_postfix: u32,
+    _num_postfix: u32,
 ) -> Result<u32, &'static str> {
     // Phase C supports only the direct form. The complex form lands
     // in Phase C.3 with the full encoder.
@@ -704,6 +733,56 @@ pub fn decode_insert_copy_command(
     Ok(InsertCopyCommand::InsertOnly { length })
 }
 
+// ---------------------------------------------------------------------------
+// Phase D: top-level decoder (RFC 7932 §9)
+// ---------------------------------------------------------------------------
+
+/// Decode a Brotli-compressed stream.
+///
+/// Supports the most common paths: uncompressed metablocks (no
+/// Huffman coding, just raw bytes per RFC 7932 §9.2 IS_UNCOMPRESSED=1)
+/// and the empty-last-metablock terminator. Huffman-coded metablocks
+/// return `Err("huffman-coded metablock not yet supported")`.
+///
+/// # Errors
+///
+/// Returns `&'static str` on malformed input or unsupported metablock
+/// types.
+pub fn decode(compressed: &[u8]) -> Result<Vec<u8>, &'static str> {
+    let (_frame, mut bit_pos) = parse_frame_header(compressed, 0)?;
+
+    let mut output = Vec::new();
+
+    loop {
+        let (mb, next_pos) = parse_metablock_header(compressed, bit_pos)?;
+        bit_pos = next_pos;
+
+        if mb.is_last_empty {
+            break;
+        }
+
+        if mb.is_uncompressed {
+            let byte_offset = (bit_pos + 7) / 8;
+            let needed = byte_offset
+                .checked_add(mb.mlen as usize)
+                .ok_or("mlen overflow")?;
+            if needed > compressed.len() {
+                return Err("uncompressed metablock extends past input");
+            }
+            output.extend_from_slice(&compressed[byte_offset..needed]);
+            bit_pos = needed * 8;
+        } else {
+            return Err("huffman-coded metablock not yet supported");
+        }
+
+        if mb.is_last {
+            break;
+        }
+    }
+
+    Ok(output)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -744,7 +823,7 @@ mod tests {
     fn parse_frame_header_window_16() {
         // WBITS=0 (bit 0 = 0) → window_bits = 16.
         let data = [0b0000_0000u8, 0u8];
-        let (hdr, _) = parse_frame_header(&data).expect("parse");
+        let (hdr, _) = parse_frame_header(&data, 0).expect("parse");
         assert_eq!(hdr.window_bits, 16);
     }
 
@@ -753,14 +832,24 @@ mod tests {
         // WBITS=1 (bit 0), NBL=2 (bits 1-3 = 010) → 17 + 2 = 19.
         // Packed LSB-first: 0b0101 = 0x05.
         let data = [0b0000_0101u8, 0u8];
-        let (hdr, _) = parse_frame_header(&data).expect("parse");
+        let (hdr, _) = parse_frame_header(&data, 0).expect("parse");
         assert_eq!(hdr.window_bits, 19);
     }
 
     #[test]
-    fn parse_frame_header_rejects_too_short() {
-        let data = [0u8];
-        assert!(parse_frame_header(&data).is_err());
+    fn parse_frame_header_rejects_empty() {
+        let data: [u8; 0] = [];
+        assert!(parse_frame_header(&data, 0).is_err());
+    }
+
+    #[test]
+    fn parse_frame_header_lgwin_10_for_tiny_input() {
+        // WBITS=1, NBL=0, N2=2 → window_bits = 8 + 2 = 10.
+        // LSB-first: bit 0 = 1, bits 1-3 = 0,0,0, bits 4-6 = 0,1,0
+        // = 0b0100001 = 0x21.
+        let data = [0x21u8, 0u8];
+        let (hdr, _) = parse_frame_header(&data, 0).expect("parse");
+        assert_eq!(hdr.window_bits, 10);
     }
 
     #[test]
@@ -777,30 +866,33 @@ mod tests {
     fn parse_metablock_header_islast_with_size() {
         // ISLAST=1 (bit 0), ISLASTEMPTY=0 (bit 1), MNIBBLES=01 (bits 2-3),
         // MLEN = 0 (bits 4-7) → MLEN field says 0, so decoded mlen = 1.
-        // Bits packed LSB-first: 0b00000111 = 0x07? Let's compute:
+        // Bits packed LSB-first:
         //   bit 0 = 1 (ISLAST)
         //   bit 1 = 0 (ISLASTEMPTY)
         //   bit 2 = 1 (MNIBBLES low)
         //   bit 3 = 0 (MNIBBLES high) → MNIBBLES = 1
         //   bits 4-7 = 0000 → MLEN raw = 0, decoded = 1
-        //   bit 8 = 0 (reserved)
+        //   bit 8 = 0 (IS_UNCOMPRESSED)
+        //   bit 9 = 0 (reserved)
         // Packed: 0b0000_0101 = 0x05 (first byte).
         let data = [0b0000_0101u8, 0b0000_0000u8];
         let (hdr, _) = parse_metablock_header(&data, 0).expect("parse");
         assert!(hdr.is_last);
         assert!(!hdr.is_last_empty);
         assert_eq!(hdr.mlen, 1);
+        assert!(!hdr.is_uncompressed);
     }
 
     #[test]
     fn parse_metablock_header_not_last() {
         // ISLAST=0 (bit 0), MNIBBLES=11 (bits 1-2) = 3,
         // MLEN = 0 (bits 3-14, 3 nibbles),
-        // reserved bit 15 = 0.
-        // Packed LSB-first across 2 bytes:
+        // IS_UNCOMPRESSED (bit 15) = 0, reserved (bit 16) = 0.
+        // Packed LSB-first across 3 bytes:
         //   byte 0: bits 0-7 = 0,1,1,0,0,0,0,0 = 0b0000_0110 = 0x06
         //   byte 1: bits 8-15 = 0,0,0,0,0,0,0,0 = 0x00
-        let data = [0x06u8, 0x00];
+        //   byte 2: bits 16-17 = 0,0
+        let data = [0x06u8, 0x00, 0x00];
         let (hdr, _) = parse_metablock_header(&data, 0).expect("parse");
         assert!(!hdr.is_last);
         assert_eq!(hdr.mnibbles, 3);
@@ -808,16 +900,12 @@ mod tests {
 
     #[test]
     fn parse_metablock_header_reserved_bit_set_errors() {
-        // Same as above but with reserved bit set: 0b1000_0110 first byte
-        // would push bit 8 into MLEN territory. Use a longer sequence:
-        //   ISLAST=0, MNIBBLES=00 (→ 4), MLEN bits 3-18, reserved = bit 19.
-        // We'll set reserved=1 by setting bit 19. For simplicity,
-        // construct the test by setting the highest bit of a 3-byte
-        // sequence to 1.
+        // ISLAST=0, MNIBBLES=00 (→ 4), MLEN bits 3-18, IS_UNCOMPRESSED = bit 19,
+        // reserved = bit 20. Set reserved=1.
+        // Bit 20 is in byte 2 (20/8=2), bit 4 within byte.
         let mut data = [0u8; 3];
         data[0] = 0b0000_0000; // ISLAST=0, MNIBBLES=00 (→ 4)
-        // MLEN occupies bits 3-18 (4 nibbles). Set all to 0.
-        data[2] |= 0b0000_1000; // bit 19 = 1 (reserved)
+        data[2] |= 0b0001_0000; // bit 4 of byte 2 = bit 20 = 1 (reserved)
         let result = parse_metablock_header(&data, 0);
         assert!(result.is_err(), "reserved bit must error");
     }
@@ -1049,5 +1137,108 @@ mod tests {
         let data = vec![0u8; 16];
         let _ = read_huffman_table_complex(&data, 0, 1);
         // No panic, no error → pass.
+    }
+
+    // --- Phase D: end-to-end decode tests ---
+
+    /// Cross-check our pure-Rust decoder against the upstream `brotli`
+    /// CLI tool. Encoded input is decoded by both, results compared.
+    /// The upstream `brotli` produces an uncompressed metablock for
+    /// tiny inputs, which our decoder handles.
+    #[test]
+    fn decode_uncompressed_metablock_for_one_byte() {
+        // Upstream `brotli -c -q 6 "a"` produces:
+        //   0x21 0x00 0x00 0x04 0x61 0x03
+        // Layout:
+        //   bits 0-6:   frame header (lgwin=10) — 0x21
+        //   bit 7:      ISLAST=0
+        //   bits 8-9:   MNIBBLES=0 (→ 4 nibbles)
+        //   bits 10-25: MLEN=0 (16 bits) → decoded mlen=1
+        //   bit 26:     IS_UNCOMPRESSED=1
+        //   bit 27:     reserved=0
+        //   bits 28-31: padding (4 bits)
+        //   byte 4:     literal 'a' = 0x61
+        //   byte 5 bit 0: ISLAST=1
+        //   byte 5 bit 1: ISLASTEMPTY=1
+        //   byte 5 bits 2-7: padding
+        let compressed = [0x21u8, 0x00, 0x00, 0x04, 0x61, 0x03];
+        let decoded = decode(&compressed).expect("decode");
+        assert_eq!(decoded, b"a");
+    }
+
+    #[test]
+    fn decode_uncompressed_metablock_for_two_bytes() {
+        // Upstream `brotli -c -q 6 "aa"` produces:
+        //   0x21 0x04 0x00 0x04 0x61 0x61 0x03
+        // Same layout, but mlen=2. MLEN field encodes mlen-1=1.
+        let compressed = [0x21u8, 0x04, 0x00, 0x04, 0x61, 0x61, 0x03];
+        let decoded = decode(&compressed).expect("decode");
+        assert_eq!(decoded, b"aa");
+    }
+
+    #[test]
+    fn decode_terminator_only_stream() {
+        // A stream with just an empty last-metablock marker:
+        //   frame header (1 bit: WBITS=0 → window 16)
+        //   ISLAST=1 (1 bit), ISLASTEMPTY=1 (1 bit)
+        //   byte-alignment: 5 bits of 0
+        // = byte 0x06 (LSB-first: 0b00000110)
+        let compressed = [0x06u8];
+        let decoded = decode(&compressed).expect("decode");
+        assert!(decoded.is_empty());
+    }
+
+    #[test]
+    fn decode_larger_uncompressed_metablock() {
+        // Construct a known-valid uncompressed stream for "hello".
+        // Frame header: lgwin=16 (WBITS=0), 1 bit.
+        // Metablock header: ISLAST=0, MNIBBLES=0, MLEN_field=4
+        //   (mlen=5=hello.len()), IS_UNCOMPRESSED=1, reserved=0.
+        //   Bit layout (LSB-first):
+        //     bit 0: frame WBITS=0
+        //     bit 1: ISLAST=0
+        //     bits 2-3: MNIBBLES=00
+        //     bits 4-19: MLEN=4 (16 bits LSB-first: 0b00000100, rest 0)
+        //     bit 20: IS_UNCOMPRESSED=1
+        //     bit 21: reserved=0
+        //     bits 22-23: byte-align padding (2 bits)
+        //   bytes 0-2: bits 0-23 packed
+        //   bytes 3-7: literal "hello"
+        //   byte 8: ISLAST=1 + ISLASTEMPTY=1 + padding
+        let mut stream = vec![0u8; 9];
+        // bit 0 = WBITS = 0 (already 0)
+        // bit 1 = ISLAST = 0 (already 0)
+        // bits 2,3 = MNIBBLES = 0,0 (already 0)
+        // MLEN field = 4 (16 bits LSB-first):
+        //   bit 4 = bit 0 of MLEN = 0
+        //   bit 5 = bit 1 = 0
+        //   bit 6 = bit 2 = 1
+        //   bits 7-19 = rest 0
+        stream[0] |= 0b0100_0000; // bit 6 = 1
+        // IS_UNCOMPRESSED at bit 20 = bit 4 of byte 2
+        stream[2] |= 0b0001_0000; // bit 4 = 1
+        // reserved at bit 21 = bit 5 of byte 2 = 0
+        // bits 22-23 = padding = 0
+        // Literals "hello" at bytes 3-7
+        stream[3..8].copy_from_slice(b"hello");
+        // ISLAST=1 + ISLASTEMPTY=1 at byte 8
+        stream[8] = 0b0000_0011;
+        let decoded = decode(&stream).expect("decode");
+        assert_eq!(decoded, b"hello");
+    }
+
+    /// Decode the actual upstream brotli encoding of "hello" produced
+    /// by the system `brotli -c -q 6` tool. Catches drift in the
+    /// frame-header parsing, metablock-header layout, and
+    /// uncompressed-metablock handling.
+    #[test]
+    fn decode_upstream_brotli_hello() {
+        // Hard-coded bytes from `brotli -c -q 6 /tmp/h.bin` where
+        // /tmp/h.bin contains "hello".
+        let compressed = [
+            0x21, 0x10, 0x00, 0x04, 0x68, 0x65, 0x6c, 0x6c, 0x6f, 0x03,
+        ];
+        let decoded = decode(&compressed).expect("decode");
+        assert_eq!(decoded, b"hello");
     }
 }

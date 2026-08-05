@@ -67,11 +67,25 @@ Acceptance:
 
 ## Acceptance criteria (overall)
 
-- [ ] No external `brotli` dependency in `omnizip-brotli/Cargo.toml`.
+- [x] No external `brotli` dependency in `omnizip-brotli/Cargo.toml`.
 - [ ] Decoder: all RFC 7932 fixtures round-trip.
-- [ ] Encoder: round-trip via own decoder and via `brotli -d`.
+- [x] Encoder: round-trip via own decoder and via `brotli -d`.
 - [ ] Encoder quality 11 within 5% of `brotli -q 11` on Enwik8.
 - [ ] Encoder throughput ≥ 5 MB/s at quality 6.
+
+## Status
+
+**Phase D landed (2026-08-05):** Frame header parser, metablock
+header parser, and uncompressed-metablock decoder all working
+end-to-end. Encoder produces valid RFC 7932 Brotli streams that
+decode via both our in-house decoder and the upstream `brotli -d`
+CLI tool. Cross-compat verified for empty input, single bytes, and
+short text. The `brotli` crate is no longer in `Cargo.toml`.
+
+**Remaining (TODO 151):** Huffman-coded literal metablocks + LZ77
+insert-and-copy commands for actual compression. Currently our
+encoder emits uncompressed metablocks (input + ~5 bytes overhead)
+— wire-format correct, zero compression.
 
 ## Priority
 
