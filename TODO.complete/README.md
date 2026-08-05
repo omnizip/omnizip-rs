@@ -152,6 +152,15 @@ the new items document the path forward.
 | 149 | [Per-codec READMEs](149-per-codec-readmes.md) | ⏳ (P2) |
 | 150 | [Multi-platform CI matrix](150-multi-platform-ci.md) | ⏳ (P1) |
 | 151 | [Brotli Phase C — encoder + dictionary](151-brotli-phase-c-encoder.md) | ⏳ (P0 — TODO 117 continuation) |
+| 152 | [ZSTD per-se SIMD](152-zstd-per-se-simd.md) | ⏳ (P1 — LimniFS #11) |
+| 153 | [BCJ filter coverage ARM/ARM64/IA64/SPARC/PPC](153-bcj-filter-coverage.md) | ⏳ (P2) |
+| 154 | [Deflate64 from-spec finish](154-deflate64-from-spec.md) | ⏳ (P2) |
+| 155 | [Security audit + cargo-audit CI](155-security-audit-ci.md) | ⏳ (P1) |
+| 156 | [Coverage measurement](156-coverage-measurement.md) | ⏳ (P2) |
+| 157 | [Architecture guide + ADRs](157-architecture-guide-adrs.md) | ⏳ (P2) |
+| 158 | [FSST v2 + GLZA tuning](158-fsst-v2-glza-tuning.md) | ⏳ (P2) |
+| 159 | [Filter-Codec composition](159-filter-codec-composition.md) | ⏳ (P2) |
+| 160 | [Release automation](160-release-automation.md) | ⏳ (P2) |
 
 ## How to claim a TODO
 
