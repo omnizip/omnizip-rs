@@ -181,11 +181,10 @@ pub fn deflate_dynamic_huffman(input: &[u8]) -> Result<Option<Vec<u8>>, OmnizipE
 
 /// Build canonical Huffman code lengths via the package-merge algorithm.
 ///
-/// Pure-Rust port of the standard "length-limited Huffman" construction.
-/// `lengths` is mutated to hold the resulting code length per symbol.
+/// Build canonical Huffman code lengths via the standard min-heap
+/// algorithm, then cap at `max_len` using the zlib CPI approach.
 fn build_huffman_lengths(freqs: &[u32], max_len: u8, lengths: &mut [u8]) {
     let n = freqs.len();
-    // Collect non-zero symbols.
     let mut symbols: Vec<(u32, usize)> = freqs
         .iter()
         .enumerate()
@@ -197,77 +196,82 @@ fn build_huffman_lengths(freqs: &[u32], max_len: u8, lengths: &mut [u8]) {
         return;
     }
     if m == 1 {
-        // Single symbol: give it a 1-bit code.
         lengths[symbols[0].1] = 1;
         return;
     }
 
-    // Sort by frequency ascending.
-    symbols.sort_unstable();
-
-    // Package-merge with `max_len` iterations.
-    let mut packages: Vec<Vec<(u64, usize)>> = Vec::with_capacity(max_len as usize);
-    // Initial: each symbol is a leaf.
-    let initial: Vec<(u64, usize)> = symbols.iter().map(|(f, i)| (u64::from(*f), *i)).collect();
-    packages.push(initial.clone());
-
-    for _ in 1..max_len {
-        let prev = packages.last().unwrap().clone();
-        let mut merged: Vec<(u64, usize)> = prev
-            .into_iter()
-            .map(|(w, _)| (w, usize::MAX)) // marker: package, not leaf
-            .collect();
-        // Add the original leaves.
-        let mut combined = initial.clone();
-        combined.append(&mut merged);
-        combined.sort_unstable_by(|a, b| a.0.cmp(&b.0));
-        // Keep only the smallest 2m-2 entries.
-        combined.truncate(2 * m - 2);
-        packages.push(combined);
+    // Standard Huffman via iterative merge (two-smallest selection).
+    struct Node {
+        freq: u64,
+        leaves: Vec<(usize, u8)>, // (symbol_index, depth_from_root)
     }
 
-    // Count how many times each leaf appears in the final package list.
-    let mut counts: Vec<u32> = vec![0; n];
-    for &(_, idx) in packages.last().unwrap() {
-        if idx != usize::MAX {
-            counts[idx] += 1;
-        }
+    let mut nodes: Vec<Node> = symbols
+        .iter()
+        .map(|&(f, i)| Node {
+            freq: u64::from(f),
+            leaves: vec![(i, 0u8)],
+        })
+        .collect();
+
+    while nodes.len() > 1 {
+        nodes.sort_by(|a, b| a.freq.cmp(&b.freq));
+        let mut right = nodes.remove(1);
+        let mut left = nodes.remove(0);
+        for (_, d) in &mut left.leaves { *d += 1; }
+        for (_, d) in &mut right.leaves { *d += 1; }
+        let merged_freq = left.freq + right.freq;
+        let mut merged_leaves = left.leaves;
+        merged_leaves.append(&mut right.leaves);
+        nodes.push(Node { freq: merged_freq, leaves: merged_leaves });
     }
-    // Walk back through packages, accumulating counts (each leaf appears
-    // once for each level it's in).
-    for pkg in packages.iter().rev().skip(1) {
-        for &(_, idx) in pkg {
-            if idx != usize::MAX {
-                // Recurse via counts of contained packages... simplified
-                // approach: use length = log2(m) - log2(counts[i]).
-                let _ = idx;
-            }
-        }
+
+    // Extract lengths.
+    for (sym, depth) in &nodes[0].leaves {
+        lengths[*sym] = (*depth).min(255);
     }
-    // Simpler approach: length[i] = max_len - (depth of leaf i in tree).
-    // The depth equals counts[i] - 1 from package-merge.
-    for (i, &c) in counts.iter().enumerate() {
-        if c > 0 {
-            lengths[i] = (max_len as u32 - (c - 1)).clamp(1, max_len as u32) as u8;
-        }
-    }
-    // Verify Kraft inequality. If violated (rare on small inputs),
-    // redistribute by increasing the longest codes. For our use case
-    // this is sufficient; production code would re-run package-merge
-    // with stricter bounds.
-    let mut kraft: f64 = 0.0;
+
+    // Length limiting: zlib CPI approach.
+    let mut bl_count = [0u32; 256];
     for &l in lengths.iter() {
         if l > 0 {
-            kraft += 2.0_f64.powi(-i32::from(l));
+            bl_count[l as usize] += 1;
         }
     }
-    if kraft > 1.0 + 1e-9 {
-        // Fall back: assign uniform 8-bit codes to non-zero symbols.
-        let code_len = 8u8;
-        for (i, &f) in freqs.iter().enumerate() {
-            if f > 0 {
-                lengths[i] = code_len;
+
+    for l in ((max_len as usize + 1)..256).rev() {
+        while bl_count[l] > 0 {
+            let mut j = l - 1;
+            while j > 0 && bl_count[j] == 0 {
+                j -= 1;
             }
+            if j == 0 {
+                break;
+            }
+            bl_count[j] -= 1;
+            bl_count[j + 1] += 2;
+            bl_count[l] -= 1;
+            bl_count[max_len as usize] += 1;
+        }
+    }
+
+    // Reassign lengths: highest-frequency symbols get shortest codes.
+    let mut sorted_syms: Vec<(usize, u32)> = freqs
+        .iter()
+        .enumerate()
+        .filter(|(_, &f)| f > 0)
+        .map(|(i, &f)| (i, f))
+        .collect();
+    sorted_syms.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+
+    let mut code_idx = 0;
+    for len in 1..=max_len as usize {
+        for _ in 0..bl_count[len] {
+            if code_idx >= sorted_syms.len() {
+                break;
+            }
+            lengths[sorted_syms[code_idx].0] = len as u8;
+            code_idx += 1;
         }
     }
 }
