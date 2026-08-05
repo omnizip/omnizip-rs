@@ -370,7 +370,7 @@ pub fn encode_huffman(input: &[u8]) -> Result<Vec<u8>, EncodeError> {
 
     // ----- Literal Huffman tree (simple form) -----
     let (emitted, lit_depth, lit_bits) =
-        huffman::build_and_store_simple(&lit_histogram, 256, 8, &mut bw);
+        huffman::build_and_store_simple(&lit_histogram, 256, 7, &mut bw);
     if !emitted {
         return encode_uncompressed(input);
     }
@@ -384,7 +384,7 @@ pub fn encode_huffman(input: &[u8]) -> Result<Vec<u8>, EncodeError> {
         cmd_histogram[cmd.cmd_prefix as usize] += 1;
     }
     let (cmd_emitted, cmd_depth, cmd_bits) =
-        huffman::build_and_store_simple(&cmd_histogram, 704, 10, &mut bw);
+        huffman::build_and_store_simple(&cmd_histogram, 704, 9, &mut bw);
     if !cmd_emitted {
         return encode_uncompressed(input);
     }
@@ -400,7 +400,7 @@ pub fn encode_huffman(input: &[u8]) -> Result<Vec<u8>, EncodeError> {
         }
     }
     let (dist_emitted, dist_depth, dist_bits) =
-        huffman::build_and_store_simple(&dist_histogram, 64, 6, &mut bw);
+        huffman::build_and_store_simple(&dist_histogram, 64, 5, &mut bw);
     if !dist_emitted {
         return encode_uncompressed(input);
     }
