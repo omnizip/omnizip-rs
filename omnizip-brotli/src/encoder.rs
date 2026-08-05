@@ -370,7 +370,7 @@ pub fn encode_huffman(input: &[u8]) -> Result<Vec<u8>, EncodeError> {
 
     // ----- Literal Huffman tree (simple form) -----
     let (emitted, lit_depth, lit_bits) =
-        huffman::build_and_store_simple(&lit_histogram, 256, 7, &mut bw);
+        huffman::build_and_store_simple(&lit_histogram, 256, 8, &mut bw);
     if !emitted {
         return encode_uncompressed(input);
     }
