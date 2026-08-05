@@ -180,11 +180,12 @@ impl Codec for Bzip2Codec {
 /// ## Example
 ///
 /// ```no_run
+/// # let paths: [&str; 0] = [];
 /// use omnizip_bzip2::Bzip2Compressor;
 /// use omnizip_codecs::CompressionLevel;
 ///
 /// let mut comp = Bzip2Compressor::new();
-/// for input in ["file_a", "file_b", "file_c"] {
+/// for input in paths {
 ///     let bytes = std::fs::read(input).unwrap();
 ///     let encoded = comp.compress(&bytes, CompressionLevel::default()).unwrap();
 ///     // ... use encoded
