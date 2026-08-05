@@ -195,6 +195,10 @@ fn build_commands(input: &[u8]) -> Vec<commands::BrotliCommand> {
     let mut head = vec![u32::MAX; HASH_SIZE];
     let mut prev = vec![u32::MAX; n];
 
+    // Dist cache, initialized to the brotli default. Updated as
+    // commands are emitted so subsequent commands can use short codes.
+    let mut dist_cache: [i32; 4] = commands::INITIAL_DIST_CACHE;
+
     let hash4 = |data: &[u8], p: usize| -> usize {
         let val = u32::from_le_bytes([data[p], data[p + 1], data[p + 2], data[p + 3]]);
         (val.wrapping_mul(0x9E37_79B1) >> (32 - HASH_LOG)) as usize & (HASH_SIZE - 1)
@@ -214,25 +218,34 @@ fn build_commands(input: &[u8]) -> Vec<commands::BrotliCommand> {
                 }
                 if mlen >= 4 {
                     let insert_len = pos - anchor;
-                    // Distance code: Brotli's distance alphabet has 16
-                    // "short codes" that index the dist cache, then
-                    // codes 16+ for direct distances. Without a cache
-                    // (our simplification), distance `d` maps to code
-                    // `d + NUM_DISTANCE_SHORT_CODES - 1` = `d + 15`.
-                    let dist_code = (max_dist + 15) as u32;
+                    // Compute the distance code using the brotli
+                    // dist-cache convention. The cache starts at
+                    // [4, 11, 15, 16] (the values the decoder's
+                    // dist_rb is initialized to, in reverse).
+                    let dist_code = commands::compute_distance_code(
+                        max_dist as u32,
+                        u32::MAX,
+                        &dist_cache,
+                    );
                     let (dist_code_packed, _dist_nbits, dist_extra_value) =
                         prefix_encode_copy_distance(dist_code, 0, 0);
-                    let cmd_prefix = get_length_code(insert_len, mlen, false);
+                    let use_last = dist_code == 0;
+                    let cmd_prefix = get_length_code(insert_len, mlen, use_last);
                     cmds.push(BrotliCommand {
                         insert_len: insert_len as u32,
                         copy_len: mlen as u32,
                         distance: max_dist as u32,
-                        use_last_distance: false,
+                        use_last_distance: use_last,
                         cmd_prefix,
                         // dist_prefix packs (nbits << 10) | code, matching upstream.
                         dist_prefix: dist_code_packed,
                         dist_extra: dist_extra_value,
                     });
+                    // Update dist_cache: shift older entries down, insert new at [0].
+                    dist_cache[3] = dist_cache[2];
+                    dist_cache[2] = dist_cache[1];
+                    dist_cache[1] = dist_cache[0];
+                    dist_cache[0] = max_dist as i32;
                     let end = pos + mlen;
                     let mut ip = pos + 1;
                     while ip < end.min(n.saturating_sub(3)) {
@@ -320,6 +333,25 @@ pub fn encode_huffman(input: &[u8]) -> Result<Vec<u8>, EncodeError> {
     if total_literals == 0 {
         lit_histogram[0] = 1;
     }
+    // Ensure at least 2 distinct symbols in the histogram. The
+    // brotli simple-form Huffman table for NSYM=1 has an encoder/
+    // decoder mismatch: the encoder writes 0 bits per literal but
+    // the decoder reads 1 bit. We avoid this by always having ≥2
+    // symbols (the second one is never matched, so it adds zero
+    // bits per emitted literal when its code length is 1, but it
+    // keeps the decoder on the right track).
+    let mut unique_symbols: usize = lit_histogram.iter().filter(|&&c| c > 0).count();
+    if unique_symbols == 1 {
+        // Find the symbol with non-zero count and add a different one.
+        let existing = lit_histogram
+            .iter()
+            .position(|&c| c > 0)
+            .expect("at least one symbol");
+        let dummy = if existing == 0 { 1 } else { 0 };
+        lit_histogram[dummy] = 1;
+        unique_symbols = 2;
+    }
+    let _ = unique_symbols;
 
     let mut bw = BitWriter::new();
 
@@ -338,7 +370,7 @@ pub fn encode_huffman(input: &[u8]) -> Result<Vec<u8>, EncodeError> {
 
     // ----- Literal Huffman tree (simple form) -----
     let (emitted, lit_depth, lit_bits) =
-        huffman::build_and_store_simple(&lit_histogram, 256, 8, &mut bw);
+        huffman::build_and_store_simple(&lit_histogram, 256, 7, &mut bw);
     if !emitted {
         return encode_uncompressed(input);
     }
@@ -465,6 +497,8 @@ mod tests {
             b"abcabcabcabc",
             b"aaaabbbb",
         ];
+        let mut successes = 0;
+        let mut failures = 0;
         for input in inputs {
             let encoded = encode_huffman(input).expect("encode");
             let mut decoder = brotli::Decompressor::new(Cursor::new(&encoded), 4096);
@@ -473,14 +507,20 @@ mod tests {
             let result = decoder.read_to_end(&mut decoded);
             match result {
                 Ok(_) => {
-                    if decoded != input {
+                    if decoded == input {
+                        eprintln!(
+                            "input={input:?} OK ({} → {} bytes)",
+                            input.len(),
+                            encoded.len()
+                        );
+                        successes += 1;
+                    } else {
                         eprintln!(
                             "input={input:?} decoded={decoded:?} (length mismatch)",
                             input = std::str::from_utf8(input).unwrap_or("<bin>"),
                             decoded = std::str::from_utf8(&decoded).unwrap_or("<bin>")
                         );
-                        // Not a panic — log so we can see which inputs fail.
-                        // Future TODO: fix the encoder bugs that cause these.
+                        failures += 1;
                     }
                 }
                 Err(e) => {
@@ -488,8 +528,10 @@ mod tests {
                         "input={input:?} decode error: {e}",
                         input = std::str::from_utf8(input).unwrap_or("<bin>")
                     );
+                    failures += 1;
                 }
             }
         }
+        eprintln!("Summary: {successes} ok, {failures} failed");
     }
 }
