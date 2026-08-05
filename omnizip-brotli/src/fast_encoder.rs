@@ -93,7 +93,13 @@ fn BrotliSetDepth(p0: i32, pool: &mut [HuffmanTree], depth: &mut [u8], max_depth
 trait HuffmanComparator { fn Cmp(&self, v0: &HuffmanTree, v1: &HuffmanTree) -> bool; }
 struct SimpleSort {}
 impl HuffmanComparator for SimpleSort {
-    fn Cmp(&self, v0: &HuffmanTree, v1: &HuffmanTree) -> bool { v0.total_count_ < v1.total_count_ }
+    fn Cmp(&self, v0: &HuffmanTree, v1: &HuffmanTree) -> bool {
+        if v0.total_count_ != v1.total_count_ {
+            v0.total_count_ < v1.total_count_
+        } else {
+            v0.index_right_or_value_ > v1.index_right_or_value_
+        }
+    }
 }
 fn SortHuffmanTreeItems(tree: &mut [HuffmanTree], n: usize, cmp: impl HuffmanComparator) {
     tree[..n].sort_by(|a, b| if cmp.Cmp(a, b) { std::cmp::Ordering::Less } else { std::cmp::Ordering::Greater });
@@ -102,38 +108,42 @@ fn SortHuffmanTreeItems(tree: &mut [HuffmanTree], n: usize, cmp: impl HuffmanCom
 // ── Build Huffman tree from histogram ──
 
 fn BrotliCreateHuffmanTree(data: &[u32], length: usize, tree_limit: i32, tree: &mut [HuffmanTree], depth: &mut [u8]) -> bool {
+    let sentinel = HuffmanTree::new(u32::MAX, -1, -1);
     let mut count_limit: u32 = 1;
     loop {
-        let mut node_index: u32 = 0;
+        let mut node_index: usize = 0;
         let mut l = length;
         while l != 0 {
             l -= 1;
             if data[l] != 0 {
-                let count = if data[l] >= count_limit { data[l] } else { count_limit };
-                if node_index < tree.len() as u32 { tree[node_index as usize] = HuffmanTree::new(count, -1, l as i16); }
+                let count = std::cmp::max(data[l], count_limit);
+                tree[node_index] = HuffmanTree::new(count, -1, l as i16);
                 node_index += 1;
             }
         }
-        let n: i32 = node_index as i32;
-        let mut i: i32 = 0;
-        let mut j: i32 = n + 1;
-        SortHuffmanTreeItems(tree, n as usize, SimpleSort{});
-        let sentinel = HuffmanTree::new(u32::MAX, -1, -1);
-        if (node_index + 1) as usize <= tree.len() { tree[(node_index + 1) as usize] = sentinel; }
-        if node_index as usize <= tree.len() { tree[node_index as usize] = sentinel; }
-        node_index += 2;
+        let n: usize = node_index;
+        if n == 1 {
+            depth[tree[0].index_right_or_value_ as usize] = 1u8;
+            return true;
+        }
+        let mut i: usize = 0;
+        let mut j: usize = n + 1;
+        SortHuffmanTreeItems(tree, n, SimpleSort{});
+        tree[n] = sentinel;
+        tree[n + 1] = sentinel;
         let mut k = n - 1;
-        while k > 0 {
-            let left = if tree[i as usize].total_count_ <= tree[j as usize].total_count_ { let l=i; i+=1; l } else { let l=j; j+=1; l };
-            let right = if tree[i as usize].total_count_ <= tree[j as usize].total_count_ { let r=i; i+=1; r } else { let r=j; j+=1; r };
-            let sum = tree[left as usize].total_count_.wrapping_add(tree[right as usize].total_count_);
-            let ti = (node_index - 1) as usize;
-            if ti < tree.len() { tree[ti] = HuffmanTree::new(sum, left as i16, right as i16); }
-            if node_index as usize <= tree.len() { tree[node_index as usize] = sentinel; }
-            node_index += 1;
+        while k != 0 {
+            let left = if tree[i].total_count_ <= tree[j].total_count_ { let l=i; i+=1; l } else { let l=j; j+=1; l };
+            let right = if tree[i].total_count_ <= tree[j].total_count_ { let r=i; i+=1; r } else { let r=j; j+=1; r };
+            let j_end = 2 * n - k;
+            tree[j_end] = HuffmanTree::new(
+                tree[left].total_count_.wrapping_add(tree[right].total_count_),
+                left as i16, right as i16,
+            );
+            tree[j_end + 1] = sentinel;
             k -= 1;
         }
-        if BrotliSetDepth(2 * n - 1, tree, depth, tree_limit) { return true; }
+        if BrotliSetDepth((2 * n - 1) as i32, tree, depth, tree_limit) { return true; }
         count_limit = count_limit.wrapping_mul(2);
     }
 }
@@ -160,35 +170,138 @@ fn BrotliConvertBitDepthsToSymbols(depth: &[u8], len: usize, bits: &mut [u16]) {
 
 // ── RLE-encode code lengths for Huffman tree storage ──
 
-fn BrotliWriteHuffmanTreeRepetitionsZeros(repetitions: usize, tree_size: &mut usize, tree: &mut [u8], extra_bits_data: &mut [u8]) {
-    let mut reps = repetitions;
-    while reps >= 11 { let take = reps.min(138); tree[*tree_size] = 18; extra_bits_data[*tree_size] = (take - 11) as u8; *tree_size += 1; reps -= take; }
-    while reps >= 3  { let take = reps.min(10);  tree[*tree_size] = 17; extra_bits_data[*tree_size] = (take - 3) as u8;   *tree_size += 1; reps -= take; }
-    for _ in 0..reps { tree[*tree_size] = 0; extra_bits_data[*tree_size] = 0; *tree_size += 1; }
-}
-fn BrotliWriteHuffmanTreeRepetitions(previous_value: u8, value: u8, repetitions: usize, tree_size: &mut usize, tree: &mut [u8], extra_bits_data: &mut [u8]) {
-    if repetitions < 3 || previous_value != value {
-        if previous_value != value {
-            tree[*tree_size] = value; extra_bits_data[*tree_size] = 0; *tree_size += 1;
-        }
-        for _ in 0..repetitions { tree[*tree_size] = value; extra_bits_data[*tree_size] = 0; *tree_size += 1; }
-        return;
+fn Reverse(v: &mut [u8], mut start: usize, mut end: usize) {
+    end -= 1;
+    while start < end {
+        v.swap(start, end);
+        start += 1;
+        end -= 1;
     }
-    tree[*tree_size] = value; extra_bits_data[*tree_size] = 0; *tree_size += 1;
-    let mut reps = repetitions - 1;
-    while reps >= 3 { let take = reps.min(6); tree[*tree_size] = 16; extra_bits_data[*tree_size] = (take - 3) as u8; *tree_size += 1; reps -= take; }
-    for _ in 0..reps { tree[*tree_size] = value; extra_bits_data[*tree_size] = 0; *tree_size += 1; }
 }
 
-fn BrotliWriteHuffmanTree(depth: &[u8], depth_size: usize, tree: &mut [u8], extra_bits_data: &mut [u8], tree_size: &mut usize) {
-    let mut previous_value: u8 = 8;
+fn decide_over_rle_use(depth: &[u8], length: usize) -> (bool, bool) {
+    let mut total_reps_zero: usize = 0;
+    let mut total_reps_non_zero: usize = 0;
+    let mut count_reps_zero: usize = 1;
+    let mut count_reps_non_zero: usize = 1;
     let mut i: usize = 0;
-    let mut k: usize;
-    loop {
+    while i < length {
         let value = depth[i];
-        k = i + 1;
-        while k < depth_size && depth[k] == value { k += 1; }
-        let reps = k - i;
+        let mut reps: usize = 1;
+        let mut k = i + 1;
+        while k < length && depth[k] == value { reps += 1; k += 1; }
+        if reps >= 3 && value == 0 {
+            total_reps_zero += reps;
+            count_reps_zero += 1;
+        }
+        if reps >= 4 && value != 0 {
+            total_reps_non_zero += reps;
+            count_reps_non_zero += 1;
+        }
+        i += reps;
+    }
+    let use_rle_for_non_zero = total_reps_non_zero > count_reps_non_zero.wrapping_mul(2);
+    let use_rle_for_zero = total_reps_zero > count_reps_zero.wrapping_mul(2);
+    (use_rle_for_non_zero, use_rle_for_zero)
+}
+
+fn BrotliWriteHuffmanTreeRepetitions(
+    previous_value: u8, value: u8, mut repetitions: usize,
+    tree_size: &mut usize, tree: &mut [u8], extra_bits_data: &mut [u8],
+) {
+    if previous_value != value {
+        tree[*tree_size] = value;
+        extra_bits_data[*tree_size] = 0;
+        *tree_size += 1;
+        repetitions -= 1;
+    }
+    if repetitions == 7 {
+        tree[*tree_size] = value;
+        extra_bits_data[*tree_size] = 0;
+        *tree_size += 1;
+        repetitions -= 1;
+    }
+    if repetitions < 3 {
+        for _ in 0..repetitions {
+            tree[*tree_size] = value;
+            extra_bits_data[*tree_size] = 0;
+            *tree_size += 1;
+        }
+    } else {
+        let start = *tree_size;
+        repetitions -= 3;
+        loop {
+            tree[*tree_size] = 16;
+            extra_bits_data[*tree_size] = (repetitions & 0x03) as u8;
+            *tree_size += 1;
+            repetitions >>= 2;
+            if repetitions == 0 { break; }
+            repetitions -= 1;
+        }
+        Reverse(tree, start, *tree_size);
+        Reverse(extra_bits_data, start, *tree_size);
+    }
+}
+
+fn BrotliWriteHuffmanTreeRepetitionsZeros(
+    mut repetitions: usize,
+    tree_size: &mut usize, tree: &mut [u8], extra_bits_data: &mut [u8],
+) {
+    if repetitions == 11 {
+        tree[*tree_size] = 0;
+        extra_bits_data[*tree_size] = 0;
+        *tree_size += 1;
+        repetitions -= 1;
+    }
+    if repetitions < 3 {
+        for _ in 0..repetitions {
+            tree[*tree_size] = 0;
+            extra_bits_data[*tree_size] = 0;
+            *tree_size += 1;
+        }
+    } else {
+        let start = *tree_size;
+        repetitions -= 3;
+        loop {
+            tree[*tree_size] = 17;
+            extra_bits_data[*tree_size] = (repetitions & 0x07) as u8;
+            *tree_size += 1;
+            repetitions >>= 3;
+            if repetitions == 0 { break; }
+            repetitions -= 1;
+        }
+        Reverse(tree, start, *tree_size);
+        Reverse(extra_bits_data, start, *tree_size);
+    }
+}
+
+fn BrotliWriteHuffmanTree(depth: &[u8], length: usize, tree: &mut [u8], extra_bits_data: &mut [u8], tree_size: &mut usize) {
+    let mut previous_value: u8 = 8;
+    let mut use_rle_for_non_zero = false;
+    let mut use_rle_for_zero = false;
+    let mut new_length: usize = length;
+    let mut i: usize = 0;
+    while i < length {
+        if depth[length - i - 1] == 0 {
+            new_length -= 1;
+        } else {
+            break;
+        }
+        i += 1;
+    }
+    if length > 50 {
+        let (n, z) = decide_over_rle_use(depth, new_length);
+        use_rle_for_non_zero = n;
+        use_rle_for_zero = z;
+    }
+    i = 0;
+    while i < new_length {
+        let value = depth[i];
+        let mut reps: usize = 1;
+        if (value != 0 && use_rle_for_non_zero) || (value == 0 && use_rle_for_zero) {
+            let mut k = i + 1;
+            while k < new_length && depth[k] == value { reps += 1; k += 1; }
+        }
         if value == 0 {
             BrotliWriteHuffmanTreeRepetitionsZeros(reps, tree_size, tree, extra_bits_data);
         } else {
@@ -196,7 +309,6 @@ fn BrotliWriteHuffmanTree(depth: &[u8], depth_size: usize, tree: &mut [u8], extr
             previous_value = value;
         }
         i += reps;
-        if i >= depth_size { break; }
     }
 }
 static kCodeLengthBits: [u32; 18] =
@@ -479,6 +591,7 @@ fn BrotliStoreHuffmanTree(depths: &[u8], num: usize, tree: &mut [HuffmanTree], s
     let mut code_length_bitdepth_symbols = [0u16; 19];
     let mut huffman_tree_histogram = [0u32; 19];
     BrotliWriteHuffmanTree(depths, num, &mut huffman_tree, &mut huffman_tree_extra_bits, &mut huffman_tree_size);
+
     for i in 0..huffman_tree_size { huffman_tree_histogram[huffman_tree[i] as usize] += 1; }
     let mut num_codes: i32 = 0;
     let mut code: usize = 0;
@@ -525,41 +638,43 @@ fn BrotliBuildAndStoreHuffmanTreeFast(
         return;
     }
     for d in depth[..length].iter_mut() { *d = 0; }
+    let sentinel = HuffmanTree::new(u32::MAX, -1, -1);
+    let mut count_limit: u32 = 1;
     loop {
         let mut node_index: usize = 0;
-        let mut count_limit: u32 = 1;
-        'outer: loop {
-            node_index = 0;
-            let mut l = length;
-            while l != 0 {
-                l -= 1;
-                if histogram[l] != 0 {
-                    let c = if histogram[l] >= count_limit { histogram[l] } else { count_limit };
-                    tree_scratch[node_index] = HuffmanTree::new(c, -1, l as i16);
-                    node_index += 1;
-                }
-            }
-            let n: i32 = node_index as i32;
-            let mut i: i32 = 0;
-            let mut j: i32 = n + 1;
-            SortHuffmanTreeItems(tree_scratch, n as usize, SimpleSort{});
-            let sentinel = HuffmanTree::new(u32::MAX, -1, -1);
-            tree_scratch[node_index + 1] = sentinel;
-            tree_scratch[node_index] = sentinel;
-            node_index += 2;
-            let mut k = n - 1;
-            while k > 0 {
-                let left = if tree_scratch[i as usize].total_count_ <= tree_scratch[j as usize].total_count_ { let l=i; i+=1; l } else { let l=j; j+=1; l };
-                let right = if tree_scratch[i as usize].total_count_ <= tree_scratch[j as usize].total_count_ { let r=i; i+=1; r } else { let r=j; j+=1; r };
-                tree_scratch[node_index - 1] = HuffmanTree::new(tree_scratch[left as usize].total_count_.wrapping_add(tree_scratch[right as usize].total_count_), left as i16, right as i16);
-                tree_scratch[node_index] = sentinel;
+        let mut l = length;
+        while l != 0 {
+            l -= 1;
+            if histogram[l] != 0 {
+                let c = std::cmp::max(histogram[l], count_limit);
+                tree_scratch[node_index] = HuffmanTree::new(c, -1, l as i16);
                 node_index += 1;
-                k -= 1;
             }
-            if BrotliSetDepth(2 * n - 1, tree_scratch, depth, 14) { break 'outer; }
-            count_limit = count_limit.wrapping_mul(2);
         }
-        break;
+        let n: usize = node_index;
+        if n == 1 {
+            depth[tree_scratch[0].index_right_or_value_ as usize] = 1u8;
+            break;
+        }
+        let mut i: usize = 0;
+        let mut j: usize = n + 1;
+        SortHuffmanTreeItems(tree_scratch, n, SimpleSort{});
+        tree_scratch[n] = sentinel;
+        tree_scratch[n + 1] = sentinel;
+        let mut k = n - 1;
+        while k != 0 {
+            let left = if tree_scratch[i].total_count_ <= tree_scratch[j].total_count_ { let l=i; i+=1; l } else { let l=j; j+=1; l };
+            let right = if tree_scratch[i].total_count_ <= tree_scratch[j].total_count_ { let r=i; i+=1; r } else { let r=j; j+=1; r };
+            let j_end = 2 * n - k;
+            tree_scratch[j_end] = HuffmanTree::new(
+                tree_scratch[left].total_count_.wrapping_add(tree_scratch[right].total_count_),
+                left as i16, right as i16,
+            );
+            tree_scratch[j_end + 1] = sentinel;
+            k -= 1;
+        }
+        if BrotliSetDepth((2 * n - 1) as i32, tree_scratch, depth, 14) { break; }
+        count_limit = count_limit.wrapping_mul(2);
     }
     BrotliConvertBitDepthsToSymbols(depth, length, bits);
     if count <= 4 {
@@ -595,23 +710,23 @@ fn BrotliBuildAndStoreHuffmanTreeFast(
             while k < length && depth[k] == value { reps += 1; k += 1; }
             i += reps;
             if value == 0 {
-                if reps < kZeroRepsDepth.len() {
-                    BrotliWriteBits(kZeroRepsDepth[reps] as usize, kZeroRepsBits[reps], storage_ix, storage);
-                } else {
-                    for _ in 0..reps { BrotliWriteBits(kZeroRepsDepth[1] as usize, kZeroRepsBits[1], storage_ix, storage); }
-                }
+                BrotliWriteBits(kZeroRepsDepth[reps] as usize, kZeroRepsBits[reps], storage_ix, storage);
             } else {
-                if reps < 3 {
-                    for _ in 0..reps { BrotliWriteBits(kNonZeroRepsDepth[1] as usize, kNonZeroRepsBits[1], storage_ix, storage); }
-                } else {
-                    if reps < kNonZeroRepsDepth.len() {
-                        BrotliWriteBits(kNonZeroRepsDepth[reps] as usize, kNonZeroRepsBits[reps], storage_ix, storage);
-                    } else {
-                        for _ in 0..reps { BrotliWriteBits(kNonZeroRepsDepth[1] as usize, kNonZeroRepsBits[1], storage_ix, storage); }
-                    }
+                if previous_value != value {
+                    BrotliWriteBits(kCodeLengthDepth[value as usize] as usize, kCodeLengthBits[value as usize] as u64, storage_ix, storage);
+                    reps -= 1;
                 }
+                if reps < 3 {
+                    while reps != 0 {
+                        reps -= 1;
+                        BrotliWriteBits(kCodeLengthDepth[value as usize] as usize, kCodeLengthBits[value as usize] as u64, storage_ix, storage);
+                    }
+                } else {
+                    reps -= 3;
+                    BrotliWriteBits(kNonZeroRepsDepth[reps] as usize, kNonZeroRepsBits[reps], storage_ix, storage);
+                }
+                previous_value = value;
             }
-            previous_value = value;
         }
     }
 }
@@ -770,17 +885,12 @@ fn ShouldCompress(input: &[u8], input_size: usize, num_literals: usize) -> bool 
     } else {
         let mut literal_histo: [u32; 256] = [0; 256];
         let max_total_bit_cost: floatX = corpus_size * 8.0 * 0.98 / 43.0;
-        let mut i: usize;
-        i = 0usize;
+        let mut i: usize = 0;
         while i < input_size {
-            {
-                let _rhs = 1;
-                let _lhs = &mut literal_histo[input[i] as usize];
-                *_lhs = (*_lhs).wrapping_add(_rhs as u32);
-            }
+            literal_histo[input[i] as usize] = literal_histo[input[i] as usize].wrapping_add(1);
             i = i.wrapping_add(43);
         }
-        BitsEntropy(&literal_histo[..], 256) < max_total_bit_cost as usize
+        BitsEntropy(&literal_histo[..], 256) < max_total_bit_cost
     }
 }
 fn CreateCommands(
@@ -905,29 +1015,29 @@ fn CreateCommands(
                     let cur_hash: u32;
                     if min_match == 4 {
                         input_bytes = BROTLI_UNALIGNED_LOAD64(&base_ip[(ip_index - 3)..]);
-                        cur_hash = HashBytesAtOffset(input_bytes, 3usize, shift, min_match);
-                        prev_hash = HashBytesAtOffset(input_bytes, 0usize, shift, min_match);
+                        cur_hash = HashBytesAtOffset(input_bytes, 3i32, shift, min_match);
+                        prev_hash = HashBytesAtOffset(input_bytes, 0i32, shift, min_match);
                         table[(prev_hash as usize)] = ip_index.wrapping_sub(3) as i32;
-                        prev_hash = HashBytesAtOffset(input_bytes, 1usize, shift, min_match);
+                        prev_hash = HashBytesAtOffset(input_bytes, 1i32, shift, min_match);
                         table[(prev_hash as usize)] = ip_index.wrapping_sub(2) as i32;
-                        prev_hash = HashBytesAtOffset(input_bytes, 0usize, shift, min_match);
+                        prev_hash = HashBytesAtOffset(input_bytes, 0i32, shift, min_match);
                         table[(prev_hash as usize)] = ip_index.wrapping_sub(1) as i32;
                     } else {
                         assert!(ip_index >= 5);
                         // could this be off the end FIXME
                         input_bytes = BROTLI_UNALIGNED_LOAD64(&base_ip[(ip_index - 5)..]);
-                        prev_hash = HashBytesAtOffset(input_bytes, 0usize, shift, min_match);
+                        prev_hash = HashBytesAtOffset(input_bytes, 0i32, shift, min_match);
                         table[(prev_hash as usize)] = ip_index.wrapping_sub(5) as i32;
-                        prev_hash = HashBytesAtOffset(input_bytes, 1usize, shift, min_match);
+                        prev_hash = HashBytesAtOffset(input_bytes, 1i32, shift, min_match);
                         table[(prev_hash as usize)] = ip_index.wrapping_sub(4) as i32;
-                        prev_hash = HashBytesAtOffset(input_bytes, 2usize, shift, min_match);
+                        prev_hash = HashBytesAtOffset(input_bytes, 2i32, shift, min_match);
                         table[(prev_hash as usize)] = ip_index.wrapping_sub(3) as i32;
                         assert!(ip_index >= 2);
                         input_bytes = BROTLI_UNALIGNED_LOAD64(&base_ip[(ip_index - 2)..]);
-                        cur_hash = HashBytesAtOffset(input_bytes, 2usize, shift, min_match);
-                        prev_hash = HashBytesAtOffset(input_bytes, 0usize, shift, min_match);
+                        cur_hash = HashBytesAtOffset(input_bytes, 2i32, shift, min_match);
+                        prev_hash = HashBytesAtOffset(input_bytes, 0i32, shift, min_match);
                         table[(prev_hash as usize)] = ip_index.wrapping_sub(2) as i32;
-                        prev_hash = HashBytesAtOffset(input_bytes, 1usize, shift, min_match);
+                        prev_hash = HashBytesAtOffset(input_bytes, 1i32, shift, min_match);
                         table[(prev_hash as usize)] = ip_index.wrapping_sub(1) as i32;
                     }
                     candidate = table[(cur_hash as usize)] as usize;
@@ -963,27 +1073,27 @@ fn CreateCommands(
                     let mut prev_hash: u32;
                     if min_match == 4 {
                         input_bytes = BROTLI_UNALIGNED_LOAD64(&base_ip[(ip_index - 3)..]);
-                        cur_hash = HashBytesAtOffset(input_bytes, 3usize, shift, min_match);
-                        prev_hash = HashBytesAtOffset(input_bytes, 0usize, shift, min_match);
+                        cur_hash = HashBytesAtOffset(input_bytes, 3i32, shift, min_match);
+                        prev_hash = HashBytesAtOffset(input_bytes, 0i32, shift, min_match);
                         table[(prev_hash as usize)] = ip_index.wrapping_sub(3) as i32;
-                        prev_hash = HashBytesAtOffset(input_bytes, 1usize, shift, min_match);
+                        prev_hash = HashBytesAtOffset(input_bytes, 1i32, shift, min_match);
                         table[(prev_hash as usize)] = ip_index.wrapping_sub(2) as i32;
-                        prev_hash = HashBytesAtOffset(input_bytes, 2usize, shift, min_match);
+                        prev_hash = HashBytesAtOffset(input_bytes, 2i32, shift, min_match);
                         table[(prev_hash as usize)] = ip_index.wrapping_sub(1) as i32;
                     } else {
                         input_bytes = BROTLI_UNALIGNED_LOAD64(&base_ip[(ip_index - 5)..]);
-                        prev_hash = HashBytesAtOffset(input_bytes, 0usize, shift, min_match);
+                        prev_hash = HashBytesAtOffset(input_bytes, 0i32, shift, min_match);
                         table[(prev_hash as usize)] = ip_index.wrapping_sub(5) as i32;
-                        prev_hash = HashBytesAtOffset(input_bytes, 1usize, shift, min_match);
+                        prev_hash = HashBytesAtOffset(input_bytes, 1i32, shift, min_match);
                         table[(prev_hash as usize)] = ip_index.wrapping_sub(4) as i32;
-                        prev_hash = HashBytesAtOffset(input_bytes, 2usize, shift, min_match);
+                        prev_hash = HashBytesAtOffset(input_bytes, 2i32, shift, min_match);
                         table[(prev_hash as usize)] = ip_index.wrapping_sub(3) as i32;
                         assert!(ip_index >= 2);
                         input_bytes = BROTLI_UNALIGNED_LOAD64(&base_ip[(ip_index - 2)..]);
-                        cur_hash = HashBytesAtOffset(input_bytes, 2usize, shift, min_match);
-                        prev_hash = HashBytesAtOffset(input_bytes, 0usize, shift, min_match);
+                        cur_hash = HashBytesAtOffset(input_bytes, 2i32, shift, min_match);
+                        prev_hash = HashBytesAtOffset(input_bytes, 0i32, shift, min_match);
                         table[(prev_hash as usize)] = ip_index.wrapping_sub(2) as i32;
-                        prev_hash = HashBytesAtOffset(input_bytes, 1usize, shift, min_match);
+                        prev_hash = HashBytesAtOffset(input_bytes, 1i32, shift, min_match);
                         table[(prev_hash as usize)] = ip_index.wrapping_sub(1) as i32;
                     }
                     candidate = table[(cur_hash as usize)] as usize;
@@ -1088,7 +1198,6 @@ fn StoreCommands(
         *_lhs = (*_lhs).wrapping_add(_rhs as u32);
     }
     BuildAndStoreCommandPrefixCode(
-        &mut tree_scratch[..],
         &mut cmd_histo[..],
         &mut cmd_depths[..],
         &mut cmd_bits[..],
@@ -1127,14 +1236,13 @@ fn StoreCommands(
     }
 }
 fn BuildAndStoreCommandPrefixCode(
-    tree: &mut [HuffmanTree],
     histogram: &[u32],
     depth: &mut [u8],
     bits: &mut [u16],
     storage_ix: &mut usize,
     storage: &mut [u8],
 ) {
-    let mut local_tree = [HuffmanTree::new(0, 0, 0); 129];
+    let mut tree = [HuffmanTree::new(0, 0, 0); 129];
     let mut cmd_depth: [u8; 704] = [0; 704];
     let mut cmd_bits: [u16; 64] = [0; 64];
     BrotliCreateHuffmanTree(histogram, 64usize, 15i32, &mut tree[..], depth);
@@ -1182,7 +1290,7 @@ fn BuildAndStoreCommandPrefixCode(
         }
         BrotliStoreHuffmanTree(
             &mut cmd_depth[..],
-            704usize,
+            704,
             &mut tree[..],
             storage_ix,
             storage,
@@ -1191,7 +1299,7 @@ fn BuildAndStoreCommandPrefixCode(
     BrotliStoreHuffmanTree(
         &mut depth[64..],
         64,
-        &mut local_tree,
+        &mut tree[..],
         storage_ix,
         storage,
     );
@@ -1280,10 +1388,11 @@ pub fn vendored_compress(input: &[u8]) -> Vec<u8> {
     let n = input.len();
     let mut storage: Vec<u8> = vec![0u8; n * 2 + 4096];
     let mut storage_ix: usize = 0;
-    
-    // Frame header: WBITS=1, NBL=0 → lgwin=17
-    BrotliWriteBits(1, 1, &mut storage_ix, &mut storage);
-    BrotliWriteBits(3, 0, &mut storage_ix, &mut storage);
+
+    // Frame header: lgwin=22 (4MB window, brotli default).
+    // Per upstream EncodeWindowBits: lgwin > 17 → write 4 bits value ((lgwin-17)<<1)|1.
+    // For lgwin=22: value = (5<<1)|1 = 0b1011 = 11.
+    BrotliWriteBits(4, 0b1011, &mut storage_ix, &mut storage);
     
     if n == 0 {
         BrotliWriteBits(1, 1, &mut storage_ix, &mut storage);
@@ -1299,8 +1408,9 @@ pub fn vendored_compress(input: &[u8]) -> Vec<u8> {
     let mut command_buf: Vec<u32> = vec![0u32; n + 1];
     let mut literal_buf: Vec<u8> = vec![0u8; n];
     let mut tree_scratch: Vec<HuffmanTree> = vec![HuffmanTree::default(); 2 * 704 + 1];
-    
+
     let min_match = if table_bits < 15 { 4 } else { 6 };
+    let initial_storage_ix = storage_ix;
     compress_fragment_two_pass_impl(
         &mut tree_scratch[..],
         input, n, true,
@@ -1308,7 +1418,17 @@ pub fn vendored_compress(input: &[u8]) -> Vec<u8> {
         &mut table, table_bits, min_match,
         &mut storage_ix, &mut storage,
     );
-    
+    // If compressed output is larger than uncompressed + 31, emit uncompressed instead.
+    if storage_ix.wrapping_sub(initial_storage_ix) > 31usize.wrapping_add(n << 3) {
+        RewindBitPosition(initial_storage_ix, &mut storage_ix, &mut storage);
+        EmitUncompressedMetaBlock(input, n, &mut storage_ix, &mut storage);
+    }
+
+    // Final empty ISLAST+ISEMPTY metablock (marks end of stream).
+    BrotliWriteBits(1, 1, &mut storage_ix, &mut storage);
+    BrotliWriteBits(1, 1, &mut storage_ix, &mut storage);
+    storage_ix = (storage_ix + 7) & !7;
+
     let out_len = (storage_ix + 7) / 8;
     storage.truncate(out_len);
     storage
@@ -1318,12 +1438,43 @@ pub fn vendored_compress(input: &[u8]) -> Vec<u8> {
 
 type floatX = f32;
 
-fn HashBytesAtOffset(p: u64, offset: usize, shift: usize, min_match: usize) -> u32 {
-    let h = if min_match == 4 {
-        ((p >> (8 * offset)) as u32 as u64).wrapping_mul(K_HASH_MUL32)
-    } else {
-        (p >> (8 * offset)).wrapping_mul(K_HASH_MUL32)
-    };
+fn FastLog2u16(v: u16) -> floatX {
+    if v == 0 { 0.0 } else { (v as f32).log2() }
+}
+fn FastLog2(v: u64) -> floatX {
+    if v == 0 { 0.0 } else { (v as f32).log2() }
+}
+
+fn shannon_entropy(population: &[u32], size: usize) -> (floatX, usize) {
+    let mut sum: usize = 0;
+    let mut retval: floatX = 0.0;
+    let mut start = 0;
+    if (size & 1) != 0 && !population.is_empty() {
+        let p = population[0] as usize;
+        sum = sum.wrapping_add(p);
+        retval -= p as floatX * FastLog2u16(p as u16);
+        start = 1;
+    }
+    let even_size = (size >> 1) << 1;
+    for i in start..even_size {
+        let p = population[i] as usize;
+        sum = sum.wrapping_add(p);
+        retval -= p as floatX * FastLog2u16(p as u16);
+    }
+    if sum != 0 {
+        retval += sum as floatX * FastLog2(sum as u64);
+    }
+    (retval, sum)
+}
+
+fn BitsEntropy(population: &[u32], size: usize) -> floatX {
+    let (mut retval, sum) = shannon_entropy(population, size);
+    if retval < sum as floatX { retval = sum as floatX; }
+    retval
+}
+
+fn HashBytesAtOffset(v: u64, offset: i32, shift: usize, length: usize) -> u32 {
+    let h: u64 = (v >> (8i32 * offset) << ((8 - length) * 8)).wrapping_mul(K_HASH_MUL32);
     (h >> shift) as u32
 }
 
@@ -1331,8 +1482,63 @@ fn IsMatch(p1: &[u8], p2: &[u8], min_match: usize) -> bool {
     FindMatchLengthWithLimit(p1, p2, min_match) >= min_match
 }
 
-fn BitsEntropy(histogram: &[u32], n: usize) -> usize {
-    let mut bits: f64 = 0.0;
-    for i in 0..n { if histogram[i] != 0 { bits -= (histogram[i] as f64) * (histogram[i] as f64).log2(); } }
-    bits as usize
+#[cfg(test)]
+mod tests {
+    use super::*;
+    
+    #[test]
+    fn create_huffman_tree_simple() {
+        let mut histo = [0u32; 8];
+        histo[0] = 10;
+        histo[1] = 5;
+        histo[2] = 3;
+        let mut depth = [0u8; 8];
+        let mut tree = vec![HuffmanTree::default(); 17];
+        let ok = BrotliCreateHuffmanTree(&histo, 8, 15, &mut tree, &mut depth);
+        assert!(ok);
+        // Higher frequency symbols should get shorter codes
+        assert!(depth[0] <= depth[2], "sym0 (freq 10) should be <= sym2 (freq 3): {} vs {}", depth[0], depth[2]);
+    }
+
+    #[test]
+    fn vendored_compress_round_trips_via_cli() {
+        let inputs: Vec<Vec<u8>> = vec![
+            Vec::new(),
+            b"a".to_vec(),
+            b"abcd".to_vec(),
+            b"abcdabcd".to_vec(),
+            b"hello world".to_vec(),
+            b"aaaaaaaaaa".to_vec(),
+            b"a".repeat(100),
+            b"hello world ".repeat(10),
+            b"The quick brown fox. ".repeat(20),
+            (0u8..=255).cycle().take(500).collect(),
+            b"a".repeat(1000),
+        ];
+
+        let tmp = std::env::temp_dir().join("omnizip_brotli_cli_test.br");
+        for (i, input) in inputs.iter().enumerate() {
+            let encoded = vendored_compress(input);
+            std::fs::write(&tmp, &encoded).expect("write");
+            let result = std::process::Command::new("brotli")
+                .arg("-d").arg("-c").arg(&tmp)
+                .output();
+            match result {
+                Ok(output) if output.status.success() => {
+                    assert_eq!(output.stdout, *input,
+                        "brotli -d mismatch for input #{} ({} bytes): got {} bytes",
+                        i, input.len(), output.stdout.len());
+                }
+                Ok(output) => {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    panic!("brotli -d failed for input #{} ({} bytes): {stderr}",
+                        i, input.len());
+                }
+                Err(e) => {
+                    eprintln!("[skip] brotli CLI not installed: {e}");
+                    return;
+                }
+            }
+        }
+    }
 }
