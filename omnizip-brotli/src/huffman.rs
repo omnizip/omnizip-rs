@@ -248,11 +248,11 @@ pub fn store_simple_form(
         bw.write_bits(s, u32::from(max_bits));
     }
 
-    if count == 2 {
-        // tree_select: 0 means 1-bit codes.
-        bw.write_bits(0, 1);
-    } else if count == 4 {
-        // tree_select: depends on whether two pairs share depth.
+    // Per upstream BrotliBuildAndStoreHuffmanTreeFast:
+    // - count==2: NO tree_select (both symbols get 1-bit codes)
+    // - count==3: NO tree_select (all get 2-bit codes)
+    // - count==4: 1-bit tree_select
+    if count == 4 {
         let tree_select = if depth[sorted[0] as usize] == 1 { 1 } else { 0 };
         bw.write_bits(u64::from(tree_select as u32), 1);
     }
@@ -373,7 +373,8 @@ mod tests {
         let depth = vec![0u8; 256];
         let emitted = store_simple_form(&symbols, &depth, 8, &mut bw);
         assert!(emitted);
-        // 4 bits header + 8 bits sym1 + 8 bits sym2 + 1 bit tree_select = 21 bits.
-        assert_eq!(bw.bit_pos_after(), 21);
+        // HSKIP(2) + NSYM-1(2) + symbol1(8) + symbol2(8) = 20 bits.
+        // No tree_select for count==2.
+        assert_eq!(bw.bit_pos_after(), 20);
     }
 }
