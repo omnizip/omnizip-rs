@@ -1,12 +1,19 @@
-//! Pure-Rust Brotli codec — wraps the [`brotli`] crate (by Daniel Reiter
-//! Horn, the format's original author) behind the [`omnizip_codecs::Codec`]
-//! trait.
+//! Pure-Rust Brotli codec.
+//!
+//! Currently wraps the [`brotli`] crate (by Daniel Reiter Horn, the
+//! format's original author) for encode + decode. A pure-Rust
+//! implementation is being phased in via [`decoder`] — Phase A
+//! (frame header + metablock header + bit reader) is landed; later
+//! phases will replace the wrapper's encode and decode paths
+//! (TODO 117).
 //!
 //! Brotli is the highest-ratio pure-Rust codec in the registry at quality
 //! 11. It outperforms ZSTD and LZMA on text and web content.
 
 #![forbid(unsafe_code)]
 #![warn(clippy::pedantic)]
+
+pub mod decoder;
 
 use std::io::{self, Cursor};
 
