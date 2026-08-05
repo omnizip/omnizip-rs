@@ -12,14 +12,14 @@ publish = false
 path = "src/lib.rs"
 
 [dev-dependencies]
-omnizip-codecs = { path = "../../omnizip-codecs", version = "0.14.11" }
-omnizip-lzma = { path = "../../omnizip-lzma", version = "0.14.11" }
-omnizip-zstd = { path = "../../omnizip-zstd", version = "0.14.11" }
-omnizip-brotli = { path = "../../omnizip-brotli", version = "0.14.11" }
-omnizip-bzip2 = { path = "../../omnizip-bzip2", version = "0.14.11" }
-omnizip-lz4 = { path = "../../omnizip-lz4", version = "0.14.11" }
-omnizip-deflate = { path = "../../omnizip-deflate", version = "0.14.11" }
-omnizip-flac = { path = "../../omnizip-flac", version = "0.14.11" }
+omnizip-codecs = { path = "../../omnizip-codecs", version = "0.14.12" }
+omnizip-lzma = { path = "../../omnizip-lzma", version = "0.14.12" }
+omnizip-zstd = { path = "../../omnizip-zstd", version = "0.14.12" }
+omnizip-brotli = { path = "../../omnizip-brotli", version = "0.14.12" }
+omnizip-bzip2 = { path = "../../omnizip-bzip2", version = "0.14.12" }
+omnizip-lz4 = { path = "../../omnizip-lz4", version = "0.14.12" }
+omnizip-deflate = { path = "../../omnizip-deflate", version = "0.14.12" }
+omnizip-flac = { path = "../../omnizip-flac", version = "0.14.12" }
 
 [lints]
 workspace = true
