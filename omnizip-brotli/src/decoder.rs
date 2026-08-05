@@ -634,6 +634,76 @@ pub fn parse_context_mode(
     Ok((result, br.bit_pos()))
 }
 
+// ---------------------------------------------------------------------------
+// Phase C: distance code computation (RFC 7932 §9.4)
+// ---------------------------------------------------------------------------
+
+/// Decode a distance code from the bitstream.
+///
+/// Returns `(distance_value, bits_consumed)`. `distance_value` is
+/// 1-based (distance 1 = previous byte).
+///
+/// Format per category (RFC 7932 §9.4):
+/// - 0..NDIRECT-1: direct distance = code + 1.
+/// - NDIRECT..NDIRECT+16^NPOSTFIX-1: direct-code with postfix.
+/// - >= NDIRECT+16^NPOSTFIX: complex (variable extra bits).
+pub fn decode_distance_code(
+    br: &mut BitReader,
+    num_direct: u32,
+    num_postfix: u32,
+) -> Result<u32, &'static str> {
+    // Phase C supports only the direct form. The complex form lands
+    // in Phase C.3 with the full encoder.
+    let code = br.read_bits(ceil_log2(num_direct.max(1)));
+    if code < num_direct {
+        Ok(code + 1)
+    } else {
+        Err("complex distance codes not supported in Phase C decoder")
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Phase C: insert-and-copy command (RFC 7932 §10.3)
+// ---------------------------------------------------------------------------
+
+/// A parsed insert-and-copy command from the bitstream.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum InsertCopyCommand {
+    /// `INSERT` literal bytes (no copy).
+    InsertOnly { length: u32 },
+    /// `INSERT` then `COPY` from a back-reference.
+    InsertAndCopy {
+        insert_len: u32,
+        copy_len: u32,
+        distance: u32,
+    },
+    /// Copy from the static dictionary (with transform).
+    DictionaryCopy {
+        copy_len: u32,
+        word_index: u32,
+        transform_index: u32,
+    },
+}
+
+/// Decode the next insert-and-copy command from the bitstream.
+///
+/// Phase C supports `InsertOnly` (no compression) and a stub
+/// `InsertAndCopy` (assumes distance code 1, copy length 1). The
+/// full implementation requires the complete insert-copy Huffman
+/// table (RFC 7932 §10.3) which lands in Phase C.3.
+pub fn decode_insert_copy_command(
+    br: &mut BitReader,
+    num_direct: u32,
+    num_postfix: u32,
+) -> Result<InsertCopyCommand, &'static str> {
+    // Phase C stub: read a length as a single 16-bit value and emit
+    // an InsertOnly. Real implementation requires the LL/ML/OF
+    // Huffman tables per RFC 7932 §10.3.
+    let length = br.read_bits(16);
+    let _ = (num_direct, num_postfix);
+    Ok(InsertCopyCommand::InsertOnly { length })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

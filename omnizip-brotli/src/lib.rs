@@ -15,6 +15,7 @@
 
 pub mod decoder;
 pub mod dictionary;
+pub mod encoder;
 
 use std::io::{self, Cursor};
 
