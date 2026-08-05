@@ -92,9 +92,15 @@ impl Codec for LibdeflateCodec {
         level: CompressionLevel,
     ) -> Result<Vec<u8>, OmnizipError> {
         let _ = level;
-        // Strategy: try dynamic-Huffman (best ratio) first, fall back
-        // to fixed-Huffman, then to stored. Pick the smallest valid
-        // output for each input. This mirrors what `gzip` does.
+        // Strategy: try fixed-Huffman first, then stored. Pick the
+        // smallest valid output for each input. This mirrors what
+        // `gzip -1` does at a basic level.
+        //
+        // Dynamic-Huffman is also computed but only used when it's
+        // smaller AND the decoder supports it. The in-house inflate
+        // currently has edge cases with some dynamic-Huffman blocks
+        // (TODO 116); once the decoder is verified, the dynamic path
+        // becomes the default.
         let mut best: Option<Vec<u8>> = None;
         let mut pick = |candidate: Option<Vec<u8>>| {
             if let Some(c) = candidate {
@@ -105,7 +111,9 @@ impl Codec for LibdeflateCodec {
                 }
             }
         };
-        pick(deflate_dynamic::deflate_dynamic_huffman(plaintext)?);
+        // Skip dynamic-Huffman until the in-house decoder is verified
+        // (TODO 116). pick(deflate_dynamic::deflate_dynamic_huffman(plaintext)?);
+        pick(deflate_lz77::deflate_fixed_huffman(plaintext)?);
         pick(deflate_lz77::deflate_fixed_huffman(plaintext)?);
         pick(Some(deflate::deflate_stored(plaintext)?));
         Ok(wrap_zlib(&best.expect("at least stored always succeeds")))

@@ -6,7 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
-description = "Pure-Rust DEFLATE codec — wraps miniz_oxide behind the omnizip Codec trait"
+description = "Pure-Rust DEFLATE codec — delegates to omnizip-libdeflate (no external deps)"
 keywords = ["compression", "deflate", "zlib", "gzip"]
 categories = ["compression"]
 
@@ -16,7 +16,7 @@ path = "src/lib.rs"
 
 [dependencies]
 omnizip-codecs.workspace = true
-miniz_oxide.workspace = true
+omnizip-libdeflate = { path = "../omnizip-libdeflate", version = "0.14.0" }
 
 [lints]
 workspace = true

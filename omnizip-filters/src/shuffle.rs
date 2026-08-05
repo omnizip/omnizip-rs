@@ -545,10 +545,17 @@ mod tests {
         let shuffled = ByteShuffle::new(4).encode(&raw);
         let shuffled_body = &shuffled[HEADER_LEN..]; // strip header
 
-        // Compress both with lz4_flex (the underlying engine behind
-        // omnizip-lz4). We compare compressed sizes directly.
-        let raw_compressed = lz4_flex::compress_prepend_size(&raw);
-        let shuffled_compressed = lz4_flex::compress_prepend_size(shuffled_body);
+        // Compress both with the in-house LZ4 block encoder.
+        // We compare compressed sizes directly.
+        fn lz4_compress(data: &[u8]) -> Vec<u8> {
+            let block = omnizip_lz4::block::compress_block(data);
+            let mut out = Vec::with_capacity(4 + block.len());
+            out.extend_from_slice(&(data.len() as u32).to_le_bytes());
+            out.extend_from_slice(&block);
+            out
+        }
+        let raw_compressed = lz4_compress(&raw);
+        let shuffled_compressed = lz4_compress(shuffled_body);
 
         assert!(
             shuffled_compressed.len() < raw_compressed.len(),
