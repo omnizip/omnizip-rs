@@ -494,17 +494,28 @@ fn encode_weights_fse(weights: &[u8], max_symbol: usize) -> Result<Vec<u8>, Zstd
 /// Encode `literals` as a single-stream Huffman bitstream using
 /// BIT_CStream (reverse-direction writer). Matches the decoder's
 /// `HUF_decompress1X_usingDTable` which reads via BIT_DStream.
+///
+/// ## Performance
+///
+/// Builds the per-symbol `(code, length)` lookup table ONCE via
+/// [`HuffmanTable::build_encode_table`] and indexes into it per
+/// literal. This avoids the O(N) per-call cost of
+/// `encode_symbol` (which used to rebuild the table on every
+/// literal — `O(N²)` for N literals).
 fn encode_huffman_stream(table: &HuffmanTable, literals: &[u8]) -> Vec<u8> {
     use crate::fse::encoder::BitCStream;
 
     let mut out = Vec::new();
     let mut bitc = BitCStream::new(&mut out);
 
+    // Pre-build the encode table once.
+    let encode_table = table.build_encode_table();
+
     // Process symbols in REVERSE order (last symbol first). The
     // CStream accumulates at the low end; the decoder reads from the
     // high end, recovering codes MSB-first.
     for &b in literals.iter().rev() {
-        let (code, len) = table.encode_symbol(b);
+        let (code, len) = encode_table[usize::from(b)];
         if len == 0 {
             continue;
         }
