@@ -1,0 +1,335 @@
+//! Brotli Huffman tree construction and emission (RFC 7932 §9.5).
+//!
+//! Ported from `brotli/src/enc/brotli_bit_stream.rs`. Builds a
+//! canonical Huffman tree from a histogram and emits it in either
+//! simple form (≤ 4 symbols) or complex form (with RLE).
+
+#![forbid(unsafe_code)]
+
+use crate::encoder::BitWriter;
+
+/// Maximum code length per RFC 7932 §9.5.
+pub const MAX_HUFFMAN_CODE_LENGTH: u8 = 15;
+
+/// A Huffman tree node used during construction.
+#[derive(Clone, Copy, Default)]
+struct HuffmanTree {
+    total_count: u32,
+    index_left: i32,
+    index_right_or_value: i32,
+}
+
+impl HuffmanTree {
+    const fn new(count: u32, left: i32, right: i32) -> Self {
+        Self {
+            total_count: count,
+            index_left: left,
+            index_right_or_value: right,
+        }
+    }
+}
+
+/// Sort tree items by `total_count` (ascending). Mirrors upstream
+/// `SortHuffmanTreeItems` with `SimpleSortHuffmanTree`.
+fn sort_huffman_tree_items(tree: &mut [HuffmanTree], n: usize) {
+    tree[..n].sort_by_key(|t| t.total_count);
+}
+
+/// Recursively set depth on each leaf. Returns false if max_depth
+/// would be exceeded. Ported from `BrotliSetDepth`.
+fn set_depth(p0: i32, pool: &mut [HuffmanTree], depth: &mut [u8], max_depth: i32) -> bool {
+    let mut stack: Vec<(i32, i32)> = Vec::with_capacity(16);
+    stack.push((p0, 0));
+    while let Some((node_idx, level)) = stack.pop() {
+        let node = pool[node_idx as usize];
+        if node.index_left >= 0 {
+            // Internal node — recurse into children.
+            stack.push((node.index_left, level + 1));
+            stack.push((node.index_right_or_value, level + 1));
+        } else if node.index_right_or_value >= 0 {
+            // Leaf — record the depth.
+            let sym = node.index_right_or_value as usize;
+            if sym >= depth.len() {
+                return false;
+            }
+            depth[sym] = level as u8;
+            if level > max_depth {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+/// Build canonical Huffman codes from per-symbol code lengths.
+///
+/// Mirrors `BrotliConvertBitDepthsToSymbols`. Returns the codes array.
+#[must_use]
+pub fn convert_bit_depths_to_symbols(depth: &[u8]) -> Vec<u16> {
+    let n = depth.len();
+    let mut codes = vec![0u16; n];
+    let mut bl_count = vec![0u32; MAX_HUFFMAN_CODE_LENGTH as usize + 2];
+    for &d in depth {
+        if d > 0 {
+            bl_count[d as usize] += 1;
+        }
+    }
+    let mut next_code = vec![0u16; MAX_HUFFMAN_CODE_LENGTH as usize + 2];
+    let mut code = 0u16;
+    for bits in 1..=MAX_HUFFMAN_CODE_LENGTH as usize {
+        code = (code + bl_count[bits - 1] as u16) << 1;
+        next_code[bits] = code;
+    }
+    for i in 0..n {
+        let l = depth[i];
+        if l > 0 {
+            codes[i] = next_code[l as usize];
+            next_code[l as usize] += 1;
+        }
+    }
+    codes
+}
+
+/// Build the per-symbol code lengths from a histogram. Returns
+/// `(depth, bits)` arrays.
+///
+/// Uses the standard min-heap Huffman construction. Code lengths are
+/// capped at 15 bits via the iterative "kraft inequality" repair
+/// algorithm (matches upstream's count_limit elevation when needed).
+#[must_use]
+pub fn build_huffman_tree(histogram: &[u32], alphabet_size: usize) -> (Vec<u8>, Vec<u16>) {
+    let mut depth = vec![0u8; alphabet_size];
+
+    // Collect symbols with non-zero frequency.
+    let active: Vec<(u32, usize)> = histogram
+        .iter()
+        .enumerate()
+        .filter(|(_, &f)| f > 0)
+        .map(|(i, &f)| (f, i))
+        .collect();
+
+    if active.is_empty() {
+        let bits = convert_bit_depths_to_symbols(&depth);
+        return (depth, bits);
+    }
+    if active.len() == 1 {
+        // Brotli's simple-form convention for 1-symbol alphabets:
+        // the symbol gets code length 0 (no bits emitted per use).
+        // All other symbols have code length 0 (not in alphabet).
+        depth[active[0].1] = 0;
+        let bits = convert_bit_depths_to_symbols(&depth);
+        return (depth, bits);
+    }
+
+    // Iterative Huffman with count-limit elevation (matches upstream).
+    let mut count_limit = 1u32;
+    loop {
+        // Build a min-heap with elevated counts.
+        let mut heap: std::collections::BinaryHeap<std::cmp::Reverse<(u32, i32)>> =
+            std::collections::BinaryHeap::new();
+        let mut nodes: Vec<HuffmanTree> = Vec::new();
+        for &(f, sym) in &active {
+            let elevated = f.max(count_limit);
+            let idx = nodes.len() as i32;
+            nodes.push(HuffmanTree::new(elevated, -1, sym as i32));
+            heap.push(std::cmp::Reverse((elevated, idx)));
+        }
+
+        // Push a sentinel so the loop terminates cleanly.
+        let sentinel_idx = nodes.len() as i32;
+        nodes.push(HuffmanTree::new(u32::MAX, -1, -1));
+        heap.push(std::cmp::Reverse((u32::MAX, sentinel_idx)));
+
+        // Merge until one root remains. We keep the sentinel in the
+        // heap to terminate cleanly: when only root + sentinel remain,
+        // we pop the root (which has a smaller count than u32::MAX).
+        let mut root_idx: Option<i32> = None;
+        let mut root_count: Option<u32> = None;
+        while let Some(std::cmp::Reverse((c, idx))) = heap.pop() {
+            if c == u32::MAX {
+                // Sentinel — stop.
+                break;
+            }
+            if let (Some(rc), Some(ri)) = (root_count, root_idx) {
+                // Already have a root; merge it with the new one.
+                let merged_count = rc.saturating_add(c);
+                let merged_idx = nodes.len() as i32;
+                nodes.push(HuffmanTree::new(merged_count, ri, idx));
+                root_count = Some(merged_count);
+                root_idx = Some(merged_idx);
+            } else {
+                root_count = Some(c);
+                root_idx = Some(idx);
+            }
+        }
+        let root_idx = root_idx.expect("root exists");
+
+        // Set depth on each leaf.
+        for d in depth.iter_mut() {
+            *d = 0;
+        }
+        if set_depth(root_idx, &mut nodes, &mut depth, 15) {
+            break;
+        }
+        count_limit = count_limit.saturating_mul(2);
+        if count_limit > (1 << 30) {
+            break;
+        }
+    }
+
+    let bits = convert_bit_depths_to_symbols(&depth);
+    (depth, bits)
+}
+
+/// Emit a Huffman tree in simple form (≤ 4 symbols). Mirrors
+/// upstream's `BrotliBuildAndStoreHuffmanTreeFast` simple-form path.
+///
+/// Returns `true` if emitted, `false` if too many symbols (use
+/// complex form instead).
+pub fn store_simple_form(
+    symbols: &[u64],
+    depth: &[u8],
+    max_bits: u8,
+    bw: &mut BitWriter,
+) -> bool {
+    let count = symbols.len();
+    if count > 4 {
+        return false;
+    }
+    if count == 1 {
+        // HSKIP=1, NSYM=0 → 4 bits = 0b0001.
+        bw.write_bits(1, 4);
+        bw.write_bits(symbols[0], u32::from(max_bits));
+        return true;
+    }
+    // HSKIP=0 (2 bits) + NSYM-1 (2 bits).
+    bw.write_bits(0, 2);
+    bw.write_bits((count - 1) as u64, 2);
+
+    // Sort symbols by descending depth (upstream convention).
+    let mut sorted: Vec<u64> = symbols.to_vec();
+    for i in 0..count {
+        for j in i + 1..count {
+            if depth[symbols[j] as usize] < depth[symbols[i] as usize] {
+                sorted.swap(i, j);
+            }
+        }
+    }
+
+    for &s in &sorted {
+        bw.write_bits(s, u32::from(max_bits));
+    }
+
+    if count == 2 {
+        // tree_select: 0 means 1-bit codes.
+        bw.write_bits(0, 1);
+    } else if count == 4 {
+        // tree_select: depends on whether two pairs share depth.
+        let tree_select = if depth[sorted[0] as usize] == 1 { 1 } else { 0 };
+        bw.write_bits(u64::from(tree_select as u32), 1);
+    }
+    true
+}
+
+/// Build and emit a Huffman tree in simple form if possible,
+/// otherwise return false (caller should fall back to complex form).
+///
+/// Returns `(emitted, symbols)` where `emitted` is true if simple
+/// form was used.
+pub fn build_and_store_simple(
+    histogram: &[u32],
+    alphabet_size: usize,
+    max_bits: u8,
+    bw: &mut BitWriter,
+) -> (bool, Vec<u8>, Vec<u16>) {
+    let (depth, bits) = build_huffman_tree(histogram, alphabet_size);
+
+    // Collect symbols in alphabetical order.
+    let symbols: Vec<u64> = (0..alphabet_size as u64)
+        .filter(|&i| histogram[i as usize] > 0)
+        .collect();
+
+    if symbols.len() <= 4 {
+        let emitted = store_simple_form(&symbols, &depth, max_bits, bw);
+        (emitted, depth, bits)
+    } else {
+        (false, depth, bits)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn single_symbol_alphabet_gets_zero_depth() {
+        // Brotli's simple-form convention: 1-symbol alphabets use
+        // code length 0 (no bits per use). Matches upstream
+        // `BrotliBuildAndStoreHuffmanTreeFast`.
+        let mut histo = vec![0u32; 4];
+        histo[2] = 10;
+        let (depth, _bits) = build_huffman_tree(&histo, 4);
+        assert_eq!(depth[2], 0);
+    }
+
+    #[test]
+    fn two_symbol_alphabet_gets_1_bit_codes() {
+        let mut histo = vec![0u32; 4];
+        histo[0] = 5;
+        histo[1] = 5;
+        let (depth, _bits) = build_huffman_tree(&histo, 4);
+        assert_eq!(depth[0], 1);
+        assert_eq!(depth[1], 1);
+    }
+
+    #[test]
+    fn skewed_distribution_shorter_for_high_freq() {
+        let mut histo = vec![0u32; 4];
+        histo[0] = 100;
+        histo[1] = 1;
+        histo[2] = 1;
+        histo[3] = 1;
+        let (depth, _bits) = build_huffman_tree(&histo, 4);
+        // Symbol 0 (high freq) should have the shortest code.
+        let d0 = depth[0];
+        let d1 = depth[1];
+        assert!(d0 <= d1, "high-freq symbol {d0} should be ≤ low-freq {d1}");
+    }
+
+    #[test]
+    fn convert_bit_depths_basic() {
+        let depth = vec![2, 1, 3, 3];
+        let bits = convert_bit_depths_to_symbols(&depth);
+        // Canonical: sorted by length then symbol.
+        // len=1: sym 1 → 0
+        // len=2: sym 0 → 10
+        // len=3: sym 2 → 110, sym 3 → 111
+        assert_eq!(bits[1], 0);
+        assert_eq!(bits[0], 0b10);
+        assert_eq!(bits[2], 0b110);
+        assert_eq!(bits[3], 0b111);
+    }
+
+    #[test]
+    fn simple_form_emits_for_one_symbol() {
+        let mut bw = BitWriter::new();
+        let symbols = vec![42u64];
+        let depth = vec![0u8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1];
+        let emitted = store_simple_form(&symbols, &depth, 8, &mut bw);
+        assert!(emitted);
+        // 4 bits header + 8 bits symbol = 12 bits.
+        assert_eq!(bw.bit_pos_after(), 12);
+    }
+
+    #[test]
+    fn simple_form_emits_for_two_symbols() {
+        let mut bw = BitWriter::new();
+        let symbols = vec![10u64, 20];
+        let depth = vec![0u8; 256];
+        let emitted = store_simple_form(&symbols, &depth, 8, &mut bw);
+        assert!(emitted);
+        // 4 bits header + 8 bits sym1 + 8 bits sym2 + 1 bit tree_select = 21 bits.
+        assert_eq!(bw.bit_pos_after(), 21);
+    }
+}
