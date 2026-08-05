@@ -19,19 +19,19 @@ name = "omnizip_bench"
 path = "src/lib.rs"
 
 [dependencies]
-omnizip-codecs = { path = "../omnizip-codecs", version = "0.14.14" }
-omnizip-lzma = { path = "../omnizip-lzma", version = "0.14.14" }
-omnizip-zstd = { path = "../omnizip-zstd", version = "0.14.14" }
-omnizip-snappy = { path = "../omnizip-snappy", version = "0.14.14" }
-omnizip-lz4 = { path = "../omnizip-lz4", version = "0.14.14" }
-omnizip-deflate = { path = "../omnizip-deflate", version = "0.14.14" }
-omnizip-deflate64 = { path = "../omnizip-deflate64", version = "0.14.14" }
-omnizip-brotli = { path = "../omnizip-brotli", version = "0.14.14" }
-omnizip-bzip2 = { path = "../omnizip-bzip2", version = "0.14.14" }
-omnizip-ppmd = { path = "../omnizip-ppmd", version = "0.14.14" }
-omnizip-zpaq = { path = "../omnizip-zpaq", version = "0.14.14" }
-omnizip-glza = { path = "../omnizip-glza", version = "0.14.14" }
-omnizip-flac = { path = "../omnizip-flac", version = "0.14.14" }
+omnizip-codecs = { path = "../omnizip-codecs", version = "0.14.15" }
+omnizip-lzma = { path = "../omnizip-lzma", version = "0.14.15" }
+omnizip-zstd = { path = "../omnizip-zstd", version = "0.14.15" }
+omnizip-snappy = { path = "../omnizip-snappy", version = "0.14.15" }
+omnizip-lz4 = { path = "../omnizip-lz4", version = "0.14.15" }
+omnizip-deflate = { path = "../omnizip-deflate", version = "0.14.15" }
+omnizip-deflate64 = { path = "../omnizip-deflate64", version = "0.14.15" }
+omnizip-brotli = { path = "../omnizip-brotli", version = "0.14.15" }
+omnizip-bzip2 = { path = "../omnizip-bzip2", version = "0.14.15" }
+omnizip-ppmd = { path = "../omnizip-ppmd", version = "0.14.15" }
+omnizip-zpaq = { path = "../omnizip-zpaq", version = "0.14.15" }
+omnizip-glza = { path = "../omnizip-glza", version = "0.14.15" }
+omnizip-flac = { path = "../omnizip-flac", version = "0.14.15" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 clap = { version = "4.5", features = ["derive"] }
