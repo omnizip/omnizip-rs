@@ -57,6 +57,7 @@
 #![warn(clippy::pedantic)]
 
 pub mod deflate;
+pub mod deflate_dynamic;
 pub mod deflate_lz77;
 mod inflate;
 
@@ -91,15 +92,23 @@ impl Codec for LibdeflateCodec {
         level: CompressionLevel,
     ) -> Result<Vec<u8>, OmnizipError> {
         let _ = level;
-        // Try LZ77 + fixed-Huffman first (non-trivial inputs only).
-        // Falls back to stored blocks for tiny inputs or if LZ77
-        // isn't beneficial.
-        let raw = if let Some(lz77) = deflate_lz77::deflate_fixed_huffman(plaintext)? {
-            lz77
-        } else {
-            deflate::deflate_stored(plaintext)?
+        // Strategy: try dynamic-Huffman (best ratio) first, fall back
+        // to fixed-Huffman, then to stored. Pick the smallest valid
+        // output for each input. This mirrors what `gzip` does.
+        let mut best: Option<Vec<u8>> = None;
+        let mut pick = |candidate: Option<Vec<u8>>| {
+            if let Some(c) = candidate {
+                match &best {
+                    None => best = Some(c),
+                    Some(prev) if c.len() < prev.len() => best = Some(c),
+                    _ => {}
+                }
+            }
         };
-        Ok(wrap_zlib(&raw))
+        pick(deflate_dynamic::deflate_dynamic_huffman(plaintext)?);
+        pick(deflate_lz77::deflate_fixed_huffman(plaintext)?);
+        pick(Some(deflate::deflate_stored(plaintext)?));
+        Ok(wrap_zlib(&best.expect("at least stored always succeeds")))
     }
 
     fn decompress(

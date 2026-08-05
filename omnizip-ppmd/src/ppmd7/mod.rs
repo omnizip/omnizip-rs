@@ -56,7 +56,8 @@ impl std::error::Error for Ppmd7Error {}
 
 pub use codec::{
     compress, compress_default, compress_with_budget, decompress, decompress_with_budget,
-    Ppmd7Codec, DEFAULT_MAX_ORDER, DEFAULT_MEMORY_BUDGET_BYTES, MAX_ORDER, MIN_ORDER,
+    Ppmd7Codec, PpmdCompressor, DEFAULT_MAX_ORDER, DEFAULT_MEMORY_BUDGET_BYTES, MAX_ORDER,
+    MIN_ORDER,
 };
 pub use model::PpmModel;
 // Re-export the shared binary arithmetic coder so callers that

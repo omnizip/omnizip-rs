@@ -110,6 +110,17 @@ the new items document the path forward.
 | 107 | [ZSTD BT match finder for levels 16-22](107-zstd-bt-match-finder.md) | ⏳ (P0 — 5-15% ratio gap) |
 | 108 | [LZMA BT4 match finder](108-lzma-bt4-match-finder.md) | ⏳ (P1 — 3-8% ratio gap) |
 | 109 | [BZip2 SA-IS suffix array](109-bzip2-sais-bwt.md) | ⏳ (P2 — 2-5x speed) |
+| 110 | [ZSTD encoder perf cliff (infinite loop)](110-zstd-perf-cliff.md) | ✅ (root cause: backward-extension `ip` mutation) |
+| 111 | [FLAC block-size sweep pruning](111-flac-block-size-pruning.md) | ⏳ (P0 — half of 10× gap) |
+| 112 | [FLAC FFT-based autocorrelation](112-flac-fft-autocorrelation.md) | ⏳ (P1 — second half of 10× gap) |
+| 113 | [ricepp SIMD via wide](113-ricepp-simd-via-wide.md) | ⏳ (P0 — half of 6× gap) |
+| 114 | [Shared match-finder (DRY)](114-shared-match-finder.md) | ⏳ (P1 — pure DRY) |
+| 115 | [Shared bitstream (DRY)](115-shared-bitstream.md) | ⏳ (P2 — DRY) |
+| 116 | [DEFLATE dynamic-Huffman](116-deflate-dynamic-huffman.md) | ⏳ (P1 — 10-20% ratio) |
+| 117 | [Brotli full pure-Rust port](117-brotli-full-port.md) | ⏳ (P0 — workspace convention) |
+| 118 | [PPMd context-tree init profiling](118-ppmd-context-tree-init.md) | ⏳ (P2 — small-chunk overhead) |
+| 119 | [Codec streaming API](119-codec-streaming-api.md) | ⏳ (P2 — LimniFS scaling) |
+| 120 | [Continuous differential harness](120-continuous-differential-harness.md) | ⏳ (P1 — regression safety) |
 
 ## How to claim a TODO
 
