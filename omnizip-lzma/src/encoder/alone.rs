@@ -79,6 +79,32 @@ pub struct LzmaOptions {
     /// worse ratio on inputs where the chain has progressively longer
     /// matches (rare).
     pub nice_match: u32,
+    /// LZMA2 reset mode for cross-call state reuse. See [`ResetMode`].
+    /// Default: [`ResetMode::Full`] (same as fresh allocation every call).
+    /// Set to [`ResetMode::ReuseState`] for batch workloads to skip
+    /// probability-model reset and carry adaptation forward.
+    pub reset_mode: ResetMode,
+}
+
+/// Controls what gets reset between LZMA2 chunks (and between
+/// `LzmaCompressor::compress` calls).
+///
+/// Maps directly to the LZMA2 chunk header's `reset_level` field
+/// (bits 5-6 of the control byte).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ResetMode {
+    /// Full reset: state + properties + all probability models.
+    /// Same as creating a fresh encoder. This is the default.
+    #[default]
+    Full,
+    /// Reuse state: keep probability models + properties, reset only
+    /// the encoder state + repeat offsets. Faster than Full for
+    /// batch workloads.
+    ReuseState,
+    /// Warm: carry everything forward (models + state + rep offsets).
+    /// The fastest mode but changes the output bytes (no reset
+    /// markers in the LZMA2 chunk headers).
+    Warm,
 }
 
 impl Default for LzmaOptions {
@@ -91,9 +117,12 @@ impl Default for LzmaOptions {
             use_optimal_parser: false,
             max_chain_length: 0,
             nice_match: 0,
+            reset_mode: ResetMode::Full,
         }
     }
 }
+
+
 
 impl LzmaOptions {
     /// Validate the parameters against the LZMA spec.
