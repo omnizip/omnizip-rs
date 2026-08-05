@@ -365,15 +365,24 @@ pub fn encode_from_solution(
 ///
 /// Uses the SIMD-accelerated inner-product in
 /// [`simd::autocorrelation_lag`](crate::encoder::simd::autocorrelation_lag)
-/// when the `simd-lpc` feature is enabled; otherwise a scalar
-/// implementation. Both use double-precision accumulation and a
-/// fixed summation order for deterministic output.
+/// when the `simd-lpc` feature is enabled; the FFT-based path
+/// ([`fft::autocorrelate_fft`](crate::encoder::fft::autocorrelate_fft))
+/// when `fft-acf` is enabled; otherwise a scalar implementation.
+/// Both use double-precision accumulation and a fixed summation
+/// order for deterministic output.
 fn autocorrelate(samples: &[i32], max_order: usize) -> Vec<f64> {
-    let mut acf = vec![0.0f64; max_order + 1];
-    for lag in 0..=max_order {
-        acf[lag] = crate::encoder::simd::autocorrelation_lag(samples, lag);
+    #[cfg(feature = "fft-acf")]
+    {
+        return crate::encoder::fft::autocorrelate_fft(samples, max_order);
     }
-    acf
+    #[cfg(not(feature = "fft-acf"))]
+    {
+        let mut acf = vec![0.0f64; max_order + 1];
+        for lag in 0..=max_order {
+            acf[lag] = crate::encoder::simd::autocorrelation_lag(samples, lag);
+        }
+        acf
+    }
 }
 
 /// Levinson-Durbin recursion: solve the Toeplitz system for LPC

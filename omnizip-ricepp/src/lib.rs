@@ -407,6 +407,95 @@ fn compute_best_split(delta: &[u64], sum: u64, pixel_bits: u32) -> (u32, u64) {
     (best_fs, best_bits)
 }
 
+/// Compute `sum(delta[i] zigzag-encoded)` for a block of pixels
+/// where `delta[i] = pixel[i] - pixel[i-1]` and `pixel[-1] = last_value`.
+///
+/// Uses `wide::u64x4` to vectorise the zigzag + sum reduction when
+/// the `simd-delta` feature is enabled. The delta computation stays
+/// scalar (sequential dependency on `last`), but the per-pixel
+/// inner work (zigzag + accumulate) processes 4 pixels per cycle.
+///
+/// Returns `(delta_scratch, sum)` so callers can use the deltas for
+/// the actual block encoding.
+#[cfg(feature = "simd-delta")]
+fn delta_zigzag_sum(
+    block: &[u64],
+    last_value: u64,
+    pixel_msb: u64,
+    pixel_bits: u32,
+    delta_scratch: &mut [u64],
+) -> u64 {
+    use wide::u64x4;
+    let n = block.len();
+    let mut last = last_value;
+    let mut sum_acc = u64x4::splat(0);
+    let mut chunk = [0u64; 4];
+    let mut i = 0;
+
+    // Process 4 pixels per chunk. The delta is computed sequentially
+    // (each pixel depends on the previous), but the zigzag + sum is
+    // vectorised within the chunk.
+    while i + 4 <= n {
+        // Compute deltas.
+        chunk[0] = block[i].wrapping_sub(last);
+        chunk[1] = block[i + 1].wrapping_sub(block[i]);
+        chunk[2] = block[i + 2].wrapping_sub(block[i + 1]);
+        chunk[3] = block[i + 3].wrapping_sub(block[i + 2]);
+        last = block[i + 3];
+
+        // Vectorised zigzag + accumulate.
+        let pixels = u64x4::from(chunk);
+        let mask = u64x4::splat((1u64 << pixel_bits) - 1);
+        let masked = pixels & mask;
+        let msb_v = u64x4::splat(pixel_msb);
+        let is_neg = (masked & msb_v).simd_eq(msb_v);
+        let shifted: u64x4 = (masked << 1) & mask;
+        let zigzag: u64x4 = (!shifted) & mask;
+        let result = is_neg.bitselect(zigzag, shifted);
+
+        let arr = result.to_array();
+        delta_scratch[i..i + 4].copy_from_slice(&arr);
+        sum_acc += result;
+        i += 4;
+    }
+
+    let mut sum: u64 = sum_acc.reduce_add();
+
+    // Tail: scalar.
+    while i < n {
+        let diff = block[i].wrapping_sub(last);
+        let d = zigzag_encode(diff, pixel_msb, pixel_bits);
+        delta_scratch[i] = d;
+        sum = sum.wrapping_add(d);
+        last = block[i];
+        i += 1;
+    }
+
+    sum
+}
+
+/// Scalar fallback — see `simd-delta` version above.
+#[cfg(not(feature = "simd-delta"))]
+fn delta_zigzag_sum(
+    block: &[u64],
+    last_value: u64,
+    pixel_msb: u64,
+    pixel_bits: u32,
+    delta_scratch: &mut [u64],
+) -> u64 {
+    let _ = pixel_bits;
+    let mut last = last_value;
+    let mut sum = 0u64;
+    for (i, &pixel) in block.iter().enumerate() {
+        let diff = pixel.wrapping_sub(last);
+        let d = zigzag_encode(diff, pixel_msb, pixel_bits);
+        delta_scratch[i] = d;
+        sum += d;
+        last = pixel;
+    }
+    sum
+}
+
 /// Encode a single block of pixels. Returns nothing; writes to `writer`.
 ///
 /// `delta_scratch` is a caller-provided scratch buffer; passing it in
@@ -424,17 +513,8 @@ fn encode_block(
     let pixel_msb = 1u64 << (pixel_bits - 1);
 
     let delta = &mut delta_scratch[..block.len()];
-    let mut last = *last_value;
-    let mut sum = 0u64;
-
-    for (i, &pixel) in block.iter().enumerate() {
-        let diff = pixel.wrapping_sub(last);
-        let d = zigzag_encode(diff, pixel_msb, pixel_bits);
-        delta[i] = d;
-        sum += d;
-        last = pixel;
-    }
-    *last_value = last;
+    let sum = delta_zigzag_sum(block, *last_value, pixel_msb, pixel_bits, delta);
+    *last_value = if block.is_empty() { *last_value } else { block[block.len() - 1] };
 
     if sum > 0 {
         let (fs, bits_used) = compute_best_split(delta, sum, pixel_bits);

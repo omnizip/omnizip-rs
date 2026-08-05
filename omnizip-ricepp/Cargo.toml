@@ -13,5 +13,16 @@ categories = ["compression", "science"]
 [dependencies]
 omnizip-codecs.workspace = true
 
+[features]
+# Enable wide::u64x4 vectorisation of the delta+zigzag+sum loop in
+# encode_block. Default off; turn on with
+# --features omnizip-ricepp/simd-delta.
+default = []
+simd-delta = ["dep:wide"]
+
+[dependencies.wide]
+version = "1.6"
+optional = true
+
 [lints]
 workspace = true
