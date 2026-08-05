@@ -151,6 +151,7 @@ the new items document the path forward.
 | 148 | [Code review sweep OCP/MECE/DRY](148-code-review-sweep-ocp-mece-dry.md) | ⏳ (P2) |
 | 149 | [Per-codec READMEs](149-per-codec-readmes.md) | ⏳ (P2) |
 | 150 | [Multi-platform CI matrix](150-multi-platform-ci.md) | ⏳ (P1) |
+| 151 | [Brotli Phase C — encoder + dictionary](151-brotli-phase-c-encoder.md) | ⏳ (P0 — TODO 117 continuation) |
 
 ## How to claim a TODO
 
