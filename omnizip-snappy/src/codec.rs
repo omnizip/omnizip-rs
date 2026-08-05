@@ -103,12 +103,10 @@ pub fn decode(input: &[u8]) -> Result<Vec<u8>, &'static str> {
                 i = end;
             }
             1 => {
-                // COPY_1: 1-byte offset (12-bit), 3-bit length-4.
-                // Wire format stores `dist - 1` split across tag high
-                // 3 bits + the next byte.
+                // COPY_1: 1-byte offset. Wire stores RAW distance
+                // (high 3 bits in tag, low 8 bits in next byte).
                 let len = (usize::from(tag >> 2) & 0b111) + 4;
-                let dist_raw = (usize::from(tag >> 5) << 8) | usize::from(input[i]);
-                let dist = dist_raw + 1;
+                let dist = (usize::from(tag >> 5) << 8) | usize::from(input[i]);
                 i += 1;
                 if dist == 0 || dist > out.len() {
                     return Err("invalid copy distance");
@@ -116,11 +114,9 @@ pub fn decode(input: &[u8]) -> Result<Vec<u8>, &'static str> {
                 copy_overlap(&mut out, dist, len);
             }
             2 => {
-                // COPY_2: 2-byte offset (16-bit), 6-bit length-1.
-                // Wire format stores `dist - 1` LE in 2 bytes.
+                // COPY_2: 2-byte offset. Wire stores RAW distance LE.
                 let len = (usize::from(tag >> 2)) + 1;
-                let dist_raw = usize::from(input[i]) | (usize::from(input[i + 1]) << 8);
-                let dist = dist_raw + 1;
+                let dist = usize::from(input[i]) | (usize::from(input[i + 1]) << 8);
                 i += 2;
                 if dist == 0 || dist > out.len() {
                     return Err("invalid copy distance");
@@ -128,13 +124,12 @@ pub fn decode(input: &[u8]) -> Result<Vec<u8>, &'static str> {
                 copy_overlap(&mut out, dist, len);
             }
             3 => {
-                // COPY_4: 4-byte offset (32-bit), 6-bit length-1.
+                // COPY_4: 4-byte offset. Wire stores RAW distance LE.
                 let len = (usize::from(tag >> 2)) + 1;
-                let dist_raw = usize::from(input[i])
+                let dist = usize::from(input[i])
                     | (usize::from(input[i + 1]) << 8)
                     | (usize::from(input[i + 2]) << 16)
                     | (usize::from(input[i + 3]) << 24);
-                let dist = dist_raw + 1;
                 i += 4;
                 if dist == 0 || dist > out.len() {
                     return Err("invalid copy distance");
@@ -232,29 +227,27 @@ fn emit_literal(out: &mut Vec<u8>, lit: &[u8]) {
 ///
 /// ## Wire format
 ///
-/// Per the Snappy framing spec, all distances are stored as
-/// **`distance - 1`** in the wire bytes (so distance=1 → byte 0).
-/// Decoder adds 1 to recover the actual distance.
+/// Per the Snappy framing format (matching upstream `snap`): distances
+/// are stored RAW in the wire bytes (not `distance - 1`).
 fn emit_copy(out: &mut Vec<u8>, dist: usize, len: usize) {
-    // COPY_1 handles dist 1..=2048 and len 4..=11.
-    if dist < 2048 && len <= 11 {
-        let d_minus_1 = dist - 1;
-        let tag = ((d_minus_1 >> 8) << 5)
+    // COPY_1 handles dist 1..=2047 and len 4..=11.
+    if dist <= 2047 && len <= 11 {
+        let tag = ((dist >> 8) << 5)
             | (((len - 4) & 0b111) << 2)
             | 0b01;
         out.push(tag as u8);
-        out.push((d_minus_1 & 0xFF) as u8);
+        out.push((dist & 0xFF) as u8);
         return;
     }
-    // COPY_2 handles dist 1..=65536 and len 1..=64.
+    // COPY_2 handles dist 1..=65535 and len 1..=64.
     // Emit in 64-byte chunks.
-    let d_minus_1 = (dist - 1) as u16;
+    let dist_le = dist as u16;
     let mut remaining = len;
     while remaining > 0 {
         let chunk = remaining.min(64);
         let tag = ((chunk - 1) as u8) << 2 | 0b10;
         out.push(tag);
-        out.extend_from_slice(&d_minus_1.to_le_bytes());
+        out.extend_from_slice(&dist_le.to_le_bytes());
         remaining -= chunk;
     }
 }
@@ -379,7 +372,7 @@ mod tests {
         bad.push(0b0000_0000); // literal tag: length = 1
         bad.push(b'X');
         bad.push(0x0F); // COPY_4 tag, len=4
-        bad.push(0xE7); // dist-1 = 999
+        bad.push(0xE8); // dist = 1000 (raw LE)
         bad.push(0x03);
         bad.push(0x00);
         bad.push(0x00);
