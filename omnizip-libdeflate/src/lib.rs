@@ -111,9 +111,8 @@ impl Codec for LibdeflateCodec {
                 }
             }
         };
-        // Skip dynamic-Huffman until the in-house decoder is verified
-        // (TODO 116). pick(deflate_dynamic::deflate_dynamic_huffman(plaintext)?);
-        pick(deflate_lz77::deflate_fixed_huffman(plaintext)?);
+        // Dynamic-Huffman re-enabled after round-trip verification.
+        pick(deflate_dynamic::deflate_dynamic_huffman(plaintext)?);
         pick(deflate_lz77::deflate_fixed_huffman(plaintext)?);
         pick(Some(deflate::deflate_stored(plaintext)?));
         Ok(wrap_zlib(&best.expect("at least stored always succeeds")))
