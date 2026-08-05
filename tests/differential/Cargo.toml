@@ -20,6 +20,9 @@ omnizip-bzip2 = { path = "../../omnizip-bzip2", version = "0.14.20" }
 omnizip-lz4 = { path = "../../omnizip-lz4", version = "0.14.20" }
 omnizip-deflate = { path = "../../omnizip-deflate", version = "0.14.20" }
 omnizip-flac = { path = "../../omnizip-flac", version = "0.14.20" }
+omnizip-libdeflate = { path = "../../omnizip-libdeflate", version = "0.14.20" }
+omnizip-ricepp = { path = "../../omnizip-ricepp", version = "0.14.20" }
+omnizip-snappy = { path = "../../omnizip-snappy", version = "0.14.20" }
 
 [lints]
 workspace = true

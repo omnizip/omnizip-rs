@@ -111,13 +111,13 @@ the new items document the path forward.
 | 108 | [LZMA BT4 match finder](108-lzma-bt4-match-finder.md) | ⏳ (P1 — 3-8% ratio gap) |
 | 109 | [BZip2 SA-IS suffix array](109-bzip2-sais-bwt.md) | ⏳ (P2 — 2-5x speed) |
 | 110 | [ZSTD encoder perf cliff (infinite loop)](110-zstd-perf-cliff.md) | ✅ (root cause: backward-extension `ip` mutation) |
-| 111 | [FLAC block-size sweep pruning](111-flac-block-size-pruning.md) | ⏳ (P0 — half of 10× gap) |
-| 112 | [FLAC FFT-based autocorrelation](112-flac-fft-autocorrelation.md) | ⏳ (P1 — second half of 10× gap) |
-| 113 | [ricepp SIMD via wide](113-ricepp-simd-via-wide.md) | ⏳ (P0 — half of 6× gap) |
-| 114 | [Shared match-finder (DRY)](114-shared-match-finder.md) | ⏳ (P1 — pure DRY) |
+| 111 | [FLAC block-size sweep pruning](111-flac-block-size-pruning.md) | ✅ (heuristic `pick_block_size` landed; 11× speedup) |
+| 112 | [FLAC FFT-based autocorrelation](112-flac-fft-autocorrelation.md) | ✅ (radix-2 FFT + Wiener-Khinchin landed behind `fft-acf` feature) |
+| 113 | [ricepp SIMD via wide](113-ricepp-simd-via-wide.md) | ✅ (`delta_zigzag_sum` SIMD path landed) |
+| 114 | [Shared match-finder (DRY)](114-shared-match-finder.md) | ✅ (`HashChainMatchFinder` in omnizip-codecs; migration TODOs 122-125) |
 | 115 | [Shared bitstream (DRY)](115-shared-bitstream.md) | ⏳ (P2 — DRY) |
-| 116 | [DEFLATE dynamic-Huffman](116-deflate-dynamic-huffman.md) | ⏳ (P1 — 10-20% ratio) |
-| 117 | [Brotli full pure-Rust port](117-brotli-full-port.md) | 🔄 (Phase A landed in #89) |
+| 116 | [DEFLATE dynamic-Huffman](116-deflate-dynamic-huffman.md) | ✅ (correct standard Huffman + zlib CPI length-limiting in #116) |
+| 117 | [Brotli full pure-Rust port](117-brotli-full-port.md) | 🔄 (Phase D landed in #119: pure-Rust uncompressed encoder+decoder, brotli crate removed) |
 | 118 | [PPMd context-tree init profiling](118-ppmd-context-tree-init.md) | ✅ (`PpmdCompressor` landed in #87) |
 | 119 | [Codec streaming API](119-codec-streaming-api.md) | ⏳ (P2 — LimniFS scaling) |
 | 120 | [Continuous differential harness](120-continuous-differential-harness.md) | ⏳ (P1 — regression safety) |
@@ -130,13 +130,13 @@ the new items document the path forward.
 | 127 | [Codec parallel batch](127-codec-parallel-batch.md) | ⏳ (P2 — throughput) |
 | 128 | [Per-codec memory budgets](128-per-codec-memory-budgets.md) | ⏳ (P2 — embedded) |
 | 129 | [Shared checksum finish](129-shared-checksum-finish.md) | ⏳ (P2 — DRY) |
-| 130 | [Brotli Phase B — Huffman + block-type](130-brotli-phase-b-huffman-blocktype.md) | 🔄 (Phase B + B-cont landed in #92, #94) |
-| 131 | [Snappy pure-Rust port](131-snappy-pure-rust-port.md) | ⏳ (P1) |
-| 132 | [LZ4 pure-Rust port](132-lz4-pure-rust-port.md) | ⏳ (P1) |
-| 133 | [DEFLATE pure-Rust port](133-deflate-pure-rust-port.md) | ⏳ (P1 — likely merge into libdeflate) |
-| 134 | [BLOSC pure-Rust port](134-blosc-pure-rust-port.md) | ⏳ (P2 — depends on 132) |
-| 135 | [Filters — drop lz4_flex](135-filters-no-external-lz4.md) | ⏳ (P2 — depends on 132) |
-| 136 | [libdeflate — drop miniz_oxide fallback](136-libdeflate-no-miniz-fallback.md) | ⏳ (P1) |
+| 130 | [Brotli Phase B — Huffman + block-type](130-brotli-phase-b-huffman-blocktype.md) | ✅ (Phase B + B-cont landed in #92, #94) |
+| 131 | [Snappy pure-Rust port](131-snappy-pure-rust-port.md) | ✅ (pure-Rust `codec::encode`/`decode` in #98; `snap` is dev-dep only) |
+| 132 | [LZ4 pure-Rust port](132-lz4-pure-rust-port.md) | ✅ (in-house `block`+`frame` modules; `lz4_flex` removed) |
+| 133 | [DEFLATE pure-Rust port](133-deflate-pure-rust-port.md) | ✅ (delegates to `omnizip_libdeflate`; `miniz_oxide` removed) |
+| 134 | [BLOSC pure-Rust port](134-blosc-pure-rust-port.md) | ✅ (uses in-house `omnizip_lz4::block`; no `lz4_flex`) |
+| 135 | [Filters — drop lz4_flex](135-filters-no-external-lz4.md) | ✅ (uses in-house `omnizip_lz4::block`) |
+| 136 | [libdeflate — drop miniz_oxide fallback](136-libdeflate-no-miniz-fallback.md) | ✅ (pure-Rust dynamic-Huffman landed) |
 | 137 | [Async Codec trait](137-async-codec-trait.md) | ⏳ (P2) |
 | 138 | [Codec observability](138-codec-observability.md) | ⏳ (P2) |
 | 139 | [Per-codec proptests](139-per-codec-proptests.md) | ⏳ (P1) |
@@ -164,10 +164,11 @@ the new items document the path forward.
 | 161 | [Deflate64 encoder](161-deflate64-encoder.md) | ⏳ (P2 — LimniFS-flagged) |
 | 162 | [FSST preprocessor wiring](162-fsst-preprocessor-wiring.md) | ⏳ (P2) |
 | 163 | [GLZA O(N²) cap → linear-time](163-glza-linear-time.md) | ⏳ (P2) |
-| 164 | [Snappy encoder](164-snappy-encoder.md) | ⏳ (P1 — LimniFS-flagged) |
-| 165 | [LZMA real reusable state](165-lzma-real-reusable-state.md) | ⏳ (P1 — LimniFS-flagged) |
+| 164 | [Snappy encoder](164-snappy-encoder.md) | ✅ (pure-Rust `codec::encode` landed in #98) |
+| 165 | [LZMA real reusable state](165-lzma-real-reusable-state.md) | ✅ (`LzmaCompressor` + `MatchFinder::reuse` landed) |
 | 166 | [FLAC remainder — finish 10× gap](166-flac-remainder.md) | ⏳ (P2) |
 | 167 | [ricepp remainder — unary emission](167-ricepp-remainder.md) | ⏳ (P2) |
+| 168 | [Brotli Huffman-coded encoder — static tree path](168-brotli-huffman-static-tree.md) | ⏳ (P0 — TODO 117 Phase C.3a) |
 
 ## How to claim a TODO
 

@@ -188,6 +188,83 @@ impl Codec for FlacCodec {
     }
 }
 
+/// Reusable FLAC compressor that caches the deinterleave scratch
+/// buffer across calls. Mirrors `omnizip_lzma::LzmaCompressor` and
+/// `omnizip_ppmd::PpmdCompressor`.
+///
+/// ## When to use
+///
+/// For batch workloads with many small inputs at the same channel
+/// count, the per-call `Vec<Vec<i32>>` deinterleave allocation
+/// dominates wall-time on short inputs. `FlacCompressor` pools the
+/// channel buffers; each call reuses them at the required length.
+///
+/// ## Example
+///
+/// ```no_run
+/// use omnizip_flac::FlacCompressor;
+/// use omnizip_flac::pcm_header::{Endianness, PcmParams};
+///
+/// let mut compressor = FlacCompressor::new();
+/// let params = PcmParams {
+///     sample_rate: 44_100, channels: 2, bits_per_sample: 16,
+///     endianness: Endianness::LittleEndian, sample_count: 1024,
+/// };
+/// for input in ["clip_a.raw", "clip_b.raw"] {
+///     let bytes = std::fs::read(input).unwrap();
+///     let encoded = compressor.compress(&bytes, &params).unwrap();
+///     // ... use encoded
+/// }
+/// ```
+pub struct FlacCompressor {
+    /// Cached per-channel sample buffer. Resized per call.
+    channels_data: Vec<Vec<i32>>,
+    /// Last seen channel count, for early return on mismatch.
+    last_channels: u8,
+}
+
+impl Default for FlacCompressor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl FlacCompressor {
+    /// Construct a reusable FLAC compressor with empty scratch buffers.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            channels_data: Vec::new(),
+            last_channels: 0,
+        }
+    }
+
+    /// Compress `input` using the cached scratch buffers. Output is
+    /// byte-identical to [`compress`] — only allocations are pooled.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`OmnizipError::EncodeFailed`] on configuration errors.
+    pub fn compress(
+        &mut self,
+        input: &[u8],
+        params: &PcmParams,
+    ) -> Result<Vec<u8>, OmnizipError> {
+        // Resize channel buffers if channel count changed.
+        let ch = usize::from(params.channels);
+        if self.last_channels != params.channels || self.channels_data.len() != ch {
+            self.channels_data = vec![Vec::new(); ch];
+            self.last_channels = params.channels;
+        }
+        encoder::encode_stream_reusable(input, params, &mut self.channels_data).map_err(|reason| {
+            OmnizipError::EncodeFailed {
+                codec: CodecId::FLAC,
+                reason,
+            }
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -253,5 +330,60 @@ mod tests {
         let compressed = compress(&pcm, &params).expect("compress");
         // CONSTANT subframe: should compress 384 bytes → well under 80.
         assert!(compressed.len() < 80, "DC signal compressed to {} bytes", compressed.len());
+    }
+
+    #[test]
+    fn reusable_compressor_matches_one_shot() {
+        let pcm = mono_sine(440.0, 8_000, 192);
+        let params = PcmParams {
+            sample_rate: 8_000,
+            channels: 1,
+            bits_per_sample: 16,
+            endianness: Endianness::LittleEndian,
+            sample_count: 192,
+        };
+        let one_shot = compress(&pcm, &params).expect("one-shot");
+
+        let mut reusable = FlacCompressor::new();
+        let reusable_out = reusable.compress(&pcm, &params).expect("reusable");
+        assert_eq!(one_shot, reusable_out, "FlacCompressor must produce identical output to compress");
+    }
+
+    #[test]
+    fn reusable_compressor_round_trips_across_calls() {
+        let mut comp = FlacCompressor::new();
+        let params = PcmParams {
+            sample_rate: 8_000,
+            channels: 1,
+            bits_per_sample: 16,
+            endianness: Endianness::LittleEndian,
+            sample_count: 192,
+        };
+        for freq in [440.0, 880.0, 220.0] {
+            let pcm = mono_sine(freq, 8_000, 192);
+            let encoded = comp.compress(&pcm, &params).expect("compress");
+            let decoded = decompress(&encoded).expect("decode");
+            assert_eq!(decoded, pcm);
+        }
+    }
+
+    #[test]
+    fn reusable_compressor_handles_channel_count_change() {
+        let mut comp = FlacCompressor::new();
+        let mono_params = PcmParams {
+            sample_rate: 8_000, channels: 1, bits_per_sample: 16,
+            endianness: Endianness::LittleEndian, sample_count: 192,
+        };
+        let stereo_params = PcmParams {
+            sample_rate: 8_000, channels: 2, bits_per_sample: 16,
+            endianness: Endianness::LittleEndian, sample_count: 192,
+        };
+        let mono_pcm = mono_sine(440.0, 8_000, 192);
+        let stereo_pcm: Vec<u8> = (0..384).map(|i| (i % 100) as u8).collect();
+        let mono_out = comp.compress(&mono_pcm, &mono_params).expect("mono");
+        let stereo_out = comp.compress(&stereo_pcm, &stereo_params).expect("stereo");
+        // Round-trip each.
+        assert_eq!(decompress(&mono_out).expect("mono decode"), mono_pcm);
+        assert_eq!(decompress(&stereo_out).expect("stereo decode"), stereo_pcm);
     }
 }

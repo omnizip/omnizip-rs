@@ -137,6 +137,34 @@ pub fn encode_stream_with_block_size(
     params: &PcmParams,
     requested_block_size: usize,
 ) -> Result<Vec<u8>, String> {
+    let mut channels_data = vec![Vec::new(); params.channels as usize];
+    encode_stream_inner(input, params, requested_block_size, &mut channels_data)
+}
+
+/// Reusable-buffer variant: caller provides scratch `channels_data`
+/// (one Vec per channel). Identical output to
+/// [`encode_stream_with_block_size`]; saves the per-channel Vec
+/// allocations on batch workloads.
+///
+/// # Errors
+///
+/// Returns `String` on configuration errors or sample-reading failures.
+pub fn encode_stream_reusable(
+    input: &[u8],
+    params: &PcmParams,
+    channels_data: &mut [Vec<i32>],
+) -> Result<Vec<u8>, String> {
+    let total_frames = validate_input(input, params)?;
+    let block_size = pick_block_size(total_frames, params.sample_rate);
+    encode_stream_inner(input, params, block_size, channels_data)
+}
+
+fn encode_stream_inner(
+    input: &[u8],
+    params: &PcmParams,
+    requested_block_size: usize,
+    channels_data: &mut [Vec<i32>],
+) -> Result<Vec<u8>, String> {
     let bps = params.bits_per_sample;
     if bps < 4 || bps > 32 {
         return Err(format!("unsupported bits_per_sample: {bps}"));
@@ -156,8 +184,10 @@ pub fn encode_stream_with_block_size(
     }
     let total_frames = input.len() / frame_bytes;
 
-    // De-interleave PCM into per-channel i32 samples.
-    let channels_data = deinterleave(input, params, bytes_per_sample, total_frames)?;
+    // De-interleave PCM into per-channel i32 samples. Reuse the
+    // caller-provided buffers: truncate to len 0 (capacity preserved),
+    // then push samples.
+    deinterleave_into(input, params, bytes_per_sample, total_frames, channels_data)?;
 
     // Clamp block size to spec max (65535) and to total_frames.
     let block_size = requested_block_size
@@ -201,7 +231,7 @@ pub fn encode_stream_with_block_size(
         let this_block = block_size.min(remaining);
 
         let mut block_channels = Vec::with_capacity(channels as usize);
-        for chan in &channels_data {
+        for chan in channels_data.iter() {
             block_channels.push(chan[offset..offset + this_block].to_vec());
         }
 
@@ -263,6 +293,41 @@ fn deinterleave(
     }
 
     Ok(channels_data)
+}
+
+/// Reusable-buffer variant of [`deinterleave`]. Clears each channel
+/// Vec (preserving capacity) and refills it with the new samples.
+fn deinterleave_into(
+    input: &[u8],
+    params: &PcmParams,
+    bytes_per_sample: usize,
+    total_frames: usize,
+    channels_data: &mut [Vec<i32>],
+) -> Result<(), String> {
+    if channels_data.len() != params.channels as usize {
+        return Err(format!(
+            "channels_data len {} != params.channels {}",
+            channels_data.len(),
+            params.channels
+        ));
+    }
+    for chan in channels_data.iter_mut() {
+        chan.clear();
+        chan.reserve(total_frames);
+    }
+    let frame_bytes = usize::from(params.channels) * bytes_per_sample;
+    let is_le = matches!(params.endianness, Endianness::LittleEndian);
+
+    for f in 0..total_frames {
+        let frame_start = f * frame_bytes;
+        for ch in 0..params.channels as usize {
+            let sample_start = frame_start + ch * bytes_per_sample;
+            let sample_bytes = &input[sample_start..sample_start + bytes_per_sample];
+            let val = read_sample(sample_bytes, bytes_per_sample, is_le, params.bits_per_sample);
+            channels_data[ch].push(val);
+        }
+    }
+    Ok(())
 }
 
 /// Read one PCM sample from `bytes`, sign-extending as needed.

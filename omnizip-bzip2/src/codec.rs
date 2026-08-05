@@ -169,6 +169,75 @@ impl Codec for Bzip2Codec {
     }
 }
 
+/// Reusable BZip2 compressor that caches the output Vec across calls.
+///
+/// BZip2's `bwt_encode` allocates suffix-array buffers internally
+/// per call; the only externally-poolable allocation is the output
+/// `Vec<u8>` and the per-block MTF/RLE scratch. This struct pools
+/// the output buffer (most relevant for batch workloads with many
+/// small inputs).
+///
+/// ## Example
+///
+/// ```no_run
+/// use omnizip_bzip2::Bzip2Compressor;
+/// use omnizip_codecs::CompressionLevel;
+///
+/// let mut comp = Bzip2Compressor::new();
+/// for input in ["file_a", "file_b", "file_c"] {
+///     let bytes = std::fs::read(input).unwrap();
+///     let encoded = comp.compress(&bytes, CompressionLevel::default()).unwrap();
+///     // ... use encoded
+/// }
+/// ```
+pub struct Bzip2Compressor {
+    /// Cached output buffer. Cleared (not freed) per call.
+    out: Vec<u8>,
+}
+
+impl Default for Bzip2Compressor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Bzip2Compressor {
+    /// Construct a reusable BZip2 compressor with empty buffers.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self { out: Vec::new() }
+    }
+
+    /// Compress `input` at the given level, reusing the cached output
+    /// buffer. Output is byte-identical to [`Bzip2Codec::compress`].
+    pub fn compress(
+        &mut self,
+        input: &[u8],
+        level: CompressionLevel,
+    ) -> Result<Vec<u8>, OmnizipError> {
+        let lv = level.as_u8();
+        if !(1..=9).contains(&lv) {
+            return Err(OmnizipError::LevelOutOfRange {
+                codec: CodecId::BZIP2,
+                level: lv,
+                min: 1,
+                max: 9,
+            });
+        }
+        if input.is_empty() {
+            self.out.clear();
+            return Ok(Vec::new());
+        }
+        let block_size = Bzip2Codec::block_size_for(lv);
+        self.out.clear();
+        for chunk in input.chunks(block_size) {
+            encode_block(chunk, &mut self.out);
+        }
+        // Clone out for the caller; we keep the capacity for the next call.
+        Ok(self.out.clone())
+    }
+}
+
 /// Encode a single block and append the wire-format bytes to `out`.
 fn encode_block(block: &[u8], out: &mut Vec<u8>) {
     // 1. CRC of original data.
@@ -340,5 +409,34 @@ mod tests {
         assert_eq!(Bzip2Codec::block_size_for(1), 100_000);
         assert_eq!(Bzip2Codec::block_size_for(9), 900_000);
         assert_eq!(Bzip2Codec::block_size_for(5), 500_000);
+    }
+
+    #[test]
+    fn reusable_compressor_matches_one_shot() {
+        let input: Vec<u8> = b"the quick brown fox jumps over the lazy dog. ".repeat(50);
+        let one_shot = Bzip2Codec::new()
+            .compress(&input, CompressionLevel::default())
+            .expect("one-shot");
+        let mut reusable = Bzip2Compressor::new();
+        let reusable_out = reusable
+            .compress(&input, CompressionLevel::default())
+            .expect("reusable");
+        assert_eq!(one_shot, reusable_out);
+    }
+
+    #[test]
+    fn reusable_compressor_round_trips_across_calls() {
+        let mut comp = Bzip2Compressor::new();
+        for input in [
+            b"foo".as_ref(),
+            b"hello world hello world".as_ref(),
+            b"the quick brown fox jumps over the lazy dog. ".repeat(20).as_slice(),
+        ] {
+            let encoded = comp.compress(input, CompressionLevel::default()).expect("compress");
+            let decoded = Bzip2Codec::new()
+                .decompress(&encoded, input.len() as u32)
+                .expect("decode");
+            assert_eq!(decoded.as_slice(), input);
+        }
     }
 }
