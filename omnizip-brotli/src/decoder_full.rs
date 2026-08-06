@@ -322,6 +322,41 @@ pub(crate) fn decode_compressed_metablock_full(
     nbltypesc: u32,
     nbltypesd: u32,
 ) -> Result<(usize, Vec<u8>), &'static str> {
+    decode_compressed_metablock_full_inner(data, bit_pos, mlen, nbltypesl, nbltypesc, nbltypesd, false)
+}
+
+/// Dispatch from trivial path when NTREES > 1 (multi-tree Huffman
+/// groups with context maps) but NBLTYPES = 1 for all categories.
+///
+/// `ndirect_raw` is the pre-NPOSTFIX-derived raw NDMEM value (caller
+/// already read NPOSTFIX + NDMOEM).
+pub(crate) fn decode_compressed_metablock_full_with_trees(
+    data: &[u8],
+    bit_pos: usize,
+    mlen: usize,
+    nbltypesl: u32,
+    nbltypesc: u32,
+    nbltypesd: u32,
+    npostfix: usize,
+    ndirect_raw: usize,
+    ntreesl: u32,
+    ntreesd: u32,
+) -> Result<(usize, Vec<u8>), &'static str> {
+    let _ = (ntreesl, ntreesd, npostfix, ndirect_raw); // TODO: pass through
+    // For now this delegates to the same path. NTREES-aware wiring lands
+    // with TODO 174 step 3.
+    decode_compressed_metablock_full_inner(data, bit_pos, mlen, nbltypesl, nbltypesc, nbltypesd, true)
+}
+
+fn decode_compressed_metablock_full_inner(
+    data: &[u8],
+    bit_pos: usize,
+    mlen: usize,
+    nbltypesl: u32,
+    nbltypesc: u32,
+    nbltypesd: u32,
+    _has_ntrees: bool,
+) -> Result<(usize, Vec<u8>), &'static str> {
     let mut br = BitReader::new(data);
     br.bit_pos = bit_pos;
 
