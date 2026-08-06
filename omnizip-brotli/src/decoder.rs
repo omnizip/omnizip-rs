@@ -741,30 +741,40 @@ pub enum ContextMode {
 }
 
 impl ContextMode {
-    /// Compute the context ID for the given previous byte.
+    /// Compute the context ID for the given two previous bytes
+    /// (RFC 7932 §10.1).
     ///
-    /// Returns a value in `[0, 64)` for Lsb6/Msb6, `[0, 32)` for
-    /// Signed, and `[0, 8)` for Utf8 (Phase B approximation).
+    /// Returns a value in:
+    /// - `[0, 64)` for `Lsb6` / `Msb6` (only `p1` used)
+    /// - `[0, 64)` for `Utf8` (uses both p1 and p2 via the 512-entry
+    ///   `K_UTF8_CONTEXT_LOOKUP` table; the table is indexed as
+    ///   `lookup[p1] | lookup[p2 | 256]`)
+    /// - `[0, 64)` for `Signed` (uses both p1 and p2 via the 256-entry
+    ///   `K_SIGNED_3BIT_CONTEXT_LOOKUP` table; the result is
+    ///   `(lookup[p1] << 3) | lookup[p2]`)
+    ///
+    /// For backwards compatibility with the existing single-byte API,
+    /// the `context_id(p1)` form treats `p2` as 0.
     #[must_use]
     pub fn context_id(&self, prev_byte: u8) -> u8 {
+        self.context_id_2(prev_byte, 0)
+    }
+
+    /// Two-byte context ID (RFC 7932 §10.1). The full brotli decoder
+    /// uses both `p1` (immediately preceding byte) and `p2` (the byte
+    /// before p1) for the UTF-8 and SIGNED context modes.
+    #[must_use]
+    pub fn context_id_2(&self, p1: u8, p2: u8) -> u8 {
         match self {
-            Self::Lsb6 => prev_byte & 0x3F,
-            Self::Msb6 => prev_byte >> 2,
+            Self::Lsb6 => p1 & 0x3F,
+            Self::Msb6 => p1 >> 2,
             Self::Utf8 => {
-                // Simplified: distinguish ASCII (high bit clear)
-                // from non-ASCII, with a few sub-categories.
-                if prev_byte < 0x80 {
-                    prev_byte & 0x07
-                } else {
-                    0x08 | (prev_byte & 0x07)
-                }
+                crate::static_codes::K_UTF8_CONTEXT_LOOKUP[p1 as usize]
+                    | crate::static_codes::K_UTF8_CONTEXT_LOOKUP[(p2 as usize) | 256]
             }
             Self::Signed => {
-                if prev_byte < 0x80 {
-                    prev_byte & 0x1F
-                } else {
-                    0x20 | (prev_byte & 0x1F)
-                }
+                ((crate::static_codes::K_SIGNED_3BIT_CONTEXT_LOOKUP[p1 as usize] as u8) << 3)
+                    + crate::static_codes::K_SIGNED_3BIT_CONTEXT_LOOKUP[p2 as usize]
             }
         }
     }
@@ -1330,25 +1340,27 @@ mod tests {
     }
 
     #[test]
-    fn context_mode_utf8_distinguishes_ascii() {
-        let ascii = ContextMode::Utf8.context_id(b'A');
-        let non_ascii = ContextMode::Utf8.context_id(0xC2);
-        assert!(ascii < 8, "ASCII context should be < 8, got {ascii}");
-        assert!(
-            non_ascii >= 8 && non_ascii < 16,
-            "non-ASCII context should be 8..16, got {non_ascii}"
-        );
+    fn context_mode_utf8_uses_lookup_table() {
+        // p1 = 'A' (0x41, ASCII letter), p2 = 0.
+        // K_UTF8_CONTEXT_LOOKUP[0x41] = 48, K_UTF8_CONTEXT_LOOKUP[256] = 0.
+        // Context = 48 | 0 = 48.
+        assert_eq!(ContextMode::Utf8.context_id(b'A'), 48);
+        // p1 = 0 (NUL): K_UTF8_CONTEXT_LOOKUP[0] = 0.
+        assert_eq!(ContextMode::Utf8.context_id(0), 0);
+        // p1 = ' ' (0x20): K_UTF8_CONTEXT_LOOKUP[0x20] = 8.
+        assert_eq!(ContextMode::Utf8.context_id(b' '), 8);
     }
 
     #[test]
-    fn context_mode_signed_distinguishes_sign() {
-        let positive = ContextMode::Signed.context_id(0x10);
-        let negative = ContextMode::Signed.context_id(0x90);
-        assert!(positive < 32, "positive context should be < 32");
-        assert!(
-            negative >= 32 && negative < 64,
-            "negative context should be 32..64"
-        );
+    fn context_mode_signed_uses_lookup_table() {
+        // K_SIGNED_3BIT_CONTEXT_LOOKUP[0]=0, [1]=1, [128]=4, [254]=6, [255]=7.
+        // For context_id(p1) we use p2 = 0, so context = (lut[p1] << 3) | lut[0]
+        //                                                = lut[p1] << 3.
+        assert_eq!(ContextMode::Signed.context_id(0), 0);
+        assert_eq!(ContextMode::Signed.context_id(1), 8);
+        assert_eq!(ContextMode::Signed.context_id(128), 32);
+        assert_eq!(ContextMode::Signed.context_id(254), 48);
+        assert_eq!(ContextMode::Signed.context_id(255), 56);
     }
 
     #[test]
