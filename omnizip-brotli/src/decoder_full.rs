@@ -307,10 +307,8 @@ fn dictionary_lookup(
 /// modes, static dictionary).
 ///
 /// Caller is `decode()` in `decoder.rs`, which dispatches here when
-/// any category has `num_block_types > 1` or `num_huffman_trees > 1`.
-/// `nbltypesl/c/d` are the values already read by the caller (caller
-/// advances the bit reader past them, so `bit_pos` points to the
-/// NPOSTFIX field here).
+/// any category has `num_block_types > 1`. `bit_pos` points to the
+/// block-type code tree section (after NBLTYPES reads).
 ///
 /// Returns `(new_bit_pos, output_bytes)`.
 #[allow(clippy::too_many_lines)]
@@ -322,46 +320,11 @@ pub(crate) fn decode_compressed_metablock_full(
     nbltypesc: u32,
     nbltypesd: u32,
 ) -> Result<(usize, Vec<u8>), &'static str> {
-    decode_compressed_metablock_full_inner(data, bit_pos, mlen, nbltypesl, nbltypesc, nbltypesd, false)
-}
-
-/// Dispatch from trivial path when NTREES > 1 (multi-tree Huffman
-/// groups with context maps) but NBLTYPES = 1 for all categories.
-///
-/// `ndirect_raw` is the pre-NPOSTFIX-derived raw NDMEM value (caller
-/// already read NPOSTFIX + NDMOEM).
-pub(crate) fn decode_compressed_metablock_full_with_trees(
-    data: &[u8],
-    bit_pos: usize,
-    mlen: usize,
-    nbltypesl: u32,
-    nbltypesc: u32,
-    nbltypesd: u32,
-    npostfix: usize,
-    ndirect_raw: usize,
-    ntreesl: u32,
-    ntreesd: u32,
-) -> Result<(usize, Vec<u8>), &'static str> {
-    let _ = (ntreesl, ntreesd, npostfix, ndirect_raw); // TODO: pass through
-    // For now this delegates to the same path. NTREES-aware wiring lands
-    // with TODO 174 step 3.
-    decode_compressed_metablock_full_inner(data, bit_pos, mlen, nbltypesl, nbltypesc, nbltypesd, true)
-}
-
-fn decode_compressed_metablock_full_inner(
-    data: &[u8],
-    bit_pos: usize,
-    mlen: usize,
-    nbltypesl: u32,
-    nbltypesc: u32,
-    nbltypesd: u32,
-    _has_ntrees: bool,
-) -> Result<(usize, Vec<u8>), &'static str> {
     let mut br = BitReader::new(data);
     br.bit_pos = bit_pos;
 
-    // Per-category block-type code reading. BlockTypeState::read_with_count
-    // skips the NBLTYPES read (caller has already consumed it).
+    // Per-category block-type code reading. Caller has already consumed
+    // the NBLTYPES DecodeVarLenUint8 field.
     let mut lit_bt = BlockTypeState::default();
     lit_bt.num_block_types = nbltypesl;
     br.bit_pos = lit_bt.read_block_type_trees(data, br.bit_pos())?;
@@ -372,18 +335,11 @@ fn decode_compressed_metablock_full_inner(
     dist_bt.num_block_types = nbltypesd;
     br.bit_pos = dist_bt.read_block_type_trees(data, br.bit_pos())?;
 
-    // ----- NPOSTFIX + NDIRECT -----
+    // NPOSTFIX + NDIRECT.
     let npostfix = br.read_bits(2) as usize;
     let ndirect_raw = br.read_bits(4) as usize;
-    let ndirect = if ndirect_raw < 12 { ndirect_raw } else { (ndirect_raw - 12) << npostfix };
-    if npostfix > 3 {
-        return Err("invalid metablock: NPOSTFIX > 3");
-    }
-    let num_direct_distance_codes = 16u32 + ndirect as u32;
-    let max_backward_distance = 1u32 << 22; // WBITS=22 default
-    let max_distance = max_backward_distance.max(num_direct_distance_codes);
 
-    // ----- Per-block-type CONTEXT_MODE (literal only) -----
+    // Per-block-type CONTEXT_MODE (literal only).
     let mut context_modes = Vec::with_capacity(lit_bt.num_block_types as usize);
     for _ in 0..lit_bt.num_block_types {
         let mode = br.read_bits(2);
@@ -396,7 +352,70 @@ fn decode_compressed_metablock_full_inner(
         };
         context_modes.push(mode);
     }
-    let _ = &context_modes;
+
+    finish_metablock_decode(
+        data, &mut br, mlen, npostfix, ndirect_raw, lit_bt, cmd_bt, dist_bt, context_modes,
+    )
+}
+
+/// Dispatch from trivial path when NTREES > 1 (multi-tree Huffman
+/// groups with context maps) but NBLTYPES = 1 for all categories.
+///
+/// Caller has already consumed NBLTYPES (all = 1), NPOSTFIX, NDMOEM,
+/// CONTEXT_MODE, NTREESL, NTREESD. `bit_pos` points to the literal
+/// context map.
+pub(crate) fn decode_compressed_metablock_full_with_trees(
+    data: &[u8],
+    bit_pos: usize,
+    mlen: usize,
+    npostfix: usize,
+    ndirect_raw: usize,
+    context_mode_bits: u32,
+) -> Result<(usize, Vec<u8>), &'static str> {
+    let mut br = BitReader::new(data);
+    br.bit_pos = bit_pos;
+
+    // NBLTYPES = 1 for all categories, so no block-type trees.
+    let lit_bt = BlockTypeState::default();
+    let cmd_bt = BlockTypeState::default();
+    let dist_bt = BlockTypeState::default();
+
+    // Single CONTEXT_MODE field (NBLTYPESL = 1).
+    let mode = match context_mode_bits {
+        0 => ContextMode::Lsb6,
+        1 => ContextMode::Msb6,
+        2 => ContextMode::Utf8,
+        3 => ContextMode::Signed,
+        _ => unreachable!(),
+    };
+    let context_modes = vec![mode];
+
+    finish_metablock_decode(
+        data, &mut br, mlen, npostfix, ndirect_raw, lit_bt, cmd_bt, dist_bt, context_modes,
+    )
+}
+
+/// Shared tail of the two full-path entry points: reads context maps,
+/// Huffman tree groups, then runs the command loop.
+#[allow(clippy::too_many_lines)]
+fn finish_metablock_decode(
+    data: &[u8],
+    mut br: &mut BitReader,
+    mlen: usize,
+    npostfix: usize,
+    ndirect_raw: usize,
+    mut lit_bt: BlockTypeState,
+    mut cmd_bt: BlockTypeState,
+    mut dist_bt: BlockTypeState,
+    context_modes: Vec<ContextMode>,
+) -> Result<(usize, Vec<u8>), &'static str> {
+    let ndirect = if ndirect_raw < 12 { ndirect_raw } else { (ndirect_raw - 12) << npostfix };
+    if npostfix > 3 {
+        return Err("invalid metablock: NPOSTFIX > 3");
+    }
+    let num_direct_distance_codes = 16u32 + ndirect as u32;
+    let max_backward_distance = 1u32 << 22; // WBITS=22 default
+    let max_distance = max_backward_distance.max(num_direct_distance_codes);
 
     // ----- Literal context map (RFC 7932 §9.6) -----
     let lit_cm_size = (lit_bt.num_block_types as usize) << K_LITERAL_CONTEXT_BITS;
