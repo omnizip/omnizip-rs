@@ -18,6 +18,7 @@ pub mod encoder;
 pub mod encoder_error;
 pub mod fast_encoder;
 pub mod huffman;
+pub mod huffman_lookup;
 pub mod prefix;
 pub mod static_codes;
 
