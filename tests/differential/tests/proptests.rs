@@ -99,7 +99,7 @@ fn make_fixtures() -> Vec<(&'static str, Vec<u8>)> {
 // ---------------------------------------------------------------------------
 
 #[test]
-#[ignore = "decoder Huffman-coded metablock path is in place but the command alphabet mapping for compress_fragment_two_pass output is not yet correct (kCmdLut is for the q≥2 encoder; compress_fragment_two_pass uses individual insert/copy command codes 0-127 that need a different LUT). Encoder output is validated via `brotli -d` in omnizip-brotli/src/fast_encoder.rs::vendored_compress_round_trips_via_cli"]
+#[ignore = "decoder cmd LUT mapping for compress_fragment_two_pass is partially implemented (inverse rearrangement + per-code interpretation LUT in place). Blocker: the encoder uses TWO independent Huffman trees (depth[0..64] for INSERT/COPY codes, depth[64..128] for DISTANCE codes 64..127) that share canonical code space — the decoder needs a state machine to dispatch reads between cmd_tree and dist_table based on command context. Encoder output is validated via `brotli -d` (C reference decoder) in omnizip-brotli/src/fast_encoder.rs::vendored_compress_round_trips_via_cli."]
 fn brotli_round_trips_property_fixtures() {
     let codec = BrotliCodec::new();
     for (name, input) in make_fixtures() {
