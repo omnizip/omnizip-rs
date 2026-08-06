@@ -218,13 +218,10 @@ pub fn parse_metablock_header(
         ));
     }
 
-    // ISLAST=0 path: read IS_UNCOMPRESSED but no reserved bit
-    // (reserved is only for `is_metadata` metablocks, which have
-    // MNIBBLES bits == 3).
+    // ISLAST=0 path: read MNIBBLES, MLEN, IS_UNCOMPRESSED.
     let mnibbles_raw = br.read_bits(2);
     let mnibbles = if mnibbles_raw == 0 { 4 } else { mnibbles_raw };
     let mnibbles_u8 = u8::try_from(mnibbles).map_err(|_| "mnibbles overflow")?;
-
     let mlen = br.read_mlen(mnibbles);
     let is_uncompressed = br.read_bit();
 
