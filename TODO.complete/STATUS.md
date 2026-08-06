@@ -1,9 +1,9 @@
 # Final Status — omnizip-rs Full Port
 
-**Last updated**: 2026-08-06 (post v0.14.24)
+**Last updated**: 2026-08-06 (post v0.14.26)
 **Build**: 0 workspace warnings.
 **Test results**: 1033 tests passing across 52 suites, 0 failures, 0 ignored.
-**Latest release**: [v0.14.24](https://github.com/omnizip/omnizip-rs/releases/tag/v0.14.24)
+**Latest release**: [v0.14.26](https://github.com/omnizip/omnizip-rs/releases/tag/v0.14.26)
 
 ## End-to-end working features
 
@@ -62,11 +62,18 @@
 
 **Decoder**:
 - ✅ Frame header (RFC 7932 §9.1) — all WBITS variants.
-- ✅ Metablock header (§9.2) — ISLAST/ISLASTEMPTY/MNIBBLES/MLEN/ISUNCOMPRESSED.
+- ✅ Metablock header (§9.2) — ISLAST/ISLASTEMPTY/MNIBBLES/MLEN.
+  Correctly omits IS_UNCOMPRESSED for ISLAST=1 metablocks (matches
+  upstream `METABLOCK_HEADER_UNCOMPRESSED` state).
 - ✅ Uncompressed metablocks.
 - ✅ Huffman-coded metablocks in the trivial layout produced by
   `compress_fragment_two_pass` (single block type per category,
   single literal/distance Huffman tree).
+- ✅ Full RFC 7932 decoder scaffolding (`decoder_full.rs`) for
+  non-trivial layouts: BlockTypeState, read_context_map,
+  read_tree_group, decode_compressed_metablock_full.
+- ✅ OCP dispatch from trivial fast path to full decoder when
+  NBLTYPES > 1 OR NTREES > 1.
 - ✅ Simple-form Huffman tables (NSYM=1..4) + complex-form (with
   iterated symbol 16/17 repeat decoding).
 - ✅ Distance formula for general NPOSTFIX + NDIRECT case (mirrors
@@ -76,13 +83,18 @@
 - ✅ Metablock-end short-circuit — exits after INSERT literals once
   `output.len() >= mlen` (mirrors upstream `ProcessCommandsInternal`).
 - ✅ Round-trip via our encoder + decoder on all 17 property fixtures.
+- ✅ Decodes `brotli -q 1..8` output on simple all-'a' inputs
+  (verified manually after the ISLAST=1 metablock-header fix).
+- ⚠️ Decodes `brotli -q 11` output on SOME inputs (10, 30, 200 byte
+  all-'a'); fails on others with "metablock overran mlen",
+  "invalid literal", or "invalid code-length code lengths" (multiple
+  subtle bugs in the multi-tree command loop).
 
-**Decoder still rejects** (see TODO 172 + 174):
-- Multiple block types per category (NBLTYPES > 1).
-- Literal or distance context maps (NTREESL > 1 or NTREESD > 1).
+**Decoder still rejects** (see TODO 174 step 1):
+- `brotli -q 11` output on most inputs > 50 bytes (multi-tree
+  command loop has subtle bugs).
 - Static dictionary references (distance_code > max_distance).
-- These are required to decode reference brotli streams from
-  `brotli -q N` for N ≥ 2 on real-world inputs.
+- Some context-map configurations with skewed literal distributions.
 
 ## Known remaining gaps
 
