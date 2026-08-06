@@ -48,7 +48,7 @@ impl<'a> BitReader<'a> {
 
     /// Read `nbits` bits LSB-first. Returns 0 if past end-of-input.
     pub fn read_bits(&mut self, nbits: u32) -> u32 {
-        if nbits == 0 {
+        if nbits == 0 || nbits > 32 {
             return 0;
         }
         let mut result = 0u32;
@@ -1045,7 +1045,6 @@ fn decode_compressed_metablock(
     let mut br = BitReader::new(data);
     br.bit_pos = bit_pos;
 
-    // NBLTYPESL/C/D via DecodeVarLenUint8. Trivial case: 1 bit each = 0.
     let nbltypesl = read_varlen_uint8(&mut br)? + 1;
     let nbltypesc = read_varlen_uint8(&mut br)? + 1;
     let nbltypesd = read_varlen_uint8(&mut br)? + 1;
@@ -1053,7 +1052,6 @@ fn decode_compressed_metablock(
         return Err("unsupported metablock feature: multiple block types");
     }
 
-    // Distance params: NPOSTFIX (2 bits) + NDIRECT code (4 bits).
     let npostfix = br.read_bits(2) as usize;
     let ndirect_raw = br.read_bits(4) as usize;
     let ndirect = if ndirect_raw < 12 { ndirect_raw } else { (ndirect_raw - 12) << npostfix };
@@ -1061,10 +1059,8 @@ fn decode_compressed_metablock(
         return Err("unsupported metablock feature: NPOSTFIX/NDIRECT nonzero");
     }
 
-    // Context mode (NBLTYPESL = 1 → 1 mode, 2 bits).
     let _context_mode = br.read_bits(2);
 
-    // NTREESL/D via DecodeVarLenUint8.
     let ntreesl = read_varlen_uint8(&mut br)? + 1;
     if ntreesl > 1 {
         return Err("unsupported metablock feature: multiple literal Huffman trees");
@@ -1074,157 +1070,96 @@ fn decode_compressed_metablock(
         return Err("unsupported metablock feature: multiple distance Huffman trees");
     }
 
-    // Read literal Huffman table (256 symbols).
     let (lit_table, p) = read_huffman_table(data, br.bit_pos(), 256)?;
     br.bit_pos = p;
 
-    // Read the cmd_depth_704 array (704 symbols) — this is the REARRANGED
-    // form of depth[0..64] produced by upstream BuildAndStoreCommandPrefixCode.
-    let (cmd_table_704, p) = read_huffman_table(data, br.bit_pos(), 704)?;
+    // Read the cmd Huffman tree as a 704-symbol table. This is used
+    // directly with kCmdLut — the rearrangement in upstream's
+    // BuildAndStoreCommandPrefixCode is designed so that symbol N in
+    // the 704-alphabet has params from kCmdLut[N] matching the encoder's
+    // intent for the original command code that maps to position N.
+    let (cmd_table, p) = read_huffman_table(data, br.bit_pos(), 704)?;
     br.bit_pos = p;
-    {
-        let mut nz = Vec::new();
-        for (i, &l) in cmd_table_704.lengths.iter().enumerate() {
-            if l != 0 { nz.push((i, l)); }
-        }
-    }
 
-    // Read the distance-code Huffman table (64 entries — depth[64..128]).
     let dist_alphabet_size = 16usize + ndirect + (16 << (npostfix + 1));
     let (dist_table, p) = read_huffman_table(data, br.bit_pos(), dist_alphabet_size.max(64))?;
     br.bit_pos = p;
 
-    // Inverse the storage rearrangement to recover depth[0..64] from the
-    // 704-entry array, then build a 128-symbol cmd_table indexed by the
-    // actual compress_fragment_two_pass command code (0..127).
-    //
-    // Per upstream `BuildAndStoreCommandPrefixCode`:
-    //   cmd_depth_704[0..8]    ← depth[24..32]
-    //   cmd_depth_704[64..72]  ← depth[32..40]
-    //   cmd_depth_704[128..136] ← depth[40..48]  (then position 128 overwritten)
-    //   cmd_depth_704[192..200] ← depth[48..56]
-    //   cmd_depth_704[384..392] ← depth[56..64]
-    //   cmd_depth_704[128+8*i] ← depth[i]         for i = 0..8   (overwrites 128)
-    //   cmd_depth_704[256+8*i] ← depth[8+i]       for i = 0..8
-    //   cmd_depth_704[448+8*i] ← depth[16+i]      for i = 0..8
-    //
-    // depth[40] is lost (position 128 is overwritten by depth[0]). Assume
-    // it's zero — compress_fragment_two_pass rarely emits code 40.
-    let mut depth_128 = vec![0u8; 128];
-    for i in 0..8 {
-        depth_128[i]      = cmd_table_704.lengths[128 + 8 * i];
-        depth_128[8 + i]  = cmd_table_704.lengths[256 + 8 * i];
-        depth_128[16 + i] = cmd_table_704.lengths[448 + 8 * i];
-        depth_128[24 + i] = cmd_table_704.lengths[i];
-        depth_128[32 + i] = cmd_table_704.lengths[64 + i];
-        depth_128[48 + i] = cmd_table_704.lengths[192 + i];
-        depth_128[56 + i] = cmd_table_704.lengths[384 + i];
-    }
-    // depth[40] is lost; depth[41..48] survives at positions 129..136.
-    for i in 0..7 {
-        depth_128[41 + i] = cmd_table_704.lengths[129 + i];
-    }
-    // depth[64..128] = distance Huffman tree.
-    for i in 0..64 {
-        depth_128[64 + i] = dist_table.lengths[i.min(dist_table.lengths.len() - 1)];
-    }
-    let cmd_table = HuffmanTable::from_lengths(&depth_128);
-    {
-        let mut nz = Vec::new();
-        for (i, &l) in cmd_table.lengths.iter().enumerate() {
-            if l != 0 { nz.push((i, l, cmd_table.codes[i])); }
-        }
-        let mut dnz = Vec::new();
-        for (i, &l) in dist_table.lengths.iter().enumerate() {
-            if l != 0 { dnz.push((i, l)); }
-        }
-    }
-
-    // Now decode commands.
     let mut output = Vec::with_capacity(mlen);
     let mut dist_rb: [u32; 4] = [16, 15, 11, 4];
     let mut dist_rb_idx: i32 = 0;
+    let num_direct_distance_codes = 16u32 + ndirect as u32;
 
     while output.len() < mlen {
-        let code = cmd_table.read_symbol(&mut br).ok_or("invalid command symbol")? as usize;
-        if code >= 128 {
-            return Err("command symbol out of range for compress_fragment_two_pass");
-        }
-        let extra = if K_NUM_EXTRA_BITS[code] > 0 {
-            br.read_bits(K_NUM_EXTRA_BITS[code])
-        } else {
-            0
-        };
+        let cmd_code = cmd_table.read_symbol(&mut br).ok_or("invalid command symbol")? as usize;
+        let v = &crate::prefix::kCmdLut[cmd_code];
 
-        if code < 24 {
-            // INSERT: emit `insert_len` literals, no copy.
-            let insert_len = K_INSERT_OFFSET[code] + extra as usize;
-            for _ in 0..insert_len {
-                let lit = lit_table.read_symbol(&mut br).ok_or("invalid literal")?;
-                output.push(lit as u8);
+        let insert_len_extra = if v.insert_len_extra_bits > 0 {
+            br.read_bits(u32::from(v.insert_len_extra_bits))
+        } else { 0 };
+        let copy_length = if v.copy_len_extra_bits > 0 {
+            br.read_bits(u32::from(v.copy_len_extra_bits))
+        } else { 0 };
+
+        let insert_len = usize::from(v.insert_len_offset) + insert_len_extra as usize;
+        let copy_len = usize::from(v.copy_len_offset) + copy_length as usize;
+
+        for _ in 0..insert_len {
+            let lit = lit_table.read_symbol(&mut br).ok_or("invalid literal")?;
+            output.push(lit as u8);
+        }
+
+        if copy_len > 0 {
+            let distance = if v.distance_code >= 0 {
+                take_distance_from_ring_buffer(v.distance_code as i32, &mut dist_rb, &mut dist_rb_idx)
+            } else {
+                let dist_code = dist_table.read_symbol(&mut br).ok_or("invalid distance symbol")? as i32;
+                decode_distance_from_code(dist_code, num_direct_distance_codes, npostfix as i32, &mut br, &mut dist_rb, &mut dist_rb_idx)
+            };
+            if distance == 0 || distance as usize > output.len() {
+                return Err("invalid back-reference distance");
             }
-            continue;
-        }
-
-        if code == 64 {
-            // "Use last distance" marker — no-op for the output state.
-            continue;
-        }
-
-        if code >= 80 {
-            // DISTANCE code: decode distance from `code` + `extra`, push into ring buffer.
-            // Distance code 80..127 follows the EmitDistance formula:
-            //   d = distance + 3
-            //   nbits = Log2FloorNonZero(d) - 1
-            //   prefix = (d >> nbits) & 1
-            //   distcode = 2*(nbits-1) + prefix + 80
-            //   extra = d - ((2 + prefix) << nbits)
-            // Invert: distance = (1 << (code-80)/2 + 1) * (2 + prefix) ... actually easier:
-            // The (code - 80) value encodes (nbits-1)*2 + prefix. So nbits = (code-80)/2 + 1, prefix = (code-80) & 1.
-            let encoded = code - 80;
-            let nbits = (encoded >> 1) as u32 + 1;
-            let prefix = (encoded & 1) as u32;
-            let offset = (2 + prefix) << nbits;
-            let d = offset + extra;
-            let distance = d.wrapping_sub(3);
-            if distance == 0 {
-                return Err("invalid distance from distance code");
+            let src = output.len() - distance as usize;
+            for i in 0..copy_len {
+                let b = output[src + i];
+                output.push(b);
             }
-            dist_rb[(dist_rb_idx as usize) & 3] = distance;
-            dist_rb_idx = dist_rb_idx.wrapping_add(1);
-            continue;
         }
 
-        // COPY command (codes 24..79 except 64).
-        // For compress_fragment_two_pass, the COPY uses the current
-        // dist_rb[0] (last distance set by a preceding DISTANCE code).
-        let copy_len = decode_copy_len(code, extra)?;
-        if copy_len == 0 {
-            // Trailing marker or unused code; skip.
-            continue;
-        }
-        let distance = dist_rb[(dist_rb_idx.wrapping_sub(1) as usize) & 3];
-        if distance == 0 || distance as usize > output.len() {
-            return Err("invalid back-reference distance");
-        }
-        let src = output.len() - distance as usize;
-        for i in 0..copy_len {
-            let b = output[src + i];
-            output.push(b);
-        }
-
-        // After a multi-command EmitCopyLenLastDistance (codes 54..63),
-        // the encoder emits a trailing code 64. Read and discard it.
-        if (54..=63).contains(&code) {
-            let _trailing = cmd_table.read_symbol(&mut br).ok_or("invalid trailing symbol")?;
-        }
-
-        if output.len() > mlen {
+        if output.len() > mlen + 1 {
             return Err("metablock overran mlen");
         }
     }
 
     Ok((br.bit_pos(), output))
+}
+
+/// Decode a distance from a dist_table symbol code (RFC 7932 §9.4 + §10.4).
+///
+/// For codes 0..15 (short codes): compute from dist_rb ring buffer.
+/// For codes >= 16: long-distance formula with extra bits.
+fn decode_distance_from_code(
+    dist_code: i32,
+    num_direct: u32,
+    _npostfix: i32,
+    br: &mut BitReader,
+    dist_rb: &mut [u32; 4],
+    dist_rb_idx: &mut i32,
+) -> u32 {
+    if dist_code < 16 {
+        return take_distance_from_ring_buffer(dist_code, dist_rb, dist_rb_idx);
+    }
+    // Long distance: RFC 7932 §9.4 formula.
+    let distval = dist_code - num_direct as i32;
+    let bucket = if distval <= 0 { 0 } else { 31i32.wrapping_sub((distval as u32).leading_zeros() as i32) };
+    let nbits = bucket.saturating_sub(1).max(0) as u32;
+    let extra = br.read_bits(nbits);
+    let offset = 1u32.wrapping_shl(nbits).wrapping_add(extra);
+    let distance = offset.wrapping_add(1);
+    // Push to ring buffer.
+    dist_rb[(*dist_rb_idx as usize) & 3] = distance;
+    *dist_rb_idx = dist_rb_idx.wrapping_add(1);
+    distance
 }
 
 /// Per-command extra-bit count table from upstream `compress_fragment_two_pass::StoreCommands`.
