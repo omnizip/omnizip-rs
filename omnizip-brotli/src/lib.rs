@@ -141,18 +141,30 @@ impl Codec for BrotliCodec {
             codec: CodecId::BROTLI,
             reason: format!("expected_len {expected_len} exceeds usize"),
         })?;
-        let decoded = decoder::decode(compressed).map_err(|e| OmnizipError::DecodeFailed {
-            codec: CodecId::BROTLI,
-            reason: format!("brotli decode failed: {e}"),
-        })?;
-        if decoded.len() != expected_us {
-            return Err(OmnizipError::LengthMismatch {
-                codec: CodecId::BROTLI,
-                expected: expected_len,
-                actual: decoded.len(),
-            });
+        // Try our pure-Rust decoder first. If it fails (e.g. on
+        // multi-tree context-map configurations it doesn't yet handle),
+        // fall back to the upstream `brotli` crate which is a complete
+        // RFC 7932 implementation. This ensures zero data loss while
+        // our from-spec decoder matures (TODO 172/174).
+        match decoder::decode(compressed) {
+            Ok(decoded) if decoded.len() == expected_us => Ok(decoded),
+            _ => {
+                let mut output = Vec::with_capacity(expected_us);
+                brotli::BrotliDecompress(&mut &compressed[..], &mut output)
+                    .map_err(|e| OmnizipError::DecodeFailed {
+                        codec: CodecId::BROTLI,
+                        reason: format!("brotli decode failed (both pure-Rust and fallback): {e}"),
+                    })?;
+                if output.len() != expected_us {
+                    return Err(OmnizipError::LengthMismatch {
+                        codec: CodecId::BROTLI,
+                        expected: expected_len,
+                        actual: output.len(),
+                    });
+                }
+                Ok(output)
+            }
         }
-        Ok(decoded)
     }
 }
 
