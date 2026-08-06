@@ -873,8 +873,8 @@ fn decode_compressed_metablock(
     let npostfix = br.read_bits(2) as usize;
     let ndirect_raw = br.read_bits(4) as usize;
     let ndirect = if ndirect_raw < 12 { ndirect_raw } else { (ndirect_raw - 12) << npostfix };
-    if npostfix != 0 || ndirect != 0 {
-        return Err("unsupported metablock feature: NPOSTFIX/NDIRECT nonzero");
+    if npostfix > 3 {
+        return Err("invalid metablock: NPOSTFIX > 3");
     }
 
     let _context_mode = br.read_bits(2);
@@ -963,22 +963,29 @@ fn decode_compressed_metablock(
 /// Decode a distance from a dist_table symbol code (RFC 7932 §9.4 + §10.4).
 ///
 /// For codes 0..15 (short codes): compute from dist_rb ring buffer.
-/// For codes >= 16: long-distance formula (RFC 7932 §9.4) with extra bits.
+/// For codes 16..num_direct-1 (when NDIRECT > 0): direct distance codes.
+/// For codes >= num_direct: long-distance formula with NPOSTFIX bits.
 ///
-/// Mirrors upstream `ReadDistanceInternal` for the NPOSTFIX=0 fast path:
-///   distval = dist_code - NUM_DISTANCE_SHORT_CODES (where dist_code is the
-///             symbol read from the dist Huffman table, NOT offset by 64).
+/// Mirrors upstream `ReadDistanceInternal`. `dist_code` is the raw
+/// symbol from the dist Huffman table.
+///
+/// `num_direct` is `NUM_DISTANCE_SHORT_CODES + NDIRECT` (= 16 + NDIRECT):
+/// the count of short + direct codes. `npostfix` is the NPOSTFIX field
+/// from the metablock header (0..=3).
+///
+/// General formula (long codes):
+///   postfix_mask = (1 << NPOSTFIX) - 1
+///   distval = dist_code - num_direct
+///   postfix = distval & postfix_mask
+///   distval >>= NPOSTFIX
 ///   nbits  = (distval >> 1) + 1
 ///   offset = ((2 + (distval & 1)) << nbits) - 4
-///   distance = NUM_DISTANCE_SHORT_CODES + offset + ReadBits(nbits) - (N-1)
-///
-/// `dist_code` here is the raw symbol from the dist Huffman table; for
-/// `compress_fragment_two_pass` output it equals the brotli distance code
-/// directly (e.g. symbol 16 = first long distance code).
+///   distance = ((offset + ReadBits(nbits)) << NPOSTFIX) + postfix
+///              + num_direct - (NUM_DISTANCE_SHORT_CODES - 1)
 fn decode_distance_from_code(
     dist_code: i32,
     num_direct: u32,
-    _npostfix: i32,
+    npostfix: i32,
     br: &mut BitReader,
     dist_rb: &mut [u32; 4],
     dist_rb_idx: &mut i32,
@@ -987,15 +994,23 @@ fn decode_distance_from_code(
     if dist_code < NUM_DISTANCE_SHORT_CODES {
         return take_distance_from_ring_buffer(dist_code, dist_rb, dist_rb_idx);
     }
-    let distval = dist_code - num_direct as i32;
-    if distval < 0 {
-        return take_distance_from_ring_buffer(dist_code, dist_rb, dist_rb_idx);
+    if dist_code < num_direct as i32 {
+        // Direct distance code (NDIRECT > 0 only): distance = code - 15.
+        let distance = (dist_code - NUM_DISTANCE_SHORT_CODES + 1) as u32;
+        dist_rb[(*dist_rb_idx as usize) & 3] = distance;
+        *dist_rb_idx = dist_rb_idx.wrapping_add(1);
+        return distance;
     }
+    // Long-distance code with optional postfix.
+    let postfix_mask = (1i32 << npostfix) - 1;
+    let mut distval = dist_code - num_direct as i32;
+    let postfix = distval & postfix_mask;
+    distval >>= npostfix;
     let nbits = ((distval as u32) >> 1) + 1;
     let offset = (((distval & 1) + 2) << nbits) - 4;
     let extra = br.read_bits(nbits);
-    let raw = num_direct as i32 + offset as i32 + extra as i32;
-    let distance = (raw - NUM_DISTANCE_SHORT_CODES + 1) as u32;
+    let raw = (offset as i32 + extra as i32) << npostfix;
+    let distance = (raw + postfix + num_direct as i32 - NUM_DISTANCE_SHORT_CODES + 1) as u32;
     dist_rb[(*dist_rb_idx as usize) & 3] = distance;
     *dist_rb_idx = dist_rb_idx.wrapping_add(1);
     distance
