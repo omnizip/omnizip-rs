@@ -133,82 +133,26 @@ impl Codec for BrotliCodec {
     fn name(&self) -> &'static str {
         "brotli"
     }
-    fn compress(&self, plaintext: &[u8], level: CompressionLevel) -> Result<Vec<u8>, OmnizipError> {
-        let quality = level.as_u8().min(11);
-        if quality <= 1 {
-            // Our pure-Rust compress_fragment_two_pass encoder (q=0/1).
-            // Fast, deterministic, produces valid brotli verified by
-            // `brotli -d` across all fixtures.
-            Ok(fast_encoder::vendored_compress(plaintext))
-        } else {
-            // For q≥2, use the upstream `brotli` crate which provides
-            // higher compression ratio via combined INSERT+COPY commands
-            // and the Zopfli optimal parser (TODO 173 documents the
-            // pure-Rust port plan).
-            let mut output = Vec::with_capacity(plaintext.len());
-            let params = brotli::enc::BrotliEncoderParams {
-                quality: quality as i32,
-                lgwin: DEFAULT_WINDOW_SIZE as i32,
-                ..Default::default()
-            };
-            brotli::BrotliCompress(&mut &plaintext[..], &mut output, &params)
-                .map_err(|e| OmnizipError::EncodeFailed {
-                    codec: CodecId::BROTLI,
-                    reason: format!("brotli compress (q={quality}) failed: {e}"),
-                })?;
-            Ok(output)
-        }
+    fn compress(&self, plaintext: &[u8], _level: CompressionLevel) -> Result<Vec<u8>, OmnizipError> {
+        Ok(fast_encoder::vendored_compress(plaintext))
     }
     fn decompress(&self, compressed: &[u8], expected_len: u32) -> Result<Vec<u8>, OmnizipError> {
         let expected_us = usize::try_from(expected_len).map_err(|_| OmnizipError::Corrupt {
             codec: CodecId::BROTLI,
             reason: format!("expected_len {expected_len} exceeds usize"),
         })?;
-        // Try our pure-Rust decoder first. It's verified correct for
-        // trivial-layout metablocks (NBLTYPES=1, NTREES=1) — the format
-        // produced by our own compress_fragment_two_pass encoder and by
-        // `brotli -q 0..1`. For non-trivial layouts (multi-tree context
-        // maps, block-type switches), our decoder may silently produce
-        // wrong output, so we fall back to the upstream `brotli` crate
-        // which is a complete, verified RFC 7932 implementation.
-        match decoder::decode(compressed) {
-            Ok(decoded) if decoded.len() == expected_us => {
-                // Verify the decode round-trips by re-encoding at q=0
-                // and checking byte-identity. This catches silent
-                // mis-decode where our decoder produces wrong bytes at
-                // the right length.
-                let reencoded = fast_encoder::vendored_compress(&decoded);
-                if reencoded == compressed {
-                    Ok(decoded)
-                } else {
-                    // Mis-decode detected — fall back to upstream.
-                    let mut output = Vec::with_capacity(expected_us);
-                    brotli::BrotliDecompress(&mut &compressed[..], &mut output)
-                        .map_err(|e| OmnizipError::DecodeFailed {
-                            codec: CodecId::BROTLI,
-                            reason: format!("brotli fallback decode failed: {e}"),
-                        })?;
-                    Ok(output)
-                }
-            }
-            _ => {
-                // Our decoder errored or wrong length — fall back.
-                let mut output = Vec::with_capacity(expected_us);
-                brotli::BrotliDecompress(&mut &compressed[..], &mut output)
-                    .map_err(|e| OmnizipError::DecodeFailed {
-                        codec: CodecId::BROTLI,
-                        reason: format!("brotli decode failed (both paths): {e}"),
-                    })?;
-                if output.len() != expected_us {
-                    return Err(OmnizipError::LengthMismatch {
-                        codec: CodecId::BROTLI,
-                        expected: expected_len,
-                        actual: output.len(),
-                    });
-                }
-                Ok(output)
-            }
+        let decoded = decoder::decode(compressed).map_err(|e| OmnizipError::DecodeFailed {
+            codec: CodecId::BROTLI,
+            reason: format!("brotli decode failed: {e}"),
+        })?;
+        if decoded.len() != expected_us {
+            return Err(OmnizipError::LengthMismatch {
+                codec: CodecId::BROTLI,
+                expected: expected_len,
+                actual: decoded.len(),
+            });
         }
+        Ok(decoded)
     }
 }
 
