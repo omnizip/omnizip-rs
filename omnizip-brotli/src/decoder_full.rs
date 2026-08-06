@@ -190,17 +190,23 @@ pub(crate) fn read_context_map(
         return Ok((context_map, num_htrees, br.bit_pos()));
     }
 
-    // RLE flag.
-    let use_rle;
+    // RLE flag (RFC 7932 §9.6). Upstream reads 5 bits as a peek:
+    //   bits = PeekBits(5);
+    //   if (bits & 1) != 0 {
+    //       max_run_length_prefix = (bits >> 1) + 1;  // bits 1..4 + 1
+    //       DropBits(5);
+    //   } else {
+    //       max_run_length_prefix = 0;
+    //       DropBits(1);
+    //   }
+    // The 1-bit RLE flag is bit 0; bits 1..4 are the max_rle - 1 value.
     let max_run_length_prefix;
     if br.read_bits(1) != 0 {
-        use_rle = true;
-        max_run_length_prefix = (br.read_bits(4) >> 1) + 1;
+        // RLE flag set: read 4 more bits for max_run_length_prefix - 1.
+        max_run_length_prefix = br.read_bits(4) + 1;
     } else {
-        use_rle = false;
         max_run_length_prefix = 0;
     }
-    let _ = use_rle;
     let max_rle = max_run_length_prefix.max(max_rle_override);
 
     // Context-map code Huffman tree.
