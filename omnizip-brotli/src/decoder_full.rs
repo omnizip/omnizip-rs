@@ -470,8 +470,11 @@ fn finish_metablock_decode(
 
     while output.len() < mlen {
         // Block-switch handling for insert-copy category.
-        if cmd_bt.num_block_types > 1 && cmd_bt.block_length == 0 {
-            cmd_block_type = cmd_bt.decode_switch(&mut br)? as usize;
+        if cmd_bt.num_block_types > 1 {
+            if cmd_bt.block_length == 0 {
+                cmd_block_type = cmd_bt.decode_switch(&mut br)? as usize;
+            }
+            cmd_bt.block_length -= 1;
         }
 
         // Read command symbol from the current command tree.
@@ -502,10 +505,10 @@ fn finish_metablock_decode(
 
             // Block-switch on literal block length.
             if lit_bt.num_block_types > 1 {
-                lit_bt.block_length -= 1;
                 if lit_bt.block_length == 0 {
                     lit_block_type = lit_bt.decode_switch(&mut br)? as usize;
                 }
+                lit_bt.block_length -= 1;
             }
         }
 
@@ -521,7 +524,8 @@ fn finish_metablock_decode(
             )
         } else {
             // Read distance code from distance tree.
-            let dist_context = if v.copy_len_offset == 0 { 1 } else { 0 };
+            // distance_context = v.context (per upstream ReadCommandInternal).
+            let dist_context = v.context as usize;
             let dist_tree_idx = dist_context_map[(dist_block_type << K_DISTANCE_CONTEXT_BITS) as usize
                 + dist_context] as usize;
             let dist_tree = &dist_trees[dist_tree_idx];
@@ -535,6 +539,14 @@ fn finish_metablock_decode(
                 &mut dist_rb_idx,
             )
         };
+
+        // Block-switch on distance block length (after each distance code).
+        if dist_bt.num_block_types > 1 {
+            if dist_bt.block_length == 0 {
+                dist_block_type = dist_bt.decode_switch(&mut br)? as usize;
+            }
+            dist_bt.block_length -= 1;
+        }
 
         // Static dictionary reference vs LZ77 back-reference.
         if (distance as i32) > max_distance as i32 {
@@ -561,13 +573,7 @@ fn finish_metablock_decode(
             p1 = last;
         }
 
-        // Block-switch on distance block length.
-        if dist_bt.num_block_types > 1 && copy_len > 0 {
-            dist_bt.block_length -= 1;
-            if dist_bt.block_length == 0 {
-                dist_block_type = dist_bt.decode_switch(&mut br)? as usize;
-            }
-        }
+        // (Distance block switch handled above after distance read.)
 
         if output.len() > mlen + 1 {
             return Err("metablock overran mlen");
