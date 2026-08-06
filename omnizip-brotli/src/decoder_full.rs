@@ -81,9 +81,10 @@ impl BlockTypeState {
     /// Layout when `num_block_types > 1`:
     /// 1. Block-type code Huffman tree (alphabet `2 + NBLTYPES`).
     /// 2. Block-length code Huffman tree (alphabet 26).
-    /// 3. Initial block type (Huffman symbol from block-type tree).
-    /// 4. Initial block length (Huffman symbol + extra bits via
-    ///    `kBlockLengthPrefixCode`).
+    /// 3. Initial block LENGTH only (Huffman symbol + extra bits via
+    ///    `kBlockLengthPrefixCode`). The initial block TYPE defaults
+    ///    to `block_type_rb[1] = 0` — upstream never reads the initial
+    ///    block type from the bitstream (see `PrepareLiteralDecoding`).
     pub(crate) fn read_block_type_trees(
         &mut self,
         data: &[u8],
@@ -108,22 +109,8 @@ impl BlockTypeState {
         self.block_len_tree = Some(tree);
         br.bit_pos = p;
 
-        // Initial block type via the block-type tree.
-        let bt_tree = self.block_type_tree.as_ref().unwrap();
-        let mut block_type = bt_tree.read_symbol(&mut br).ok_or("invalid block-type symbol")?;
-        // Decode ring-buffer convention (matches upstream DecodeBlockTypeAndLength).
-        block_type = match block_type {
-            0 => self.block_type_rb[0],
-            1 => self.block_type_rb[1] + 1,
-            other => other - 2,
-        };
-        if block_type >= self.num_block_types {
-            block_type -= self.num_block_types;
-        }
-        self.block_type_rb[0] = self.block_type_rb[1];
-        self.block_type_rb[1] = block_type;
-
         // Initial block length via the block-length tree.
+        // The initial block type stays at block_type_rb[1] = 0.
         let bl_tree = self.block_len_tree.as_ref().unwrap();
         self.block_length = read_block_length(bl_tree, &mut br)?;
 
@@ -401,11 +388,11 @@ pub(crate) fn decode_compressed_metablock_full(
     br.bit_pos = p;
     let (cmd_trees, p) = read_tree_group(data, br.bit_pos(), 704, cmd_bt.num_block_types)?;
     br.bit_pos = p;
-    let dist_alphabet_size = 16usize + ndirect + (16 << (npostfix + 1));
+    let dist_alphabet_size = num_direct_distance_codes as usize + (48usize << npostfix);
     let (dist_trees, p) = read_tree_group(
         data,
         br.bit_pos(),
-        dist_alphabet_size.max(64),
+        dist_alphabet_size,
         ntreesd,
     )?;
     br.bit_pos = p;
