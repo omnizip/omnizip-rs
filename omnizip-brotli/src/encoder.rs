@@ -32,7 +32,6 @@
 use super::encoder_error::EncodeError;
 use crate::commands;
 use crate::huffman;
-use crate::static_codes;
 
 /// Encode `input` as a single-metablock Brotli uncompressed stream.
 ///
@@ -147,6 +146,7 @@ impl BitWriter {
     }
 
     /// Total bits written so far (including pending in the partial byte).
+    #[cfg(test)]
     pub(crate) fn bit_pos_after(&self) -> usize {
         self.out.len() * 8 - (if self.bit_pos == 0 { 0 } else { 8 - self.bit_pos as usize })
     }

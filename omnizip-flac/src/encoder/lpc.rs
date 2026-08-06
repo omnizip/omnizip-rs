@@ -389,6 +389,7 @@ fn autocorrelate(samples: &[i32], max_order: usize) -> Vec<f64> {
 /// coefficients of the given order.
 ///
 /// Returns the reflection coefficients and the LPC coefficients.
+#[cfg(test)]
 fn levinson_durbin(acf: &[f64], order: usize) -> Vec<f64> {
     if order == 0 || acf.is_empty() || acf[0] == 0.0 {
         return vec![0.0; order];

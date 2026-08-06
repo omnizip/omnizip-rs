@@ -28,8 +28,8 @@
 #![forbid(unsafe_code)]
 #![allow(clippy::cast_possible_truncation)]
 
-use super::deflate_lz77::{collect_tokens, Lz77Token, MIN_MATCH};
-use omnizip_codecs::{CodecId, OmnizipError};
+use super::deflate_lz77::{collect_tokens, Lz77Token};
+use omnizip_codecs::OmnizipError;
 
 /// Maximum Huffman code length for literal/length and distance codes
 /// (RFC 1951 §3.2.7).
@@ -184,8 +184,7 @@ pub fn deflate_dynamic_huffman(input: &[u8]) -> Result<Option<Vec<u8>>, OmnizipE
 /// Build canonical Huffman code lengths via the standard min-heap
 /// algorithm, then cap at `max_len` using the zlib CPI approach.
 fn build_huffman_lengths(freqs: &[u32], max_len: u8, lengths: &mut [u8]) {
-    let n = freqs.len();
-    let mut symbols: Vec<(u32, usize)> = freqs
+    let symbols: Vec<(u32, usize)> = freqs
         .iter()
         .enumerate()
         .filter(|(_, &f)| f > 0)

@@ -1,6 +1,6 @@
 //! Vendored Brotli encoder — adapted from upstream brotli crate (BSD-3-Clause).
 //! All upstream code rewritten to use Vec instead of Allocator<HuffmanTree>.
-#![allow(dead_code, non_snake_case, unused_parens, non_upper_case_globals, clippy::too_many_arguments, clippy::needless_range_loop)]
+#![allow(dead_code, non_snake_case, unused_parens, unused_assignments, unused_variables, non_upper_case_globals, non_camel_case_types, clippy::too_many_arguments, clippy::needless_range_loop)]
 use std::cmp::min;
 
 // ── Constants ──
@@ -1436,6 +1436,7 @@ pub fn vendored_compress(input: &[u8]) -> Vec<u8> {
 
 // --- Missing helpers ---
 
+#[allow(non_camel_case_types)]
 type floatX = f32;
 
 fn FastLog2u16(v: u16) -> floatX {
