@@ -12,6 +12,7 @@
 
 pub mod commands;
 pub mod decoder;
+pub mod decoder_full;
 pub mod dictionary;
 pub mod encoder;
 pub mod encoder_error;
