@@ -14,6 +14,7 @@ pub const MAX_HUFFMAN_CODE_LENGTH: u8 = 15;
 /// A Huffman tree node used during construction.
 #[derive(Clone, Copy, Default)]
 struct HuffmanTree {
+    #[allow(dead_code)]
     total_count: u32,
     index_left: i32,
     index_right_or_value: i32,
@@ -31,6 +32,7 @@ impl HuffmanTree {
 
 /// Sort tree items by `total_count` (ascending). Mirrors upstream
 /// `SortHuffmanTreeItems` with `SimpleSortHuffmanTree`.
+#[cfg(test)]
 fn sort_huffman_tree_items(tree: &mut [HuffmanTree], n: usize) {
     tree[..n].sort_by_key(|t| t.total_count);
 }
@@ -209,7 +211,7 @@ pub fn build_huffman_tree(histogram: &[u32], alphabet_size: usize) -> (Vec<u8>, 
 ///
 /// Returns `true` if emitted, `false` if too many symbols (use
 /// complex form instead).
-pub fn store_simple_form(
+pub(crate) fn store_simple_form(
     symbols: &[u64],
     depth: &[u8],
     max_bits: u8,
@@ -264,7 +266,7 @@ pub fn store_simple_form(
 ///
 /// Returns `(emitted, symbols)` where `emitted` is true if simple
 /// form was used.
-pub fn build_and_store_simple(
+pub(crate) fn build_and_store_simple(
     histogram: &[u32],
     alphabet_size: usize,
     max_bits: u8,

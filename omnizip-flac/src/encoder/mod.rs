@@ -266,37 +266,12 @@ fn validate_input(input: &[u8], params: &PcmParams) -> Result<usize, String> {
     Ok(input.len() / frame_bytes)
 }
 
-/// De-interleave raw PCM bytes into per-channel i32 sample vectors.
+/// De-interleave raw PCM bytes into per-channel `i32` sample vectors.
 ///
-/// Input layout (LE example, 16-bit stereo):
-///   `[L_lo, L_hi, R_lo, R_hi, L_lo, L_hi, R_lo, R_hi, ...]`
-///
-/// Output: `vec![vec![L0, L1, ...], vec![R0, R1, ...]]`
-fn deinterleave(
-    input: &[u8],
-    params: &PcmParams,
-    bytes_per_sample: usize,
-    total_frames: usize,
-) -> Result<Vec<Vec<i32>>, String> {
-    let mut channels_data = vec![Vec::with_capacity(total_frames); params.channels as usize];
-    let frame_bytes = usize::from(params.channels) * bytes_per_sample;
-    let is_le = matches!(params.endianness, Endianness::LittleEndian);
-
-    for f in 0..total_frames {
-        let frame_start = f * frame_bytes;
-        for ch in 0..params.channels as usize {
-            let sample_start = frame_start + ch * bytes_per_sample;
-            let sample_bytes = &input[sample_start..sample_start + bytes_per_sample];
-            let val = read_sample(sample_bytes, bytes_per_sample, is_le, params.bits_per_sample);
-            channels_data[ch].push(val);
-        }
-    }
-
-    Ok(channels_data)
-}
-
-/// Reusable-buffer variant of [`deinterleave`]. Clears each channel
-/// Vec (preserving capacity) and refills it with the new samples.
+/// Clears each channel Vec (preserving capacity) and refills it with
+/// the new samples. The single-shot API that returns a fresh `Vec<Vec<i32>>`
+/// was removed — all call sites use this reusable-buffer form to avoid
+/// per-frame allocation.
 fn deinterleave_into(
     input: &[u8],
     params: &PcmParams,

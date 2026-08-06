@@ -343,7 +343,7 @@ pub fn compress_block_with_min_match(
 
         // Hash current position.
         let h = hash4(src, ip, h_bits);
-        let mut candidate = ms.hash_table[h as usize] as usize;
+        let candidate = ms.hash_table[h as usize] as usize;
 
         // Update hash table with current position.
         ms.hash_table[h as usize] = ip as u32;
@@ -832,7 +832,7 @@ pub fn compress_block_fast_with_prefix(
 
         // Hash + candidate lookup.
         let h = hash4(src, ip, h_bits);
-        let mut candidate = ms.hash_table[h as usize] as usize;
+        let candidate = ms.hash_table[h as usize] as usize;
         ms.hash_table[h as usize] = ip as u32;
 
         if candidate > 0 && candidate < ip {
