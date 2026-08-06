@@ -506,7 +506,6 @@ fn read_simple_form(
     br: &mut BitReader,
     alphabet_size: usize,
 ) -> Result<(HuffmanTable, usize), &'static str> {
-    let start = br.bit_pos;
     let nsym = br.read_bits(2) + 1;
     let bits_per_sym = ceil_log2(alphabet_size as u32);
     let mut lengths = vec![0u8; alphabet_size];
@@ -581,7 +580,6 @@ fn read_complex_form(
     let mut cl_code_lengths = [0u8; 18];
     let mut space: u32 = 32;
     let mut num_codes: u32 = 0;
-    let start_bit_pos = br.bit_pos;
     for (i, &sym) in CODE_LENGTH_CODE_ORDER.iter().enumerate() {
         if i < hskip {
             continue;
@@ -797,77 +795,7 @@ pub fn parse_context_mode(
 }
 
 // ---------------------------------------------------------------------------
-// Phase C: distance code computation (RFC 7932 §9.4)
-// ---------------------------------------------------------------------------
-
-/// Decode a distance code from the bitstream.
-///
-/// Returns `(distance_value, bits_consumed)`. `distance_value` is
-/// 1-based (distance 1 = previous byte).
-///
-/// Format per category (RFC 7932 §9.4):
-/// - 0..NDIRECT-1: direct distance = code + 1.
-/// - NDIRECT..NDIRECT+16^NPOSTFIX-1: direct-code with postfix.
-/// - >= NDIRECT+16^NPOSTFIX: complex (variable extra bits).
-pub fn decode_distance_code(
-    br: &mut BitReader,
-    num_direct: u32,
-    _num_postfix: u32,
-) -> Result<u32, &'static str> {
-    // Phase C supports only the direct form. The complex form lands
-    // in Phase C.3 with the full encoder.
-    let code = br.read_bits(ceil_log2(num_direct.max(1)));
-    if code < num_direct {
-        Ok(code + 1)
-    } else {
-        Err("complex distance codes not supported in Phase C decoder")
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Phase C: insert-and-copy command (RFC 7932 §10.3)
-// ---------------------------------------------------------------------------
-
-/// A parsed insert-and-copy command from the bitstream.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum InsertCopyCommand {
-    /// `INSERT` literal bytes (no copy).
-    InsertOnly { length: u32 },
-    /// `INSERT` then `COPY` from a back-reference.
-    InsertAndCopy {
-        insert_len: u32,
-        copy_len: u32,
-        distance: u32,
-    },
-    /// Copy from the static dictionary (with transform).
-    DictionaryCopy {
-        copy_len: u32,
-        word_index: u32,
-        transform_index: u32,
-    },
-}
-
-/// Decode the next insert-and-copy command from the bitstream.
-///
-/// Phase C supports `InsertOnly` (no compression) and a stub
-/// `InsertAndCopy` (assumes distance code 1, copy length 1). The
-/// full implementation requires the complete insert-copy Huffman
-/// table (RFC 7932 §10.3) which lands in Phase C.3.
-pub fn decode_insert_copy_command(
-    br: &mut BitReader,
-    num_direct: u32,
-    num_postfix: u32,
-) -> Result<InsertCopyCommand, &'static str> {
-    // Phase C stub: read a length as a single 16-bit value and emit
-    // an InsertOnly. Real implementation requires the LL/ML/OF
-    // Huffman tables per RFC 7932 §10.3.
-    let length = br.read_bits(16);
-    let _ = (num_direct, num_postfix);
-    Ok(InsertCopyCommand::InsertOnly { length })
-}
-
-// ---------------------------------------------------------------------------
-// Phase D: top-level decoder (RFC 7932 §9)
+// Top-level decoder (RFC 7932 §9)
 // ---------------------------------------------------------------------------
 
 /// Decode a Brotli-compressed stream (RFC 7932).
@@ -918,136 +846,6 @@ pub fn decode(compressed: &[u8]) -> Result<Vec<u8>, &'static str> {
     }
 
     Ok(output)
-}
-
-/// Per-command LUT entry: maps a 704-symbol command code to its
-/// insert-length / copy-length / distance parameters.
-#[derive(Clone, Copy, Default, Debug)]
-struct CmdLut {
-    insert_len_extra_bits: u8,
-    copy_len_extra_bits: u8,
-    /// -1: read distance from bitstream via distance Huffman table.
-    /// 0..15: predefined short distance code.
-    distance_code: i8,
-    insert_len_offset: u16,
-    copy_len_offset: u16,
-}
-
-/// Build the 704-entry command LUT (RFC 7932 §5).
-///
-/// For each (insertlen, copylen) pair, the encoder computes a 9-bit
-/// command code via `combine_length_codes`. We iterate over all
-/// (ins_code, copy_code) pairs, compute the command code, and store
-/// the params. Some command codes are produced by both "use last
-/// distance" and "normal" variants; the LUT picks one consistently.
-fn build_cmd_lut() -> [CmdLut; 704] {
-    let mut lut = [CmdLut::default(); 704];
-    let mut set_at = [false; 704];
-
-    for ins_code in 0u32..24 {
-        for copy_code in 0u32..24 {
-            let (i_off, i_xb) = insert_length_prefix(ins_code);
-            let (c_off, c_xb) = copy_length_prefix(copy_code);
-            // Try use_last_distance = true (only valid for ins < 8, copy < 16).
-            if ins_code < 8 && copy_code < 16 {
-                let code = combine_length_codes(ins_code, copy_code, true);
-                let idx = code as usize;
-                if !set_at[idx] {
-                    lut[idx] = CmdLut {
-                        insert_len_extra_bits: i_xb,
-                        copy_len_extra_bits: c_xb,
-                        distance_code: 0, // dist_cache[0]
-                        insert_len_offset: i_off,
-                        copy_len_offset: c_off,
-                    };
-                    set_at[idx] = true;
-                }
-            }
-            // Normal variant.
-            let code = combine_length_codes(ins_code, copy_code, false);
-            let idx = code as usize;
-            if !set_at[idx] {
-                lut[idx] = CmdLut {
-                    insert_len_extra_bits: i_xb,
-                    copy_len_extra_bits: c_xb,
-                    distance_code: -1, // read from bitstream
-                    insert_len_offset: i_off,
-                    copy_len_offset: c_off,
-                };
-                set_at[idx] = true;
-            }
-        }
-    }
-    lut
-}
-
-/// Insert-length code → (offset, extra_bits) per RFC 7932 §5 Table: "Insert
-/// Length Code N means insertlen = offset + ReadBits(extra_bits)".
-fn insert_length_prefix(code: u32) -> (u16, u8) {
-    // From kInsertRangeLut / kInsertLengthPrefix in upstream.
-    // 24 entries: code 0..5 → insertlen = code; 6..23 → complex.
-    match code {
-        0..=5 => (code as u16, 0),
-        6 => (6, 1),
-        7 => (8, 1),
-        8 => (10, 2),
-        9 => (14, 2),
-        10 => (18, 3),
-        11 => (26, 3),
-        12 => (34, 4),
-        13 => (50, 4),
-        14 => (66, 5),
-        15 => (98, 5),
-        16 => (130, 6),
-        17 => (194, 7),
-        18 => (322, 8),
-        19 => (578, 9),
-        20 => (1090, 10),
-        21 => (2114, 12),
-        22 => (6210, 14),
-        23 => (22594, 24),
-        _ => (0, 0),
-    }
-}
-
-/// Copy-length code → (offset, extra_bits) per RFC 7932 §5.
-fn copy_length_prefix(code: u32) -> (u16, u8) {
-    match code {
-        0..=7 => (code as u16 + 2, 0),
-        8 => (10, 1),
-        9 => (12, 1),
-        10 => (14, 2),
-        11 => (18, 2),
-        12 => (22, 3),
-        13 => (30, 3),
-        14 => (38, 4),
-        15 => (54, 4),
-        16 => (70, 5),
-        17 => (102, 5),
-        18 => (134, 6),
-        19 => (198, 7),
-        20 => (326, 8),
-        21 => (582, 9),
-        22 => (1094, 10),
-        23 => (2118, 24),
-        _ => (0, 0),
-    }
-}
-
-/// Mirror of upstream `combine_length_codes` (RFC 7932 §5).
-fn combine_length_codes(inscode: u32, copycode: u32, use_last_distance: bool) -> u32 {
-    let bits64 = (copycode & 0x7) | ((inscode & 0x7) << 3);
-    if use_last_distance && inscode < 8 && copycode < 16 {
-        if copycode < 8 {
-            bits64
-        } else {
-            bits64 | 64
-        }
-    } else {
-        let sub_offset: u32 = 2 * ((copycode >> 3) + 3 * (inscode >> 3));
-        let offset = (sub_offset << 5) + 0x40 + ((0x520d40u32 >> sub_offset) & 0xc0);
-        offset | bits64
-    }
 }
 
 /// Decode a Huffman-coded metablock (RFC 7932 §9.3-§9.4).
@@ -1203,133 +1001,6 @@ fn decode_distance_from_code(
     distance
 }
 
-/// Per-command extra-bit count table from upstream `compress_fragment_two_pass::StoreCommands`.
-/// Indexed by command code 0..=127.
-const K_NUM_EXTRA_BITS: [u32; 128] = [
-    0, 0, 0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 7, 8, 9, 10, 12, 14, 24, // 0..23 (INSERT)
-    0, 0, 0, 0, 0, 0, 0, 0,                                                     // 24..31
-    1, 1, 2, 2, 3, 3, 4, 4,                                                     // 32..39
-    0, 0, 0, 0, 0, 0, 0, 0,                                                     // 40..47
-    1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 7, 8, 9, 10, 24,                           // 48..63
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,                             // 64..79
-    1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12,
-    13, 13, 14, 14, 15, 15, 16, 16, 17, 17, 18, 18, 19, 19, 20, 20, 21, 21, 22, 22, 23, 23, 24, 24, // 80..127
-];
-
-/// Per-command insertlen offset for INSERT codes (0..23) — matches upstream `kInsertOffset`.
-const K_INSERT_OFFSET: [usize; 24] = [
-    0, 1, 2, 3, 4, 5, 6, 8, 10, 14, 18, 26, 34, 50, 66, 98, 130, 194, 322, 578, 1090, 2114, 6210, 22594,
-];
-
-/// Decode copylen from a COPY command (code 24..=79, excluding 64) + extra bits.
-///
-/// Returns the copy length, or 0 for unused/no-op codes.
-///
-/// The mapping is the inverse of upstream `EmitCopyLenLastDistance` (the
-/// dominant path for compress_fragment_two_pass). Codes 24..63 cover
-/// copylens 4..2120+; codes 65..79 are unused (return 0).
-fn decode_copy_len(code: usize, extra: u32) -> Result<usize, &'static str> {
-    if (20..=31).contains(&code) {
-        // copylen < 12 from EmitCopyLenLastDistance: copylen = code - 20.
-        return Ok(code - 20);
-    }
-    if (28..=53).contains(&code) {
-        // copylen 8..71 (second branch): tail = copylen - 8 in [0..63].
-        // code = (nbits << 1) + prefix + 28 where nbits = Log2FloorNonZero(tail) - 1, prefix = tail >> nbits.
-        // For tail = 0..3, nbits = 0 (special), code = prefix + 28..29 with 0 extra bits.
-        // kNumExtraBits[code] = nbits.
-        let encoded = code - 28;
-        let nbits = (encoded >> 1) as u32;
-        let prefix = (encoded & 1) as usize;
-        let copylen = 8 + (prefix << nbits) + extra as usize;
-        return Ok(copylen);
-    }
-    if (54..=57).contains(&code) {
-        // copylen 72..135 (third branch, with trailing 64).
-        // code = ((copylen-8) >> 5) + 54, so copylen-8 = (code-54)*32 + extra_5bits.
-        let copylen = 8 + ((code - 54) << 5) + extra as usize;
-        return Ok(copylen);
-    }
-    if (58..=62).contains(&code) {
-        // copylen 136..2119 (fourth branch, with trailing 64).
-        // code = Log2FloorNonZero(copylen-72) + 52, so nbits = code - 52.
-        // copylen = 72 + (1 << nbits) + extra.
-        let nbits = (code - 52) as u32;
-        let copylen = 72 + (1usize << nbits) + extra as usize;
-        return Ok(copylen);
-    }
-    if code == 63 {
-        // copylen >= 2120 (with trailing 64).
-        let copylen = 2118 + extra as usize;
-        return Ok(copylen);
-    }
-    if (38..=47).contains(&code) {
-        // EmitCopyLen first branch (copylen 0..9 with new distance).
-        // For our decoder, we treat this as a regular copy using last distance.
-        return Ok(code - 38);
-    }
-    if (48..=53).contains(&code) {
-        // Could be from EmitCopyLen second branch (copylen 10..71).
-        // code = (nbits << 1) + prefix + 44, so encoded = code - 44, nbits = encoded >> 1, prefix = encoded & 1.
-        // copylen = 6 + (prefix << nbits) + extra.
-        // But also could be EmitCopyLenLastDistance second branch (handled above).
-        // For simplicity, use the EmitCopyLen interpretation.
-        let encoded = code - 44;
-        let nbits = (encoded >> 1) as u32;
-        let prefix = (encoded & 1) as usize;
-        let copylen = 6 + (prefix << nbits) + extra as usize;
-        return Ok(copylen);
-    }
-    // Codes 65..79 unused.
-    Ok(0)
-}
-
-/// Mirror of upstream `TakeDistanceFromRingBuffer`: computes the
-/// actual distance for short codes 0..15 from the dist_rb ring buffer.
-fn take_distance_from_ring_buffer(code: i32, dist_rb: &mut [u32; 4], dist_rb_idx: &mut i32) -> u32 {
-    if code == 0 {
-        *dist_rb_idx -= 1;
-        return dist_rb[(*dist_rb_idx & 3) as usize];
-    }
-    // distance_code in the formula is `code << 1` (matches upstream line 1911).
-    let dc = code << 1;
-    const K_INDEX_OFFSET: u32 = 0xaaafff1b;
-    const K_VALUE_OFFSET: u32 = 0xfa5fa500;
-    let mut v_idx = (*dist_rb_idx + (K_INDEX_OFFSET as i32 >> dc)) as i32 & 0x3;
-    let mut distance = dist_rb[v_idx as usize] as i32;
-    let v_val = (K_VALUE_OFFSET >> dc) as i32 & 0x3;
-    if dc & 3 != 0 {
-        distance += v_val;
-    } else {
-        distance -= v_val;
-        if distance <= 0 {
-            distance = 0x7fff_ffff;
-        }
-    }
-    let _ = v_idx;
-    distance as u32
-}
-
-/// Decode a "long" distance (RFC 7932 §9.4) from a Huffman symbol
-/// (codes >= NUM_DISTANCE_SHORT_CODES = 16). Used when the command's
-/// `distance_code` field is -1 (read from bitstream).
-fn decode_long_distance(dist_code: i32, br: &mut BitReader) -> Result<u32, &'static str> {
-    if dist_code < 16 {
-        // Short codes shouldn't reach here.
-        return Err("short distance code via long path");
-    }
-    // For NPOSTFIX=0, NDIRECT=0: distance code >= 16 means a
-    // "complex" distance with extra bits. The actual distance
-    // follows RFC 7932 §9.4 via the (nbits+postfix+...) formula.
-    // Simplified for our trivial case (NPOSTFIX=0):
-    let distval = (dist_code - 16) as u32;
-    // bucket = number of bits needed to represent distval + 1 minus 1.
-    let bucket = if distval == 0 { 0 } else { 31 - (distval + 1).leading_zeros() };
-    let nbits = bucket.saturating_sub(1);
-    let extra = br.read_bits(nbits);
-    let offset = (1u32 << nbits) + extra;
-    Ok(offset + 1)
-}
 
 /// Read a `DecodeVarLenUint8`-encoded value (RFC 7932 §9.3 MoreBlockLengths).
 ///
@@ -1348,15 +1019,35 @@ fn read_varlen_uint8(br: &mut BitReader) -> Result<u32, &'static str> {
     Ok((1u32 << nbits) + extra)
 }
 
-/// Compute a short-distance code value (RFC 7932 §10.4 distance short codes).
-///
-// (Legacy short_distance / compute_short_distance / old decode_long_distance
-//  implementations removed — replaced by take_distance_from_ring_buffer and
-//  the new decode_long_distance above.)
+/// Mirror of upstream `TakeDistanceFromRingBuffer`: computes the
+/// actual distance for short codes 0..15 from the dist_rb ring buffer.
+fn take_distance_from_ring_buffer(code: i32, dist_rb: &mut [u32; 4], dist_rb_idx: &mut i32) -> u32 {
+    if code == 0 {
+        *dist_rb_idx -= 1;
+        return dist_rb[(*dist_rb_idx & 3) as usize];
+    }
+    // distance_code in the formula is `code << 1` (matches upstream line 1911).
+    let dc = code << 1;
+    const K_INDEX_OFFSET: u32 = 0xaaafff1b;
+    const K_VALUE_OFFSET: u32 = 0xfa5fa500;
+    let v_idx = (*dist_rb_idx + (K_INDEX_OFFSET as i32 >> dc)) as i32 & 0x3;
+    let mut distance = dist_rb[v_idx as usize] as i32;
+    let v_val = (K_VALUE_OFFSET >> dc) as i32 & 0x3;
+    if dc & 3 != 0 {
+        distance += v_val;
+    } else {
+        distance -= v_val;
+        if distance <= 0 {
+            distance = 0x7fff_ffff;
+        }
+    }
+    distance as u32
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::fast_encoder;
 
     #[test]
     fn bit_reader_reads_lsb_first() {
@@ -1806,5 +1497,57 @@ mod tests {
         ];
         let decoded = decode(&compressed).expect("decode");
         assert_eq!(decoded, b"hello");
+    }
+
+    // --- Phase E: distance formula + metablock-end behaviour ---
+
+    /// `decode_distance_from_code` for the first long-distance code
+    /// (symbol 16) must read the 1 extra bit per upstream
+    /// `ReadDistanceInternal`. Regression test for the bitstream
+    /// desync that produced wrong symbol reads after every match.
+    #[test]
+    fn decode_distance_from_code_reads_extra_bit_for_first_long_code() {
+        let mut dist_rb: [u32; 4] = [16, 15, 11, 4];
+        let mut dist_rb_idx: i32 = 0;
+        // NPOSTFIX=0, NDIRECT=0 → num_direct_distance_codes = 16.
+        // Bit pattern: bit 0 = 1 → distance = 1 + 1 = 2.
+        let data = [0b0000_0001u8];
+        let mut br = BitReader::new(&data);
+        let d = decode_distance_from_code(16, 16, 0, &mut br, &mut dist_rb, &mut dist_rb_idx);
+        assert_eq!(d, 2, "first long-code + extra=1 → distance 2");
+        assert_eq!(br.bit_pos(), 1, "exactly one extra bit consumed");
+    }
+
+    /// After consuming INSERT literals for the LAST command, the
+    /// metablock-end check must fire so we do NOT read into the
+    /// trailing ISLAST+ISLASTEMPTY terminator. Regression test for
+    /// the metablock-overrun failure on `low_entropy_64`.
+    #[test]
+    fn decoder_exits_after_final_insert_only_command() {
+        // 64-byte input with low entropy (alphabet 4) — the encoder
+        // emits multiple matches followed by an INSERT-only tail.
+        // Round-trip via our own encoder exercises the
+        // `output.len() >= mlen` short-circuit.
+        let mut state: u64 = 0xDEAD_BEEF_BAAD_F00D;
+        let mut xs = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let input: Vec<u8> = (0..64).map(|_| (xs() % 4) as u8).collect();
+        let compressed = fast_encoder::vendored_compress(&input);
+        let decoded = decode(&compressed).expect("decode");
+        assert_eq!(decoded, input, "low-entropy 64-byte round-trip");
+    }
+
+    /// Empty input still produces an empty terminator stream and
+    /// decodes to nothing. Catches header parsing regressions when
+    /// the encoder short-circuits before `compress_fragment_two_pass`.
+    #[test]
+    fn decode_empty_input() {
+        let compressed = fast_encoder::vendored_compress(&[]);
+        let decoded = decode(&compressed).expect("decode empty");
+        assert!(decoded.is_empty());
     }
 }
