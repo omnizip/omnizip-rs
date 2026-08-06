@@ -1,8 +1,9 @@
 # Final Status — omnizip-rs Full Port
 
-**Last updated**: 2026-08-06
+**Last updated**: 2026-08-06 (post v0.14.24)
 **Build**: 0 workspace warnings.
 **Test results**: 1033 tests passing across 52 suites, 0 failures, 0 ignored.
+**Latest release**: [v0.14.24](https://github.com/omnizip/omnizip-rs/releases/tag/v0.14.24)
 
 ## End-to-end working features
 
@@ -65,14 +66,23 @@
 - ✅ Uncompressed metablocks.
 - ✅ Huffman-coded metablocks in the trivial layout produced by
   `compress_fragment_two_pass` (single block type per category,
-  NPOSTFIX=0, NDIRECT=0, single literal/distance Huffman tree).
+  single literal/distance Huffman tree).
 - ✅ Simple-form Huffman tables (NSYM=1..4) + complex-form (with
   iterated symbol 16/17 repeat decoding).
-- ✅ Distance formula for NPOSTFIX=0 fast path (mirrors upstream
-  `ReadDistanceInternal`).
+- ✅ Distance formula for general NPOSTFIX + NDIRECT case (mirrors
+  upstream `ReadDistanceInternal`).
+- ✅ `ContextMode::context_id_2(p1, p2)` with full UTF-8 + SIGNED
+  lookup tables (K_UTF8_CONTEXT_LOOKUP, K_SIGNED_3BIT_CONTEXT_LOOKUP).
 - ✅ Metablock-end short-circuit — exits after INSERT literals once
   `output.len() >= mlen` (mirrors upstream `ProcessCommandsInternal`).
 - ✅ Round-trip via our encoder + decoder on all 17 property fixtures.
+
+**Decoder still rejects** (see TODO 172 + 174):
+- Multiple block types per category (NBLTYPES > 1).
+- Literal or distance context maps (NTREESL > 1 or NTREESD > 1).
+- Static dictionary references (distance_code > max_distance).
+- These are required to decode reference brotli streams from
+  `brotli -q N` for N ≥ 2 on real-world inputs.
 
 ## Known remaining gaps
 
