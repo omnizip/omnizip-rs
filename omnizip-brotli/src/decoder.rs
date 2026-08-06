@@ -203,25 +203,24 @@ pub fn parse_metablock_header(
         let mnibbles = if mnibbles_raw == 0 { 4 } else { mnibbles_raw };
         let mnibbles_u8 = u8::try_from(mnibbles).map_err(|_| "mnibbles overflow")?;
         let mlen = br.read_mlen(mnibbles);
-        let is_uncompressed = br.read_bit();
-        // Reserved bit — must be zero.
-        if br.read_bit() {
-            return Err("reserved bit set in ISLAST metablock header");
-        }
+        // Per upstream `BrotliDecoderState::METABLOCK_HEADER_UNCOMPRESSED`:
+        // IS_UNCOMPRESSED is only read when ISLAST=0 (and is_metadata=0).
+        // For ISLAST=1 metablocks, the body is always Huffman-coded.
         return Ok((
             MetablockHeader {
                 is_last,
                 is_last_empty: false,
                 mlen,
                 mnibbles: mnibbles_u8,
-                is_uncompressed,
+                is_uncompressed: false,
             },
             br.bit_pos(),
         ));
     }
 
-    // ISLAST=0 path. No reserved bit; ISUNCOMPRESSED is the last
-    // field of the metablock header (RFC 7932 §9.2).
+    // ISLAST=0 path: read IS_UNCOMPRESSED but no reserved bit
+    // (reserved is only for `is_metadata` metablocks, which have
+    // MNIBBLES bits == 3).
     let mnibbles_raw = br.read_bits(2);
     let mnibbles = if mnibbles_raw == 0 { 4 } else { mnibbles_raw };
     let mnibbles_u8 = u8::try_from(mnibbles).map_err(|_| "mnibbles overflow")?;
