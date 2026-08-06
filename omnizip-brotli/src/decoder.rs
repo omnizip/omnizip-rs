@@ -899,12 +899,17 @@ fn decode_compressed_metablock(
     let _context_mode = br.read_bits(2);
 
     let ntreesl = read_varlen_uint8(&mut br)? + 1;
-    if ntreesl > 1 {
-        return Err("unsupported metablock feature: multiple literal Huffman trees");
-    }
     let ntreesd = read_varlen_uint8(&mut br)? + 1;
-    if ntreesd > 1 {
-        return Err("unsupported metablock feature: multiple distance Huffman trees");
+
+    // Dispatch to the full decoder if NTREES > 1 in either category
+    // (multi-tree Huffman groups requiring context maps).
+    if ntreesl > 1 || ntreesd > 1 {
+        return crate::decoder_full::decode_compressed_metablock_full_with_trees(
+            data, br.bit_pos(), mlen,
+            1, 1, 1, // NBLTYPES all 1
+            npostfix, ndirect_raw,
+            ntreesl, ntreesd,
+        );
     }
 
     let (lit_table, p) = read_huffman_table(data, br.bit_pos(), 256)?;
