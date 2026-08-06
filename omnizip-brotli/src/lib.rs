@@ -17,6 +17,7 @@ pub mod encoder;
 pub mod encoder_error;
 pub mod fast_encoder;
 pub mod huffman;
+pub mod prefix;
 pub mod static_codes;
 
 use omnizip_codecs::{Codec, CodecId, CompressionLevel, OmnizipError};

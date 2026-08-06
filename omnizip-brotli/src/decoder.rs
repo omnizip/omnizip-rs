@@ -220,20 +220,14 @@ pub fn parse_metablock_header(
         ));
     }
 
-    // ISLAST=0 path.
+    // ISLAST=0 path. No reserved bit; ISUNCOMPRESSED is the last
+    // field of the metablock header (RFC 7932 §9.2).
     let mnibbles_raw = br.read_bits(2);
     let mnibbles = if mnibbles_raw == 0 { 4 } else { mnibbles_raw };
     let mnibbles_u8 = u8::try_from(mnibbles).map_err(|_| "mnibbles overflow")?;
 
-    // If MNIBBLES == 0 the block is metadata: MLEN is encoded but
-    // skipped by Phase A. RFC 7932 §9.2.
     let mlen = br.read_mlen(mnibbles);
     let is_uncompressed = br.read_bit();
-
-    // Reserved bit must be 0.
-    if br.read_bit() {
-        return Err("reserved bit set in metablock header");
-    }
 
     Ok((
         MetablockHeader {
@@ -333,6 +327,17 @@ fn ceil_log2(n: u32) -> u32 {
     32 - (n - 1).leading_zeros()
 }
 
+/// Bit-reverse the low `n` bits of `v` (RFC 7932 §1.2 / huffman lookup).
+fn reverse_bits(n: u32, v: u32) -> u32 {
+    let mut v = v;
+    let mut r = 0u32;
+    for _ in 0..n {
+        r = (r << 1) | (v & 1);
+        v >>= 1;
+    }
+    r
+}
+
 // ---------------------------------------------------------------------------
 // Phase B: distance-code header (RFC 7932 §9.4)
 // ---------------------------------------------------------------------------
@@ -393,7 +398,9 @@ impl HuffmanTable {
     /// (RFC 7932 §9.5, also used by DEFLATE / ZSTD).
     ///
     /// Symbols are assigned codes in alphabetical order within each
-    /// code-length bucket.
+    /// code-length bucket. Codes are bit-reversed so that the LSB of
+    /// each code corresponds to the first bit written into Brotli's
+    /// LSB-first bitstream.
     #[must_use]
     pub fn from_lengths(lengths: &[u8]) -> Self {
         let n = lengths.len();
@@ -407,7 +414,7 @@ impl HuffmanTable {
             }
         }
 
-        // Compute the next code per length.
+        // Compute the next code per length (canonical, MSB-first).
         let mut next_code = [0u16; 17];
         let mut code = 0u16;
         for bits in 1..=16usize {
@@ -415,11 +422,12 @@ impl HuffmanTable {
             next_code[bits] = code;
         }
 
-        // Assign codes per symbol in alphabetical order.
+        // Assign codes per symbol in alphabetical order, bit-reversed
+        // for LSB-first bitstream lookup.
         for i in 0..n {
             let l = lengths[i];
             if l > 0 {
-                codes[i] = next_code[usize::from(l)];
+                codes[i] = reverse_bits(u32::from(l), u32::from(next_code[usize::from(l)])) as u16;
                 next_code[usize::from(l)] += 1;
             }
         }
@@ -432,16 +440,14 @@ impl HuffmanTable {
 
     /// Read a Huffman-coded symbol from the bit reader.
     ///
-    /// Walks one bit at a time, comparing against canonical codes.
-    /// Returns the symbol value or `None` if the code isn't in the
-    /// alphabet (shouldn't happen for well-formed streams).
+    /// Bits are read LSB-first and accumulated LSB-first into `code`,
+    /// matching the bit-reversed canonical codes stored in `codes`.
+    /// Returns the symbol or `None` if the code isn't in the alphabet.
     pub fn read_symbol(&self, br: &mut BitReader) -> Option<u32> {
         let mut code: u32 = 0;
         for len in 1..=MAX_HUFFMAN_CODE_LENGTH {
-            code = (code << 1) | br.read_bits(1);
-            // Look for a symbol with this length whose canonical code
-            // matches. Canonical assignment is alphabetical within
-            // length buckets, so we walk symbols in order.
+            // Append the new bit at position `len - 1` (LSB-first accumulation).
+            code |= br.read_bits(1) << (len - 1);
             for (sym, &sym_len) in self.lengths.iter().enumerate() {
                 if sym_len == len && u32::from(self.codes[sym]) == code {
                     return Some(sym as u32);
@@ -450,6 +456,190 @@ impl HuffmanTable {
         }
         None
     }
+}
+
+/// Read a Huffman table from the bitstream (RFC 7932 §9.5).
+///
+/// Dispatches on the 2-bit HSKIP prefix:
+/// - HSKIP = 1 → simple form (NSYM = 1/2/3/4 with optional tree select)
+/// - HSKIP = 0/2/3 → complex form (with that many leading code-length
+///   codes assumed zero)
+///
+/// `alphabet_size` is the maximum number of symbols in the alphabet
+/// (e.g. 256 for literals, 704 for commands, 64 for distances).
+/// `max_bits` caps the code-length code's symbol bit width.
+pub fn read_huffman_table(
+    data: &[u8],
+    bit_pos: usize,
+    alphabet_size: usize,
+) -> Result<(HuffmanTable, usize), &'static str> {
+    let mut br = BitReader::new(data);
+    br.bit_pos = bit_pos;
+
+    let hskip = br.read_bits(2);
+    if hskip == 1 {
+        read_simple_form(&mut br, alphabet_size)
+    } else {
+        read_complex_form(&mut br, alphabet_size, hskip as usize)
+    }
+}
+
+fn read_simple_form(
+    br: &mut BitReader,
+    alphabet_size: usize,
+) -> Result<(HuffmanTable, usize), &'static str> {
+    let start = br.bit_pos;
+    let nsym = br.read_bits(2) + 1;
+    let bits_per_sym = ceil_log2(alphabet_size as u32);
+    let mut lengths = vec![0u8; alphabet_size];
+
+    match nsym {
+        1 => {
+            let s = br.read_bits(bits_per_sym) as usize;
+            if s >= alphabet_size { return Err("simple-form symbol out of range"); }
+            lengths[s] = 1;
+        }
+        2 => {
+            let s0 = br.read_bits(bits_per_sym) as usize;
+            let s1 = br.read_bits(bits_per_sym) as usize;
+            if s0 >= alphabet_size || s1 >= alphabet_size { return Err("simple-form symbol out of range"); }
+            lengths[s0] = 1;
+            lengths[s1] = 1;
+        }
+        3 => {
+            let s0 = br.read_bits(bits_per_sym) as usize;
+            let s1 = br.read_bits(bits_per_sym) as usize;
+            let s2 = br.read_bits(bits_per_sym) as usize;
+            if s0 >= alphabet_size || s1 >= alphabet_size || s2 >= alphabet_size { return Err("simple-form symbol out of range"); }
+            lengths[s0] = 2;
+            lengths[s1] = 2;
+            lengths[s2] = 2;
+        }
+        4 => {
+            let s0 = br.read_bits(bits_per_sym) as usize;
+            let s1 = br.read_bits(bits_per_sym) as usize;
+            let s2 = br.read_bits(bits_per_sym) as usize;
+            let s3 = br.read_bits(bits_per_sym) as usize;
+            if s0 >= alphabet_size || s1 >= alphabet_size || s2 >= alphabet_size || s3 >= alphabet_size { return Err("simple-form symbol out of range"); }
+            let tree_select = br.read_bits(1);
+            let len = if tree_select == 0 { 2 } else { 3 };
+            // For tree_select=0: 2-bit codes for all 4 symbols.
+            // For tree_select=1: first 2 symbols get 1-bit codes (s0=0, s1=1), last 2 get 2-bit codes starting at 00.
+            // Wait — per RFC 7932 §9.5.1 Table: tree_select=1 means 1+1+2+2 layout, NOT 3-bit codes.
+            // Actually re-reading: tree_select=0 → 2+2+2+2; tree_select=1 → 1+1+2+2 with s0,s1 getting 1-bit codes (s0=0, s1=1) and s2,s3 getting codes 00+something.
+            // For our from_lengths builder, we just need the per-symbol lengths.
+            if tree_select == 0 {
+                lengths[s0] = 2;
+                lengths[s1] = 2;
+                lengths[s2] = 2;
+                lengths[s3] = 2;
+            } else {
+                lengths[s0] = 1;
+                lengths[s1] = 1;
+                lengths[s2] = 2;
+                lengths[s3] = 2;
+            }
+            let _ = len;
+        }
+        _ => unreachable!(),
+    }
+
+    let table = HuffmanTable::from_lengths(&lengths);
+    Ok((table, br.bit_pos()))
+}
+
+fn read_complex_form(
+    br: &mut BitReader,
+    alphabet_size: usize,
+    hskip: usize,
+) -> Result<(HuffmanTable, usize), &'static str> {
+    // Code-length code lengths (RFC 7932 §9.5.2). The 18 entries in
+    // CODE_LENGTH_CODE_ORDER are read via a static prefix code:
+    //   kCodeLengthPrefixLength: bits consumed per 4-bit peek
+    //   kCodeLengthPrefixValue:  decoded value
+    const K_CL_PREFIX_LENGTH: [u8; 16] = [2, 2, 2, 3, 2, 2, 2, 4, 2, 2, 2, 3, 2, 2, 2, 4];
+    const K_CL_PREFIX_VALUE: [u8; 16] = [0, 4, 3, 2, 0, 4, 3, 1, 0, 4, 3, 2, 0, 4, 3, 5];
+
+    let mut cl_code_lengths = [0u8; 18];
+    let mut space: u32 = 32;
+    let mut num_codes: u32 = 0;
+    let start_bit_pos = br.bit_pos;
+    for (i, &sym) in CODE_LENGTH_CODE_ORDER.iter().enumerate() {
+        if i < hskip {
+            continue;
+        }
+        let ix = br.read_bits(4) as usize;
+        let v = K_CL_PREFIX_VALUE[ix];
+        let consumed = K_CL_PREFIX_LENGTH[ix] as usize;
+        br.bit_pos -= 4 - consumed;
+        cl_code_lengths[usize::from(sym)] = v;
+        if v != 0 {
+            space = space.wrapping_sub(32u32 >> v);
+            num_codes += 1;
+            if space.wrapping_sub(1) >= 32 {
+                break;
+            }
+        }
+    }
+    if !(num_codes == 1 || space == 0) {
+        return Err("invalid code-length code lengths (space not consumed)");
+    }
+
+    let cl_table = HuffmanTable::from_lengths(&cl_code_lengths);
+
+    let mut lengths = vec![0u8; alphabet_size];
+    let mut i: usize = 0;
+    let mut prev_code_len: u8 = 8;
+    // `space` tracks how much of the Huffman tree's "code space" has
+    // been filled. It starts at 32768 (= 1 << MAX_HUFFMAN_BITS = 15)
+    // and decreases by (32768 >> code_len) for each non-zero code
+    // length assigned. When space hits 0, the tree is complete and we
+    // can stop reading even if `i < alphabet_size` (trailing zero
+    // entries are trimmed by the encoder and not present in the
+    // bitstream).
+    let mut space: u32 = 32768;
+    while i < alphabet_size && space > 0 {
+        let sym = cl_table
+            .read_symbol(br)
+            .ok_or("invalid code-length symbol")? as u8;
+        match sym {
+            0..=15 => {
+                lengths[i] = sym;
+                prev_code_len = sym;
+                if sym != 0 {
+                    space = space.wrapping_sub(32768u32 >> sym);
+                }
+                i += 1;
+            }
+            16 => {
+                if i == 0 { return Err("symbol 16 with no previous length"); }
+                let repeat = (br.read_bits(2) + 3) as usize;
+                let take = repeat.min(alphabet_size - i);
+                for _ in 0..take {
+                    lengths[i] = prev_code_len;
+                    if prev_code_len != 0 {
+                        space = space.wrapping_sub(32768u32 >> prev_code_len);
+                    }
+                    i += 1;
+                    if space == 0 { break; }
+                }
+            }
+            17 => {
+                let repeat = (br.read_bits(3) + 3) as usize;
+                let take = repeat.min(alphabet_size - i);
+                i += take;
+            }
+            18 => {
+                let repeat = (br.read_bits(7) + 11) as usize;
+                let take = repeat.min(alphabet_size - i);
+                i += take;
+            }
+            _ => return Err("invalid code-length symbol"),
+        }
+    }
+
+    let table = HuffmanTable::from_lengths(&lengths);
+    Ok((table, br.bit_pos()))
 }
 
 /// Read a Huffman table from the bitstream using the "simple" form
@@ -462,41 +652,13 @@ pub fn read_huffman_table_simple(
 ) -> Result<(HuffmanTable, usize), &'static str> {
     let mut br = BitReader::new(data);
     br.bit_pos = bit_pos;
-
-    let nsym_raw = br.read_bits(2);
-    let nsym = nsym_raw + 1;
-
-    // Symbol alphabet size — Phase B assumes 256 for literals.
-    // Production code takes this as a parameter.
-    let alphabet_size = 256usize;
-    let mut lengths = vec![0u8; alphabet_size];
-
-    match nsym {
-        1 => {
-            let sym = br.read_bits(ceil_log2(alphabet_size as u32));
-            lengths[usize::try_from(sym).unwrap_or(0)] = 1;
-        }
-        2 => {
-            let s1 = br.read_bits(ceil_log2(alphabet_size as u32));
-            let s2 = br.read_bits(ceil_log2(alphabet_size as u32));
-            let tree_select = br.read_bits(1);
-            // tree_select=0: both symbols get 1-bit codes.
-            // tree_select=1: both symbols get 2-bit codes (with unused code).
-            let len = if tree_select == 0 { 1 } else { 2 };
-            lengths[usize::try_from(s1).unwrap_or(0)] = len;
-            lengths[usize::try_from(s2).unwrap_or(0)] = len;
-        }
-        _ => {
-            // NSYM=3 or 4 — read each symbol + assign 2-bit codes.
-            for _ in 0..nsym {
-                let sym = br.read_bits(ceil_log2(alphabet_size as u32));
-                lengths[usize::try_from(sym).unwrap_or(0)] = 2;
-            }
-        }
+    // Peek HSKIP — if it's 1, dispatch to simple form.
+    let hskip = br.read_bits(2);
+    if hskip != 1 {
+        return Err("read_huffman_table_simple called with HSKIP != 1");
     }
-
-    let table = HuffmanTable::from_lengths(&lengths);
-    Ok((table, br.bit_pos()))
+    let (t, p) = read_simple_form(&mut br, 256)?;
+    Ok((t, p))
 }
 
 // ---------------------------------------------------------------------------
@@ -523,73 +685,10 @@ pub fn read_huffman_table_complex(
     bit_pos: usize,
     alphabet_size: usize,
 ) -> Result<(HuffmanTable, usize), &'static str> {
-    let mut br = BitReader::new(data);
-    br.bit_pos = bit_pos;
-
-    let _hskip = br.read_bits(2);
-
-    // Read code-length code lengths. Each is 3 bits, terminated when
-    // we've assigned all 18 in CODE_LENGTH_CODE_ORDER.
-    let mut cl_code_lengths = [0u8; 18];
-    // Track how many have non-zero length — once all remaining are
-    // zero we stop reading.
-    let mut cl_count = 0;
-    for &sym in &CODE_LENGTH_CODE_ORDER {
-        let len = br.read_bits(3) as u8;
-        cl_code_lengths[usize::from(sym)] = len;
-        if len > 0 {
-            cl_count += 1;
-        }
-        if cl_count == 18 {
-            break;
-        }
-    }
-
-    let cl_table = HuffmanTable::from_lengths(&cl_code_lengths);
-
-    // Decode the actual alphabet's code lengths.
-    let mut lengths = vec![0u8; alphabet_size];
-    let mut i = 0;
-    while i < alphabet_size {
-        let sym = cl_table
-            .read_symbol(&mut br)
-            .ok_or("invalid code-length symbol")?;
-        match sym {
-            0..=15 => {
-                lengths[i] = sym as u8;
-                i += 1;
-            }
-            16 => {
-                // Repeat previous length 2-6 times.
-                if i == 0 {
-                    return Err("symbol 16 with no previous length");
-                }
-                let extra = br.read_bits(2) + 3;
-                let prev = lengths[i - 1];
-                for _ in 0..extra {
-                    if i >= alphabet_size {
-                        break;
-                    }
-                    lengths[i] = prev;
-                    i += 1;
-                }
-            }
-            17 => {
-                // Zero-run 3-10.
-                let extra = br.read_bits(3) + 3;
-                i += extra as usize;
-            }
-            18 => {
-                // Zero-run 11-138.
-                let extra = br.read_bits(7) + 11;
-                i += extra as usize;
-            }
-            _ => return Err("invalid code-length symbol value"),
-        }
-    }
-
-    let table = HuffmanTable::from_lengths(&lengths);
-    Ok((table, br.bit_pos()))
+    // Legacy entry point — delegates to read_huffman_table (which handles
+    // both simple and complex forms). Prefer calling read_huffman_table
+    // directly.
+    read_huffman_table(data, bit_pos, alphabet_size)
 }
 
 // ---------------------------------------------------------------------------
@@ -737,20 +836,24 @@ pub fn decode_insert_copy_command(
 // Phase D: top-level decoder (RFC 7932 §9)
 // ---------------------------------------------------------------------------
 
-/// Decode a Brotli-compressed stream.
+/// Decode a Brotli-compressed stream (RFC 7932).
 ///
-/// Supports the most common paths: uncompressed metablocks (no
-/// Huffman coding, just raw bytes per RFC 7932 §9.2 IS_UNCOMPRESSED=1)
-/// and the empty-last-metablock terminator. Huffman-coded metablocks
-/// return `Err("huffman-coded metablock not yet supported")`.
+/// Handles:
+/// - Empty metablocks (ISLASTEMPTY)
+/// - Uncompressed metablocks (IS_UNCOMPRESSED=1)
+/// - Huffman-coded metablocks in the trivial layout produced by
+///   `compress_fragment_two_pass` (1 literal/command/distance Huffman
+///   tree each, no context maps, no block types, NPOSTFIX=0, NDIRECT=0).
+///
+/// Non-trivial Huffman-coded metablocks (multiple block types, context
+/// maps, NPOSTFIX/NDIRECT > 0, custom dictionaries) are not yet
+/// supported — they return `Err("unsupported metablock feature")`.
 ///
 /// # Errors
 ///
-/// Returns `&'static str` on malformed input or unsupported metablock
-/// types.
+/// Returns `&'static str` on malformed input or unsupported features.
 pub fn decode(compressed: &[u8]) -> Result<Vec<u8>, &'static str> {
     let (_frame, mut bit_pos) = parse_frame_header(compressed, 0)?;
-
     let mut output = Vec::new();
 
     loop {
@@ -763,16 +866,16 @@ pub fn decode(compressed: &[u8]) -> Result<Vec<u8>, &'static str> {
 
         if mb.is_uncompressed {
             let byte_offset = (bit_pos + 7) / 8;
-            let needed = byte_offset
-                .checked_add(mb.mlen as usize)
-                .ok_or("mlen overflow")?;
+            let needed = byte_offset.checked_add(mb.mlen as usize).ok_or("mlen overflow")?;
             if needed > compressed.len() {
                 return Err("uncompressed metablock extends past input");
             }
             output.extend_from_slice(&compressed[byte_offset..needed]);
             bit_pos = needed * 8;
         } else {
-            return Err("huffman-coded metablock not yet supported");
+            let (new_pos, bytes_emitted) = decode_compressed_metablock(compressed, bit_pos, mb.mlen as usize)?;
+            bit_pos = new_pos;
+            output.extend(bytes_emitted);
         }
 
         if mb.is_last {
@@ -782,6 +885,341 @@ pub fn decode(compressed: &[u8]) -> Result<Vec<u8>, &'static str> {
 
     Ok(output)
 }
+
+/// Per-command LUT entry: maps a 704-symbol command code to its
+/// insert-length / copy-length / distance parameters.
+#[derive(Clone, Copy, Default, Debug)]
+struct CmdLut {
+    insert_len_extra_bits: u8,
+    copy_len_extra_bits: u8,
+    /// -1: read distance from bitstream via distance Huffman table.
+    /// 0..15: predefined short distance code.
+    distance_code: i8,
+    insert_len_offset: u16,
+    copy_len_offset: u16,
+}
+
+/// Build the 704-entry command LUT (RFC 7932 §5).
+///
+/// For each (insertlen, copylen) pair, the encoder computes a 9-bit
+/// command code via `combine_length_codes`. We iterate over all
+/// (ins_code, copy_code) pairs, compute the command code, and store
+/// the params. Some command codes are produced by both "use last
+/// distance" and "normal" variants; the LUT picks one consistently.
+fn build_cmd_lut() -> [CmdLut; 704] {
+    let mut lut = [CmdLut::default(); 704];
+    let mut set_at = [false; 704];
+
+    for ins_code in 0u32..24 {
+        for copy_code in 0u32..24 {
+            let (i_off, i_xb) = insert_length_prefix(ins_code);
+            let (c_off, c_xb) = copy_length_prefix(copy_code);
+            // Try use_last_distance = true (only valid for ins < 8, copy < 16).
+            if ins_code < 8 && copy_code < 16 {
+                let code = combine_length_codes(ins_code, copy_code, true);
+                let idx = code as usize;
+                if !set_at[idx] {
+                    lut[idx] = CmdLut {
+                        insert_len_extra_bits: i_xb,
+                        copy_len_extra_bits: c_xb,
+                        distance_code: 0, // dist_cache[0]
+                        insert_len_offset: i_off,
+                        copy_len_offset: c_off,
+                    };
+                    set_at[idx] = true;
+                }
+            }
+            // Normal variant.
+            let code = combine_length_codes(ins_code, copy_code, false);
+            let idx = code as usize;
+            if !set_at[idx] {
+                lut[idx] = CmdLut {
+                    insert_len_extra_bits: i_xb,
+                    copy_len_extra_bits: c_xb,
+                    distance_code: -1, // read from bitstream
+                    insert_len_offset: i_off,
+                    copy_len_offset: c_off,
+                };
+                set_at[idx] = true;
+            }
+        }
+    }
+    lut
+}
+
+/// Insert-length code → (offset, extra_bits) per RFC 7932 §5 Table: "Insert
+/// Length Code N means insertlen = offset + ReadBits(extra_bits)".
+fn insert_length_prefix(code: u32) -> (u16, u8) {
+    // From kInsertRangeLut / kInsertLengthPrefix in upstream.
+    // 24 entries: code 0..5 → insertlen = code; 6..23 → complex.
+    match code {
+        0..=5 => (code as u16, 0),
+        6 => (6, 1),
+        7 => (8, 1),
+        8 => (10, 2),
+        9 => (14, 2),
+        10 => (18, 3),
+        11 => (26, 3),
+        12 => (34, 4),
+        13 => (50, 4),
+        14 => (66, 5),
+        15 => (98, 5),
+        16 => (130, 6),
+        17 => (194, 7),
+        18 => (322, 8),
+        19 => (578, 9),
+        20 => (1090, 10),
+        21 => (2114, 12),
+        22 => (6210, 14),
+        23 => (22594, 24),
+        _ => (0, 0),
+    }
+}
+
+/// Copy-length code → (offset, extra_bits) per RFC 7932 §5.
+fn copy_length_prefix(code: u32) -> (u16, u8) {
+    match code {
+        0..=7 => (code as u16 + 2, 0),
+        8 => (10, 1),
+        9 => (12, 1),
+        10 => (14, 2),
+        11 => (18, 2),
+        12 => (22, 3),
+        13 => (30, 3),
+        14 => (38, 4),
+        15 => (54, 4),
+        16 => (70, 5),
+        17 => (102, 5),
+        18 => (134, 6),
+        19 => (198, 7),
+        20 => (326, 8),
+        21 => (582, 9),
+        22 => (1094, 10),
+        23 => (2118, 24),
+        _ => (0, 0),
+    }
+}
+
+/// Mirror of upstream `combine_length_codes` (RFC 7932 §5).
+fn combine_length_codes(inscode: u32, copycode: u32, use_last_distance: bool) -> u32 {
+    let bits64 = (copycode & 0x7) | ((inscode & 0x7) << 3);
+    if use_last_distance && inscode < 8 && copycode < 16 {
+        if copycode < 8 {
+            bits64
+        } else {
+            bits64 | 64
+        }
+    } else {
+        let sub_offset: u32 = 2 * ((copycode >> 3) + 3 * (inscode >> 3));
+        let offset = (sub_offset << 5) + 0x40 + ((0x520d40u32 >> sub_offset) & 0xc0);
+        offset | bits64
+    }
+}
+
+/// Decode a Huffman-coded metablock (RFC 7932 §9.3-§9.4).
+///
+/// Returns `(new_bit_pos, output_bytes)`.
+///
+/// Supports the trivial layout produced by `compress_fragment_two_pass`:
+/// NBLTYPES = 1 for all 3 categories, NTREES = 1 for literals and
+/// distances, NPOSTFIX = 0, NDIRECT = 0.
+fn decode_compressed_metablock(
+    data: &[u8],
+    bit_pos: usize,
+    mlen: usize,
+) -> Result<(usize, Vec<u8>), &'static str> {
+    let mut br = BitReader::new(data);
+    br.bit_pos = bit_pos;
+
+    // NBLTYPESL/C/D via DecodeVarLenUint8. Trivial case: 1 bit each = 0.
+    let nbltypesl = read_varlen_uint8(&mut br)? + 1;
+    let nbltypesc = read_varlen_uint8(&mut br)? + 1;
+    let nbltypesd = read_varlen_uint8(&mut br)? + 1;
+    if nbltypesl > 1 || nbltypesc > 1 || nbltypesd > 1 {
+        return Err("unsupported metablock feature: multiple block types");
+    }
+    // Skip block type info (none when NBLTYPES = 1).
+
+    // Distance params: NPOSTFIX (2 bits) + NDIRECT code (4 bits).
+    // NDIRECT_CODE_BITS encodes via: low 4 bits value n; if n < 12, NDIRECT = n; else complex.
+    let npostfix = br.read_bits(2) as usize;
+    let ndirect_raw = br.read_bits(4) as usize;
+    let ndirect = if ndirect_raw < 12 { ndirect_raw } else { (ndirect_raw - 12) << npostfix };
+    if npostfix != 0 || ndirect != 0 {
+        return Err("unsupported metablock feature: NPOSTFIX/NDIRECT nonzero");
+    }
+
+    // Context modes: NBLTYPESL modes, each 2 bits. (NBLTYPESL = 1 → 1 mode.)
+    let _context_mode = br.read_bits(2);
+    // (We use LSB6 default; context lookup isn't strictly needed for
+    // single-tree case — every literal uses the same Huffman tree.)
+
+    // NTREESL via DecodeVarLenUint8. Trivial case: 1 bit = 0 → NTREES = 1.
+    let ntreesl = read_varlen_uint8(&mut br)? + 1;
+    if ntreesl > 1 {
+        return Err("unsupported metablock feature: multiple literal Huffman trees");
+    }
+    // No literal context map (NTREESL = 1).
+
+    // NTREESD via DecodeVarLenUint8.
+    let ntreesd = read_varlen_uint8(&mut br)? + 1;
+    if ntreesd > 1 {
+        return Err("unsupported metablock feature: multiple distance Huffman trees");
+    }
+    // No distance context map (NTREESD = 1).
+
+    // 3 Huffman trees: literal (256), command (704), distance (64 for trivial case).
+    let (lit_table, p) = read_huffman_table(data, br.bit_pos(), 256)?;
+    br.bit_pos = p;
+    let (cmd_table, p) = read_huffman_table(data, br.bit_pos(), 704)?;
+    br.bit_pos = p;
+    {
+        let mut nonzero = Vec::new();
+        for (i, &l) in cmd_table.lengths.iter().enumerate() {
+            if l != 0 { nonzero.push((i, l, cmd_table.codes[i])); }
+        }
+    }
+    let dist_alphabet_size = 16usize + ndirect + (16 << (npostfix + 1));
+    let (dist_table, p) = read_huffman_table(data, br.bit_pos(), dist_alphabet_size.max(64))?;
+    br.bit_pos = p;
+
+    // Now decode commands until we've produced `mlen` output bytes.
+    // Use upstream's kCmdLut for the 704-symbol command alphabet
+    // (RFC 7932 §5).
+    let mut output = Vec::with_capacity(mlen);
+    // Distance ring buffer per RFC 7932 §10.4 / upstream state.rs.
+    let mut dist_rb: [u32; 4] = [16, 15, 11, 4];
+    let mut dist_rb_idx: i32 = 0;
+
+    while output.len() < mlen {
+        let cmd = cmd_table.read_symbol(&mut br).ok_or("invalid command symbol")? as usize;
+        if cmd >= 704 {
+            return Err("command symbol out of range");
+        }
+        let entry = &crate::prefix::kCmdLut[cmd];
+
+        let insert_extra = if entry.insert_len_extra_bits > 0 {
+            br.read_bits(u32::from(entry.insert_len_extra_bits))
+        } else {
+            0
+        };
+        let insert_len = usize::from(entry.insert_len_offset) + insert_extra as usize;
+
+        let copy_extra = if entry.copy_len_extra_bits > 0 {
+            br.read_bits(u32::from(entry.copy_len_extra_bits))
+        } else {
+            0
+        };
+        let copy_len = usize::from(entry.copy_len_offset) + copy_extra as usize;
+
+        // Read insert_len literals.
+        for _ in 0..insert_len {
+            let lit = lit_table.read_symbol(&mut br).ok_or("invalid literal")?;
+            output.push(lit as u8);
+        }
+
+        if copy_len > 0 {
+            let distance = if entry.distance_code >= 0 {
+                // Short distance code: derived from dist_rb.
+                take_distance_from_ring_buffer(entry.distance_code as i32, &mut dist_rb, &mut dist_rb_idx)
+            } else {
+                // Read distance from bitstream.
+                let dist_code = dist_table.read_symbol(&mut br).ok_or("invalid distance")? as i32;
+                let dist = decode_long_distance(dist_code, &mut br)?;
+                // Push into ring buffer.
+                dist_rb[(dist_rb_idx as usize) & 3] = dist;
+                dist_rb_idx += 1;
+                dist
+            };
+            if distance == 0 || distance as usize > output.len() {
+                return Err("invalid back-reference distance");
+            }
+
+            // Apply copy: bytes may overlap (e.g. distance=1 → RLE).
+            let src = output.len() - distance as usize;
+            for i in 0..copy_len {
+                let b = output[src + i];
+                output.push(b);
+            }
+        }
+
+        if output.len() > mlen {
+            return Err("metablock overran mlen");
+        }
+    }
+
+    Ok((br.bit_pos(), output))
+}
+
+/// Mirror of upstream `TakeDistanceFromRingBuffer`: computes the
+/// actual distance for short codes 0..15 from the dist_rb ring buffer.
+fn take_distance_from_ring_buffer(code: i32, dist_rb: &mut [u32; 4], dist_rb_idx: &mut i32) -> u32 {
+    if code == 0 {
+        *dist_rb_idx -= 1;
+        return dist_rb[(*dist_rb_idx & 3) as usize];
+    }
+    // distance_code in the formula is `code << 1` (matches upstream line 1911).
+    let dc = code << 1;
+    const K_INDEX_OFFSET: u32 = 0xaaafff1b;
+    const K_VALUE_OFFSET: u32 = 0xfa5fa500;
+    let mut v_idx = (*dist_rb_idx + (K_INDEX_OFFSET as i32 >> dc)) as i32 & 0x3;
+    let mut distance = dist_rb[v_idx as usize] as i32;
+    let v_val = (K_VALUE_OFFSET >> dc) as i32 & 0x3;
+    if dc & 3 != 0 {
+        distance += v_val;
+    } else {
+        distance -= v_val;
+        if distance <= 0 {
+            distance = 0x7fff_ffff;
+        }
+    }
+    let _ = v_idx;
+    distance as u32
+}
+
+/// Decode a "long" distance (RFC 7932 §9.4) from a Huffman symbol
+/// (codes >= NUM_DISTANCE_SHORT_CODES = 16). Used when the command's
+/// `distance_code` field is -1 (read from bitstream).
+fn decode_long_distance(dist_code: i32, br: &mut BitReader) -> Result<u32, &'static str> {
+    if dist_code < 16 {
+        // Short codes shouldn't reach here.
+        return Err("short distance code via long path");
+    }
+    // For NPOSTFIX=0, NDIRECT=0: distance code >= 16 means a
+    // "complex" distance with extra bits. The actual distance
+    // follows RFC 7932 §9.4 via the (nbits+postfix+...) formula.
+    // Simplified for our trivial case (NPOSTFIX=0):
+    let distval = (dist_code - 16) as u32;
+    // bucket = number of bits needed to represent distval + 1 minus 1.
+    let bucket = if distval == 0 { 0 } else { 31 - (distval + 1).leading_zeros() };
+    let nbits = bucket.saturating_sub(1);
+    let extra = br.read_bits(nbits);
+    let offset = (1u32 << nbits) + extra;
+    Ok(offset + 1)
+}
+
+/// Read a `DecodeVarLenUint8`-encoded value (RFC 7932 §9.3 MoreBlockLengths).
+///
+/// - 1 bit = 0 → value = 0
+/// - 4 bits = 0000 → value = 1
+/// - 4 bits = 0XYZ (XYZ nonzero) → read XYZ more bits, value = (1 << XYZ) + bits
+fn read_varlen_uint8(br: &mut BitReader) -> Result<u32, &'static str> {
+    if br.read_bits(1) == 0 {
+        return Ok(0);
+    }
+    let nbits = br.read_bits(3);
+    if nbits == 0 {
+        return Ok(1);
+    }
+    let extra = br.read_bits(nbits);
+    Ok((1u32 << nbits) + extra)
+}
+
+/// Compute a short-distance code value (RFC 7932 §10.4 distance short codes).
+///
+// (Legacy short_distance / compute_short_distance / old decode_long_distance
+//  implementations removed — replaced by take_distance_from_ring_buffer and
+//  the new decode_long_distance above.)
 
 #[cfg(test)]
 mod tests {
@@ -899,15 +1337,15 @@ mod tests {
     }
 
     #[test]
-    fn parse_metablock_header_reserved_bit_set_errors() {
-        // ISLAST=0, MNIBBLES=00 (→ 4), MLEN bits 3-18, IS_UNCOMPRESSED = bit 19,
-        // reserved = bit 20. Set reserved=1.
-        // Bit 20 is in byte 2 (20/8=2), bit 4 within byte.
+    fn parse_metablock_header_islast_no_reserved_bit() {
+        // Per RFC 7932 §9.2: the reserved bit only appears when ISLAST=1.
+        // For ISLAST=0 metablocks, ISUNCOMPRESSED is the last field —
+        // there is no reserved bit to validate.
         let mut data = [0u8; 3];
-        data[0] = 0b0000_0000; // ISLAST=0, MNIBBLES=00 (→ 4)
-        data[2] |= 0b0001_0000; // bit 4 of byte 2 = bit 20 = 1 (reserved)
+        data[0] = 0b0000_0000; // ISLAST=0, MNIBBLES=00
+        // bit 20 in the stream is just whatever comes after the header.
         let result = parse_metablock_header(&data, 0);
-        assert!(result.is_err(), "reserved bit must error");
+        assert!(result.is_ok(), "ISLAST=0 metablock has no reserved bit");
     }
 
     // --- Phase B tests ---
@@ -969,21 +1407,21 @@ mod tests {
     #[test]
     fn huffman_table_from_lengths_assigns_canonical_codes() {
         // Standard example: 4 symbols with lengths [2, 1, 3, 3].
-        // Canonical: sym 0 → 00, sym 1 → 1, sym 2 → 010, sym 3 → 011.
-        // Wait, that's not standard canonical. Let me use the spec:
-        // sort by length, then by symbol:
+        // Canonical Huffman codes (MSB-first) for lengths [2, 1, 3, 3]:
         //   len=1: sym 1 → code 0
         //   len=2: sym 0 → code 10
         //   len=3: sym 2 → code 110, sym 3 → code 111
+        // Our from_lengths stores BIT-REVERSED codes for LSB-first
+        // bitstream lookup:
+        //   sym 0 → reverse(0b10, 2) = 0b01 = 1
+        //   sym 1 → reverse(0b0, 1) = 0
+        //   sym 2 → reverse(0b110, 3) = 0b011 = 3
+        //   sym 3 → reverse(0b111, 3) = 0b111 = 7
         let table = HuffmanTable::from_lengths(&[2, 1, 3, 3]);
         assert_eq!(table.lengths, vec![2, 1, 3, 3]);
-        // Code for sym 1 (len 1) = 0.
         assert_eq!(table.codes[1], 0b0);
-        // Code for sym 0 (len 2) = 0b10 = 2.
-        assert_eq!(table.codes[0], 0b10);
-        // Code for sym 2 (len 3) = 0b110 = 6.
-        assert_eq!(table.codes[2], 0b110);
-        // Code for sym 3 (len 3) = 0b111 = 7.
+        assert_eq!(table.codes[0], 0b01);
+        assert_eq!(table.codes[2], 0b011);
         assert_eq!(table.codes[3], 0b111);
     }
 
@@ -1011,30 +1449,25 @@ mod tests {
 
     #[test]
     fn read_huffman_table_simple_single_symbol() {
-        // NSYM=1 (NSYM bits = 00). For alphabet_size=256, ceil_log2=8.
-        // Symbol = 0x42 = 'B' (8 bits).
-        //   byte 0 bits 0-1: NSYM=00
-        //   byte 0 bits 2-7: sym low 6 bits = 0x42 mod 64 = 0b00_0010
-        //   byte 1 bits 0-1: sym high 2 bits = 0x42 / 64 = 1 = 0b01
-        // Packed: byte 0 = bits 2-7 of 0x42 in LSB-first = 0b0000_1000 = 0x08,
-        //         byte 1 = 0b0000_0001 = 0x01.
-        // Actually let me just lay it out bit by bit:
-        //   bit 0: 0  (NSYM bit 0)
-        //   bit 1: 0  (NSYM bit 1)
-        //   bit 2: 0  (sym bit 0)
-        //   bit 3: 1  (sym bit 1)
-        //   bit 4: 0  (sym bit 2)
-        //   bit 5: 0  (sym bit 3)
-        //   bit 6: 0  (sym bit 4)
-        //   bit 7: 0  (sym bit 5)
-        //   bit 8: 1  (sym bit 6)
-        //   bit 9: 0  (sym bit 7)
-        // For sym 0x42 = 0b0100_0010: bit 0=0, bit 1=1, bit 2=0,
-        // bit 3=0, bit 4=0, bit 5=0, bit 6=1, bit 7=0.
-        // So bits 2-9 in stream = 0,1,0,0,0,0,1,0.
-        // Byte 0: bits 0-7 = 0,0,0,1,0,0,0,0 = 0b0000_1000 = 0x08.
-        // Byte 1: bits 8-9 + padding = 1,0,0,0,0,0,0,0 = 0b0000_0001 = 0x01.
-        let data = [0x08u8, 0x01];
+        // HSKIP=1 (2 bits value 0b01), NSYM=1 (2 bits value 0b00),
+        // then symbol 0x42 (8 bits).
+        // Bit layout:
+        //   bit 0: 1  (HSKIP bit 0 — value 1)
+        //   bit 1: 0  (HSKIP bit 1)
+        //   bit 2: 0  (NSYM bit 0 — value 0 → NSYM=1)
+        //   bit 3: 0  (NSYM bit 1)
+        //   bit 4-11: symbol 0x42 = 0b0100_0010 LSB-first
+        //     bit 4: 0 (sym bit 0)
+        //     bit 5: 1 (sym bit 1)
+        //     bit 6: 0 (sym bit 2)
+        //     bit 7: 0 (sym bit 3)
+        // Byte 0 = 0,0,0,0,0,1,0,0 (LSB-first reading) = 0b0010_0000 = 0x20
+        //   bit 8: 0 (sym bit 4)
+        //   bit 9: 0 (sym bit 5)
+        //   bit 10: 1 (sym bit 6)
+        //   bit 11: 0 (sym bit 7)
+        // Byte 1 low nibble = 0,0,1,0 = 0b0100 = 0x04
+        let data = [0x21u8, 0x04];
         let (table, _) = read_huffman_table_simple(&data, 0).expect("parse");
         assert_eq!(table.lengths[0x42], 1);
     }
