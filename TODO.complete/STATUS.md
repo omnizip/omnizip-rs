@@ -1,7 +1,8 @@
 # Final Status — omnizip-rs Full Port
 
-**Date**: 2026-08-01
-**Test results**: 24 suites passing, 257+ tests, 0 failures.
+**Last updated**: 2026-08-06
+**Build**: 0 workspace warnings.
+**Test results**: 1033 tests passing across 52 suites, 0 failures, 0 ignored.
 
 ## End-to-end working features
 
@@ -50,6 +51,28 @@
 ### Wrapper crates
 - ✅ Snappy, LZ4, DEFLATE, Brotli — all wrap their respective ecosystem
   crates and round-trip through `omnizip-codecs::Codec`.
+
+### Brotli (pure-Rust) crate (`omnizip-brotli`)
+
+**Encoder** (vendored from upstream `compress_fragment_two_pass`, BSD-3-Clause):
+- ✅ Valid Brotli streams (verified by `brotli -d`) across all 17 property
+  fixtures + extra CLI corpus.
+- ✅ Bit-exact with `brotli -q 1 -w 22` on inputs up to ~120 bytes.
+
+**Decoder**:
+- ✅ Frame header (RFC 7932 §9.1) — all WBITS variants.
+- ✅ Metablock header (§9.2) — ISLAST/ISLASTEMPTY/MNIBBLES/MLEN/ISUNCOMPRESSED.
+- ✅ Uncompressed metablocks.
+- ✅ Huffman-coded metablocks in the trivial layout produced by
+  `compress_fragment_two_pass` (single block type per category,
+  NPOSTFIX=0, NDIRECT=0, single literal/distance Huffman tree).
+- ✅ Simple-form Huffman tables (NSYM=1..4) + complex-form (with
+  iterated symbol 16/17 repeat decoding).
+- ✅ Distance formula for NPOSTFIX=0 fast path (mirrors upstream
+  `ReadDistanceInternal`).
+- ✅ Metablock-end short-circuit — exits after INSERT literals once
+  `output.len() >= mlen` (mirrors upstream `ProcessCommandsInternal`).
+- ✅ Round-trip via our encoder + decoder on all 17 property fixtures.
 
 ## Known remaining gaps
 
