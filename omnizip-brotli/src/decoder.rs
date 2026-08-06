@@ -905,9 +905,7 @@ fn decode_compressed_metablock(
     if ntreesl > 1 || ntreesd > 1 {
         return crate::decoder_full::decode_compressed_metablock_full_with_trees(
             data, br.bit_pos(), mlen,
-            1, 1, 1, // NBLTYPES all 1
-            npostfix, ndirect_raw,
-            ntreesl, ntreesd,
+            npostfix, ndirect_raw, _context_mode,
         );
     }
 
