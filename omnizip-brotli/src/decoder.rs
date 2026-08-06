@@ -387,10 +387,14 @@ pub const MAX_HUFFMAN_CODE_LENGTH: u8 = 15;
 /// Canonical Huffman table built from per-symbol code lengths.
 #[derive(Clone, Debug)]
 pub struct HuffmanTable {
-    /// Per-symbol code length (0 = symbol not in alphabet).
     pub lengths: Vec<u8>,
-    /// Per-symbol canonical code (only valid for symbols with length > 0).
     pub codes: Vec<u16>,
+    /// For a single-symbol table (NSYM=1 in simple form), the encoder
+    /// uses depth=0 (no bits consumed). We store the symbol here and
+    /// return it from `read_symbol` without reading any bits, matching
+    /// the upstream C decoder's behavior of mapping all bit patterns
+    /// to the sole symbol.
+    pub single_symbol: Option<u32>,
 }
 
 impl HuffmanTable {
@@ -432,21 +436,35 @@ impl HuffmanTable {
             }
         }
 
+        // Detect single-symbol table (only 1 non-zero depth).
+        let nonzero_count: usize = lengths.iter().filter(|&&l| l != 0).count();
+        let single_symbol = if nonzero_count == 1 {
+            Some(lengths.iter().position(|&l| l != 0).unwrap() as u32)
+        } else {
+            None
+        };
+
         Self {
             lengths: lengths.to_vec(),
             codes,
+            single_symbol,
         }
     }
 
     /// Read a Huffman-coded symbol from the bit reader.
     ///
+    /// For a single-symbol table (NSYM=1), returns the symbol WITHOUT
+    /// reading any bits — matching the encoder's depth=0 behavior.
+    ///
     /// Bits are read LSB-first and accumulated LSB-first into `code`,
     /// matching the bit-reversed canonical codes stored in `codes`.
     /// Returns the symbol or `None` if the code isn't in the alphabet.
     pub fn read_symbol(&self, br: &mut BitReader) -> Option<u32> {
+        if let Some(sym) = self.single_symbol {
+            return Some(sym);
+        }
         let mut code: u32 = 0;
         for len in 1..=MAX_HUFFMAN_CODE_LENGTH {
-            // Append the new bit at position `len - 1` (LSB-first accumulation).
             code |= br.read_bits(1) << (len - 1);
             for (sym, &sym_len) in self.lengths.iter().enumerate() {
                 if sym_len == len && u32::from(self.codes[sym]) == code {
@@ -580,6 +598,8 @@ fn read_complex_form(
                 break;
             }
         }
+    }
+    if alphabet_size >= 64 {
     }
     if !(num_codes == 1 || space == 0) {
         return Err("invalid code-length code lengths (space not consumed)");
@@ -1149,14 +1169,21 @@ fn decode_distance_from_code(
     if dist_code < 16 {
         return take_distance_from_ring_buffer(dist_code, dist_rb, dist_rb_idx);
     }
-    // Long distance: RFC 7932 §9.4 formula.
     let distval = dist_code - num_direct as i32;
-    let bucket = if distval <= 0 { 0 } else { 31i32.wrapping_sub((distval as u32).leading_zeros() as i32) };
-    let nbits = bucket.saturating_sub(1).max(0) as u32;
+    // For distval == 0 (the first long distance code), distance = 1.
+    // The general formula degenerates (Log2FloorNonZero(0) is undefined);
+    // the C reference decoder relies on UB that yields 1 on x86.
+    if distval <= 0 {
+        let distance = 1u32;
+        dist_rb[(*dist_rb_idx as usize) & 3] = distance;
+        *dist_rb_idx = dist_rb_idx.wrapping_add(1);
+        return distance;
+    }
+    let bucket = 31i32.wrapping_sub((distval as u32).leading_zeros() as i32).saturating_sub(1);
+    let nbits = bucket.max(0) as u32;
     let extra = br.read_bits(nbits);
     let offset = 1u32.wrapping_shl(nbits).wrapping_add(extra);
     let distance = offset.wrapping_add(1);
-    // Push to ring buffer.
     dist_rb[(*dist_rb_idx as usize) & 3] = distance;
     *dist_rb_idx = dist_rb_idx.wrapping_add(1);
     distance
