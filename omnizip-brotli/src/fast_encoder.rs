@@ -1,7 +1,7 @@
 //! Vendored Brotli encoder — adapted from upstream brotli crate (BSD-3-Clause).
 //! All upstream code rewritten to use Vec instead of Allocator<HuffmanTree>.
-use std::cmp::{max, min};
-#[allow(dead_code, non_snake_case, unused_parens, non_upper_case_globals, clippy::too_many_arguments, clippy::needless_range_loop)]
+#![allow(dead_code, non_snake_case, unused_parens, non_upper_case_globals, clippy::too_many_arguments, clippy::needless_range_loop)]
+use std::cmp::min;
 
 // ── Constants ──
 
