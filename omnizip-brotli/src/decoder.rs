@@ -1129,6 +1129,14 @@ fn decode_compressed_metablock(
             output.push(lit as u8);
         }
 
+        // Per upstream `ProcessCommandsInternal`: after consuming the
+        // insert-length literals, if the metablock is fully decoded,
+        // exit without reading the trailing distance/copy. The encoder's
+        // final INSERT-only command leaves the remaining len == 0 here.
+        if output.len() >= mlen {
+            break;
+        }
+
         if copy_len > 0 {
             let distance = if v.distance_code >= 0 {
                 take_distance_from_ring_buffer(v.distance_code as i32, &mut dist_rb, &mut dist_rb_idx)
@@ -1157,7 +1165,18 @@ fn decode_compressed_metablock(
 /// Decode a distance from a dist_table symbol code (RFC 7932 §9.4 + §10.4).
 ///
 /// For codes 0..15 (short codes): compute from dist_rb ring buffer.
-/// For codes >= 16: long-distance formula with extra bits.
+/// For codes >= 16: long-distance formula (RFC 7932 §9.4) with extra bits.
+///
+/// Mirrors upstream `ReadDistanceInternal` for the NPOSTFIX=0 fast path:
+///   distval = dist_code - NUM_DISTANCE_SHORT_CODES (where dist_code is the
+///             symbol read from the dist Huffman table, NOT offset by 64).
+///   nbits  = (distval >> 1) + 1
+///   offset = ((2 + (distval & 1)) << nbits) - 4
+///   distance = NUM_DISTANCE_SHORT_CODES + offset + ReadBits(nbits) - (N-1)
+///
+/// `dist_code` here is the raw symbol from the dist Huffman table; for
+/// `compress_fragment_two_pass` output it equals the brotli distance code
+/// directly (e.g. symbol 16 = first long distance code).
 fn decode_distance_from_code(
     dist_code: i32,
     num_direct: u32,
@@ -1166,24 +1185,19 @@ fn decode_distance_from_code(
     dist_rb: &mut [u32; 4],
     dist_rb_idx: &mut i32,
 ) -> u32 {
-    if dist_code < 16 {
+    const NUM_DISTANCE_SHORT_CODES: i32 = 16;
+    if dist_code < NUM_DISTANCE_SHORT_CODES {
         return take_distance_from_ring_buffer(dist_code, dist_rb, dist_rb_idx);
     }
     let distval = dist_code - num_direct as i32;
-    // For distval == 0 (the first long distance code), distance = 1.
-    // The general formula degenerates (Log2FloorNonZero(0) is undefined);
-    // the C reference decoder relies on UB that yields 1 on x86.
-    if distval <= 0 {
-        let distance = 1u32;
-        dist_rb[(*dist_rb_idx as usize) & 3] = distance;
-        *dist_rb_idx = dist_rb_idx.wrapping_add(1);
-        return distance;
+    if distval < 0 {
+        return take_distance_from_ring_buffer(dist_code, dist_rb, dist_rb_idx);
     }
-    let bucket = 31i32.wrapping_sub((distval as u32).leading_zeros() as i32).saturating_sub(1);
-    let nbits = bucket.max(0) as u32;
+    let nbits = ((distval as u32) >> 1) + 1;
+    let offset = (((distval & 1) + 2) << nbits) - 4;
     let extra = br.read_bits(nbits);
-    let offset = 1u32.wrapping_shl(nbits).wrapping_add(extra);
-    let distance = offset.wrapping_add(1);
+    let raw = num_direct as i32 + offset as i32 + extra as i32;
+    let distance = (raw - NUM_DISTANCE_SHORT_CODES + 1) as u32;
     dist_rb[(*dist_rb_idx as usize) & 3] = distance;
     *dist_rb_idx = dist_rb_idx.wrapping_add(1);
     distance

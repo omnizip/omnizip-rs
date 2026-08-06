@@ -99,7 +99,6 @@ fn make_fixtures() -> Vec<(&'static str, Vec<u8>)> {
 // ---------------------------------------------------------------------------
 
 #[test]
-#[ignore = "decoder cmd LUT mapping for compress_fragment_two_pass requires resolving the two-tree canonical code mismatch: the encoder uses separate canonical Huffman assignments for depth[0..64] (INSERT/COPY) and depth[64..128] (DISTANCE), but the 704-symbol cmd_table combines them into one tree with different canonical codes. Encoder output is validated via `brotli -d` in fast_encoder::vendored_compress_round_trips_via_cli."]
 fn brotli_round_trips_property_fixtures() {
     let codec = BrotliCodec::new();
     for (name, input) in make_fixtures() {
