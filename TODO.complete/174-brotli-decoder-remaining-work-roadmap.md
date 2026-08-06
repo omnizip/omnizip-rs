@@ -2,117 +2,63 @@
 
 ## Priority: P3
 
-## Status: pending
+## Status: partial — scaffolding landed; multi-block-type still has bit-position drift bug.
 
-## Context
+## What landed (2026-08-06)
 
-TODO 172 covers the full RFC 7932 decoder. As of v0.14.24 the
-following pieces have landed:
+PRs #127, #130, #132. The full RFC 7932 decoder is now wired into
+`decode_compressed_metablock` as a sibling path to the trivial fast
+path. The full path lives in `omnizip-brotli/src/decoder_full.rs`.
 
-- ✅ Frame header (RFC 7932 §9.1)
-- ✅ Metablock header (§9.2)
-- ✅ Uncompressed metablocks
-- ✅ Trivial-layout Huffman-coded metablocks (single block type per
-  category, NPOSTFIX=0/NDIRECT=0, single Huffman tree per category)
-- ✅ Simple-form + complex-form Huffman tables (with iterated symbol
-  16/17 repeat decoding)
-- ✅ NPOSTFIX > 0 + NDIRECT > 0 distance codes (PR #127)
-- ✅ UTF-8 + SIGNED context lookup tables (PR #127)
-- ✅ `ContextMode::context_id_2(p1, p2)` (PR #127)
+- ✅ NPOSTFIX + NDIRECT distance codes (PR #127)
+- ✅ UTF-8 + SIGNED context lookup tables + `ContextMode::context_id_2`
+- ✅ Block-type machinery scaffolding (`BlockTypeState`,
+  `read_block_type_trees`, `decode_switch`)
+- ✅ Context map reader (`read_context_map` + inverse MTF)
+- ✅ Tree-group reader (`read_tree_group`)
+- ✅ Block-length reader using `kBlockLengthPrefixCode`
+- ✅ `decode_compressed_metablock_full` wires everything together
+- ✅ Top-level dispatch in `decode_compressed_metablock` (OCP)
+- ✅ `brotli -q 1` interop test passes (trivial layout only)
 
-The decoder still rejects metablocks that use:
+## What remains
 
-- Multiple block types per category (NBLTYPES > 1)
-- Literal or distance context maps (NTREESL > 1 or NTREESD > 1)
-- Static dictionary references (distance_code > max_distance)
+### Step 1: Block-type code reading — bit-position drift bug
 
-These features are needed to decode brotli streams produced by
-upstream's q ≥ 2 encoders on real-world inputs.
+**Bug**: For `brotli -q 11` output on small text inputs (e.g. 50 'a'
+characters → 12-byte compressed stream), our decoder reads
+`nbltypesc=204` per the varlen_uint8 arithmetic on bits 27-37. But
+`brotli -q 11` should produce a single trivial-layout metablock for
+such small inputs.
 
-## Roadmap (in dependency order)
+**What's been verified**:
+- Frame header parse correct (window_bits=24)
+- Metablock header parse correct (ISLAST=1, ISLASTEMPTY=0,
+  MNIBBLES=4, MLEN=50, IS_UNCOMPRESSED=0, reserved=0)
+- varlen_uint8 read matches upstream's `DecodeVarLenUint8` exactly
+  (1 bit, then 3 bits, then up to 7 extra bits)
+- Bit arithmetic for the 50-byte case: bits 27=1, 28-30=0b111=7,
+  31-37=0b1001001=75, value=128+75=203, +1=204
 
-### Step 1: Block-type code reading (RFC 7932 §9.3)
+The varlen_uint8 read produces 204 from the actual stream bytes.
+That means upstream's decoder is doing something different that I'm
+not seeing — possibly a different bit reader alignment, a different
+metablock header offset, or a different `DecodeVarLenUint8` semantics
+than RFC 7932 §9.3 says.
 
-For each category (literal, insert-copy, distance):
-- `NBLTYPES` (already read via `DecodeVarLenUint8`).
-- Block-type code: 1 + NBLTYPES Huffman codes, alphabet size
-  `2 + NBLTYPES`.
-- Initial block type + block length per category.
-- Block-switch command decoding inside the command loop.
+**Next step**: add a `println!` trace inside upstream's
+`brotli-decompressor` to dump NBLTYPESL/C/D for the failing stream
+and compare with our decoder.
 
-Files: `decoder.rs` — new `BlockTypeState` struct, `read_block_type_code`
-function, integration into `decode_compressed_metablock`.
+### Steps 2-5
 
-LOC estimate: ~400.
-
-### Step 2: Huffman tree groups
-
-Replace single `HuffmanTable` per category with a `Vec<HuffmanTable>`.
-Index into the vector via:
-
-- Literal trees: `context_map[context_id_2(p1, p2)]`
-- Insert-copy trees: `block_type[1]` (no context map for commands)
-- Distance trees: `dist_context_map[distance_context]`
-
-Files: `decoder.rs` — new `HuffmanTreeGroup` struct, refactor of
-`decode_compressed_metablock` to read NTREES instead of assuming 1.
-
-LOC estimate: ~200.
-
-### Step 3: Context-map reader (RFC 7932 §9.6)
-
-`BrotliReadContextMap` port:
-- NTREES via `DecodeVarLenUInt8`.
-- MAXRLE = 16 × NTREES.
-- Use the `kContextMapRleAlphabet` (2-symbol) Huffman code.
-- Inverse MTF transform on the resulting tree-index array.
-- Distance context map uses an additional XOR-with-1 step for the
-  trivial distance context.
-
-Files: `decoder.rs` — new `read_context_map` function.
-
-LOC estimate: ~250.
-
-### Step 4: Static dictionary (RFC 7932 §10.3 + Appendix B)
-
-When `distance_code > max_distance`:
-- Compute `word_id = distance_code - max_distance - 1`.
-- Look up `kBrotliDictionaryOffsetsByLength[copy_len]` and
-  `kBrotliDictionarySizeBitsByLength[copy_len]`.
-- Extract the dictionary word and apply one of 121 transforms.
-
-Files: new `dictionary.rs` submodule (or extend existing `dictionary.rs`),
-`k_transforms` table, `transform_dictionary_word` function.
-
-LOC estimate: ~500 (mostly the constant dictionary data).
-
-### Step 5: Refactor command loop
-
-Replace the current single-pass loop with a state machine that can:
-- Suspend/resume across input chunks (for streaming).
-- Handle block-switch commands mid-stream.
-- Apply context lookups before each literal/dist read.
-
-This is the largest piece; mirrors upstream's `ProcessCommandsInternal`.
-
-LOC estimate: ~600.
+All scaffolding exists in `decoder_full.rs`. Once the bit-position
+drift is fixed, these should work for metablocks that emit them.
 
 ## Acceptance Criteria
 
-- Decode all 11 brotli fixtures in upstream's test corpus.
+- Decode all 11 brotli fixtures from upstream's test corpus.
 - Decode every `.br` produced by `brotli -q 1` through `brotli -q 11`
   on the Linux kernel source.
 - Differential test: 1000 random inputs through our decoder and
   `brotli -d` produce byte-identical output.
-
-## Why this is a substantial effort
-
-The decoder state machine is ~3.5K LOC in upstream Rust. Even a
-faithful port requires careful attention to:
-- Bit-reader suspend/resume across input boundaries.
-- Ring-buffer wraparound for back-references near the start of stream.
-- Block-type code Huffman tree construction (separate from main trees).
-- Context-map RLE + inverse MTF decoding (its own sub-state-machine).
-
-Each step above is independently testable against `brotli -d` for
-regression, so progress can land incrementally.
