@@ -29,8 +29,8 @@ pub const MAX_WINDOW_BITS: u8 = 24;
 /// LSB-first bit reader per RFC 7932 §1.2. Bits are read from the
 /// least-significant end of each byte.
 pub struct BitReader<'a> {
-    data: &'a [u8],
-    bit_pos: usize,
+    pub(crate) data: &'a [u8],
+    pub(crate) bit_pos: usize,
 }
 
 impl<'a> BitReader<'a> {
@@ -862,9 +862,13 @@ pub fn decode(compressed: &[u8]) -> Result<Vec<u8>, &'static str> {
 ///
 /// Returns `(new_bit_pos, output_bytes)`.
 ///
-/// Supports the trivial layout produced by `compress_fragment_two_pass`:
-/// NBLTYPES = 1 for all 3 categories, NTREES = 1 for literals and
-/// distances, NPOSTFIX = 0, NDIRECT = 0.
+/// Dispatches between two paths via OCP:
+/// - Trivial-layout fast path (this function body): when all three
+///   categories have `NBLTYPES == 1` and `NTREES == 1`. Handles all
+///   output from our `compress_fragment_two_pass` encoder.
+/// - Full RFC 7932 path (`decode_compressed_metablock_full`): when
+///   any category has `NBLTYPES > 1` or `NTREES > 1`. Handles
+///   reference brotli streams from upstream encoders.
 fn decode_compressed_metablock(
     data: &[u8],
     bit_pos: usize,
@@ -876,10 +880,15 @@ fn decode_compressed_metablock(
     let nbltypesl = read_varlen_uint8(&mut br)? + 1;
     let nbltypesc = read_varlen_uint8(&mut br)? + 1;
     let nbltypesd = read_varlen_uint8(&mut br)? + 1;
+
+    // Dispatch to the full decoder for non-trivial layouts.
     if nbltypesl > 1 || nbltypesc > 1 || nbltypesd > 1 {
-        return Err("unsupported metablock feature: multiple block types");
+        return crate::decoder_full::decode_compressed_metablock_full(
+            data, br.bit_pos(), mlen, nbltypesl, nbltypesc, nbltypesd,
+        );
     }
 
+    // From here on the trivial fast path: NBLTYPES = 1 for all categories.
     let npostfix = br.read_bits(2) as usize;
     let ndirect_raw = br.read_bits(4) as usize;
     let ndirect = if ndirect_raw < 12 { ndirect_raw } else { (ndirect_raw - 12) << npostfix };
@@ -992,7 +1001,7 @@ fn decode_compressed_metablock(
 ///   offset = ((2 + (distval & 1)) << nbits) - 4
 ///   distance = ((offset + ReadBits(nbits)) << NPOSTFIX) + postfix
 ///              + num_direct - (NUM_DISTANCE_SHORT_CODES - 1)
-fn decode_distance_from_code(
+pub(crate) fn decode_distance_from_code(
     dist_code: i32,
     num_direct: u32,
     npostfix: i32,
@@ -1032,7 +1041,7 @@ fn decode_distance_from_code(
 /// - 1 bit = 0 → value = 0
 /// - 4 bits = 0000 → value = 1
 /// - 4 bits = 0XYZ (XYZ nonzero) → read XYZ more bits, value = (1 << XYZ) + bits
-fn read_varlen_uint8(br: &mut BitReader) -> Result<u32, &'static str> {
+pub(crate) fn read_varlen_uint8(br: &mut BitReader) -> Result<u32, &'static str> {
     if br.read_bits(1) == 0 {
         return Ok(0);
     }
@@ -1046,7 +1055,7 @@ fn read_varlen_uint8(br: &mut BitReader) -> Result<u32, &'static str> {
 
 /// Mirror of upstream `TakeDistanceFromRingBuffer`: computes the
 /// actual distance for short codes 0..15 from the dist_rb ring buffer.
-fn take_distance_from_ring_buffer(code: i32, dist_rb: &mut [u32; 4], dist_rb_idx: &mut i32) -> u32 {
+pub(crate) fn take_distance_from_ring_buffer(code: i32, dist_rb: &mut [u32; 4], dist_rb_idx: &mut i32) -> u32 {
     if code == 0 {
         *dist_rb_idx -= 1;
         return dist_rb[(*dist_rb_idx & 3) as usize];
@@ -1524,6 +1533,38 @@ mod tests {
         ];
         let decoded = decode(&compressed).expect("decode");
         assert_eq!(decoded, b"hello");
+    }
+
+    /// Decode an actual upstream `brotli -q 1` compressed stream.
+    /// The encoder produces a Huffman-coded metablock in the trivial
+    /// layout (single block type per category, single Huffman tree
+    /// per category). Our decoder must round-trip this through the
+    /// same code path used for our own encoder's output.
+    ///
+    /// Skipped if the `brotli` CLI is not installed.
+    #[test]
+    fn decode_upstream_brotli_q1_text() {
+        let input = b"The quick brown fox jumps over the lazy dog. ".repeat(3);
+        let tmp = std::env::temp_dir().join("omnizip_brotli_q1_decode_test.br");
+        std::fs::write(&tmp, &input).unwrap();
+        let enc = std::process::Command::new("brotli")
+            .args(["-q", "1", "-c"])
+            .arg(&tmp)
+            .output();
+        let compressed = match enc {
+            Ok(o) if o.status.success() => o.stdout,
+            Ok(o) => {
+                eprintln!("[skip] brotli -q 1 failed: {}",
+                          String::from_utf8_lossy(&o.stderr));
+                return;
+            }
+            Err(e) => {
+                eprintln!("[skip] brotli CLI not installed: {e}");
+                return;
+            }
+        };
+        let decoded = decode(&compressed).unwrap_or_else(|e| panic!("decode failed: {e}"));
+        assert_eq!(decoded, input);
     }
 
     // --- Phase E: distance formula + metablock-end behaviour ---
