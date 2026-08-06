@@ -920,14 +920,17 @@ fn decode_compressed_metablock(
     let (cmd_table, p) = read_huffman_table(data, br.bit_pos(), 704)?;
     br.bit_pos = p;
 
-    let dist_alphabet_size = 16usize + ndirect + (16 << (npostfix + 1));
-    let (dist_table, p) = read_huffman_table(data, br.bit_pos(), dist_alphabet_size.max(64))?;
+    // Distance alphabet size per RFC 7932 §9.4:
+    //   alphabet_size = NUM_DISTANCE_SHORT_CODES + NDIRECT + (48 << NPOSTFIX)
+    //                = (16 + NDIRECT) + (48 << NPOSTFIX).
+    let num_direct_distance_codes = 16u32 + ndirect as u32;
+    let dist_alphabet_size = num_direct_distance_codes as usize + (48usize << npostfix);
+    let (dist_table, p) = read_huffman_table(data, br.bit_pos(), dist_alphabet_size)?;
     br.bit_pos = p;
 
     let mut output = Vec::with_capacity(mlen);
     let mut dist_rb: [u32; 4] = [16, 15, 11, 4];
     let mut dist_rb_idx: i32 = 0;
-    let num_direct_distance_codes = 16u32 + ndirect as u32;
 
     while output.len() < mlen {
         let cmd_code = cmd_table.read_symbol(&mut br).ok_or("invalid command symbol")? as usize;
