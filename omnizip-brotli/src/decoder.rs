@@ -887,7 +887,16 @@ fn decode_compressed_metablock(
     // From here on the trivial fast path: NBLTYPES = 1 for all categories.
     let npostfix = br.read_bits(2) as usize;
     let ndirect_raw = br.read_bits(4) as usize;
-    let ndirect = if ndirect_raw < 12 { ndirect_raw } else { (ndirect_raw - 12) << npostfix };
+    // Per RFC 7932 §9.4 + upstream `BrotliDecoderState::METABLOCK_HEADER_2`:
+    //   bits = ReadBits(6);  // 6 bits = NPOSTFIX (2) + NDMOEM (4) packed.
+    //   NPOSTFIX = bits & 3;
+    //   NDMOEM = bits >> 2;
+    //   num_direct_distance_codes = NUM_SHORT + (NDMOEM << NPOSTFIX).
+    //
+    // So NDIRECT (the count of direct codes beyond the 16 short codes) =
+    // NDMOEM << NPOSTFIX. No `if < 12` adjustment (that was a previous
+    // incorrect interpretation).
+    let ndirect = ndirect_raw << npostfix;
     if npostfix > 3 {
         return Err("invalid metablock: NPOSTFIX > 3");
     }

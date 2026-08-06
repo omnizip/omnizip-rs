@@ -338,6 +338,8 @@ pub(crate) fn decode_compressed_metablock_full(
     // NPOSTFIX + NDIRECT.
     let npostfix = br.read_bits(2) as usize;
     let ndirect_raw = br.read_bits(4) as usize;
+    // Per RFC 7932 §9.4: NDIRECT = NDMOEM << NPOSTFIX.
+    let _ndirect = ndirect_raw << npostfix;
 
     // Per-block-type CONTEXT_MODE (literal only).
     let mut context_modes = Vec::with_capacity(lit_bt.num_block_types as usize);
@@ -409,7 +411,7 @@ fn finish_metablock_decode(
     mut dist_bt: BlockTypeState,
     context_modes: Vec<ContextMode>,
 ) -> Result<(usize, Vec<u8>), &'static str> {
-    let ndirect = if ndirect_raw < 12 { ndirect_raw } else { (ndirect_raw - 12) << npostfix };
+    let ndirect = ndirect_raw << npostfix;
     if npostfix > 3 {
         return Err("invalid metablock: NPOSTFIX > 3");
     }
