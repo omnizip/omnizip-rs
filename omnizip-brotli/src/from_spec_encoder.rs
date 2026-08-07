@@ -142,18 +142,165 @@ fn reverse_bits(mut v: u32, n: u8) -> u32 {
 /// Produces output accepted by any RFC 7932 conformant decoder. The
 /// encoder tries the Huffman-coded path first and falls back to an
 /// uncompressed metablock if the Huffman output would be larger.
+///
+/// Inputs larger than 64 KiB (the Brotli single-metablock limit) are
+/// split into 64 KiB chunks, each emitted as its own metablock.
 #[must_use]
 pub fn compress(input: &[u8]) -> Vec<u8> {
     if input.is_empty() {
         return empty_frame();
     }
 
-    let uncompressed = encode_uncompressed_frame(input);
-    let huffman = encode_huffman_frame(input);
-    if !huffman.is_empty() && huffman.len() < uncompressed.len() {
-        huffman
-    } else {
-        uncompressed
+    // Inputs ≤ 64 KiB: single metablock, Huffman or uncompressed.
+    if input.len() < (1 << 16) {
+        let uncompressed = encode_uncompressed_frame(input);
+        let huffman = encode_huffman_frame(input);
+        if !huffman.is_empty() && huffman.len() < uncompressed.len() {
+            return huffman;
+        }
+        return uncompressed;
+    }
+
+    // Large inputs (> 64 KiB) exceed the single-metablock MLEN limit.
+    // The multi-metablock Huffman path has a known issue with bit-position
+    // tracking between chunks (chunk1's last command shifts chunk2's
+    // metablock header by a few bits, causing decoder failure on some
+    // inputs). Until that's fixed, emit a single uncompressed metablock
+    // per 64 KiB chunk. This gives correct output (no expansion beyond
+    // ~5 bytes/chunk header) but no compression for large inputs.
+    let chunk_size = (1 << 16) - 1;
+    let mut bw = BitWriter::new();
+    write_wbits(&mut bw);
+
+    let mut offset = 0usize;
+    while offset < input.len() {
+        let end = (offset + chunk_size).min(input.len());
+        let chunk = &input[offset..end];
+        let is_last = end == input.len();
+        encode_uncompressed_chunk_into(&mut bw, chunk, is_last);
+        offset = end;
+    }
+    bw.flush()
+}
+
+/// Append all bits from `src` (bytes + accumulator) to `dst`. Used by
+/// the multi-metablock Huffman path (currently unused — kept for the
+/// TODO multi-metablock implementation).
+#[allow(dead_code)]
+fn append_writer(dst: &mut BitWriter, src: BitWriter) {
+    for byte in src.out {
+        dst.write_bits(u32::from(byte), 8);
+    }
+    if src.nbits > 0 {
+        dst.write_bits(src.acc as u32, src.nbits);
+    }
+}
+
+/// Encode one metablock (Huffman-coded) into the shared writer.
+fn encode_huffman_chunk_into(bw: &mut BitWriter, input: &[u8], mlen_offset: usize, is_last: bool) {
+    bw.write_bits(if is_last { 1 } else { 0 }, 1); // ISLAST
+                                                   // ISLASTEMPTY only present when ISLAST=1; we never emit empty
+                                                   // metablocks, so always 0 when present.
+    if is_last {
+        bw.write_bits(0, 1); // ISLASTEMPTY = 0
+    }
+    bw.write_bits(0, 2); // MNIBBLES = 0 (= 4 nibbles)
+    let mlen_minus_1 = (input.len() - 1) as u32;
+    for i in 0..4u32 {
+        bw.write_bits((mlen_minus_1 >> (4 * i)) & 0xF, 4);
+    }
+    bw.write_bits(0, 1); // ISUNCOMPRESSED = 0
+
+    bw.write_bits(0, 1); // NBLTYPESL = 1
+    bw.write_bits(0, 1); // NBLTYPESI = 1
+    bw.write_bits(0, 1); // NBLTYPESD = 1
+
+    bw.write_bits(0, 2); // NPOSTFIX = 0
+    bw.write_bits(0, 4); // NDMOEM = 0
+
+    bw.write_bits(0, 2); // CONTEXT_MODE = LSB6
+    bw.write_bits(0, 1); // NTREESL = 1
+    bw.write_bits(0, 1); // NTREESD = 1
+
+    let commands = parse_input_with_offset(input, mlen_offset);
+    let Some(stream) = build_symbol_stream(&commands, input) else {
+        return;
+    };
+
+    let mut lit_freq = vec![0u32; 256];
+    let mut cmd_freq = vec![0u32; 704];
+    let mut dist_freq = vec![0u32; 64];
+    for &b in &stream.literals {
+        lit_freq[b as usize] += 1;
+    }
+    for &sym in &stream.cmd_symbols {
+        cmd_freq[sym] += 1;
+    }
+    for &sym in &stream.dist_symbols {
+        dist_freq[sym as usize] += 1;
+    }
+
+    let lit_lengths = omnizip_codecs::HuffmanLengths::build(&lit_freq, 15);
+    let cmd_lengths = omnizip_codecs::HuffmanLengths::build(&cmd_freq, 15);
+    let dist_lengths = omnizip_codecs::HuffmanLengths::build(&dist_freq, 15);
+
+    let lit_codes = canonical_with_reverse(&lit_lengths);
+    let cmd_codes = canonical_with_reverse(&cmd_lengths);
+    let dist_codes = canonical_with_reverse(&dist_lengths);
+
+    write_huffman_table(bw, &lit_lengths, 256);
+    write_huffman_table(bw, &cmd_lengths, 704);
+    write_huffman_table(bw, &dist_lengths, 64);
+
+    let mut lit_iter = stream.literals.iter();
+    let mut dist_iter = stream.dist_symbols.iter().zip(stream.dist_extras.iter());
+    for (&cmd_sym, cmd) in stream.cmd_symbols.iter().zip(commands.iter()) {
+        let (code, len) = cmd_codes[cmd_sym];
+        bw.write_bits(code, u32::from(len));
+
+        let entry = &kCmdLut[cmd_sym];
+        if entry.insert_len_extra_bits > 0 {
+            let extra = cmd.insert_len - u32::from(entry.insert_len_offset);
+            bw.write_bits(extra, u32::from(entry.insert_len_extra_bits));
+        }
+        if entry.copy_len_extra_bits > 0 {
+            let extra = cmd.copy_len - u32::from(entry.copy_len_offset);
+            bw.write_bits(extra, u32::from(entry.copy_len_extra_bits));
+        }
+
+        for _ in 0..cmd.insert_len {
+            let &b = lit_iter.next().expect("literal stream exhausted");
+            let (lc, ll) = lit_codes[b as usize];
+            bw.write_bits(lc, u32::from(ll));
+        }
+
+        if cmd.copy_len > 0 {
+            let (&d_sym, &d_extra) = dist_iter.next().expect("distance stream exhausted");
+            let (dc, dl) = dist_codes[d_sym as usize];
+            bw.write_bits(dc, u32::from(dl));
+            let nbits = distance_extra_bits(d_sym);
+            if nbits > 0 {
+                bw.write_bits(d_extra, nbits);
+            }
+        }
+    }
+}
+
+/// Encode one metablock (uncompressed) into the shared writer.
+fn encode_uncompressed_chunk_into(bw: &mut BitWriter, input: &[u8], is_last: bool) {
+    bw.write_bits(if is_last { 1 } else { 0 }, 1); // ISLAST
+    if is_last {
+        bw.write_bits(0, 1); // ISLASTEMPTY = 0
+    }
+    bw.write_bits(0, 2); // MNIBBLES = 0 (= 4 nibbles)
+    let mlen_minus_1 = (input.len() - 1) as u64;
+    for i in 0..4u32 {
+        bw.write_bits(((mlen_minus_1 >> (4 * u64::from(i))) & 0xF) as u32, 4);
+    }
+    bw.write_bits(1, 1); // ISUNCOMPRESSED = 1
+    bw.byte_align();
+    for &b in input {
+        bw.write_bits(u32::from(b), 8);
     }
 }
 
@@ -202,119 +349,16 @@ fn empty_frame() -> Vec<u8> {
 // Huffman-coded metablock
 // ---------------------------------------------------------------------------
 
-/// Encode a Huffman-coded metablock. Returns the frame bytes on success,
-/// or an empty Vec if encoding fails (caller falls back to uncompressed).
+/// Encode the entire input as a single Huffman-coded metablock (fallback
+/// for inputs ≤ 64 KiB). Calls the chunk encoder with mlen_offset=0 and
+/// is_last=true, then prepends WBITS.
 fn encode_huffman_frame(input: &[u8]) -> Vec<u8> {
-    // Brotli caps single-metablock MLEN at 1 << 24 nibbles. For our
-    // 4-nibble encoding, the limit is 2^16 bytes. Larger inputs would
-    // need 6 nibbles; we punt to the uncompressed path for now.
-    if input.len() >= (1 << 16) {
+    if input.is_empty() || input.len() >= (1 << 16) {
         return Vec::new();
     }
-
-    let commands = parse_input(input);
-    let Some(stream) = build_symbol_stream(&commands, input) else {
-        return Vec::new();
-    };
-
-    // Build per-alphabet histograms.
-    let mut lit_freq = vec![0u32; 256];
-    let mut cmd_freq = vec![0u32; 704];
-    let mut dist_freq = vec![0u32; 64]; // 16 short + 48 long codes (NPOSTFIX=0)
-    for &b in &stream.literals {
-        lit_freq[b as usize] += 1;
-    }
-    for &sym in &stream.cmd_symbols {
-        cmd_freq[sym] += 1;
-    }
-    for &sym in &stream.dist_symbols {
-        dist_freq[sym as usize] += 1;
-    }
-
-    // Build Huffman code lengths (max 15 bits).
-    let lit_lengths = omnizip_codecs::HuffmanLengths::build(&lit_freq, 15);
-    let cmd_lengths = omnizip_codecs::HuffmanLengths::build(&cmd_freq, 15);
-    let dist_lengths = omnizip_codecs::HuffmanLengths::build(&dist_freq, 15);
-
-    // Generate canonical codes (MSB-first) and bit-reverse for wire.
-    let lit_codes = canonical_with_reverse(&lit_lengths);
-    let cmd_codes = canonical_with_reverse(&cmd_lengths);
-    let dist_codes = canonical_with_reverse(&dist_lengths);
-
     let mut bw = BitWriter::new();
     write_wbits(&mut bw);
-
-    // Metablock header.
-    bw.write_bits(1, 1); // ISLAST = 1
-    bw.write_bits(0, 1); // ISLASTEMPTY = 0
-    bw.write_bits(0, 2); // MNIBBLES = 0 (= 4 nibbles)
-    let mlen_minus_1 = (input.len() - 1) as u32;
-    for i in 0..4u32 {
-        bw.write_bits((mlen_minus_1 >> (4 * i)) & 0xF, 4);
-    }
-    bw.write_bits(0, 1); // ISUNCOMPRESSED = 0
-
-    // NBLTYPESL/C/D — all = 1 via DecodeVarLenUint8 = 0 (1 bit each).
-    bw.write_bits(0, 1); // NBLTYPESL = 1
-    bw.write_bits(0, 1); // NBLTYPESI = 1
-    bw.write_bits(0, 1); // NBLTYPESD = 1
-
-    // NPOSTFIX (2 bits) + NDMOEM (4 bits) — both 0.
-    bw.write_bits(0, 2);
-    bw.write_bits(0, 4);
-
-    // CONTEXT_MODE for the single literal block type: 0 = LSB6.
-    bw.write_bits(0, 2);
-
-    // NTREESL via DecodeVarLenUint8 = 0 → 1 tree. No literal context map.
-    bw.write_bits(0, 1);
-    // NTREESD via DecodeVarLenUint8 = 0 → 1 tree. No distance context map.
-    bw.write_bits(0, 1);
-
-    // Per-alphabet Huffman tables.
-    write_huffman_table(&mut bw, &lit_lengths, 256);
-    write_huffman_table(&mut bw, &cmd_lengths, 704);
-    write_huffman_table(&mut bw, &dist_lengths, 64);
-
-    // Command stream.
-    let mut lit_iter = stream.literals.iter();
-    let mut dist_iter = stream.dist_symbols.iter().zip(stream.dist_extras.iter());
-    for (&cmd_sym, cmd) in stream.cmd_symbols.iter().zip(commands.iter()) {
-        let (code, len) = cmd_codes[cmd_sym];
-        bw.write_bits(code, u32::from(len));
-
-        // Insert-length extra bits.
-        let entry = &kCmdLut[cmd_sym];
-        if entry.insert_len_extra_bits > 0 {
-            let extra = cmd.insert_len - u32::from(entry.insert_len_offset);
-            bw.write_bits(extra, u32::from(entry.insert_len_extra_bits));
-        }
-        // Copy-length extra bits.
-        if entry.copy_len_extra_bits > 0 {
-            let extra = cmd.copy_len - u32::from(entry.copy_len_offset);
-            bw.write_bits(extra, u32::from(entry.copy_len_extra_bits));
-        }
-
-        // Literals.
-        for _ in 0..cmd.insert_len {
-            let &b = lit_iter.next().expect("literal stream exhausted");
-            let (lc, ll) = lit_codes[b as usize];
-            bw.write_bits(lc, u32::from(ll));
-        }
-
-        // Distance code (only if copy_len > 0).
-        if cmd.copy_len > 0 {
-            let (&d_sym, &d_extra) = dist_iter.next().expect("distance stream exhausted");
-            let (dc, dl) = dist_codes[d_sym as usize];
-            bw.write_bits(dc, u32::from(dl));
-            // Distance extra bits.
-            let nbits = distance_extra_bits(d_sym);
-            if nbits > 0 {
-                bw.write_bits(d_extra, nbits);
-            }
-        }
-    }
-
+    encode_huffman_chunk_into(&mut bw, input, 0, true);
     bw.flush()
 }
 
@@ -464,7 +508,21 @@ fn distance_extra_bits(sym: u32) -> u32 {
 /// max_backward_distance)` per RFC 7932 §10.4. Dictionary references
 /// use `distance = max_distance + 1 + address` so the decoder resolves
 /// them via the static dictionary lookup path.
+/// Parse input into commands using LZ77 + static dictionary.
+///
+/// Convenience wrapper for chunks at the start of the input (offset=0).
+#[allow(dead_code)]
 fn parse_input(input: &[u8]) -> Vec<Command> {
+    parse_input_with_offset(input, 0)
+}
+
+/// Parse input into commands using LZ77 + static dictionary, with a
+/// non-zero `mlen_offset` for chunks in a multi-metablock frame.
+///
+/// `mlen_offset` is added to local `pos` when computing per-position
+/// `max_distance`, so dictionary references use the same distance
+/// formula the decoder will use.
+fn parse_input_with_offset(input: &[u8], mlen_offset: usize) -> Vec<Command> {
     let n = input.len();
     let mut commands = Vec::new();
 
@@ -480,8 +538,9 @@ fn parse_input(input: &[u8]) -> Vec<Command> {
     let mut pos = 0usize;
     let mut insert_start = 0usize;
     while pos < n {
-        // max_distance at this output position (RFC 7932 §10.4).
-        let max_dist = (pos as u32).min(MAX_BACKWARD_DISTANCE);
+        // Global output position (across metablocks) for max_distance.
+        let global_pos = mlen_offset + pos;
+        let max_dist = (global_pos as u32).min(MAX_BACKWARD_DISTANCE);
 
         let lz77 = if pos + MIN_MATCH as usize <= n {
             mf.advance();
@@ -490,8 +549,6 @@ fn parse_input(input: &[u8]) -> Vec<Command> {
             None
         };
 
-        // Reject LZ77 matches whose distance exceeds max_distance — the
-        // decoder would interpret those as dictionary references.
         let lz77_valid = lz77.as_ref().map_or(false, |m| m.distance <= max_dist);
 
         let best = if lz77_valid {
@@ -797,6 +854,86 @@ mod tests {
         bw.write_bits(2, 2);
         let out = bw.flush();
         assert_eq!(out, vec![0b0101]);
+    }
+
+    #[test]
+    fn large_repetitive_input_round_trips() {
+        // 200 KiB. The encoder currently falls back to a single
+        // uncompressed metablock for inputs >64 KiB (multi-metablock
+        // Huffman path is TODO). Verify round-trip correctness.
+        let input: Vec<u8> = b"the quick brown fox jumps over the lazy dog. ".repeat(5000);
+        assert!(input.len() > 65_536);
+        let compressed = compress(&input);
+        let decoded = decoder::decode(&compressed).expect("decode");
+        assert_eq!(decoded, input);
+    }
+
+    #[test]
+    fn near_max_metablock_round_trips() {
+        // 60 KiB — fits in a single 4-nibble MLEN metablock.
+        let input: Vec<u8> = vec![0u8; 60_000];
+        let compressed = compress(&input);
+        eprintln!("input {} -> compressed {}", input.len(), compressed.len());
+        let decoded = decoder::decode(&compressed).expect("decode");
+        assert_eq!(decoded, input);
+    }
+
+    #[test]
+    fn two_chunk_input_round_trips() {
+        // Just barely larger than 64 KiB — exercises the uncompressed
+        // fallback path (multi-metablock Huffman is TODO).
+        let input: Vec<u8> = vec![0u8; 70_000];
+        let compressed = compress(&input);
+        let decoded = decoder::decode(&compressed).expect("decode");
+        assert_eq!(decoded, input);
+    }
+
+    #[test]
+    fn two_chunk_random_input_round_trips() {
+        let input: Vec<u8> = (0..70_000u32)
+            .map(|i| (i.wrapping_mul(2654435761)) as u8)
+            .collect();
+        let compressed = compress(&input);
+        eprintln!(
+            "rand input {} -> compressed {}",
+            input.len(),
+            compressed.len()
+        );
+        let decoded = decoder::decode(&compressed).expect("decode");
+        assert_eq!(decoded, input);
+    }
+
+    /// Manual bit-position check for multi-metablock (debug aid).
+    #[test]
+    fn multi_metablock_uncompressed_round_trips() {
+        // Two raw uncompressed metablocks back-to-back. Both 100 bytes.
+        let chunk1 = vec![0xAAu8; 100];
+        let chunk2 = vec![0xBBu8; 100];
+        let mut bw = BitWriter::new();
+        write_wbits(&mut bw);
+        encode_uncompressed_chunk_into(&mut bw, &chunk1, false);
+        encode_uncompressed_chunk_into(&mut bw, &chunk2, true);
+        let compressed = bw.flush();
+        let decoded = decoder::decode(&compressed).expect("decode");
+        let expected: Vec<u8> = chunk1.iter().chain(chunk2.iter()).copied().collect();
+        assert_eq!(decoded, expected);
+    }
+
+    #[test]
+    fn multi_metablock_huffman_round_trips() {
+        // Two Huffman-coded metablocks. Each is a small repetitive chunk
+        // that compresses well.
+        let chunk1 = b"abcabc".repeat(20);
+        let chunk2 = b"xyzxyz".repeat(20);
+        let mut bw = BitWriter::new();
+        write_wbits(&mut bw);
+        encode_huffman_chunk_into(&mut bw, &chunk1, 0, false);
+        encode_huffman_chunk_into(&mut bw, &chunk2, chunk1.len(), true);
+        let compressed = bw.flush();
+        eprintln!("compressed: {} bytes", compressed.len());
+        let decoded = decoder::decode(&compressed).expect("decode");
+        let expected: Vec<u8> = chunk1.iter().chain(chunk2.iter()).copied().collect();
+        assert_eq!(decoded, expected);
     }
 
     #[test]
