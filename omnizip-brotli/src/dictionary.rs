@@ -403,6 +403,53 @@ pub fn dictionary_lookup(
     Some(())
 }
 
+/// Try to find a dictionary word match at the given input position.
+/// Returns `(distance_code, copy_len)` if a match is found, or `None`.
+///
+/// Uses a simple linear scan over 4-byte dictionary words (identity
+/// transform only). The distance_code is set to `max_distance + 1 +
+/// word_idx` so the decoder interprets it as a dictionary reference.
+///
+/// `max_distance` should be `min(output_len, (1 << window_bits) - 1)`.
+#[must_use]
+pub fn find_dictionary_match(input: &[u8], pos: usize, max_distance: u32) -> Option<(u32, u32)> {
+    if pos + 4 > input.len() {
+        return None;
+    }
+
+    // Try word lengths 4..=8 (the most common in text).
+    for len in 4u32..=8u32 {
+        let len_us = len as usize;
+        if pos + len_us > input.len() {
+            break;
+        }
+        let shift = SIZE_BITS_BY_LENGTH[len_us];
+        if shift == 0 {
+            continue;
+        }
+        let num_words = 1usize << shift;
+        let offset_base = OFFSETS_BY_LENGTH[len_us] as usize;
+
+        for word_idx in 0..num_words {
+            let dict_offset = offset_base + word_idx * len_us;
+            if dict_offset + len_us > DICTIONARY_DATA.len() {
+                break;
+            }
+            // Fast first-byte check before full comparison.
+            if DICTIONARY_DATA[dict_offset] != input[pos] {
+                continue;
+            }
+            if &DICTIONARY_DATA[dict_offset..dict_offset + len_us] == &input[pos..pos + len_us] {
+                // Found a match! Compute the distance code.
+                let address = word_idx as u32; // transform_idx = 0 (identity)
+                let distance = max_distance + 1 + address;
+                return Some((distance, len));
+            }
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

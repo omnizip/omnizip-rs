@@ -53,7 +53,7 @@ pub fn compress_block(input: &[u8]) -> Vec<u8> {
 
     // Incompressibility detector: count matches in the first 1024
     // positions. If fewer than 2, switch to literal-only mode.
-    let probe_end = last_match_start.min(1024);
+    let probe_end = last_match_start.min(256);
     let mut match_count = 0u32;
     let mut probing = pos < probe_end;
 
@@ -111,7 +111,7 @@ pub fn compress_block(input: &[u8]) -> Vec<u8> {
         // Check incompressibility after probing window.
         if probing && pos >= probe_end {
             probing = false;
-            if match_count < 2 {
+            if match_count < 1 {
                 // Incompressible: emit remaining as literals.
                 let lit_len = input.len() - anchor;
                 write_token_literals(&mut out, lit_len);
