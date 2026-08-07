@@ -2,7 +2,7 @@
 
 ## Priority: P1 (ratio improvement on >2 MiB inputs)
 
-## Status: partial — `encode_chunk_inplace` infrastructure exists
+## Status: PARTIAL — encode_chunk_inplace API exists. Full model reuse blocked by get_match_byte needing cross-chunk dictionary access (encoder only sees current chunk). Fixed the matched/unmatched literal condition for base_pos > 0.
 
 ## Context
 

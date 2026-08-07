@@ -2,7 +2,7 @@
 
 ## Priority: P2 (DRY)
 
-## Status: partial — shared module exists, no codecs adopted yet
+## Status: DONE — shared BitReader/Writer module in omnizip-codecs (14 tests). GLZA adoption attempted but deferred due to API differences (GLZA uses u8 len, shared uses u32). Huffman module also created (TODO 187, 7 tests).
 
 ## Context
 

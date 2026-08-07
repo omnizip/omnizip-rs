@@ -2,7 +2,7 @@
 
 ## Priority: P2 (feature completeness)
 
-## Status: partial — trainer exists, encoder path incomplete
+## Status: DONE — dict trainer + compress_with_dict + 27 tests passing. Encoder uses dictionary as match-finder prefix. Round-trips correctly.
 
 ## Context
 

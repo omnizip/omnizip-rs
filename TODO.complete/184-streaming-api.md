@@ -2,7 +2,7 @@
 
 ## Priority: P2 (feature completeness)
 
-## Status: pending
+## Status: DONE — traits in omnizip-codecs, LZMA + ZSTD implementations
 
 ## Context
 

@@ -487,10 +487,11 @@ impl Lzma1Encoder {
 
         let lit_state = (abs_pos << 8 | u32::from(prev_byte)) & self.literal_mask;
 
-        // Matched mode: state is a match context AND there is a previous
-        // byte to reference. Must match the decoder's condition exactly
-        // (decoder uses `is_match_context() && !output.is_empty()`).
-        if self.state.is_match_context() && pos > 0 {
+        // Matched mode: state is a match context AND we're not at the very
+        // first byte of the entire stream. Must match the decoder's condition
+        // exactly (decoder uses `is_match_context() && !output.is_empty()`).
+        // For LZMA2 multi-chunk, base_pos > 0 means output is non-empty.
+        if self.state.is_match_context() && (pos > 0 || self.base_pos > 0) {
             self.literal_encoder.encode_matched(
                 byte,
                 match_byte,
