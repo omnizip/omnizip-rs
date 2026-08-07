@@ -22,3 +22,14 @@ body = """
 {% endfor %}
 {% endfor %}
 """
+
+# omnizip-deflate64 was added at commit 8ba1c91 in a workspace that
+# temporarily listed omnizip-bzip2 as a member before that directory
+# existed. release-plz's changelog generation walks back to that commit
+# to compute the diff, and `cargo metadata` fails there. Skipping
+# changelog generation for this one crate unblocks the workspace release.
+# Re-enable once enough release-plz runs have passed that the baseline
+# moves past 8ba1c91.
+[[package]]
+name = "omnizip-deflate64"
+changelog_update = false
