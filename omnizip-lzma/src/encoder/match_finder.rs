@@ -136,7 +136,15 @@ impl<'a> MatchFinder<'a> {
             return None;
         }
         let h = Self::hash4(self.data, pos);
+        // advance() may have already inserted pos into the hash chain
+        // (if advance() was called for this position). In that case,
+        // head[h] == pos and we need to follow the chain to prev[pos].
+        // If advance() was NOT called (e.g., lazy look-ahead at pos+1),
+        // head[h] is the most recent previous position with this hash.
         let mut candidate = self.head[h];
+        if candidate == pos as u32 {
+            candidate = self.prev[pos & self.mask as usize];
+        }
         let mut best_len = 0u32;
         let mut best_dist = 0u32;
         let mut chain = 0;
@@ -145,7 +153,7 @@ impl<'a> MatchFinder<'a> {
         while candidate != u32::MAX && chain < self.max_chain_length {
             let cand_us = candidate as usize;
             let dist = pos.saturating_sub(cand_us);
-            if dist == 0 || dist as u32 > self.max_distance {
+            if dist == 0 || dist as u32 > self.max_distance || cand_us >= self.data.len() {
                 break;
             }
 

@@ -19,6 +19,8 @@ use crate::constants::NUM_LEN_TO_POS_STATES;
 /// Minimum match length for LZMA (2 for rep matches, 3 for full matches).
 const MATCH_LEN_MIN: u32 = 2;
 const FULL_MATCH_LEN_MIN: u32 = 3;
+/// Maximum encodable match length (LZMA spec limit).
+const MATCH_LEN_MAX: u32 = 273;
 
 /// LZMA1 encoder state — holds the probability models, range encoder,
 /// and match-finder state.
@@ -32,11 +34,19 @@ pub struct Lzma1Encoder {
     state: LzmaState,
     is_match: Vec<BitModel>,
     is_rep: Vec<BitModel>,
+    is_rep0: Vec<BitModel>,
+    is_rep1: Vec<BitModel>,
+    is_rep2: Vec<BitModel>,
+    is_rep0_long: Vec<BitModel>,
     literal_encoder: LiteralEncoder,
     length_encoder: LengthEncoder,
+    rep_length_encoder: LengthEncoder,
     distance_encoder: DistanceEncoder,
     range_encoder: RangeEncoder,
     rep0: u32,
+    rep1: u32,
+    rep2: u32,
+    rep3: u32,
     dict_size: u32,
 }
 
@@ -71,11 +81,19 @@ impl Lzma1Encoder {
             state: LzmaState::initial(),
             is_match: vec![BitModel::new(); NUM_STATES * pos_states],
             is_rep: vec![BitModel::new(); NUM_STATES],
+            is_rep0: vec![BitModel::new(); NUM_STATES],
+            is_rep1: vec![BitModel::new(); NUM_STATES],
+            is_rep2: vec![BitModel::new(); NUM_STATES],
+            is_rep0_long: vec![BitModel::new(); NUM_STATES * pos_states],
             literal_encoder: LiteralEncoder::new(lit_capacity),
             length_encoder: LengthEncoder::new(pos_states),
+            rep_length_encoder: LengthEncoder::new(pos_states),
             distance_encoder: DistanceEncoder::new(NUM_LEN_TO_POS_STATES as usize),
             range_encoder: RangeEncoder::new(),
             rep0: 0,
+            rep1: 0,
+            rep2: 0,
+            rep3: 0,
             dict_size,
         }
     }
@@ -176,8 +194,8 @@ impl Lzma1Encoder {
                     let match_byte = self.get_match_byte(input, pos);
                     self.encode_literal_byte(input[pos], prev_byte, match_byte, pos);
                 } else {
-                    self.encode_match(m1.distance, m1.length, pos);
-                    for _ in 0..m1.length.saturating_sub(1) {
+                    self.encode_match(m1.distance, m1.length.min(MATCH_LEN_MAX), pos);
+                    for _ in 0..m1.length.min(MATCH_LEN_MAX).saturating_sub(1) {
                         if mf.advance().is_none() {
                             break;
                         }
@@ -237,8 +255,8 @@ impl Lzma1Encoder {
                     let match_byte = self.get_match_byte(input, pos);
                     self.encode_literal_byte(input[pos], prev_byte, match_byte, pos);
                 } else {
-                    self.encode_match(m1.distance, m1.length, pos);
-                    for _ in 0..m1.length.saturating_sub(1) {
+                    self.encode_match(m1.distance, m1.length.min(MATCH_LEN_MAX), pos);
+                    for _ in 0..m1.length.min(MATCH_LEN_MAX).saturating_sub(1) {
                         if mf.advance().is_none() {
                             break;
                         }
@@ -320,7 +338,7 @@ impl Lzma1Encoder {
 
     /// Get the byte at rep0 distance back (for matched-literal context).
     fn get_match_byte(&self, input: &[u8], pos: usize) -> u8 {
-        if self.rep0 > 0 && self.rep0 < pos as u32 {
+        if self.rep0 < pos as u32 {
             input[pos - self.rep0 as usize - 1]
         } else {
             0
@@ -339,7 +357,10 @@ impl Lzma1Encoder {
 
         let lit_state = ((pos as u32) << 8 | u32::from(prev_byte)) & self.literal_mask;
 
-        if self.state.is_match_context() && self.rep0 > 0 {
+        // Matched mode: state is a match context AND there is a previous
+        // byte to reference. Must match the decoder's condition exactly
+        // (decoder uses `is_match_context() && !output.is_empty()`).
+        if self.state.is_match_context() && pos > 0 {
             self.literal_encoder.encode_matched(
                 byte,
                 match_byte,
@@ -386,6 +407,10 @@ impl Lzma1Encoder {
         self.distance_encoder
             .encode(&mut self.range_encoder, distance - 1, len_state);
 
+        // Rotate rep distances: rep3 ← rep2 ← rep1 ← rep0; rep0 = distance - 1.
+        self.rep3 = self.rep2;
+        self.rep2 = self.rep1;
+        self.rep1 = self.rep0;
         self.rep0 = distance - 1;
         self.state.on_match();
     }
@@ -402,39 +427,80 @@ impl Lzma1Encoder {
             .encode_bit(&mut self.is_rep[state_idx], 0);
         self.length_encoder
             .encode(&mut self.range_encoder, 0, pos_state as usize);
-        let len_state = std::cmp::min(pos_state as usize, NUM_LEN_TO_POS_STATES as usize - 1);
+        // EOPM encodes length code 0 (length = MATCH_LEN_MIN), so
+        // len_state = GetLenToPosState(MATCH_LEN_MIN) = 0. Using
+        // pos_state here would select the wrong distance-slot models
+        // and corrupt the stream.
         self.distance_encoder
-            .encode(&mut self.range_encoder, 0xFFFF_FFFF, len_state);
+            .encode(&mut self.range_encoder, 0xFFFF_FFFF, 0);
     }
 
     /// Emit a rep0 match (reuse the previous distance). The `length`
     /// is the actual match length (not length - MATCH_LEN_MIN).
+    ///
+    /// Bit layout (mirrors the decoder's `decode_rep_match`):
+    /// 1. is_match = 1
+    /// 2. is_rep = 1
+    /// 3. is_rep0 = 0 (select rep0)
+    /// 4. is_rep0_long = 1 (length > 1)
+    /// 5. Length code (via the rep length coder's model set)
     fn encode_rep0_match(&mut self, length: u32, pos: usize) {
         let pos_state = (pos as u32) & self.pb_mask;
         let state_idx = usize::from(self.state.as_u8());
         let is_match_idx = state_idx * (1 << self.pb as usize) + pos_state as usize;
 
+        // is_match = 1, is_rep = 1 (enters the rep-match branch).
         self.range_encoder
             .encode_bit(&mut self.is_match[is_match_idx], 1);
         self.range_encoder
             .encode_bit(&mut self.is_rep[state_idx], 1);
 
-        // Rep0 length coding (no distance encoding needed).
+        // is_rep0 = 0 (select rep0 over rep1/2/3).
+        self.range_encoder
+            .encode_bit(&mut self.is_rep0[state_idx], 0);
+
+        // is_rep0_long = 1 (long rep0, not short rep of length 1).
+        let long_idx = state_idx * (1 << self.pb as usize) + pos_state as usize;
+        self.range_encoder
+            .encode_bit(&mut self.is_rep0_long[long_idx], 1);
+
+        // Rep0 length coding (uses the rep length coder's model set,
+        // which the decoder mirrors via `rep_length_coder`).
         let adjusted_len = length.saturating_sub(MATCH_LEN_MIN);
-        self.length_encoder
+        self.rep_length_encoder
             .encode(&mut self.range_encoder, adjusted_len, pos_state as usize);
 
-        self.state.on_match();
+        self.state.on_rep();
     }
 
     /// Reset state and models (LZMA2 reset-state compatibility).
     pub fn reset_state(&mut self) {
         self.state = LzmaState::initial();
         self.rep0 = 0;
+        self.rep1 = 0;
+        self.rep2 = 0;
+        self.rep3 = 0;
         for m in &mut self.is_match {
             m.reset();
         }
+        for m in &mut self.is_rep {
+            m.reset();
+        }
+        for m in &mut self.is_rep0 {
+            m.reset();
+        }
+        for m in &mut self.is_rep1 {
+            m.reset();
+        }
+        for m in &mut self.is_rep2 {
+            m.reset();
+        }
+        for m in &mut self.is_rep0_long {
+            m.reset();
+        }
         self.literal_encoder.reset();
+        self.length_encoder.reset_models();
+        self.rep_length_encoder.reset_models();
     }
 }
 
