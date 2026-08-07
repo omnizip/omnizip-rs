@@ -458,6 +458,51 @@ impl HuffmanTable {
         Self { lookup, single_symbol }
     }
 
+    /// Build a Huffman table for the NSYM=4 tree_select=1 simple form
+    /// (RFC 7932 §9.5.1). This layout uses a MIXED code assignment:
+    ///   "0"    → s_a (1-bit code, fills 4 of 8 root entries)
+    ///   "01"   → s_b (2-bit code at odd root positions)
+    ///   "011"  → s_c (3-bit code at root position 3)
+    ///   "111"  → s_d (3-bit code at root position 7)
+    ///
+    /// Canonical Huffman CANNOT represent this (2 length-1 codes
+    /// saturate the 1-bit space, leaving no room for longer codes).
+    /// Upstream's `BrotliBuildSimpleHuffmanTable` case 4 builds it
+    /// directly via an 8-entry pattern replicated to the full table.
+    ///
+    /// `syms` = [s0, s1, s2, s3] in stream order. Per upstream:
+    /// - s_a = s0, s_b = s1 (1-bit pair, unsorted).
+    /// - s_c = min(s2, s3), s_d = max(s2, s3) (2-bit/3-bit pair, sorted).
+    #[must_use]
+    pub fn from_simple_4_tree_select(syms: &[u16; 4]) -> Self {
+        let (s_c, s_d) = if syms[2] <= syms[3] {
+            (syms[2], syms[3])
+        } else {
+            (syms[3], syms[2])
+        };
+        let s_a = syms[0];
+        let s_b = syms[1];
+
+        // 8-entry pattern (indexed by low 3 bits of peek value).
+        // Replicated to fill the full 2^15 lookup.
+        let pattern: [(u16, u8); 8] = [
+            (s_a, 1), // 000
+            (s_b, 2), // 001
+            (s_a, 1), // 010
+            (s_c, 3), // 011
+            (s_a, 1), // 100
+            (s_b, 2), // 101
+            (s_a, 1), // 110
+            (s_d, 3), // 111
+        ];
+
+        let mut lookup = vec![(0u16, 0u8); 32768];
+        for idx in 0..32768 {
+            lookup[idx] = pattern[idx & 7];
+        }
+        Self { lookup, single_symbol: None }
+    }
+
     /// O(1) symbol decode via 15-bit peek + flat table lookup.
     pub fn read_symbol(&self, br: &mut BitReader) -> Option<u32> {
         if let Some(sym) = self.single_symbol {
@@ -537,17 +582,18 @@ fn read_simple_form(
             let s3 = br.read_bits(bits_per_sym) as usize;
             if s0 >= alphabet_size || s1 >= alphabet_size || s2 >= alphabet_size || s3 >= alphabet_size { return Err("simple-form symbol out of range"); }
             let tree_select = br.read_bits(1);
-            if tree_select == 0 {
-                lengths[s0] = 2;
-                lengths[s1] = 2;
-                lengths[s2] = 2;
-                lengths[s3] = 2;
-            } else {
-                lengths[s0] = 1;
-                lengths[s1] = 1;
-                lengths[s2] = 2;
-                lengths[s3] = 2;
+            if tree_select == 1 {
+                // 1+1+2+2 layout: canonical Huffman can't represent this.
+                // Build directly via upstream's 8-entry pattern.
+                let table = HuffmanTable::from_simple_4_tree_select(&[
+                    s0 as u16, s1 as u16, s2 as u16, s3 as u16,
+                ]);
+                return Ok((table, br.bit_pos()));
             }
+            lengths[s0] = 2;
+            lengths[s1] = 2;
+            lengths[s2] = 2;
+            lengths[s3] = 2;
         }
         _ => unreachable!(),
     }
