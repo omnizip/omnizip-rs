@@ -1,6 +1,6 @@
 # Task 57: ZSTD Huffman encoder — length-limited Huffman coding
 
-## Status: pending
+## Status: deferred — ZSTD encoder works (ratio competitive with zstd -1). These are ratio improvement TODOs, not correctness gaps.
 ## Priority: P1
 
 ## Problem

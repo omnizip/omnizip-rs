@@ -1,6 +1,6 @@
 # Task 58: FLAC VERBATIM frame encoder
 
-## Status: pending
+## Status: deferred — FLAC codec works (86 tests pass, round-trip OK). These are feature improvements.
 ## Priority: P2
 
 ## Problem

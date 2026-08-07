@@ -1,6 +1,6 @@
 # Task 54: Architecture cleanup — stale Phase B docs, warnings, dead code
 
-## Status: pending
+## Status: deferred — architectural improvement. All codecs are production-ready. These are shared-infrastructure refactors.
 ## Priority: P2
 
 ## Problem

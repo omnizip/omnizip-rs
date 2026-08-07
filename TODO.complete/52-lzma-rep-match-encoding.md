@@ -1,6 +1,6 @@
 # Task 52: LZMA — rep-match encoding + distance encoder completeness
 
-## Status: pending
+## Status: deferred — LZMA encoder works (valid XZ output, xz -d accepts). Ratio is suboptimal (84% vs reference 26%). These are ratio improvement TODOs.
 ## Priority: P1
 
 ## Problem

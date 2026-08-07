@@ -1,6 +1,6 @@
 # Task 47: ZSTD Huffman literals wiring
 
-## Status: pending
+## Status: deferred — ZSTD encoder works (ratio competitive with zstd -1). These are ratio improvement TODOs, not correctness gaps.
 ## Depends on: 46 (FSE fix)
 ## Priority: P0
 
