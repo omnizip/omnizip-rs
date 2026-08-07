@@ -1,24 +1,8 @@
 [workspace]
+# Use glob patterns so missing directories at old git commits don't
+# break cargo metadata (fixes release-plz historical comparison).
 members = [
-    "omnizip-codecs",
-    "omnizip-lzma",
-    "omnizip-zstd",
-    "omnizip-snappy",
-    "omnizip-lz4",
-    "omnizip-deflate",
-    "omnizip-deflate64",
-    "omnizip-libdeflate",
-    "omnizip-brotli",
-    "omnizip-filters",
-    "omnizip-fsst",
-    "omnizip-ricepp",
-    "omnizip-flac",
-    "omnizip-blosc",
-    "omnizip-glza",
-    "omnizip-ppmd",
-    "omnizip-zpaq",
-    "omnizip-bzip2",
-    "omnizip-bench",
+    "omnizip-*",
     "tests/differential",
     "tests/determinism",
 ]
