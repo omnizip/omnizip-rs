@@ -10,18 +10,21 @@
 #![forbid(unsafe_code)]
 #![warn(clippy::pedantic)]
 
-pub mod commands;
+// Active modules (used by the Codec trait implementation).
 pub mod compress_fragment;
 pub mod decoder;
 pub mod decoder_full;
 pub mod dictionary;
-pub mod encoder;
-pub mod encoder_error;
 pub mod fast_encoder;
-pub mod huffman;
-pub mod huffman_lookup;
 pub mod prefix;
 pub mod static_codes;
+
+// Archived modules: the original from-scratch encoder (encoder.rs,
+// huffman.rs, commands.rs, encoder_error.rs) and the table-based
+// Huffman port (huffman_lookup.rs) are superseded by fast_encoder.rs
+// (q=0/1 two-pass) and compress_fragment.rs (q=2..6 one-pass).
+// The files are retained as reference but not compiled.
+// To re-enable: add `pub mod encoder;` etc.
 
 use omnizip_codecs::{Codec, CodecId, CompressionLevel, OmnizipError};
 

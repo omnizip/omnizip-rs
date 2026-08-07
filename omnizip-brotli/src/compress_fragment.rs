@@ -15,14 +15,7 @@
 //! `fast_encoder` helpers (BrotliWriteBits, HuffmanTree, etc.).
 
 #![forbid(unsafe_code)]
-#![allow(dead_code)] // Work in progress: q=2..6 encoder, not yet wired.
-#![allow(
-    non_snake_case,
-    non_upper_case_globals,
-    clippy::too_many_arguments,
-    clippy::needless_range_loop,
-    clippy::cast_possible_truncation
-)]
+#![allow(non_snake_case, non_upper_case_globals, clippy::too_many_arguments, clippy::needless_range_loop, clippy::cast_possible_truncation, unused_assignments)]
 
 use crate::fast_encoder::{
     BrotliBuildAndStoreHuffmanTreeFast, BrotliStoreHuffmanTree, BrotliWriteBits, HuffmanTree,
@@ -345,6 +338,7 @@ fn BrotliStoreMetaBlockHeader(
     BrotliWriteBits(1, if is_uncompressed { 1 } else { 0 }, storage_ix, storage);
 }
 
+#[allow(dead_code)] // Used by metablock merge path (not yet active).
 fn UpdateBits(n_bits: usize, mut bits: u32, pos: usize, array: &mut [u8]) {
     let mut n_bits = n_bits;
     let mut pos = pos;
@@ -480,7 +474,7 @@ fn compress_fragment_fast(
     let mut input_pos: usize = 0;
     let mut remaining = input_size;
     let mut block_size = remaining.min(k_first_block_size);
-    let mut total_block_size = block_size;
+    let mut _total_block_size = block_size;
     let mut metablock_start: usize = 0;
     let mut mlen_storage_ix = *storage_ix + 3;
 
@@ -710,13 +704,14 @@ fn compress_fragment_fast(
                 EmitLiterals(&input[next_emit..], insert, &lit_depth, &lit_bits, storage_ix, storage);
             }
         }
+        let _ = ip_end; // next_emit tracks end of emitted range.
         next_emit = ip_end;
 
         // next_block.
         if remaining > 0 {
             metablock_start = input_pos;
             block_size = remaining.min(k_first_block_size);
-            total_block_size = block_size;
+            _total_block_size = block_size;
             mlen_storage_ix = *storage_ix + 3;
             BrotliStoreMetaBlockHeader(block_size, false, storage_ix, storage);
             BrotliWriteBits(13, 0, storage_ix, storage);
