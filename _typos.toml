@@ -7,6 +7,10 @@ ser = "ser"
 nam = "nam"
 mis = "mis"
 siz = "siz"
+cpy = "cpy"
+CLEN = "CLEN"
+uncompressible = "uncompressible"
+ful = "ful"
 
 # Exclude binary dictionary files and generated tables
 [files]
@@ -14,4 +18,5 @@ extend-exclude = [
   "omnizip-brotli/data/*",
   "omnizip-zstd/src/predef_tables.rs",
   "target/",
+  "docs/RFC-7932-brotli.txt",
 ]
