@@ -24,7 +24,7 @@
 
 #![forbid(unsafe_code)]
 
-use crate::encoder::match_finder::{new_lzma_match_finder, Match, MatchFinder};
+use crate::encoder::match_finder::{new_lzma_match_finder, Match};
 use crate::encoder::prob_state::LzmaProbState;
 
 /// Maximum match length to consider at each position.
