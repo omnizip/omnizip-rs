@@ -12,7 +12,7 @@
 use crate::bit_model::BitModel;
 use crate::coder::{DistanceEncoder, LengthEncoder, LiteralEncoder};
 use crate::constants::NUM_LEN_TO_POS_STATES;
-use crate::encoder::match_finder::{new_lzma_match_finder, MatchFinder};
+use crate::encoder::match_finder::new_lzma_match_finder;
 use crate::range_coder::RangeEncoder;
 use crate::state::{LzmaState, NUM_STATES};
 
