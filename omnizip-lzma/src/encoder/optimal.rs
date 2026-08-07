@@ -24,7 +24,7 @@
 
 #![forbid(unsafe_code)]
 
-use crate::encoder::match_finder::{Match, MatchFinder};
+use crate::encoder::match_finder::{new_lzma_match_finder, Match, MatchFinder};
 use crate::encoder::prob_state::LzmaProbState;
 
 /// Maximum match length to consider at each position.
@@ -48,7 +48,7 @@ pub enum ParseAction {
 /// Returns a vector where `matches[i]` = list of (distance, length)
 /// candidates at position `i`.
 fn find_all_matches(input: &[u8], dict_size: u32) -> Vec<Vec<Match>> {
-    let mut mf = MatchFinder::new(input, dict_size);
+    let mut mf = new_lzma_match_finder(input, dict_size);
     let mut all_matches = vec![Vec::new(); input.len()];
 
     while let Some(pos) = mf.advance() {
@@ -70,7 +70,7 @@ fn find_all_matches_tuned(
     max_chain_length: u32,
     nice_match: u32,
 ) -> Vec<Vec<Match>> {
-    let mut mf = MatchFinder::new(input, dict_size);
+    let mut mf = new_lzma_match_finder(input, dict_size);
     if max_chain_length > 0 {
         mf.set_max_chain_length(max_chain_length);
     }

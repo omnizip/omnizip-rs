@@ -5,7 +5,7 @@
 
 use omnizip_codecs::{Codec, CodecId, CompressionLevel, OmnizipError};
 
-use crate::{compress, decompress, ZstdDecoder, ZstdError, ZstdLevel};
+use crate::{decompress, ZstdDecoder, ZstdError};
 
 /// Codec entry for the Zstandard format.
 pub struct ZstdCodec;
@@ -33,16 +33,20 @@ impl Codec for ZstdCodec {
     }
 
     fn compress(&self, plaintext: &[u8], level: CompressionLevel) -> Result<Vec<u8>, OmnizipError> {
-        let zstd_level = match level.as_u8() {
-            0..=2 => ZstdLevel::Fastest,
-            3..=9 => ZstdLevel::Fast,
-            10..=16 => ZstdLevel::Default,
-            17..=22 => ZstdLevel::Better,
-            _ => ZstdLevel::Best,
-        };
-        compress(plaintext, zstd_level).map_err(|e| OmnizipError::EncodeFailed {
-            codec: CodecId::ZSTD,
-            reason: e.to_string(),
+        // Map the omnizip CompressionLevel (0-22) directly to the ZSTD
+        // reference level (1-22), using the full cparams table from
+        // `clevels.h`. This gives fine-grained level differentiation:
+        // each level has its own (window_log, chain_log, hash_log,
+        // search_log, min_match, target_length, strategy) tuple.
+        //
+        // Previously this collapsed 22 levels into just 5 ZstdLevel
+        // enum values, losing the per-level parameter tuning.
+        let zstd_level = level.as_u8().clamp(1, 22);
+        crate::encoder::block::encode_frame_compressed(plaintext, zstd_level).map_err(|e| {
+            OmnizipError::EncodeFailed {
+                codec: CodecId::ZSTD,
+                reason: e.to_string(),
+            }
         })
     }
 
