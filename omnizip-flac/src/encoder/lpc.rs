@@ -178,9 +178,8 @@ pub fn best_lpc_candidate(samples: &[i32], bps: u8) -> Option<LpcSolution> {
     for c in candidates.into_iter().take(top_k) {
         let est = estimate_residual_bits(&c.residuals, samples.len(), c.order as u32);
         let order_u64 = c.order as u64;
-        let header_bits: u64 = 8 + 4 + 5
-            + order_u64 * u64::from(bps)
-            + order_u64 * u64::from(c.precision_bits);
+        let header_bits: u64 =
+            8 + 4 + 5 + order_u64 * u64::from(bps) + order_u64 * u64::from(c.precision_bits);
         let total = header_bits + u64::from(est);
         if total < best_total_cost {
             best_total_cost = total;
@@ -240,7 +239,11 @@ fn fast_residual_cost(residuals: &[i32]) -> u64 {
     // ML estimate of optimal k for Laplace-distributed residuals with
     // mean |m|: k* = max(0, floor(log2(mean))).
     let mean = sum / n;
-    let k_star = if mean == 0 { 0u64 } else { 64 - mean.leading_zeros() as u64 - 1 };
+    let k_star = if mean == 0 {
+        0u64
+    } else {
+        64 - mean.leading_zeros() as u64 - 1
+    };
     let k = k_star.min(14);
 
     // T(k) ≈ sum >> k (lower bound; actual is slightly higher due to
@@ -281,7 +284,11 @@ fn levinson_durbin_all_orders(samples: &[i32], max_order: usize) -> (Vec<Vec<f64
         for j in 0..m {
             acc += lpc[j] * acf[m - j];
         }
-        let lambda = if error.abs() > 1e-20 { -acc / error } else { 0.0 };
+        let lambda = if error.abs() > 1e-20 {
+            -acc / error
+        } else {
+            0.0
+        };
 
         let mut new_lpc = lpc.clone();
         new_lpc[m] = lambda;
@@ -348,18 +355,11 @@ pub fn encode_from_solution(
     }
 
     // Residual.
-    let _order_used = rice::encode_residuals_best(
-        writer,
-        &sol.residuals,
-        samples_len,
-        sol.order as u32,
-        bps,
-    )?;
+    let _order_used =
+        rice::encode_residuals_best(writer, &sol.residuals, samples_len, sol.order as u32, bps)?;
 
     Ok(())
 }
-
-
 
 /// Compute autocorrelation coefficients at lags 0..=max_order.
 ///
@@ -405,7 +405,11 @@ fn levinson_durbin(acf: &[f64], order: usize) -> Vec<f64> {
         for j in 0..m {
             acc += lpc[j] * acf[m - j];
         }
-        let lambda = if error.abs() > 1e-20 { -acc / error } else { 0.0 };
+        let lambda = if error.abs() > 1e-20 {
+            -acc / error
+        } else {
+            0.0
+        };
 
         ref_coefs[m] = lambda;
 
@@ -435,11 +439,7 @@ fn levinson_durbin(acf: &[f64], order: usize) -> Vec<f64> {
 /// that need a single best candidate; production code goes through
 /// [`best_lpc_candidate`] which uses the faster proxy + top-K path.
 #[cfg(test)]
-fn levinson_durbin_quantise(
-    lpc: &[f64],
-    order: usize,
-    samples: &[i32],
-) -> Option<LpcSolution> {
+fn levinson_durbin_quantise(lpc: &[f64], order: usize, samples: &[i32]) -> Option<LpcSolution> {
     let mut best: Option<LpcSolution> = None;
     let mut best_cost = u64::MAX;
 
@@ -587,7 +587,9 @@ mod tests {
     fn lpc_round_trips_random() {
         // Pseudo-random data — LPC should still round-trip even if it
         // doesn't compress well.
-        let samples: Vec<i32> = (0u32..256).map(|i| ((i.wrapping_mul(2654435761) >> 16) as i16) as i32).collect();
+        let samples: Vec<i32> = (0u32..256)
+            .map(|i| ((i.wrapping_mul(2654435761) >> 16) as i16) as i32)
+            .collect();
         round_trip(&samples, 16);
     }
 

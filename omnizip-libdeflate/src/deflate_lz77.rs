@@ -324,7 +324,9 @@ impl MatchFinder {
                 && input[cand..cand + MIN_MATCH] == input[pos..pos + MIN_MATCH]
             {
                 let mut len = MIN_MATCH;
-                while len < max_len && cand + len < input.len() && input[cand + len] == input[pos + len]
+                while len < max_len
+                    && cand + len < input.len()
+                    && input[cand + len] == input[pos + len]
                 {
                     len += 1;
                 }
@@ -362,7 +364,6 @@ fn reverse_bits(v: u32, n: u8) -> u32 {
     }
     r
 }
-
 
 /// Map a match length (3..=258) to a length symbol (257..=285).
 fn length_to_sym(length: usize) -> Option<u16> {
@@ -481,26 +482,71 @@ const fn build_fixed_lit_table() -> [(u16, u8); 288] {
 /// The formula is `length = base + extra_value` where extra_value is
 /// `extra_bits_count` bits read from the stream.
 static LENGTH_TABLE: [(u32, u32); 29] = [
-    (3, 0),    (4, 0),    (5, 0),    (6, 0),    (7, 0),
-    (8, 0),    (9, 0),    (10, 0),   (11, 1),   (13, 1),
-    (15, 1),   (17, 1),   (19, 2),   (23, 2),   (27, 2),
-    (31, 2),   (35, 3),   (43, 3),   (51, 3),   (59, 3),
-    (67, 4),   (83, 4),   (99, 4),   (115, 4),  (131, 5),
-    (163, 5),  (195, 5),  (227, 5),  (258, 0),
+    (3, 0),
+    (4, 0),
+    (5, 0),
+    (6, 0),
+    (7, 0),
+    (8, 0),
+    (9, 0),
+    (10, 0),
+    (11, 1),
+    (13, 1),
+    (15, 1),
+    (17, 1),
+    (19, 2),
+    (23, 2),
+    (27, 2),
+    (31, 2),
+    (35, 3),
+    (43, 3),
+    (51, 3),
+    (59, 3),
+    (67, 4),
+    (83, 4),
+    (99, 4),
+    (115, 4),
+    (131, 5),
+    (163, 5),
+    (195, 5),
+    (227, 5),
+    (258, 0),
 ];
 
 /// Distance symbol table per RFC 1951 §3.2.5.
 /// `(base_distance, extra_bits_count)` indexed by distance_sym.
 /// Formula: `distance = base + extra_value`.
 static DIST_TABLE: [(u32, u32); 30] = [
-    (1, 0),     (2, 0),     (3, 0),     (4, 0),
-    (5, 1),     (7, 1),     (9, 2),     (13, 2),
-    (17, 3),    (25, 3),    (33, 4),    (49, 4),
-    (65, 5),    (97, 5),    (129, 6),   (193, 6),
-    (257, 7),   (385, 7),   (513, 8),   (769, 8),
-    (1025, 9),  (1537, 9),  (2049, 10), (3073, 10),
-    (4097, 11), (6145, 11), (8193, 12), (12289, 12),
-    (16385, 13),(24577, 13),
+    (1, 0),
+    (2, 0),
+    (3, 0),
+    (4, 0),
+    (5, 1),
+    (7, 1),
+    (9, 2),
+    (13, 2),
+    (17, 3),
+    (25, 3),
+    (33, 4),
+    (49, 4),
+    (65, 5),
+    (97, 5),
+    (129, 6),
+    (193, 6),
+    (257, 7),
+    (385, 7),
+    (513, 8),
+    (769, 8),
+    (1025, 9),
+    (1537, 9),
+    (2049, 10),
+    (3073, 10),
+    (4097, 11),
+    (6145, 11),
+    (8193, 12),
+    (12289, 12),
+    (16385, 13),
+    (24577, 13),
 ];
 
 #[cfg(test)]
@@ -553,7 +599,9 @@ mod tests {
     #[test]
     fn round_trips_text_input_through_inflate() {
         let input = b"the quick brown fox jumps over the lazy dog ".repeat(20);
-        let compressed = deflate_fixed_huffman(&input).unwrap().expect("non-trivial output");
+        let compressed = deflate_fixed_huffman(&input)
+            .unwrap()
+            .expect("non-trivial output");
         let decoded = crate::inflate::inflate(&compressed, input.len()).unwrap_or_else(|e| {
             panic!("inflate error: {e}");
         });

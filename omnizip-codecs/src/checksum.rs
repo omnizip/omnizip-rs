@@ -105,9 +105,7 @@ pub fn crc32_iso_hdlc(data: &[u8]) -> u32 {
 
     while i + 8 <= main {
         // XOR the next 4 bytes into the low bits of crc.
-        let block = u32::from_le_bytes([
-            data[i], data[i + 1], data[i + 2], data[i + 3],
-        ]);
+        let block = u32::from_le_bytes([data[i], data[i + 1], data[i + 2], data[i + 3]]);
         let high = crc ^ block;
         // Slice-by-8: each stream byte goes through a different-depth
         // table. Stream byte 0 (low byte of `high`) has 7 byte-steps
@@ -179,7 +177,10 @@ mod tests {
 
     #[test]
     fn known_value_pangram() {
-        assert_eq!(crc32_iso_hdlc(b"The quick brown fox jumps over the lazy dog"), CHECK_FOX);
+        assert_eq!(
+            crc32_iso_hdlc(b"The quick brown fox jumps over the lazy dog"),
+            CHECK_FOX
+        );
     }
 
     #[test]

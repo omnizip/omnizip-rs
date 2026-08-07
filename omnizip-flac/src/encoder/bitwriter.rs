@@ -48,7 +48,11 @@ impl BitWriter {
             return;
         }
         let count_u32 = u32::from(count);
-        let mask = if count_u32 >= 64 { u64::MAX } else { (1u64 << count_u32) - 1 };
+        let mask = if count_u32 >= 64 {
+            u64::MAX
+        } else {
+            (1u64 << count_u32) - 1
+        };
         let v = value & mask;
         let shift = 64 - u32::from(self.bits) - count_u32;
         self.acc |= v << shift;

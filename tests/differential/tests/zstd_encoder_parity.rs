@@ -3,11 +3,13 @@
 
 #![forbid(unsafe_code)]
 
-use std::process::Command;
 use omnizip_zstd::{compress, ZstdLevel};
+use std::process::Command;
 
 fn zstd_oracle_available() -> bool {
-    Command::new("which").arg("zstd").output()
+    Command::new("which")
+        .arg("zstd")
+        .output()
         .map(|o| o.status.success())
         .unwrap_or(false)
 }
@@ -37,9 +39,21 @@ fn rust_encoder_round_trips_via_reference_decoder() {
             .arg(&path)
             .output()
             .expect("invoke zstd");
-        assert!(out.status.success(), "zstd -d failed on input {i}: {}", String::from_utf8_lossy(&out.stderr));
-        assert_eq!(out.stdout.as_slice(), *input, "input {i}: round-trip mismatch");
-        eprintln!("input {i}: {} bytes -> {} bytes -> {} bytes (OK)",
-                  input.len(), compressed.len(), out.stdout.len());
+        assert!(
+            out.status.success(),
+            "zstd -d failed on input {i}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(
+            out.stdout.as_slice(),
+            *input,
+            "input {i}: round-trip mismatch"
+        );
+        eprintln!(
+            "input {i}: {} bytes -> {} bytes -> {} bytes (OK)",
+            input.len(),
+            compressed.len(),
+            out.stdout.len()
+        );
     }
 }

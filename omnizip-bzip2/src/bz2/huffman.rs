@@ -73,8 +73,8 @@ pub fn code_lengths(freqs: &[u32]) -> Vec<u8> {
 /// Build standard Huffman code lengths via binary-heap merging.
 /// Returns lengths indexed by original symbol index (0..alphabet_size).
 fn build_huffman_lengths(active: &[(u32, usize)], alphabet_size: usize) -> Vec<u8> {
-    use std::collections::BinaryHeap;
     use std::cmp::Reverse;
+    use std::collections::BinaryHeap;
 
     #[derive(Eq, PartialEq)]
     struct Node {

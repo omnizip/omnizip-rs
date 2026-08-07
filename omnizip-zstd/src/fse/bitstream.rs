@@ -75,8 +75,14 @@ impl<'a> BitStream<'a> {
         let (ptr, container, bits_consumed) = if n >= 8 {
             let p = n - 8;
             let c = u64::from_le_bytes([
-                data[p], data[p + 1], data[p + 2], data[p + 3],
-                data[p + 4], data[p + 5], data[p + 6], data[p + 7],
+                data[p],
+                data[p + 1],
+                data[p + 2],
+                data[p + 3],
+                data[p + 4],
+                data[p + 5],
+                data[p + 6],
+                data[p + 7],
             ]);
             (p, c, end_mark)
         } else {
@@ -131,8 +137,14 @@ impl<'a> BitStream<'a> {
         let p = self.ptr;
         if p + 8 <= self.data.len() {
             self.container = u64::from_le_bytes([
-                self.data[p], self.data[p + 1], self.data[p + 2], self.data[p + 3],
-                self.data[p + 4], self.data[p + 5], self.data[p + 6], self.data[p + 7],
+                self.data[p],
+                self.data[p + 1],
+                self.data[p + 2],
+                self.data[p + 3],
+                self.data[p + 4],
+                self.data[p + 5],
+                self.data[p + 6],
+                self.data[p + 7],
             ]);
         } else {
             let mut c: u64 = 0;
@@ -152,7 +164,9 @@ impl<'a> BitStream<'a> {
     /// fix up).
     #[inline]
     pub fn read_bits(&mut self, count: u32) -> u32 {
-        if count == 0 { return 0; }
+        if count == 0 {
+            return 0;
+        }
         let shift_left = self.bits_consumed & 63;
         let shift_right = (64u32 - count) & 63;
         let result = if shift_left >= shift_right {
@@ -168,7 +182,11 @@ impl<'a> BitStream<'a> {
         self.bits_consumed += count;
         // Mask to `count` bits (C doesn't mask, but the shifts already
         // isolate the bits when count <= 64).
-        let mask = if count >= 64 { u64::MAX } else { (1u64 << count) - 1 };
+        let mask = if count >= 64 {
+            u64::MAX
+        } else {
+            (1u64 << count) - 1
+        };
         (result & mask) as u32
     }
 
@@ -201,7 +219,8 @@ impl<'a> BitStream<'a> {
     /// Bits remaining to be read (raw, including any trailing end mark).
     #[must_use]
     pub fn remaining_bits(&self) -> usize {
-        self.total_bits().saturating_sub(self.bits_consumed_so_far())
+        self.total_bits()
+            .saturating_sub(self.bits_consumed_so_far())
     }
 
     /// Bit position (for diagnostics).
@@ -262,17 +281,23 @@ impl<'a> BitStream<'a> {
     /// Debug accessor: current ptr index.
     #[doc(hidden)]
     #[must_use]
-    pub const fn debug_ptr(&self) -> usize { self.ptr }
+    pub const fn debug_ptr(&self) -> usize {
+        self.ptr
+    }
 
     /// Debug accessor: current bits_consumed.
     #[doc(hidden)]
     #[must_use]
-    pub const fn debug_bits_consumed(&self) -> u32 { self.bits_consumed }
+    pub const fn debug_bits_consumed(&self) -> u32 {
+        self.bits_consumed
+    }
 
     /// Debug accessor: current container value.
     #[doc(hidden)]
     #[must_use]
-    pub const fn debug_container(&self) -> u64 { self.container }
+    pub const fn debug_container(&self) -> u64 {
+        self.container
+    }
 }
 
 /// Forward-direction bit reader: bytes consumed from the start, bits
@@ -402,7 +427,10 @@ mod tests {
             assert!(v < (1u32 << n), "read_bits({n}) returned {v} ≥ 2^{n}");
             total_bits_read += n;
         }
-        assert!(total_bits_read >= 40, "expected at least 40 bits read, got {total_bits_read}");
+        assert!(
+            total_bits_read >= 40,
+            "expected at least 40 bits read, got {total_bits_read}"
+        );
     }
 
     #[test]

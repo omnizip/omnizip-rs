@@ -25,13 +25,19 @@
 /// `seed` contains exactly the distinct bytes that appear in `data`.
 #[must_use]
 pub fn mtf_encode_with_seed(data: &[u8], seed: &[u8]) -> Vec<u8> {
-    debug_assert!(seed.iter().all(|&b| seed.iter().filter(|&&x| x == b).count() == 1),
-        "seed must contain unique bytes");
+    debug_assert!(
+        seed.iter()
+            .all(|&b| seed.iter().filter(|&&x| x == b).count() == 1),
+        "seed must contain unique bytes"
+    );
 
     let mut table: Vec<u8> = seed.to_vec();
     let mut out = Vec::with_capacity(data.len());
     for &byte in data {
-        let pos = table.iter().position(|&s| s == byte).expect("byte not in seed");
+        let pos = table
+            .iter()
+            .position(|&s| s == byte)
+            .expect("byte not in seed");
         out.push(pos as u8);
         // Move-to-front: remove and reinsert at index 0.
         table.remove(pos);

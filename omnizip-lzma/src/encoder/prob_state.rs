@@ -88,7 +88,11 @@ impl LzmaState {
     /// States 0-6 use context 0; states 7-11 use context 1.
     #[must_use]
     pub const fn is_match_context(self) -> u8 {
-        if self.0 <= 6 { 0 } else { 1 }
+        if self.0 <= 6 {
+            0
+        } else {
+            1
+        }
     }
 }
 
@@ -166,14 +170,14 @@ pub fn length_slot(length: u32) -> (u8, u8) {
     // Slots 8+: lengths 10+ with extra bits.
     // Table per LZMA spec.
     const TABLE: [(u8, u8); 8] = [
-        (0, 0),  // len 2
-        (1, 0),  // len 3
-        (2, 0),  // len 4
-        (3, 0),  // len 5
-        (4, 1),  // len 6-7
-        (5, 2),  // len 8-9
-        (6, 3),  // len 10-11
-        (7, 4),  // len 12-15
+        (0, 0), // len 2
+        (1, 0), // len 3
+        (2, 0), // len 4
+        (3, 0), // len 5
+        (4, 1), // len 6-7
+        (5, 2), // len 8-9
+        (6, 3), // len 10-11
+        (7, 4), // len 12-15
     ];
     let l = length.min(15);
     let idx = (l as usize).saturating_sub(2);

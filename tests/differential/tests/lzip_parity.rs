@@ -20,14 +20,18 @@ fn fixtures_root() -> PathBuf {
 
 fn oracle_decode(fixture: &PathBuf) -> Option<Vec<u8>> {
     let which = Command::new("which").arg("xz").output().ok()?;
-    if !which.status.success() { return None; }
+    if !which.status.success() {
+        return None;
+    }
     let output = Command::new("xz")
         .arg("--decompress")
         .arg("--stdout")
         .arg(fixture)
         .output()
         .ok()?;
-    if !output.status.success() { return None; }
+    if !output.status.success() {
+        return None;
+    }
     Some(output.stdout)
 }
 
@@ -44,8 +48,11 @@ fn run_one(path: &PathBuf) {
             if rust == oracle {
                 eprintln!("PASS: {name}");
             } else {
-                eprintln!("MISMATCH: {name} — Rust {} bytes, oracle {} bytes",
-                          rust.len(), oracle.len());
+                eprintln!(
+                    "MISMATCH: {name} — Rust {} bytes, oracle {} bytes",
+                    rust.len(),
+                    oracle.len()
+                );
             }
         }
         Err(e) => {

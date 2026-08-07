@@ -40,7 +40,7 @@ pub use codec::{Bzip2Codec, Bzip2Compressor};
 // Re-export the pipeline stages so downstream crates/tests can exercise them
 // in isolation (matching the Ruby class layout).
 pub use bwt::{bwt_decode, bwt_encode};
+pub use bz2::compress as compress_framed;
 pub use huffman::{huffman_decode, huffman_encode};
 pub use mtf::{mtf_decode, mtf_encode};
 pub use rle::{rle_decode, rle_encode};
-pub use bz2::compress as compress_framed;

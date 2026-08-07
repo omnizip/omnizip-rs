@@ -112,9 +112,9 @@ pub fn encode_frame(
     // Optional sample rate extra bytes (for codes 12, 13, 14).
     if let Some(extra) = sr_extra {
         match sr_code {
-            12 => writer.write_bits(u64::from(extra), 8),       // 8-bit kHz
-            13 => writer.write_bits(u64::from(extra), 16),      // 16-bit Hz
-            14 => writer.write_bits(u64::from(extra), 16),      // 16-bit decihz
+            12 => writer.write_bits(u64::from(extra), 8), // 8-bit kHz
+            13 => writer.write_bits(u64::from(extra), 16), // 16-bit Hz
+            14 => writer.write_bits(u64::from(extra), 16), // 16-bit decihz
             _ => {}
         }
     }
@@ -156,18 +156,30 @@ fn pick_best_stereo_assignment(left: &[i32], right: &[i32]) -> (Vec<Vec<i32>>, u
     let indep_cost = estimate_subframe_cost(left) + estimate_subframe_cost(right);
 
     // Left/side: channel 0 = left, channel 1 = side = left - right.
-    let side: Vec<i32> = left.iter().zip(right.iter()).map(|(&l, &r)| l - r).collect();
+    let side: Vec<i32> = left
+        .iter()
+        .zip(right.iter())
+        .map(|(&l, &r)| l - r)
+        .collect();
     let ls_cost = estimate_subframe_cost(left) + estimate_subframe_cost(&side);
 
     // Right/side: channel 0 = right, channel 1 = side = left - right.
     let rs_cost = estimate_subframe_cost(right) + estimate_subframe_cost(&side);
 
     // Mid/side: channel 0 = mid = (l+r)>>1, channel 1 = side = l-r.
-    let mid: Vec<i32> = left.iter().zip(right.iter()).map(|(&l, &r)| (l + r) >> 1).collect();
+    let mid: Vec<i32> = left
+        .iter()
+        .zip(right.iter())
+        .map(|(&l, &r)| (l + r) >> 1)
+        .collect();
     let ms_cost = estimate_subframe_cost(&mid) + estimate_subframe_cost(&side);
 
     // Pick the cheapest.
-    let mut best = (vec![left.to_vec(), right.to_vec()], CH_INDEPENDENT_STEREO, indep_cost);
+    let mut best = (
+        vec![left.to_vec(), right.to_vec()],
+        CH_INDEPENDENT_STEREO,
+        indep_cost,
+    );
     if ls_cost < best.2 {
         best = (vec![left.to_vec(), side.clone()], CH_LEFT_SIDE, ls_cost);
     }
@@ -207,13 +219,7 @@ fn estimate_subframe_cost(samples: &[i32]) -> u64 {
 /// the fixed-size codes 1-5, 8-15.
 fn pick_block_size_code(block_size: usize) -> (u64, Option<u32>) {
     // Fixed codes: 192, 576×2^k for k=0..3.
-    let fixed: [(u64, usize); 5] = [
-        (1, 192),
-        (2, 576),
-        (3, 1152),
-        (4, 2304),
-        (5, 4608),
-    ];
+    let fixed: [(u64, usize); 5] = [(1, 192), (2, 576), (3, 1152), (4, 2304), (5, 4608)];
     for &(code, size) in &fixed {
         if size == block_size {
             return (code, None);
@@ -253,9 +259,7 @@ fn pick_sample_rate_code(sample_rate: u32) -> (u64, Option<u32>) {
         48_000 => (10, None),
         96_000 => (11, None),
         // 12: get 8 bit sample rate (in kHz) from end of header
-        _ if sample_rate % 1000 == 0 && sample_rate / 1000 <= 255 => {
-            (12, Some(sample_rate / 1000))
-        }
+        _ if sample_rate % 1000 == 0 && sample_rate / 1000 <= 255 => (12, Some(sample_rate / 1000)),
         // 13: get 16 bit sample rate (in Hz) from end of header
         _ if sample_rate <= u16::MAX as u32 => (13, Some(sample_rate)),
         // 14: get 16 bit sample rate (in tens of Hz) from end of header
@@ -314,8 +318,8 @@ fn write_utf8_coded(writer: &mut BitWriter, value: u64) {
     // First byte: (nbytes+1) leading 1s, then 0-separator, then data.
     let leading_ones_mask = ((1u8 << (nbytes + 1)) - 1) << (7 - nbytes);
     let data_bits_first = 6 - nbytes; // wait, this should be 7 - nbytes - 1 = 6 - nbytes... hmm
-    // Actually: total bits = 8. Leading 1s = nbytes+1. Separator = 1.
-    // Data = 8 - (nbytes+1) - 1 = 6 - nbytes.
+                                      // Actually: total bits = 8. Leading 1s = nbytes+1. Separator = 1.
+                                      // Data = 8 - (nbytes+1) - 1 = 6 - nbytes.
     let data_mask = (1u8 << data_bits_first) - 1;
     let high_data = (value >> (6 * nbytes)) as u8 & data_mask;
     writer.write_bits(u64::from(leading_ones_mask | high_data), 8);

@@ -188,7 +188,11 @@ mod tests {
         let freqs = vec![10u32; 256];
         let mut lengths = vec![0u8; 256];
         package_merge(&freqs, 11, &mut lengths);
-        assert!(lengths.iter().all(|&l| l == 8), "expected all 8, got max={:?}", lengths.iter().max());
+        assert!(
+            lengths.iter().all(|&l| l == 8),
+            "expected all 8, got max={:?}",
+            lengths.iter().max()
+        );
     }
 
     #[test]
@@ -198,7 +202,11 @@ mod tests {
         let freqs = [100u32, 50, 20, 10, 5, 5, 5, 5];
         let mut lengths = [0u8; 8];
         package_merge(&freqs, 3, &mut lengths);
-        let pm_cost: u64 = freqs.iter().zip(&lengths).map(|(f, l)| u64::from(*f) * u64::from(*l)).sum();
+        let pm_cost: u64 = freqs
+            .iter()
+            .zip(&lengths)
+            .map(|(f, l)| u64::from(*f) * u64::from(*l))
+            .sum();
 
         // Try all length assignments with max=3 and verify package_merge
         // is optimal (brute-force).
@@ -218,7 +226,11 @@ mod tests {
                 kraft += 1u64 << (3 - l);
             }
             if valid && kraft == 1u64 << 3 {
-                let cost: u64 = freqs.iter().zip(&ls).map(|(f, l)| u64::from(*f) * u64::from(*l)).sum();
+                let cost: u64 = freqs
+                    .iter()
+                    .zip(&ls)
+                    .map(|(f, l)| u64::from(*f) * u64::from(*l))
+                    .sum();
                 if cost < best {
                     best = cost;
                 }

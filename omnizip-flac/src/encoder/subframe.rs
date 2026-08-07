@@ -68,8 +68,13 @@ pub fn encode_subframe(
 enum SubframeType {
     Constant(i32),
     Verbatim,
-    Fixed { order: u8, residuals: Vec<i32> },
-    Lpc { solution: crate::encoder::lpc::LpcSolution },
+    Fixed {
+        order: u8,
+        residuals: Vec<i32>,
+    },
+    Lpc {
+        solution: crate::encoder::lpc::LpcSolution,
+    },
 }
 
 /// Choose the cheapest subframe type for `samples`. The cost metric is
@@ -100,14 +105,24 @@ fn choose_type(samples: &[i32], bps: u8) -> SubframeType {
     let fixed_cost = match &fixed {
         Some((order, residuals, cost)) => {
             let header = 8 + u32::from(*order) * u32::from(bps);
-            Some((header + cost, SubframeType::Fixed { order: *order, residuals: residuals.clone() }))
+            Some((
+                header + cost,
+                SubframeType::Fixed {
+                    order: *order,
+                    residuals: residuals.clone(),
+                },
+            ))
         }
         None => None,
     };
 
     let lpc_cost = match lpc {
         Some(sol) => {
-            let header = 8 + (sol.order as u32 * u32::from(bps)) + 4 + 5 + (sol.order as u32 * u32::from(sol.precision_bits));
+            let header = 8
+                + (sol.order as u32 * u32::from(bps))
+                + 4
+                + 5
+                + (sol.order as u32 * u32::from(sol.precision_bits));
             let cost = header + sol.estimated_residual_bits;
             Some((cost, SubframeType::Lpc { solution: sol }))
         }
@@ -165,11 +180,11 @@ fn try_constant(samples: &[i32]) -> Option<i32> {
 /// prediction[i] = Σ coeff[k] * sample[i-1-k], for k = 0..order-1.
 /// residual[i] = sample[i] - prediction[i].
 const FIXED_COEFFS: [[i32; 4]; 5] = [
-    [0, 0, 0, 0],          // order 0: residual = sample
-    [1, 0, 0, 0],          // order 1: pred = sample[i-1]
-    [2, -1, 0, 0],         // order 2: pred = 2*a - b
-    [3, -3, 1, 0],         // order 3
-    [4, -6, 4, -1],        // order 4
+    [0, 0, 0, 0],   // order 0: residual = sample
+    [1, 0, 0, 0],   // order 1: pred = sample[i-1]
+    [2, -1, 0, 0],  // order 2: pred = 2*a - b
+    [3, -3, 1, 0],  // order 3
+    [4, -6, 4, -1], // order 4
 ];
 
 /// Compute FIXED-predictor residuals for `samples` at the given `order`.
@@ -223,8 +238,7 @@ mod tests {
         let bytes = w.finish();
 
         let mut reader = BitReader::new(&bytes);
-        let decoded = subframe::decode_subframe(&mut reader, samples.len(), bps)
-            .expect("decode");
+        let decoded = subframe::decode_subframe(&mut reader, samples.len(), bps).expect("decode");
         assert_eq!(decoded, samples);
     }
 

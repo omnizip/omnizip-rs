@@ -34,12 +34,8 @@ pub fn decode_stream(input: &[u8]) -> Result<Vec<u8>, String> {
             return Err("truncated metadata block header".into());
         }
 
-        let header = u32::from_be_bytes([
-            input[pos],
-            input[pos + 1],
-            input[pos + 2],
-            input[pos + 3],
-        ]);
+        let header =
+            u32::from_be_bytes([input[pos], input[pos + 1], input[pos + 2], input[pos + 3]]);
         is_last = (header >> 31) & 1 != 0;
         let block_type = (header >> 24) & 0x7F;
         let block_length = header & 0x00FF_FFFF;
@@ -75,7 +71,9 @@ pub fn decode_stream(input: &[u8]) -> Result<Vec<u8>, String> {
     let mut output: Vec<u8> = Vec::new();
     let mut total_samples_decoded: u64 = 0;
 
-    while pos < input.len() && (info.total_samples == 0 || total_samples_decoded < info.total_samples) {
+    while pos < input.len()
+        && (info.total_samples == 0 || total_samples_decoded < info.total_samples)
+    {
         let mut reader = BitReader::new(&input[pos..]);
 
         match frame::decode_frame(&mut reader, &info) {

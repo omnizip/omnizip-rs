@@ -249,7 +249,12 @@ mod tests {
     fn block_round_trip_text() {
         let input = b"hello world hello world hello world hello world hello world";
         let compressed = compress_block(input);
-        assert!(compressed.len() < input.len(), "should compress: {} vs {}", compressed.len(), input.len());
+        assert!(
+            compressed.len() < input.len(),
+            "should compress: {} vs {}",
+            compressed.len(),
+            input.len()
+        );
         let decompressed = decompress_block(&compressed, input.len()).expect("decode");
         assert_eq!(decompressed, input);
     }
@@ -265,7 +270,9 @@ mod tests {
 
     #[test]
     fn block_round_trip_incompressible() {
-        let input: Vec<u8> = (0..4096u32).map(|i| i.wrapping_mul(2654435761) as u8).collect();
+        let input: Vec<u8> = (0..4096u32)
+            .map(|i| i.wrapping_mul(2654435761) as u8)
+            .collect();
         let compressed = compress_block(&input);
         let decompressed = decompress_block(&compressed, input.len()).expect("decode");
         assert_eq!(decompressed, input);
@@ -326,7 +333,13 @@ mod tests {
     fn block_extension_byte_for_long_literal_15() {
         // Literal run of exactly 15 bytes → lit_code = 15 → extension
         // byte required.
-        let input: Vec<u8> = (0..15).collect::<Vec<u8>>().iter().cycle().take(64).copied().collect();
+        let input: Vec<u8> = (0..15)
+            .collect::<Vec<u8>>()
+            .iter()
+            .cycle()
+            .take(64)
+            .copied()
+            .collect();
         let compressed = compress_block(&input);
         let decompressed = decompress_block(&compressed, input.len()).expect("decode");
         assert_eq!(decompressed, input);
@@ -335,7 +348,9 @@ mod tests {
     #[test]
     fn block_handles_large_input_64_bytes() {
         // Specifically tests the LimniFS threshold: inputs ≥ 64 bytes.
-        let input: Vec<u8> = (0..64u32).map(|i| i.wrapping_mul(2654435761) as u8).collect();
+        let input: Vec<u8> = (0..64u32)
+            .map(|i| i.wrapping_mul(2654435761) as u8)
+            .collect();
         let compressed = compress_block(&input);
         let decompressed = decompress_block(&compressed, input.len()).expect("decode");
         assert_eq!(decompressed, input);
@@ -358,17 +373,25 @@ mod tests {
         // Comprehensive test at the 128-byte boundary with 5 different
         // patterns that historically triggered the extension byte bug.
         let patterns: Vec<Vec<u8>> = vec![
-            vec![0u8; 128],                                              // all-zero
-            (0..128).map(|i| (i % 7) as u8).collect(),                  // periodic
-            (0..128).map(|i| (i * 31 % 251) as u8).collect(),           // pseudo-random
-            b"the quick brown fox jumps over the lazy dog. ".repeat(3).to_vec(),  // text
-            (0..128).map(|i| if i % 100 < 50 { 0u8 } else { 0xFF }).collect(), // binary
+            vec![0u8; 128],                                   // all-zero
+            (0..128).map(|i| (i % 7) as u8).collect(),        // periodic
+            (0..128).map(|i| (i * 31 % 251) as u8).collect(), // pseudo-random
+            b"the quick brown fox jumps over the lazy dog. "
+                .repeat(3)
+                .to_vec(), // text
+            (0..128)
+                .map(|i| if i % 100 < 50 { 0u8 } else { 0xFF })
+                .collect(), // binary
         ];
         for (idx, input) in patterns.iter().enumerate() {
             let compressed = compress_block(input);
             let decompressed = decompress_block(&compressed, input.len())
                 .unwrap_or_else(|e| panic!("pattern {idx} decode failed: {e}"));
-            assert_eq!(decompressed.as_slice(), input.as_slice(), "pattern {idx} mismatch");
+            assert_eq!(
+                decompressed.as_slice(),
+                input.as_slice(),
+                "pattern {idx} mismatch"
+            );
         }
     }
 }

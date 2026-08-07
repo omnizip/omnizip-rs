@@ -93,11 +93,7 @@ impl Codec for LzmaCodec {
         "lzma"
     }
 
-    fn compress(
-        &self,
-        plaintext: &[u8],
-        level: CompressionLevel,
-    ) -> Result<Vec<u8>, OmnizipError> {
+    fn compress(&self, plaintext: &[u8], level: CompressionLevel) -> Result<Vec<u8>, OmnizipError> {
         let lv = level.as_u8();
         let use_optimal = lv >= OPTIMAL_PARSER_LEVEL_THRESHOLD;
         let (max_chain_length, nice_match) = match_finder_tuning(lv);
@@ -248,7 +244,13 @@ mod tests {
     #[test]
     fn lzma_compressor_matches_one_shot_api() {
         let input: Vec<u8> = (0..2048)
-            .map(|i| if i % 100 < 50 { (i % 26 + b'a' as i32) as u8 } else { (i % 256) as u8 })
+            .map(|i| {
+                if i % 100 < 50 {
+                    (i % 26 + b'a' as i32) as u8
+                } else {
+                    (i % 256) as u8
+                }
+            })
             .collect();
         let one_shot = LzmaCodec
             .compress(&input, CompressionLevel::default())

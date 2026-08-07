@@ -43,8 +43,13 @@ impl<'a> BitReader<'a> {
             let avail: u32 = (8 - self.bit_pos).into();
             let take = remaining.min(avail);
             let shift = avail - take;
-            let mask = if take >= 32 { u32::MAX } else { (1u32 << take) - 1 };
-            let bits = u32::from((byte >> shift) & (if take >= 8 { 0xFF } else { (1u8 << take) - 1 }));
+            let mask = if take >= 32 {
+                u32::MAX
+            } else {
+                (1u32 << take) - 1
+            };
+            let bits =
+                u32::from((byte >> shift) & (if take >= 8 { 0xFF } else { (1u8 << take) - 1 }));
             result = (result << take) | (bits & mask);
             self.bit_pos += take as u8;
             if self.bit_pos >= 8 {

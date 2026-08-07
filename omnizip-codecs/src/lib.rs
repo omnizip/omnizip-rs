@@ -19,12 +19,12 @@
 #![warn(clippy::pedantic)]
 
 pub mod arith;
-mod codec;
 pub mod checksum;
+mod codec;
 mod error;
 pub mod hash;
-pub mod matchfinder;
 mod level;
+pub mod matchfinder;
 mod registry;
 pub mod xxhash;
 

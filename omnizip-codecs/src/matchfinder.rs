@@ -242,17 +242,26 @@ impl<'a> HashChainMatchFinder<'a> {
     fn match_length(data: &[u8], a: usize, b: usize, max_len: u32) -> u32 {
         let max = max_len as usize;
         let mut len = 0usize;
-        while len + 8 <= max
-            && a + len + 8 <= data.len()
-            && b + len + 8 <= data.len()
-        {
+        while len + 8 <= max && a + len + 8 <= data.len() && b + len + 8 <= data.len() {
             let wa = u64::from_le_bytes([
-                data[a + len], data[a + len + 1], data[a + len + 2], data[a + len + 3],
-                data[a + len + 4], data[a + len + 5], data[a + len + 6], data[a + len + 7],
+                data[a + len],
+                data[a + len + 1],
+                data[a + len + 2],
+                data[a + len + 3],
+                data[a + len + 4],
+                data[a + len + 5],
+                data[a + len + 6],
+                data[a + len + 7],
             ]);
             let wb = u64::from_le_bytes([
-                data[b + len], data[b + len + 1], data[b + len + 2], data[b + len + 3],
-                data[b + len + 4], data[b + len + 5], data[b + len + 6], data[b + len + 7],
+                data[b + len],
+                data[b + len + 1],
+                data[b + len + 2],
+                data[b + len + 3],
+                data[b + len + 4],
+                data[b + len + 5],
+                data[b + len + 6],
+                data[b + len + 7],
             ]);
             if wa == wb {
                 len += 8;

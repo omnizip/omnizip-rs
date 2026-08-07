@@ -84,7 +84,12 @@ pub(crate) struct BitReader<'a> {
 
 impl<'a> BitReader<'a> {
     fn new(data: &'a [u8]) -> Self {
-        Self { data, pos: 0, bits: 0, nbits: 0 }
+        Self {
+            data,
+            pos: 0,
+            bits: 0,
+            nbits: 0,
+        }
     }
 
     #[inline]
@@ -167,8 +172,8 @@ fn inflate_stored(reader: &mut BitReader<'_>, out: &mut Vec<u8>) -> Result<(), E
     if nlen != !len {
         return Err(corrupt(format!(
             "DEFLATE: stored-block NLEN ({nlen}) != ~LEN ({})",
-            !len)
-        ));
+            !len
+        )));
     }
     for _ in 0..len {
         out.push(reader.read_byte()?);
@@ -196,7 +201,11 @@ fn inflate_block(
             257..=285 => {
                 let idx = (sym - 257) as usize;
                 let (base_len, extra_bits) = LENGTH_BASE_EXTRA[idx];
-                let extra = if extra_bits > 0 { reader.read_bits(extra_bits)? } else { 0 };
+                let extra = if extra_bits > 0 {
+                    reader.read_bits(extra_bits)?
+                } else {
+                    0
+                };
                 let length = base_len + extra;
 
                 let dist_sym = dist_table.decode(reader)? as usize;
@@ -206,7 +215,11 @@ fn inflate_block(
                     )));
                 }
                 let (base_dist, extra_d) = DIST_BASE_EXTRA[dist_sym];
-                let extra = if extra_d > 0 { reader.read_bits(extra_d)? } else { 0 };
+                let extra = if extra_d > 0 {
+                    reader.read_bits(extra_d)?
+                } else {
+                    0
+                };
                 let distance = (base_dist + extra) as usize;
 
                 let start = out.len().checked_sub(distance).ok_or_else(|| {
@@ -230,23 +243,68 @@ fn inflate_block(
 // ---------------------------------------------------------------------------
 
 const LENGTH_BASE_EXTRA: [(u32, u32); 29] = [
-    (3, 0),    (4, 0),    (5, 0),    (6, 0),    (7, 0),
-    (8, 0),    (9, 0),    (10, 0),   (11, 1),   (13, 1),
-    (15, 1),   (17, 1),   (19, 2),   (23, 2),   (27, 2),
-    (31, 2),   (35, 3),   (43, 3),   (51, 3),   (59, 3),
-    (67, 4),   (83, 4),   (99, 4),   (115, 4),  (131, 5),
-    (163, 5),  (195, 5),  (227, 5),  (258, 0),
+    (3, 0),
+    (4, 0),
+    (5, 0),
+    (6, 0),
+    (7, 0),
+    (8, 0),
+    (9, 0),
+    (10, 0),
+    (11, 1),
+    (13, 1),
+    (15, 1),
+    (17, 1),
+    (19, 2),
+    (23, 2),
+    (27, 2),
+    (31, 2),
+    (35, 3),
+    (43, 3),
+    (51, 3),
+    (59, 3),
+    (67, 4),
+    (83, 4),
+    (99, 4),
+    (115, 4),
+    (131, 5),
+    (163, 5),
+    (195, 5),
+    (227, 5),
+    (258, 0),
 ];
 
 const DIST_BASE_EXTRA: [(u32, u32); 30] = [
-    (1, 0),     (2, 0),     (3, 0),     (4, 0),
-    (5, 1),     (7, 1),     (9, 2),     (13, 2),
-    (17, 3),    (25, 3),    (33, 4),    (49, 4),
-    (65, 5),    (97, 5),    (129, 6),   (193, 6),
-    (257, 7),   (385, 7),   (513, 8),   (769, 8),
-    (1025, 9),  (1537, 9),  (2049, 10), (3073, 10),
-    (4097, 11), (6145, 11), (8193, 12), (12289, 12),
-    (16385, 13),(24577, 13),
+    (1, 0),
+    (2, 0),
+    (3, 0),
+    (4, 0),
+    (5, 1),
+    (7, 1),
+    (9, 2),
+    (13, 2),
+    (17, 3),
+    (25, 3),
+    (33, 4),
+    (49, 4),
+    (65, 5),
+    (97, 5),
+    (129, 6),
+    (193, 6),
+    (257, 7),
+    (385, 7),
+    (513, 8),
+    (769, 8),
+    (1025, 9),
+    (1537, 9),
+    (2049, 10),
+    (3073, 10),
+    (4097, 11),
+    (6145, 11),
+    (8193, 12),
+    (12289, 12),
+    (16385, 13),
+    (24577, 13),
 ];
 
 // ---------------------------------------------------------------------------
@@ -314,7 +372,10 @@ impl HuffmanTable {
             }
         }
 
-        Ok(Self { table, max_bits: max_bits as u32 })
+        Ok(Self {
+            table,
+            max_bits: max_bits as u32,
+        })
     }
 
     /// Decode one symbol from the bit reader.
@@ -377,8 +438,7 @@ fn fixed_lit_table() -> &'static HuffmanTable {
 fn fixed_dist_table() -> &'static HuffmanTable {
     FIXED_DIST.get_or_init(|| {
         let lens = [5u8; 30];
-        HuffmanTable::from_lengths(&lens)
-            .expect("fixed distance table is valid by construction")
+        HuffmanTable::from_lengths(&lens).expect("fixed distance table is valid by construction")
     })
 }
 
@@ -386,9 +446,7 @@ fn fixed_dist_table() -> &'static HuffmanTable {
 // Dynamic Huffman tables (RFC 1951 §3.2.7).
 // ---------------------------------------------------------------------------
 
-fn read_dynamic_tables(
-    reader: &mut BitReader<'_>,
-) -> Result<(HuffmanTable, HuffmanTable), Error> {
+fn read_dynamic_tables(reader: &mut BitReader<'_>) -> Result<(HuffmanTable, HuffmanTable), Error> {
     let hlit = reader.read_bits(5)? + 257;
     let hdist = reader.read_bits(5)? + 1;
     let hclen = reader.read_bits(4)? + 4;
@@ -410,9 +468,9 @@ fn read_dynamic_tables(
             0..=15 => lengths.push(sym as u8),
             16 => {
                 let repeat = 3 + reader.read_bits(2)?;
-                let prev = *lengths.last().ok_or_else(|| {
-                    corrupt("DEFLATE: code-length symbol 16 has no predecessor")
-                })?;
+                let prev = *lengths
+                    .last()
+                    .ok_or_else(|| corrupt("DEFLATE: code-length symbol 16 has no predecessor"))?;
                 for _ in 0..repeat {
                     lengths.push(prev);
                 }

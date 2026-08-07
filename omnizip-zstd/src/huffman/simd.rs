@@ -75,9 +75,7 @@ pub fn decode_eight_symbols(
             })?;
         if entry.length == 0 {
             return Err(ZstdError::Corrupt {
-                reason: format!(
-                    "huffman lookup slot {i} returned length 0 (peek={peek:#012b})"
-                ),
+                reason: format!("huffman lookup slot {i} returned length 0 (peek={peek:#012b})"),
             });
         }
         out[i] = entry.symbol;
@@ -117,8 +115,8 @@ mod tests {
     #[test]
     fn simd_path_matches_scalar_on_zstd_payload() {
         let input = b"the quick brown fox jumps over the lazy dog. ".repeat(20);
-        let compressed = crate::encoder::encode_frame(&input, crate::ZstdLevel::Default)
-            .expect("encode_frame");
+        let compressed =
+            crate::encoder::encode_frame(&input, crate::ZstdLevel::Default).expect("encode_frame");
         let decoded = crate::decompress(&compressed, input.len() as u32).expect("decompress");
         assert_eq!(decoded, input);
     }

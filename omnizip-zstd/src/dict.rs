@@ -87,12 +87,7 @@ impl ZstdDictionary {
                 ),
             });
         }
-        let id = u32::from_le_bytes([
-            data[4],
-            data[5],
-            data[6],
-            data[7],
-        ]);
+        let id = u32::from_le_bytes([data[4], data[5], data[6], data[7]]);
         let content = data[8..].to_vec();
         Ok(Self { id, content })
     }

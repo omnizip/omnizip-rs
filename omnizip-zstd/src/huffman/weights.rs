@@ -141,7 +141,9 @@ fn implied_last_weight(weights: &[u8]) -> Result<u8, ZstdError> {
 
 fn read_fse_compressed_weights(src: &[u8]) -> Result<(Vec<u8>, usize), ZstdError> {
     if src.is_empty() {
-        return Err(ZstdError::Corrupt { reason: "FSE weights: empty".into() });
+        return Err(ZstdError::Corrupt {
+            reason: "FSE weights: empty".into(),
+        });
     }
     let i_size = usize::from(src[0]);
     if 1 + i_size > src.len() {

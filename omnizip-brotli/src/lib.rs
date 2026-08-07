@@ -125,7 +125,12 @@ impl BrotliCodec {
         plaintext: &[u8],
         options: BrotliOptions<'_>,
     ) -> Result<Vec<u8>, OmnizipError> {
-        let _ = (options.quality, options.window_size, options.mode, options.custom_dictionary);
+        let _ = (
+            options.quality,
+            options.window_size,
+            options.mode,
+            options.custom_dictionary,
+        );
         // Use vendored encoder — produces Huffman-coded Brotli.
         Ok(fast_encoder::vendored_compress(plaintext))
     }
@@ -184,8 +189,12 @@ mod tests {
             .compress(&data, CompressionLevel::new(11))
             .expect("compress");
         // Verify output is smaller than input (actual compression)
-        assert!(compressed.len() < data.len(),
-            "compressed {} should be < input {}", compressed.len(), data.len());
+        assert!(
+            compressed.len() < data.len(),
+            "compressed {} should be < input {}",
+            compressed.len(),
+            data.len()
+        );
     }
 
     #[test]

@@ -108,7 +108,9 @@ fn optimal_table_log_internal(
     if min_bits > u32::from(table_log) {
         table_log = min_bits as u8;
     }
-    table_log.max(FSE_MIN_ACCURACY_LOG).min(FSE_MAX_ACCURACY_LOG)
+    table_log
+        .max(FSE_MIN_ACCURACY_LOG)
+        .min(FSE_MAX_ACCURACY_LOG)
 }
 
 /// Normalize a raw histogram to sum to `1 << tableLog`. Ported from
@@ -188,7 +190,14 @@ pub fn normalize_count(
 
     if -still_to_distribute >= i32::from(norm[largest]) / 2 {
         // Corner case: fall back to secondary normalization.
-        normalize_m2(&mut norm, table_log, count, total, max_symbol_value, low_prob_count)?;
+        normalize_m2(
+            &mut norm,
+            table_log,
+            count,
+            total,
+            max_symbol_value,
+            low_prob_count,
+        )?;
     } else {
         norm[largest] += still_to_distribute as i16;
     }
@@ -459,7 +468,11 @@ pub fn write_ncount(
         let count = norm[symbol as usize];
         symbol += 1;
         let max = (2 * threshold - 1) - remaining;
-        remaining -= if count < 0 { -count as i32 } else { count as i32 };
+        remaining -= if count < 0 {
+            -count as i32
+        } else {
+            count as i32
+        };
         let mut count_val = count as i32 + 1; // +1 for wire format
         if count_val >= threshold {
             count_val += max;
@@ -532,7 +545,11 @@ impl<'a> BitCStream<'a> {
             self.bit_pos,
             nb_bits
         );
-        let mask = if nb_bits >= 32 { u32::MAX } else { (1u32 << nb_bits) - 1 };
+        let mask = if nb_bits >= 32 {
+            u32::MAX
+        } else {
+            (1u32 << nb_bits) - 1
+        };
         self.container |= (value & u64::from(mask)) << self.bit_pos;
         self.bit_pos += nb_bits;
     }
@@ -610,11 +627,7 @@ impl CState {
 /// 2-state interleaving for throughput.
 ///
 /// Returns the number of bytes appended to `out`.
-pub fn compress_using_ctable(
-    out: &mut Vec<u8>,
-    symbols: &[u8],
-    table: &CTable,
-) -> usize {
+pub fn compress_using_ctable(out: &mut Vec<u8>, symbols: &[u8], table: &CTable) -> usize {
     if symbols.len() <= 2 {
         return 0; // Too few to encode; caller should fall back to Raw.
     }
@@ -764,8 +777,7 @@ mod tests {
         let (dtable, consumed) = read_fse_table(&out).expect("read table");
         assert_eq!(consumed, ncount_len);
         let bitstream = &out[consumed..];
-        let decoded = decode_stream(&dtable, bitstream, symbols.len())
-            .expect("decode");
+        let decoded = decode_stream(&dtable, bitstream, symbols.len()).expect("decode");
         assert_eq!(decoded, symbols);
     }
 
@@ -776,8 +788,22 @@ mod tests {
         let count = vec![40u32, 60, 35, 25, 20, 15, 10, 10, 5, 5, 5, 5];
         let total: u64 = count.iter().map(|&c| u64::from(c)).sum();
         let norm = normalize_count(6, &count, total, 11, true).expect("normalize");
-        let sum: i32 = norm.iter().map(|&n| if n > 0 { n as i32 } else if n < 0 { 1 } else { 0 }).sum();
-        assert_eq!(sum, 64, "normalized counts must sum to tableSize=64, got {norm:?}");
+        let sum: i32 = norm
+            .iter()
+            .map(|&n| {
+                if n > 0 {
+                    n as i32
+                } else if n < 0 {
+                    1
+                } else {
+                    0
+                }
+            })
+            .sum();
+        assert_eq!(
+            sum, 64,
+            "normalized counts must sum to tableSize=64, got {norm:?}"
+        );
 
         let mut out = Vec::new();
         write_ncount(&mut out, &norm, 11, 6).expect("writeNCount");
@@ -792,10 +818,8 @@ mod tests {
         // OF_DEFAULT_NORM has -1 (low-prob) entries at indices 24-28.
         // Verify the FSE encoder handles these correctly.
         let of_norm: Vec<i16> = vec![
-            1, 1, 1, 1, 1, 1, 2, 2,
-            2, 1, 1, 1, 1, 1, 1, 1,
-            1, 1, 1, 1, 1, 1, 1, 1,
-            -1, -1, -1, -1, -1,
+            1, 1, 1, 1, 1, 1, 2, 2, 2, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, -1, -1, -1, -1,
+            -1,
         ];
         let ctable = build_ctable(&of_norm, 28, 5).expect("build OF ctable");
         let symbols: Vec<u8> = vec![3, 3, 3, 2, 4, 3, 3, 2, 5, 3, 3, 3, 2, 4, 3, 3];

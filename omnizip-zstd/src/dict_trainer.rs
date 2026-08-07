@@ -23,7 +23,11 @@
 //! offset)` ordering.
 
 #![forbid(unsafe_code)]
-#![allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap, clippy::cast_sign_loss)]
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss
+)]
 
 use omnizip_codecs::hash::fnv1a_32;
 
@@ -51,7 +55,11 @@ pub fn train_dictionary(samples: &[&[u8]], target_size: usize) -> Vec<u8> {
 
 /// Train with any [`DictTrainer`] impl.
 #[must_use]
-pub fn train_dictionary_with(trainer: &dyn DictTrainer, samples: &[&[u8]], target_size: usize) -> Vec<u8> {
+pub fn train_dictionary_with(
+    trainer: &dyn DictTrainer,
+    samples: &[&[u8]],
+    target_size: usize,
+) -> Vec<u8> {
     trainer.train(samples, target_size)
 }
 
@@ -330,7 +338,9 @@ mod tests {
 
     #[test]
     fn fastcover_zero_target_yields_empty_dict() {
-        assert!(FastCoverTrainer::default().train(&[b"hello world this is long enough"], 0).is_empty());
+        assert!(FastCoverTrainer::default()
+            .train(&[b"hello world this is long enough"], 0)
+            .is_empty());
     }
 
     #[test]
@@ -361,7 +371,10 @@ mod tests {
         let mut b: Vec<u8> = prefix.to_vec();
         b.extend_from_slice(beta);
         // Use a small-K trainer so a single segment covers the prefix.
-        let trainer = FastCoverTrainer::new(FastCoverOptions { k: prefix.len(), d: 8 });
+        let trainer = FastCoverTrainer::new(FastCoverOptions {
+            k: prefix.len(),
+            d: 8,
+        });
         let dict = trainer.train(&[a.as_slice(), b.as_slice()], prefix.len());
         assert!(
             dict.starts_with(b"COMMON"),
@@ -373,7 +386,10 @@ mod tests {
     #[test]
     fn fastcover_smaller_k_for_small_corpus() {
         let samples: Vec<Vec<u8>> = (0..20)
-            .map(|i| format!("item_{i:03}: shared_token_value_and_some_padding_to_reach_k\n").into_bytes())
+            .map(|i| {
+                format!("item_{i:03}: shared_token_value_and_some_padding_to_reach_k\n")
+                    .into_bytes()
+            })
             .collect();
         let refs: Vec<&[u8]> = samples.iter().map(Vec::as_slice).collect();
         let dict = FastCoverTrainer::new(FastCoverOptions::small()).train(&refs, 256);

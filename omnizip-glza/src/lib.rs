@@ -42,7 +42,6 @@ mod suffix_array;
 
 use omnizip_codecs::{Codec, CodecId, CompressionLevel, OmnizipError};
 
-
 pub use grammar::{Grammar, Symbol};
 
 /// Compress `input` with GLZA using the default container version.
@@ -182,14 +181,12 @@ fn decompress_multichunk(compressed: &[u8]) -> Result<Vec<u8>, OmnizipError> {
             reason: "multichunk header too short for total size".into(),
         });
     }
-    let total = u32::from_le_bytes(
-        compressed[cursor..cursor + 4]
-            .try_into()
-            .map_err(|_| OmnizipError::Corrupt {
-                codec: CodecId::GLZA,
-                reason: "total size slice".into(),
-            })?,
-    );
+    let total = u32::from_le_bytes(compressed[cursor..cursor + 4].try_into().map_err(|_| {
+        OmnizipError::Corrupt {
+            codec: CodecId::GLZA,
+            reason: "total size slice".into(),
+        }
+    })?);
     cursor += 4;
 
     let mut out: Vec<u8> = Vec::with_capacity(total as usize);
@@ -200,14 +197,13 @@ fn decompress_multichunk(compressed: &[u8]) -> Result<Vec<u8>, OmnizipError> {
                 reason: "truncated chunk size prefix".into(),
             });
         }
-        let chunk_size = u32::from_le_bytes(
-            compressed[cursor..cursor + 4]
-                .try_into()
-                .map_err(|_| OmnizipError::Corrupt {
+        let chunk_size =
+            u32::from_le_bytes(compressed[cursor..cursor + 4].try_into().map_err(|_| {
+                OmnizipError::Corrupt {
                     codec: CodecId::GLZA,
                     reason: "chunk size slice".into(),
-                })?,
-        ) as usize;
+                }
+            })?) as usize;
         cursor += 4;
         if chunk_size == 0 {
             break; // end marker
@@ -611,7 +607,7 @@ mod tests {
         let mut bad = Vec::new();
         bad.extend_from_slice(MULTICHUNK_MAGIC);
         bad.extend_from_slice(&1000u32.to_le_bytes()); // claims 1000 bytes total
-        // No chunks, no end marker — should be rejected.
+                                                       // No chunks, no end marker — should be rejected.
         assert!(decompress(&bad).is_err());
     }
 

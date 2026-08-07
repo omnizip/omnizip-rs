@@ -271,7 +271,8 @@ mod cli_tests {
         let output = child.wait_with_output()?;
         if !output.status.success() {
             return Err(std::io::Error::other(format!(
-                "bzip2 failed: {}", String::from_utf8_lossy(&output.stderr)
+                "bzip2 failed: {}",
+                String::from_utf8_lossy(&output.stderr)
             )));
         }
         Ok(output.stdout)
@@ -281,7 +282,11 @@ mod cli_tests {
     fn small_input_decodes_via_bzip2_cli() {
         let input = b"banana banana banana banana banana";
         let compressed = compress(input, 9).unwrap();
-        eprintln!("compressed {} bytes -> {} bytes", input.len(), compressed.len());
+        eprintln!(
+            "compressed {} bytes -> {} bytes",
+            input.len(),
+            compressed.len()
+        );
         eprintln!("hex: {:02x?}", compressed);
         let decoded = bzip2_decode(&compressed).unwrap();
         assert_eq!(decoded, input);
@@ -293,16 +298,22 @@ mod detailed_tests {
     use super::*;
     use std::io::Write;
     use std::process::{Command, Stdio};
-    
+
     #[test]
     fn dump_with_tvv() {
         let input = b"banana banana banana banana banana";
         let compressed = compress(input, 9).unwrap();
         eprintln!("compressed hex: {:02x?}", compressed);
-        let mut child = Command::new("bzip2").args(["-tvv"])
-            .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped())
-            .spawn().unwrap();
-        if let Some(stdin) = child.stdin.as_mut() { stdin.write_all(&compressed).unwrap(); }
+        let mut child = Command::new("bzip2")
+            .args(["-tvv"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        if let Some(stdin) = child.stdin.as_mut() {
+            stdin.write_all(&compressed).unwrap();
+        }
         let output = child.wait_with_output().unwrap();
         eprintln!("stderr: {}", String::from_utf8_lossy(&output.stderr));
         eprintln!("stdout: {}", String::from_utf8_lossy(&output.stdout));
@@ -316,12 +327,22 @@ mod full_parity {
     use std::process::{Command, Stdio};
 
     fn bzip2_decode(compressed: &[u8]) -> Vec<u8> {
-        let mut child = Command::new("bzip2").arg("-dc")
-            .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped())
-            .spawn().unwrap();
-        if let Some(stdin) = child.stdin.as_mut() { stdin.write_all(compressed).unwrap(); }
+        let mut child = Command::new("bzip2")
+            .arg("-dc")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        if let Some(stdin) = child.stdin.as_mut() {
+            stdin.write_all(compressed).unwrap();
+        }
         let output = child.wait_with_output().unwrap();
-        assert!(output.status.success(), "bzip2 -dc failed: {}", String::from_utf8_lossy(&output.stderr));
+        assert!(
+            output.status.success(),
+            "bzip2 -dc failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
         output.stdout
     }
 

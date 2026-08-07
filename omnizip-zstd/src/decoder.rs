@@ -126,11 +126,9 @@ impl ZstdDecoder {
             });
         }
         let size = u32::from_le_bytes([input[4], input[5], input[6], input[7]]) as usize;
-        let end = 8usize
-            .checked_add(size)
-            .ok_or_else(|| ZstdError::Corrupt {
-                reason: format!("skippable frame size {size} overflows usize"),
-            })?;
+        let end = 8usize.checked_add(size).ok_or_else(|| ZstdError::Corrupt {
+            reason: format!("skippable frame size {size} overflows usize"),
+        })?;
         if input.len() < end {
             return Err(ZstdError::Corrupt {
                 reason: "truncated skippable frame body".into(),
@@ -166,8 +164,7 @@ impl ZstdDecoder {
                 });
             }
 
-            let after_block_data =
-                self.decode_block(block, after_block, &mut output)?;
+            let after_block_data = self.decode_block(block, after_block, &mut output)?;
             remaining = after_block_data;
             if block.last_block {
                 break;
@@ -182,12 +179,8 @@ impl ZstdDecoder {
             }
             // ZSTD frame checksum: XXH64 of decoded output, truncated to 32 bits.
             // The checksum covers only the plaintext (after the prefix).
-            let expected = u32::from_le_bytes([
-                remaining[0],
-                remaining[1],
-                remaining[2],
-                remaining[3],
-            ]);
+            let expected =
+                u32::from_le_bytes([remaining[0], remaining[1], remaining[2], remaining[3]]);
             let plaintext = &output[prefix_len..];
             let actual = crate::xxhash::zstd_frame_checksum(plaintext);
             if expected != actual {
@@ -260,7 +253,8 @@ impl ZstdDecoder {
         let after_block = &input[block_end..];
 
         // 1. Literals section.
-        let lit_section = decode_literals_section(block_input, self.previous_huffman_table.as_ref())?;
+        let lit_section =
+            decode_literals_section(block_input, self.previous_huffman_table.as_ref())?;
         if lit_section.huffman_table.is_some() {
             self.previous_huffman_table = lit_section.huffman_table;
         }
@@ -280,7 +274,8 @@ impl ZstdDecoder {
         //    frame-level output buffer (which may already contain the
         //    dictionary prefix). This lets back-references into the
         //    prefix resolve correctly.
-        self.executor.execute(&literals, &seq_section.sequences, output)?;
+        self.executor
+            .execute(&literals, &seq_section.sequences, output)?;
 
         Ok(after_block)
     }

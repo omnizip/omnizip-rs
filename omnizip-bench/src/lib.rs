@@ -59,7 +59,11 @@ use omnizip_zstd::ZstdCodec;
 pub fn default_codecs() -> Vec<BenchCodec> {
     vec![
         BenchCodec::new("lzma", Box::new(LzmaCodec), vec![0, 3, 6, 9]),
-        BenchCodec::new("zstd", Box::new(ZstdCodec), vec![1, 3, 6, 9, 12, 15, 19, 22]),
+        BenchCodec::new(
+            "zstd",
+            Box::new(ZstdCodec),
+            vec![1, 3, 6, 9, 12, 15, 19, 22],
+        ),
         BenchCodec::new("deflate", Box::new(DeflateCodec), vec![1, 6, 9]),
         BenchCodec::new("deflate64", Box::new(Deflate64Codec), vec![1, 6, 9]),
         BenchCodec::new("brotli", Box::new(BrotliCodec), vec![1, 6, 9, 11]),

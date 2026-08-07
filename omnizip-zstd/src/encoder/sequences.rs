@@ -29,72 +29,46 @@ const MODE_PREDEFINED: u8 = 0;
 /// Predefined LL normalized distribution (from C's `LL_defaultNorm`).
 /// 36 entries, tableLog = 6.
 const LL_DEFAULT_NORM: [i16; 36] = [
-    4, 3, 2, 2, 2, 2, 2, 2,
-    2, 2, 2, 2, 2, 1, 1, 1,
-    2, 2, 2, 2, 2, 2, 2, 2,
-    2, 3, 2, 1, 1, 1, 1, 1,
+    4, 3, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 1, 1, 1, 2, 2, 2, 2, 2, 2, 2, 2, 2, 3, 2, 1, 1, 1, 1, 1,
     -1, -1, -1, -1,
 ];
 
 /// Predefined ML normalized distribution (from C's `ML_defaultNorm`).
 /// 53 entries, tableLog = 6.
 const ML_DEFAULT_NORM: [i16; 53] = [
-    1, 4, 3, 2, 2, 2, 2, 2,
-    2, 1, 1, 1, 1, 1, 1, 1,
-    1, 1, 1, 1, 1, 1, 1, 1,
-    1, 1, 1, 1, 1, 1, 1, 1,
-    1, 1, 1, 1, 1, 1, 1, 1,
-    1, 1, 1, 1, 1, 1, -1, -1,
-    -1, -1, -1, -1, -1,
+    1, 4, 3, 2, 2, 2, 2, 2, 2, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, -1, -1, -1, -1, -1, -1, -1,
 ];
 
 /// Predefined OF normalized distribution (from C's `OF_defaultNorm`).
 /// 29 entries, tableLog = 5.
 const OF_DEFAULT_NORM: [i16; 29] = [
-    1, 1, 1, 1, 1, 1, 2, 2,
-    2, 1, 1, 1, 1, 1, 1, 1,
-    1, 1, 1, 1, 1, 1, 1, 1,
-    -1, -1, -1, -1, -1,
+    1, 1, 1, 1, 1, 1, 2, 2, 2, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, -1, -1, -1, -1, -1,
 ];
 
 /// LL code → number of extra bits (from C's `LL_bits`).
 const LL_BITS: [u8; 36] = [
-    0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0,
-    1, 1, 1, 1, 2, 2, 3, 3,
-    4, 6, 7, 8, 9, 10, 11, 12,
-    13, 14, 15, 16,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 3, 3, 4, 6, 7, 8, 9, 10, 11,
+    12, 13, 14, 15, 16,
 ];
 
 /// ML code → number of extra bits (from C's `ML_bits`).
 const ML_BITS: [u8; 53] = [
-    0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0,
-    1, 1, 1, 1, 2, 2, 3, 3,
-    4, 4, 5, 7, 8, 9, 10, 11,
-    12, 13, 14, 15, 16,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    1, 1, 1, 1, 2, 2, 3, 3, 4, 4, 5, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16,
 ];
 
 /// LL code → base literal length value (from C's `LL_Base`).
 const LL_BASE: [u32; 36] = [
-    0, 1, 2, 3, 4, 5, 6, 7,
-    8, 9, 10, 11, 12, 13, 14, 15,
-    16, 18, 20, 22, 24, 28, 32, 40,
-    48, 64, 128, 256, 512, 1024, 2048, 4096,
-    8192, 16384, 32768, 65536,
+    0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 18, 20, 22, 24, 28, 32, 40, 48, 64,
+    128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536,
 ];
 
 /// ML code → base match length value (from C's `ML_Base`).
 const ML_BASE: [u32; 53] = [
-    3, 4, 5, 6, 7, 8, 9, 10,
-    11, 12, 13, 14, 15, 16, 17, 18,
-    19, 20, 21, 22, 23, 24, 25, 26,
-    27, 28, 29, 30, 31, 32, 33, 34,
-    35, 37, 39, 41, 43, 47, 51, 59,
-    67, 83, 99, 131, 259, 515, 1027, 2051,
-    4099, 8195, 16387, 32771, 65539,
+    3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27,
+    28, 29, 30, 31, 32, 33, 34, 35, 37, 39, 41, 43, 47, 51, 59, 67, 83, 99, 131, 259, 515, 1027,
+    2051, 4099, 8195, 16387, 32771, 65539,
 ];
 
 /// Find the LL code for a given literal length. Returns (code, extra_bits_value).
@@ -130,10 +104,7 @@ const fn off_base(offset: u32) -> u32 {
 /// # Errors
 ///
 /// Returns [`ZstdError::Corrupt`] on internal failures.
-pub fn encode_section(
-    out: &mut Vec<u8>,
-    seq_store: &SeqStore,
-) -> Result<(), ZstdError> {
+pub fn encode_section(out: &mut Vec<u8>, seq_store: &SeqStore) -> Result<(), ZstdError> {
     let nb_seq = seq_store.sequences.len();
 
     // 1. Sequence count (1-3 bytes).
@@ -145,9 +116,7 @@ pub fn encode_section(
 
     // 2. Modes byte: LL=Predefined, OF=Predefined, ML=Predefined.
     // Bits: [LL_mode(2)] [OF_mode(2)] [ML_mode(2)] [reserved(2)]
-    let modes: u8 = (MODE_PREDEFINED << 6)
-        | (MODE_PREDEFINED << 4)
-        | (MODE_PREDEFINED << 2);
+    let modes: u8 = (MODE_PREDEFINED << 6) | (MODE_PREDEFINED << 4) | (MODE_PREDEFINED << 2);
     out.push(modes);
 
     // 3. Build CTables from the predefined distributions.
@@ -265,11 +234,20 @@ fn encode_sequences_bitstream(
     let mut state_ll = CState::init2(ll_ctable, ll_codes[nb_seq - 1]);
 
     // Write the last sequence's extra bits.
-    bitc.add_bits(u64::from(ll_extras[nb_seq - 1]), u32::from(LL_BITS[ll_codes[nb_seq - 1] as usize]));
+    bitc.add_bits(
+        u64::from(ll_extras[nb_seq - 1]),
+        u32::from(LL_BITS[ll_codes[nb_seq - 1] as usize]),
+    );
     bitc.flush();
-    bitc.add_bits(u64::from(ml_extras[nb_seq - 1]), u32::from(ML_BITS[ml_codes[nb_seq - 1] as usize]));
+    bitc.add_bits(
+        u64::from(ml_extras[nb_seq - 1]),
+        u32::from(ML_BITS[ml_codes[nb_seq - 1] as usize]),
+    );
     bitc.flush();
-    bitc.add_bits(u64::from(off_bases[nb_seq - 1]), u32::from(of_codes[nb_seq - 1]));
+    bitc.add_bits(
+        u64::from(off_bases[nb_seq - 1]),
+        u32::from(of_codes[nb_seq - 1]),
+    );
     bitc.flush();
 
     // Encode remaining sequences in reverse (nb_seq-2 down to 0).
@@ -283,8 +261,14 @@ fn encode_sequences_bitstream(
         bitc.flush();
 
         // Extra bits for this sequence.
-        bitc.add_bits(u64::from(ll_extras[n]), u32::from(LL_BITS[ll_codes[n] as usize]));
-        bitc.add_bits(u64::from(ml_extras[n]), u32::from(ML_BITS[ml_codes[n] as usize]));
+        bitc.add_bits(
+            u64::from(ll_extras[n]),
+            u32::from(LL_BITS[ll_codes[n] as usize]),
+        );
+        bitc.add_bits(
+            u64::from(ml_extras[n]),
+            u32::from(ML_BITS[ml_codes[n] as usize]),
+        );
         bitc.flush();
         bitc.add_bits(u64::from(off_bases[n]), u32::from(of_codes[n]));
         bitc.flush();

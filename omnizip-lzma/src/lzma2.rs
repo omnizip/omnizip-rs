@@ -129,9 +129,7 @@ pub fn decode_lzma2_stream(input: &[u8]) -> Result<(Vec<u8>, usize), LzmaError> 
             let lc_in = remainder - (lp_in * 9);
             if lc_in + lp_in > 4 {
                 return Err(LzmaError::Corrupt {
-                    reason: format!(
-                        "LZMA2 properties lc({lc_in}) + lp({lp_in}) > 4"
-                    ),
+                    reason: format!("LZMA2 properties lc({lc_in}) + lp({lp_in}) > 4"),
                 });
             }
             lc = lc_in;
@@ -166,9 +164,7 @@ pub fn decode_lzma2_stream(input: &[u8]) -> Result<(Vec<u8>, usize), LzmaError> 
             }
             1 => {
                 // Reset state (models + rep distances), keep lc/lp/pb.
-                let d = decoder.get_or_insert_with(|| {
-                    Lzma1Decoder::new(lc, lp, pb, dict_size)
-                });
+                let d = decoder.get_or_insert_with(|| Lzma1Decoder::new(lc, lp, pb, dict_size));
                 d.reset_state();
                 d.decode_continuation(chunk_data, &mut output, uncompressed_size)?;
             }
@@ -178,8 +174,7 @@ pub fn decode_lzma2_stream(input: &[u8]) -> Result<(Vec<u8>, usize), LzmaError> 
                     // Full dictionary reset — clear output.
                     output.clear();
                 }
-                let mut d =
-                    Lzma1Decoder::new(lc, lp, pb, dict_size);
+                let mut d = Lzma1Decoder::new(lc, lp, pb, dict_size);
                 d.reset_state();
                 d.decode_continuation(chunk_data, &mut output, uncompressed_size)?;
                 decoder = Some(d);

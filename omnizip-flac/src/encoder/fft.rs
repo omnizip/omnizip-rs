@@ -247,7 +247,10 @@ mod tests {
         for k in 0..8 {
             let expected = (2.0 * PI * k as f64 / 8.0).cos();
             let got = re[k] / 8.0;
-            assert!((got - expected).abs() < 1e-9, "sample {k}: {got} vs {expected}");
+            assert!(
+                (got - expected).abs() < 1e-9,
+                "sample {k}: {got} vs {expected}"
+            );
         }
     }
 

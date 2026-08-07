@@ -231,7 +231,10 @@ impl HcEncoder {
         }
 
         if best_len >= MIN_MATCH {
-            Some(RawMatch { offset: best_offset, length: best_len })
+            Some(RawMatch {
+                offset: best_offset,
+                length: best_len,
+            })
         } else {
             None
         }

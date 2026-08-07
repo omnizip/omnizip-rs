@@ -29,7 +29,7 @@ pub fn build_streaminfo_block(
     //   bit 0: last-metadata-block flag (we set this = 1).
     //   bits 1-7: block type (0 = STREAMINFO).
     out.push(0x80); // last=1, type=0
-    //   bits 8-31: length of payload in bytes = 34.
+                    //   bits 8-31: length of payload in bytes = 34.
     out.extend_from_slice(&(STREAMINFO_SIZE as u32).to_be_bytes()[1..4]);
 
     // STREAMINFO payload (34 bytes).
@@ -71,18 +71,10 @@ mod tests {
     #[test]
     fn build_then_parse_round_trips() {
         let md5 = [0xABu8; 16];
-        let block = build_streaminfo_block(
-            4096,
-            4096,
-            44_100,
-            2,
-            16,
-            1_000_000,
-            md5,
-        );
+        let block = build_streaminfo_block(4096, 4096, 44_100, 2, 16, 1_000_000, md5);
         // First 4 bytes = header.
         assert_eq!(block[0], 0x80); // last=1, type=0
-        // Bytes 1-3 = length = 34 = 0x000022.
+                                    // Bytes 1-3 = length = 34 = 0x000022.
         assert_eq!(&block[1..4], &[0, 0, 34]);
 
         // Parse the payload via existing decoder.

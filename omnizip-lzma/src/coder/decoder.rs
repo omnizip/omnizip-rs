@@ -18,8 +18,8 @@
 #![forbid(unsafe_code)]
 
 use crate::bit_model::BitModel;
-use crate::LzmaError;
 use crate::range_coder::RangeEncoder;
+use crate::LzmaError;
 use crate::RangeDecoder;
 
 /// Decode a `num_bits`-wide symbol by walking a binary bit-tree forwards
@@ -49,12 +49,7 @@ pub fn decode_tree(
 /// Encode a `num_bits`-wide symbol by walking the bit-tree forwards
 /// (MSB first). Inverse of [`decode_tree`].
 #[inline]
-pub fn encode_tree(
-    rc: &mut RangeEncoder,
-    models: &mut [BitModel],
-    num_bits: u32,
-    symbol: u32,
-) {
+pub fn encode_tree(rc: &mut RangeEncoder, models: &mut [BitModel], num_bits: u32, symbol: u32) {
     let mut node = 1usize;
     for i in (0..num_bits).rev() {
         let bit = (symbol >> i) & 1;

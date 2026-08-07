@@ -61,9 +61,7 @@ impl Reporter for MarkdownReporter {
         let mut out = String::from(
             "| codec | level | corpus | file | input | compressed | ratio | enc ms | dec ms | enc MiB/s | dec MiB/s | det | rt | error |\n",
         );
-        out.push_str(
-            "|---|---:|---|---|---:|---:|---:|---:|---:|---:|---:|:---:|:---:|---|\n",
-        );
+        out.push_str("|---|---:|---|---|---:|---:|---:|---:|---:|---:|---:|:---:|:---:|---|\n");
         for r in results {
             out.push_str(&format!(
                 "| {} | {} | {} | {} | {} | {} | {:.4} | {:.2} | {:.2} | {:.1} | {:.1} | {} | {} | {} |\n",
@@ -106,7 +104,11 @@ mod tests {
             decode_mib_s: 190.0,
             deterministic: ok,
             roundtrip_ok: ok,
-            error: if ok { String::new() } else { "fail".to_string() },
+            error: if ok {
+                String::new()
+            } else {
+                "fail".to_string()
+            },
         }
     }
 

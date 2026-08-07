@@ -41,10 +41,7 @@ impl Filter for BcjIa64Filter {
 /// 5-bit template → bitmask of which 3 slots contain branches.
 /// Copied verbatim from the C reference `BRANCH_TABLE[32]`.
 const BRANCH_TABLE: [u8; 32] = [
-    0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0,
-    4, 4, 6, 6, 0, 0, 7, 7,
-    4, 4, 0, 0, 4, 4, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4, 4, 6, 6, 0, 0, 7, 7, 4, 4, 0, 0, 4, 4, 0, 0,
 ];
 
 fn ia64_transform(data: &mut [u8], is_encoder: bool) {
@@ -102,7 +99,11 @@ fn process_slot(data: &mut [u8], bundle_start: usize, bit_pos: u32, is_encoder: 
         new_inst_norm |= u64::from(dest_shifted & 0xFFFFF) << 13;
         new_inst_norm |= u64::from(dest_shifted & 0x100000) << (36 - 20);
 
-        instruction &= if bit_res == 0 { 0 } else { (1u64 << bit_res) - 1 };
+        instruction &= if bit_res == 0 {
+            0
+        } else {
+            (1u64 << bit_res) - 1
+        };
         instruction |= new_inst_norm << bit_res;
 
         for j in 0..6usize {

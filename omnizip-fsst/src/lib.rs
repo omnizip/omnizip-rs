@@ -37,7 +37,12 @@
 
 #![forbid(unsafe_code)]
 #![warn(clippy::pedantic)]
-#![allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap, clippy::cast_sign_loss, clippy::cast_lossless)]
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless
+)]
 
 use omnizip_codecs::{Codec, CodecId, CompressionLevel, OmnizipError};
 
@@ -52,7 +57,8 @@ const ESCAPE_ESCAPE: u8 = 255;
 const MAX_SYMBOLS: usize = 255;
 
 /// Maximum symbol length.
-#[allow(dead_code)] const MAX_SYMBOL_LEN: usize = 8;
+#[allow(dead_code)]
+const MAX_SYMBOL_LEN: usize = 8;
 
 /// A trained FSST symbol table.
 #[derive(Clone, Debug)]
@@ -72,14 +78,15 @@ impl SymbolTable {
     #[must_use]
     pub fn train(input: &[u8]) -> Self {
         if input.is_empty() {
-            return Self { symbols: Vec::new() };
+            return Self {
+                symbols: Vec::new(),
+            };
         }
 
         // Phase 1: Count all 1–8 byte substrings using a HashMap.
         // To keep memory bounded, only count substrings up to length 8
         // and sample positions if input is very large.
-        let mut counts: std::collections::HashMap<Vec<u8>, u32> =
-            std::collections::HashMap::new();
+        let mut counts: std::collections::HashMap<Vec<u8>, u32> = std::collections::HashMap::new();
         let step = if input.len() > 1_000_000 { 4 } else { 1 };
 
         for &len in &[1, 2, 3, 4, 5, 6, 7, 8] {
@@ -113,9 +120,9 @@ impl SymbolTable {
             }
             // Skip if this symbol is a substring of an already-chosen
             // symbol (redundant). This is O(n×len) but n ≤ 255.
-            let is_redundant = chosen.iter().any(|c| {
-                c.windows(sym.len()).any(|w| w == sym.as_slice())
-            });
+            let is_redundant = chosen
+                .iter()
+                .any(|c| c.windows(sym.len()).any(|w| w == sym.as_slice()));
             if is_redundant {
                 continue;
             }
@@ -140,7 +147,9 @@ impl SymbolTable {
 
     /// Serialize the table to bytes.
     fn serialize(&self) -> Vec<u8> {
-        let mut out = Vec::with_capacity(1 + self.symbols.len() + self.symbols.iter().map(|s| s.len()).sum::<usize>());
+        let mut out = Vec::with_capacity(
+            1 + self.symbols.len() + self.symbols.iter().map(|s| s.len()).sum::<usize>(),
+        );
         out.push(self.symbols.len() as u8);
         for s in &self.symbols {
             out.push(s.len() as u8);
@@ -225,8 +234,8 @@ fn escape_text(input: &[u8], table: &SymbolTable) -> Vec<u8> {
 ///
 /// Returns [`OmnizipError::DecodeFailed`] on malformed input.
 pub fn decompress(compressed: &[u8]) -> Result<Vec<u8>, OmnizipError> {
-    let (table, header_len) = SymbolTable::deserialize(compressed)
-        .ok_or(OmnizipError::DecodeFailed {
+    let (table, header_len) =
+        SymbolTable::deserialize(compressed).ok_or(OmnizipError::DecodeFailed {
             codec: CodecId::FSST,
             reason: "malformed symbol table header".into(),
         })?;
@@ -280,7 +289,11 @@ impl Codec for FsstCodec {
         "fsst"
     }
 
-    fn compress(&self, plaintext: &[u8], _level: CompressionLevel) -> Result<Vec<u8>, OmnizipError> {
+    fn compress(
+        &self,
+        plaintext: &[u8],
+        _level: CompressionLevel,
+    ) -> Result<Vec<u8>, OmnizipError> {
         compress(plaintext)
     }
 
@@ -313,7 +326,10 @@ mod tests {
         // "the quick brown fox" repeated 100 times.
         let input: Vec<u8> = b"the quick brown fox ".repeat(100);
         let compressed = compress(&input).expect("compress");
-        assert!(compressed.len() < input.len(), "FSST should compress repetitive text");
+        assert!(
+            compressed.len() < input.len(),
+            "FSST should compress repetitive text"
+        );
         let decompressed = decompress(&compressed).expect("decompress");
         assert_eq!(decompressed, input);
     }
@@ -339,8 +355,12 @@ mod tests {
     fn codec_trait_round_trips() {
         let codec = FsstCodec::new();
         let input = b"repetitive repetitive repetitive repetitive text".to_vec();
-        let compressed = codec.compress(&input, CompressionLevel::default()).expect("compress");
-        let decompressed = codec.decompress(&compressed, input.len() as u32).expect("decompress");
+        let compressed = codec
+            .compress(&input, CompressionLevel::default())
+            .expect("compress");
+        let decompressed = codec
+            .decompress(&compressed, input.len() as u32)
+            .expect("decompress");
         assert_eq!(decompressed, input);
     }
 
@@ -350,6 +370,9 @@ mod tests {
         let input = b"id,name,email,department,salary\n".repeat(200);
         let compressed = compress(&input).expect("compress");
         let ratio = compressed.len() as f64 / input.len() as f64;
-        assert!(ratio < 0.3, "CSV should compress well with FSST, got {ratio:.2}");
+        assert!(
+            ratio < 0.3,
+            "CSV should compress well with FSST, got {ratio:.2}"
+        );
     }
 }

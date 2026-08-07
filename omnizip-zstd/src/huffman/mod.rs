@@ -96,7 +96,10 @@ impl HuffmanTable {
     /// emits no Huffman header.
     #[must_use]
     pub fn empty() -> Self {
-        let entry = DecodeEntry { symbol: 0, length: 0 };
+        let entry = DecodeEntry {
+            symbol: 0,
+            length: 0,
+        };
         Self {
             lookup: vec![entry; 1usize << MAX_BITS],
             weights: Vec::new(),
@@ -354,7 +357,8 @@ fn compute_table_log(weights: &[u8]) -> Result<u8, ZstdError> {
             reason: "huffman weights: no present symbols".into(),
         });
     }
-    let weight_total: u32 = weights.iter()
+    let weight_total: u32 = weights
+        .iter()
         .filter(|&&w| w > 0)
         .map(|&w| (1u32 << w) >> 1)
         .sum();
@@ -396,7 +400,10 @@ fn build_zstd_lookup(weights: &[u8], table_log: u8) -> Vec<DecodeEntry> {
 
     // Build the compact DTable (table_size entries).
     let mut dtable = vec![
-        DecodeEntry { symbol: 0, length: 0 };
+        DecodeEntry {
+            symbol: 0,
+            length: 0
+        };
         table_size
     ];
     let mut pos = 0usize;
@@ -432,7 +439,10 @@ fn build_zstd_lookup(weights: &[u8], table_log: u8) -> Vec<DecodeEntry> {
     // Handle the case where table_size * expand < lookup_size (shouldn't
     // happen for valid tables, but guard against underflow).
     while lookup.len() < lookup_size {
-        lookup.push(DecodeEntry { symbol: 0, length: 0 });
+        lookup.push(DecodeEntry {
+            symbol: 0,
+            length: 0,
+        });
     }
     lookup
 }
@@ -489,7 +499,7 @@ mod tests {
     }
 
     #[test]
-    
+
     fn canonical_codes_are_prefix_free() {
         let w = [3u8, 1, 2, 0];
         let table = HuffmanTable::from_weights(&w).expect("table");
@@ -533,8 +543,8 @@ mod tests {
         // Take any ZSTD-encoded fixture and decode its literals both ways.
         // The literals are a real Huffman stream that exercises decode_into.
         let input = b"the quick brown fox jumps over the lazy dog. ".repeat(20);
-        let compressed = crate::encoder::encode_frame(&input, crate::ZstdLevel::Default)
-            .expect("encode_frame");
+        let compressed =
+            crate::encoder::encode_frame(&input, crate::ZstdLevel::Default).expect("encode_frame");
         // Decode frame → checks decode_into path implicitly.
         let decoded = crate::decompress(&compressed, input.len() as u32).expect("decompress");
         assert_eq!(decoded, input);

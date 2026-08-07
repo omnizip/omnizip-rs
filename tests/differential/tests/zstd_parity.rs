@@ -72,13 +72,16 @@ fn run_parity(filename: &str) {
 
     match (rust, oracle, is_bad) {
         (Ok(rust), Some(oracle), false) => assert_eq!(
-            rust, oracle,
+            rust,
+            oracle,
             "{}: byte mismatch — Rust {} bytes, oracle {} bytes",
             filename,
             rust.len(),
             oracle.len()
         ),
-        (Ok(_), None, true) => eprintln!("accepted-bad-{filename}: decoder produced output but oracle rejected (investigate)"),
+        (Ok(_), None, true) => eprintln!(
+            "accepted-bad-{filename}: decoder produced output but oracle rejected (investigate)"
+        ),
         (Ok(_), None, false) => panic!("{filename}: rust accepted but oracle rejected"),
         (Ok(_), Some(_), true) => panic!("{filename}: marked bad but both decoders accepted"),
         (Err(e), Some(_), false) => {
@@ -101,10 +104,7 @@ fn parity_known_fixtures() {
         if path.extension().and_then(|s| s.to_str()) != Some("zst") {
             continue;
         }
-        let name = path
-            .file_name()
-            .and_then(|s| s.to_str())
-            .expect("filename");
+        let name = path.file_name().and_then(|s| s.to_str()).expect("filename");
         run_parity(name);
     }
 }

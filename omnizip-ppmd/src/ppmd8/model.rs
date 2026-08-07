@@ -405,8 +405,8 @@ impl Ppmd8Model {
             if snap.is_empty() {
                 continue;
             }
-            let total: u32 =
-                snap.iter().map(|(_, f)| u32::from(*f)).sum::<u32>() + Self::escape_count(snap.len());
+            let total: u32 = snap.iter().map(|(_, f)| u32::from(*f)).sum::<u32>()
+                + Self::escape_count(snap.len());
             let mut remaining = total;
             let pos = snap.iter().position(|(s, _)| *s == byte);
             match pos {
@@ -457,8 +457,8 @@ impl Ppmd8Model {
             if snap.is_empty() {
                 continue;
             }
-            let total: u32 =
-                snap.iter().map(|(_, f)| u32::from(*f)).sum::<u32>() + Self::escape_count(snap.len());
+            let total: u32 = snap.iter().map(|(_, f)| u32::from(*f)).sum::<u32>()
+                + Self::escape_count(snap.len());
             let mut remaining = total;
             let mut found: Option<u8> = None;
             for (s, f) in snap.iter() {

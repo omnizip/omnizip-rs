@@ -112,7 +112,10 @@ impl Dictionary {
         }
         if dist > self.fullness {
             return Err(LzmaError::Corrupt {
-                reason: format!("match distance {dist} exceeds dictionary fullness {}", self.fullness),
+                reason: format!(
+                    "match distance {dist} exceeds dictionary fullness {}",
+                    self.fullness
+                ),
             });
         }
         if self.size == 0 {

@@ -259,7 +259,11 @@ fn normalize_distribution(raw: &[i16], accuracy_log: u8) -> Vec<i16> {
         .collect();
 
     // Compute remainder and distribute.
-    let current_sum: i32 = normalized.iter().filter(|&&x| x > 0).map(|&x| x as i32).sum();
+    let current_sum: i32 = normalized
+        .iter()
+        .filter(|&&x| x > 0)
+        .map(|&x| x as i32)
+        .sum();
     let remainder = target as i32 - current_sum;
 
     if remainder > 0 {
@@ -367,10 +371,8 @@ mod tests {
     fn build_predefined_offset_distribution_sums_correctly() {
         // The C reference offset distribution: 27 positive + 5 sentinels = 32.
         let dist: [i16; 32] = [
-            1, 1, 1, 1, 1, 1, 2, 2,
-            2, 1, 1, 1, 1, 1, 1, 1,
-            1, 1, 1, 1, 1, 1, 1, 1,
-            -1, -1, -1, -1, -1, 0, 0, 0,
+            1, 1, 1, 1, 1, 1, 2, 2, 2, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, -1, -1, -1, -1,
+            -1, 0, 0, 0,
         ];
         let positive_sum: i32 = dist.iter().filter(|&&x| x > 0).map(|&x| x as i32).sum();
         let sentinel_count = dist.iter().filter(|&&x| x == -1).count();

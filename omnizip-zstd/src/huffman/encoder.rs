@@ -44,7 +44,9 @@ pub fn build_weights(literals: &[u8]) -> Vec<u8> {
     // but keep the fallback as a safety net for unusual distributions).
     let mut pm_lengths = vec![0u8; freqs.len()];
     crate::huffman::package_merge::package_merge(&freqs, 11, &mut pm_lengths);
-    if pm_lengths.iter().any(|&l| l > 11) || pm_lengths.iter().filter(|&&l| l > 0).count() != freqs.len() {
+    if pm_lengths.iter().any(|&l| l > 11)
+        || pm_lengths.iter().filter(|&&l| l > 0).count() != freqs.len()
+    {
         // Package-merge produced invalid output; fall back.
         limit_lengths(&mut lengths, 11, &freqs);
     } else {
@@ -162,8 +164,9 @@ fn encode_literals_internal(
     treeless: bool,
 ) -> Result<(Vec<u8>, Vec<u8>), ZstdError> {
     let weights = build_weights(literals);
-    let table = HuffmanTable::from_weights(&weights)
-        .map_err(|e| ZstdError::Corrupt { reason: e.to_string() })?;
+    let table = HuffmanTable::from_weights(&weights).map_err(|e| ZstdError::Corrupt {
+        reason: e.to_string(),
+    })?;
 
     // block_type bits: 0b10 = Compressed, 0b11 = Treeless.
     let block_type: u32 = if treeless { 0b11 } else { 0b10 };
@@ -197,7 +200,9 @@ fn encode_literals_internal(
     }
 
     // Fall back to 4-stream encoding.
-    if let Err(e) = encode_literals_4streams_internal(literals, &table, &weights_wire, &mut out, treeless) {
+    if let Err(e) =
+        encode_literals_4streams_internal(literals, &table, &weights_wire, &mut out, treeless)
+    {
         return Err(ZstdError::Corrupt { reason: e });
     }
     Ok((out, weights_wire))
@@ -241,17 +246,18 @@ fn encode_literals_4streams_internal(
 
     // Pick smallest header that fits.
     if lit_size < 1024 && lit_c_size < 1024 {
-        let header: u32 = block_type | (0b01u32 << 2)
-            | (lit_size as u32) << 4
-            | (lit_c_size as u32) << 14;
+        let header: u32 =
+            block_type | (0b01u32 << 2) | (lit_size as u32) << 4 | (lit_c_size as u32) << 14;
         out.extend_from_slice(&header.to_le_bytes()[..3]);
     } else if lit_size < 16384 && lit_c_size < 16384 {
-        let header: u32 = block_type | (0b10u32 << 2)
+        let header: u32 = block_type
+            | (0b10u32 << 2)
             | ((lit_size as u32) << 4 & 0x3FFF0)
             | ((lit_c_size as u32) << 18 & 0xFFFC0000);
         out.extend_from_slice(&header.to_le_bytes()[..4]);
     } else if lit_size < 262144 && lit_c_size < 262144 {
-        let low: u32 = block_type | (0b11u32 << 2)
+        let low: u32 = block_type
+            | (0b11u32 << 2)
             | ((lit_size as u32) << 4 & 0x3FFFF0)
             | ((lit_c_size as u32) << 22 & 0xFFC00000);
         out.extend_from_slice(&low.to_le_bytes());
@@ -300,14 +306,16 @@ fn limit_lengths(lengths: &mut [u8], max_len: u8, freqs: &[u32]) {
         }
 
         // Find the symbol with the longest code and lowest frequency.
-        let longest = lengths.iter()
+        let longest = lengths
+            .iter()
             .enumerate()
             .filter(|(_, &l)| l == cur_max)
             .min_by_key(|&(i, _)| freqs.get(i).copied().unwrap_or(0))
             .map(|(i, _)| i);
 
         // Find the symbol with the shortest code and highest frequency.
-        let shortest = lengths.iter()
+        let shortest = lengths
+            .iter()
             .enumerate()
             .filter(|(_, &l)| l > 0 && l < max_len)
             .max_by_key(|&(i, _)| freqs.get(i).copied().unwrap_or(0))
@@ -333,7 +341,8 @@ fn limit_lengths(lengths: &mut [u8], max_len: u8, freqs: &[u32]) {
     // Final Kraft check: if sum(2^(-l)) > 1, increase the shortest
     // codes until Kraft ≤ 1. This ensures a valid Huffman tree.
     loop {
-        let kraft: f64 = lengths.iter()
+        let kraft: f64 = lengths
+            .iter()
             .filter(|&&l| l > 0)
             .map(|&l| 2f64.powi(-(i32::from(l))))
             .sum();
@@ -341,7 +350,8 @@ fn limit_lengths(lengths: &mut [u8], max_len: u8, freqs: &[u32]) {
             break;
         }
         // Increase the shortest code's length.
-        let min_idx = lengths.iter()
+        let min_idx = lengths
+            .iter()
             .enumerate()
             .filter(|(_, &l)| l > 0 && l < max_len)
             .min_by_key(|&(i, &l)| (l, freqs.get(i).copied().unwrap_or(0)))
@@ -364,9 +374,12 @@ fn limit_lengths(lengths: &mut [u8], max_len: u8, freqs: &[u32]) {
 /// decode. The last present symbol's weight is implied by the Kraft
 /// inequality in both cases.
 fn encode_weights(weights: &[u8]) -> Result<Vec<u8>, ZstdError> {
-    let max_symbol = weights.iter().rposition(|&w| w > 0).ok_or(ZstdError::Corrupt {
-        reason: "encode_weights: no present symbols".into(),
-    })?;
+    let max_symbol = weights
+        .iter()
+        .rposition(|&w| w > 0)
+        .ok_or(ZstdError::Corrupt {
+            reason: "encode_weights: no present symbols".into(),
+        })?;
 
     if max_symbol <= 128 {
         encode_weights_direct(weights, max_symbol)
@@ -594,17 +607,24 @@ mod tests {
         // weights (some symbols much more frequent than others).
         let input: Vec<u8> = (0..50_000)
             .map(|i| {
-                if i % 10 < 7 { 0u8 }      // 70% zeros
-                else if i % 10 < 9 { 255 }  // 20% 255s
-                else { (i % 254 + 1) as u8 } // 10% spread across rest
+                if i % 10 < 7 {
+                    0u8
+                }
+                // 70% zeros
+                else if i % 10 < 9 {
+                    255
+                }
+                // 20% 255s
+                else {
+                    (i % 254 + 1) as u8
+                } // 10% spread across rest
             })
             .collect();
         let encoded = encode_literals(&input);
         // This should either succeed (FSE weights path) or fail
         // gracefully (falling back to Raw in the block encoder).
         if let Ok(enc) = encoded {
-            let section =
-                crate::literals::decode_literals_section(&enc, None).expect("decode");
+            let section = crate::literals::decode_literals_section(&enc, None).expect("decode");
             assert_eq!(section.literals, input);
         }
     }
@@ -613,18 +633,16 @@ mod tests {
     fn encode_200k_uses_5byte_header() {
         // litSize > 16384 must select the 5-byte header path; otherwise
         // the decoder truncates the literal count and the bitstream desyncs.
-        let input: Vec<u8> = (0..200_000)
-            .map(|i| (i % 26 + b'a' as i32) as u8)
-            .collect();
+        let input: Vec<u8> = (0..200_000).map(|i| (i % 26 + b'a' as i32) as u8).collect();
         let encoded = encode_literals(&input).expect("encode");
         // The literals_section_header byte (low 2 bits = block_type=2)
         // must encode lhlCode=3 → bits 2-3 = 0b11.
         assert_eq!(
-            encoded[0] & 0x0C, 0b1100,
+            encoded[0] & 0x0C,
+            0b1100,
             "expected 5-byte header (lhlCode=3) for litSize=200000"
         );
-        let section =
-            crate::literals::decode_literals_section(&encoded, None).expect("decode");
+        let section = crate::literals::decode_literals_section(&encoded, None).expect("decode");
         assert_eq!(section.literals.len(), input.len());
         assert_eq!(section.literals, input);
     }

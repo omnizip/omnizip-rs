@@ -47,10 +47,7 @@ fn hash4(data: &[u8], pos: usize, h_bits: u32) -> u32 {
 fn count_match(a: &[u8], a_pos: usize, b: &[u8], b_pos: usize, limit: usize) -> usize {
     let mut len = 0usize;
     // 8-byte word stepping.
-    while len + 8 <= limit
-        && a_pos + len + 8 <= a.len()
-        && b_pos + len + 8 <= b.len()
-    {
+    while len + 8 <= limit && a_pos + len + 8 <= a.len() && b_pos + len + 8 <= b.len() {
         let wa = u64::from_le_bytes([
             a[a_pos + len],
             a[a_pos + len + 1],
@@ -250,11 +247,7 @@ impl MatchState {
 /// Ported from C's `ZSTD_compressBlock_fast_generic` with `minMatch=4`,
 /// simplified control flow. The `min_match` parameter controls the
 /// minimum match length to accept.
-pub fn compress_block_fast(
-    src: &[u8],
-    seq_store: &mut SeqStore,
-    ms: &mut MatchState,
-) -> usize {
+pub fn compress_block_fast(src: &[u8], seq_store: &mut SeqStore, ms: &mut MatchState) -> usize {
     compress_block_with_min_match(src, seq_store, ms, MIN_MATCH)
 }
 
@@ -291,7 +284,13 @@ pub fn compress_block_with_min_match(
             if src[ip..ip + MIN_MATCH] == src[ip - rep0 as usize..ip - rep0 as usize + MIN_MATCH] {
                 // Found a repcode match. Extend forward.
                 let mut m_len = MIN_MATCH;
-                m_len += count_match(src, ip + m_len, src, ip + m_len - rep0 as usize, limit + MIN_MATCH - ip - m_len);
+                m_len += count_match(
+                    src,
+                    ip + m_len,
+                    src,
+                    ip + m_len - rep0 as usize,
+                    limit + MIN_MATCH - ip - m_len,
+                );
 
                 // Backward extension: count how many preceding bytes
                 // also match, without mutating ip. We track the
@@ -356,7 +355,13 @@ pub fn compress_block_with_min_match(
                 if src[ip..ip + MIN_MATCH] == src[candidate..candidate + MIN_MATCH] {
                     // Extend forward.
                     let mut m_len = MIN_MATCH;
-                    m_len += count_match(src, ip + m_len, src, candidate + m_len, limit + MIN_MATCH - ip - m_len);
+                    m_len += count_match(
+                        src,
+                        ip + m_len,
+                        src,
+                        candidate + m_len,
+                        limit + MIN_MATCH - ip - m_len,
+                    );
 
                     // Backward extension as a count (see rep0 path).
                     let mut back = 0usize;
@@ -586,7 +591,13 @@ fn find_best_match(
     }
 
     let mut m_len = MIN_MATCH;
-    m_len += count_match(src, ip + m_len, src, candidate + m_len, limit + MIN_MATCH - ip - m_len);
+    m_len += count_match(
+        src,
+        ip + m_len,
+        src,
+        candidate + m_len,
+        limit + MIN_MATCH - ip - m_len,
+    );
 
     if m_len >= min_match {
         Some((dist, m_len))
@@ -642,10 +653,14 @@ fn find_best_match_chain(
         if candidate + MIN_MATCH <= src.len()
             && src[ip..ip + MIN_MATCH] == src[candidate..candidate + MIN_MATCH]
         {
-            let m_len = MIN_MATCH + count_match(
-                src, ip + MIN_MATCH, src, candidate + MIN_MATCH,
-                max_extend.saturating_sub(MIN_MATCH),
-            );
+            let m_len = MIN_MATCH
+                + count_match(
+                    src,
+                    ip + MIN_MATCH,
+                    src,
+                    candidate + MIN_MATCH,
+                    max_extend.saturating_sub(MIN_MATCH),
+                );
             if m_len > best_len {
                 best_len = m_len;
                 best_dist = dist;
@@ -702,7 +717,13 @@ fn probe_match(
     }
 
     let mut m_len = MIN_MATCH;
-    m_len += count_match(src, ip + m_len, src, candidate + m_len, limit + MIN_MATCH - ip - m_len);
+    m_len += count_match(
+        src,
+        ip + m_len,
+        src,
+        candidate + m_len,
+        limit + MIN_MATCH - ip - m_len,
+    );
 
     if m_len >= min_match {
         Some((dist, m_len))
@@ -796,7 +817,13 @@ pub fn compress_block_fast_with_prefix(
         if rep0 > 0 && ip > rep0 as usize {
             if src[ip..ip + MIN_MATCH] == src[ip - rep0 as usize..ip - rep0 as usize + MIN_MATCH] {
                 let mut m_len = MIN_MATCH;
-                m_len += count_match(src, ip + m_len, src, ip + m_len - rep0 as usize, limit + MIN_MATCH - ip - m_len);
+                m_len += count_match(
+                    src,
+                    ip + m_len,
+                    src,
+                    ip + m_len - rep0 as usize,
+                    limit + MIN_MATCH - ip - m_len,
+                );
 
                 // Backward extension as a count (see
                 // compress_block_with_min_match for the rationale).
@@ -842,7 +869,13 @@ pub fn compress_block_fast_with_prefix(
                 && src[ip..ip + MIN_MATCH] == src[candidate..candidate + MIN_MATCH]
             {
                 let mut m_len = MIN_MATCH;
-                m_len += count_match(src, ip + m_len, src, candidate + m_len, limit + MIN_MATCH - ip - m_len);
+                m_len += count_match(
+                    src,
+                    ip + m_len,
+                    src,
+                    candidate + m_len,
+                    limit + MIN_MATCH - ip - m_len,
+                );
 
                 let mut back = 0usize;
                 while ip > anchor + back
@@ -1045,7 +1078,13 @@ fn find_best_match_absolute(
         return None;
     }
     let mut m_len = MIN_MATCH;
-    m_len += count_match(src, ip + m_len, src, candidate + m_len, limit + MIN_MATCH - ip - m_len);
+    m_len += count_match(
+        src,
+        ip + m_len,
+        src,
+        candidate + m_len,
+        limit + MIN_MATCH - ip - m_len,
+    );
     if m_len >= min_match {
         Some((dist, m_len))
     } else {
@@ -1081,7 +1120,13 @@ fn probe_match_absolute(
         return None;
     }
     let mut m_len = MIN_MATCH;
-    m_len += count_match(src, ip + m_len, src, candidate + m_len, limit + MIN_MATCH - ip - m_len);
+    m_len += count_match(
+        src,
+        ip + m_len,
+        src,
+        candidate + m_len,
+        limit + MIN_MATCH - ip - m_len,
+    );
     if m_len >= min_match {
         Some((dist, m_len))
     } else {
@@ -1141,7 +1186,8 @@ mod tests {
         let mut reconstructed = Vec::new();
         let mut lit_pos = 0;
         for seq in &ss.sequences {
-            reconstructed.extend_from_slice(&ss.literals[lit_pos..lit_pos + seq.literal_length as usize]);
+            reconstructed
+                .extend_from_slice(&ss.literals[lit_pos..lit_pos + seq.literal_length as usize]);
             lit_pos += seq.literal_length as usize;
             let off = seq.offset as usize;
             let ml = seq.match_length as usize;

@@ -11,8 +11,10 @@
 
 use crate::bitreader::BitReader;
 use crate::rice;
-use crate::subframe_type::{TYPE_CONSTANT as SUBFRAME_CONSTANT, TYPE_FIXED_BASE as SUBFRAME_FIXED,
-    TYPE_LPC_BASE as SUBFRAME_LPC, TYPE_VERBATIM as SUBFRAME_VERBATIM};
+use crate::subframe_type::{
+    TYPE_CONSTANT as SUBFRAME_CONSTANT, TYPE_FIXED_BASE as SUBFRAME_FIXED,
+    TYPE_LPC_BASE as SUBFRAME_LPC, TYPE_VERBATIM as SUBFRAME_VERBATIM,
+};
 
 /// Decode a single subframe. Returns the decoded samples as i32 values.
 ///
@@ -129,13 +131,11 @@ fn decode_fixed(
             1 => i64::from(samples[i]),
             2 => 2 * i64::from(samples[i + 1]) - i64::from(samples[i]),
             3 => {
-                3 * i64::from(samples[i + 2])
-                    - 3 * i64::from(samples[i + 1])
+                3 * i64::from(samples[i + 2]) - 3 * i64::from(samples[i + 1])
                     + i64::from(samples[i])
             }
             4 => {
-                4 * i64::from(samples[i + 3])
-                    - 6 * i64::from(samples[i + 2])
+                4 * i64::from(samples[i + 3]) - 6 * i64::from(samples[i + 2])
                     + 4 * i64::from(samples[i + 1])
                     - i64::from(samples[i])
             }

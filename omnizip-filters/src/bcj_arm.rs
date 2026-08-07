@@ -42,9 +42,8 @@ fn arm_transform(data: &mut [u8], is_encoder: bool) {
     let mut i = 0usize;
     while i + 4 <= len {
         if data[i + 3] == BL_HIGH_BYTE {
-            let src = (u32::from(data[i + 2]) << 16)
-                | (u32::from(data[i + 1]) << 8)
-                | u32::from(data[i]);
+            let src =
+                (u32::from(data[i + 2]) << 16) | (u32::from(data[i + 1]) << 8) | u32::from(data[i]);
             let src_shifted = src << 2;
             let pos = i as u32;
             let dest = if is_encoder {

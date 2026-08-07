@@ -15,11 +15,19 @@
 //! `fast_encoder` helpers (BrotliWriteBits, HuffmanTree, etc.).
 
 #![forbid(unsafe_code)]
-#![allow(non_snake_case, non_upper_case_globals, clippy::too_many_arguments, clippy::needless_range_loop, clippy::cast_possible_truncation, unused_assignments)]
+#![allow(
+    non_snake_case,
+    non_upper_case_globals,
+    clippy::too_many_arguments,
+    clippy::needless_range_loop,
+    clippy::cast_possible_truncation,
+    unused_assignments
+)]
 
 use crate::fast_encoder::{
-    BrotliBuildAndStoreHuffmanTreeFast, BrotliStoreHuffmanTree, BrotliWriteBits, HuffmanTree,
-    Log2FloorNonZero, BROTLI_UNALIGNED_LOAD32, BROTLI_UNALIGNED_LOAD64, FindMatchLengthWithLimit,
+    BrotliBuildAndStoreHuffmanTreeFast, BrotliStoreHuffmanTree, BrotliWriteBits,
+    FindMatchLengthWithLimit, HuffmanTree, Log2FloorNonZero, BROTLI_UNALIGNED_LOAD32,
+    BROTLI_UNALIGNED_LOAD64,
 };
 
 const MAX_DISTANCE: usize = (1usize << 18) - 16; // BROTLI_MAX_BACKWARD_LIMIT(18)
@@ -165,25 +173,55 @@ fn EmitInsertLen(
 ) {
     if insertlen < 6 {
         let code = insertlen + 40;
-        BrotliWriteBits(cmd_depth[code] as usize, cmd_bits[code] as u64, storage_ix, storage);
+        BrotliWriteBits(
+            cmd_depth[code] as usize,
+            cmd_bits[code] as u64,
+            storage_ix,
+            storage,
+        );
         cmd_histo[code] += 1;
     } else if insertlen < 130 {
         let tail = insertlen - 2;
         let nbits = Log2FloorNonZero(tail as u64) - 1;
         let prefix = tail >> nbits;
         let inscode = (nbits as usize) * 2 + prefix + 42;
-        BrotliWriteBits(cmd_depth[inscode] as usize, cmd_bits[inscode] as u64, storage_ix, storage);
-        BrotliWriteBits(nbits as usize, (tail - (prefix << nbits)) as u64, storage_ix, storage);
+        BrotliWriteBits(
+            cmd_depth[inscode] as usize,
+            cmd_bits[inscode] as u64,
+            storage_ix,
+            storage,
+        );
+        BrotliWriteBits(
+            nbits as usize,
+            (tail - (prefix << nbits)) as u64,
+            storage_ix,
+            storage,
+        );
         cmd_histo[inscode] += 1;
     } else if insertlen < 2114 {
         let tail = insertlen - 66;
         let nbits = Log2FloorNonZero(tail as u64);
         let code = nbits as usize + 50;
-        BrotliWriteBits(cmd_depth[code] as usize, cmd_bits[code] as u64, storage_ix, storage);
-        BrotliWriteBits(nbits as usize, (tail - (1usize << nbits)) as u64, storage_ix, storage);
+        BrotliWriteBits(
+            cmd_depth[code] as usize,
+            cmd_bits[code] as u64,
+            storage_ix,
+            storage,
+        );
+        BrotliWriteBits(
+            nbits as usize,
+            (tail - (1usize << nbits)) as u64,
+            storage_ix,
+            storage,
+        );
         cmd_histo[code] += 1;
     } else {
-        BrotliWriteBits(cmd_depth[61] as usize, cmd_bits[61] as u64, storage_ix, storage);
+        BrotliWriteBits(
+            cmd_depth[61] as usize,
+            cmd_bits[61] as u64,
+            storage_ix,
+            storage,
+        );
         BrotliWriteBits(12, (insertlen - 2114) as u64, storage_ix, storage);
         cmd_histo[61] += 1;
     }
@@ -198,11 +236,21 @@ fn EmitLongInsertLen(
     storage: &mut [u8],
 ) {
     if insertlen < 22594 {
-        BrotliWriteBits(cmd_depth[62] as usize, cmd_bits[62] as u64, storage_ix, storage);
+        BrotliWriteBits(
+            cmd_depth[62] as usize,
+            cmd_bits[62] as u64,
+            storage_ix,
+            storage,
+        );
         BrotliWriteBits(14, (insertlen - 6210) as u64, storage_ix, storage);
         cmd_histo[62] += 1;
     } else {
-        BrotliWriteBits(cmd_depth[63] as usize, cmd_bits[63] as u64, storage_ix, storage);
+        BrotliWriteBits(
+            cmd_depth[63] as usize,
+            cmd_bits[63] as u64,
+            storage_ix,
+            storage,
+        );
         BrotliWriteBits(24, (insertlen - 22594) as u64, storage_ix, storage);
         cmd_histo[63] += 1;
     }
@@ -217,25 +265,55 @@ fn EmitCopyLen(
     storage: &mut [u8],
 ) {
     if copylen < 10 {
-        BrotliWriteBits(cmd_depth[copylen + 14] as usize, cmd_bits[copylen + 14] as u64, storage_ix, storage);
+        BrotliWriteBits(
+            cmd_depth[copylen + 14] as usize,
+            cmd_bits[copylen + 14] as u64,
+            storage_ix,
+            storage,
+        );
         cmd_histo[copylen + 14] += 1;
     } else if copylen < 134 {
         let tail = copylen - 6;
         let nbits = Log2FloorNonZero(tail as u64) - 1;
         let prefix = tail >> nbits;
         let code = (nbits as usize) * 2 + prefix + 20;
-        BrotliWriteBits(cmd_depth[code] as usize, cmd_bits[code] as u64, storage_ix, storage);
-        BrotliWriteBits(nbits as usize, (tail - (prefix << nbits)) as u64, storage_ix, storage);
+        BrotliWriteBits(
+            cmd_depth[code] as usize,
+            cmd_bits[code] as u64,
+            storage_ix,
+            storage,
+        );
+        BrotliWriteBits(
+            nbits as usize,
+            (tail - (prefix << nbits)) as u64,
+            storage_ix,
+            storage,
+        );
         cmd_histo[code] += 1;
     } else if copylen < 2118 {
         let tail = copylen - 70;
         let nbits = Log2FloorNonZero(tail as u64);
         let code = nbits as usize + 28;
-        BrotliWriteBits(cmd_depth[code] as usize, cmd_bits[code] as u64, storage_ix, storage);
-        BrotliWriteBits(nbits as usize, (tail - (1usize << nbits)) as u64, storage_ix, storage);
+        BrotliWriteBits(
+            cmd_depth[code] as usize,
+            cmd_bits[code] as u64,
+            storage_ix,
+            storage,
+        );
+        BrotliWriteBits(
+            nbits as usize,
+            (tail - (1usize << nbits)) as u64,
+            storage_ix,
+            storage,
+        );
         cmd_histo[code] += 1;
     } else {
-        BrotliWriteBits(cmd_depth[39] as usize, cmd_bits[39] as u64, storage_ix, storage);
+        BrotliWriteBits(
+            cmd_depth[39] as usize,
+            cmd_bits[39] as u64,
+            storage_ix,
+            storage,
+        );
         BrotliWriteBits(24, (copylen - 2118) as u64, storage_ix, storage);
         cmd_histo[39] += 1;
     }
@@ -250,37 +328,87 @@ fn EmitCopyLenLastDistance(
     storage: &mut [u8],
 ) {
     if copylen < 12 {
-        BrotliWriteBits(cmd_depth[copylen - 4] as usize, cmd_bits[copylen - 4] as u64, storage_ix, storage);
+        BrotliWriteBits(
+            cmd_depth[copylen - 4] as usize,
+            cmd_bits[copylen - 4] as u64,
+            storage_ix,
+            storage,
+        );
         cmd_histo[copylen - 4] += 1;
     } else if copylen < 72 {
         let tail = copylen - 8;
         let nbits = Log2FloorNonZero(tail as u64) - 1;
         let prefix = tail >> nbits;
         let code = (nbits as usize) * 2 + prefix + 4;
-        BrotliWriteBits(cmd_depth[code] as usize, cmd_bits[code] as u64, storage_ix, storage);
-        BrotliWriteBits(nbits as usize, (tail - (prefix << nbits)) as u64, storage_ix, storage);
+        BrotliWriteBits(
+            cmd_depth[code] as usize,
+            cmd_bits[code] as u64,
+            storage_ix,
+            storage,
+        );
+        BrotliWriteBits(
+            nbits as usize,
+            (tail - (prefix << nbits)) as u64,
+            storage_ix,
+            storage,
+        );
         cmd_histo[code] += 1;
     } else if copylen < 136 {
         let tail = copylen - 8;
         let code = (tail >> 5) + 30;
-        BrotliWriteBits(cmd_depth[code] as usize, cmd_bits[code] as u64, storage_ix, storage);
+        BrotliWriteBits(
+            cmd_depth[code] as usize,
+            cmd_bits[code] as u64,
+            storage_ix,
+            storage,
+        );
         BrotliWriteBits(5, (tail & 31) as u64, storage_ix, storage);
-        BrotliWriteBits(cmd_depth[64] as usize, cmd_bits[64] as u64, storage_ix, storage);
+        BrotliWriteBits(
+            cmd_depth[64] as usize,
+            cmd_bits[64] as u64,
+            storage_ix,
+            storage,
+        );
         cmd_histo[code] += 1;
         cmd_histo[64] += 1;
     } else if copylen < 2120 {
         let tail = copylen - 72;
         let nbits = Log2FloorNonZero(tail as u64);
         let code = nbits as usize + 28;
-        BrotliWriteBits(cmd_depth[code] as usize, cmd_bits[code] as u64, storage_ix, storage);
-        BrotliWriteBits(nbits as usize, (tail - (1usize << nbits)) as u64, storage_ix, storage);
-        BrotliWriteBits(cmd_depth[64] as usize, cmd_bits[64] as u64, storage_ix, storage);
+        BrotliWriteBits(
+            cmd_depth[code] as usize,
+            cmd_bits[code] as u64,
+            storage_ix,
+            storage,
+        );
+        BrotliWriteBits(
+            nbits as usize,
+            (tail - (1usize << nbits)) as u64,
+            storage_ix,
+            storage,
+        );
+        BrotliWriteBits(
+            cmd_depth[64] as usize,
+            cmd_bits[64] as u64,
+            storage_ix,
+            storage,
+        );
         cmd_histo[code] += 1;
         cmd_histo[64] += 1;
     } else {
-        BrotliWriteBits(cmd_depth[39] as usize, cmd_bits[39] as u64, storage_ix, storage);
+        BrotliWriteBits(
+            cmd_depth[39] as usize,
+            cmd_bits[39] as u64,
+            storage_ix,
+            storage,
+        );
         BrotliWriteBits(24, (copylen - 2120) as u64, storage_ix, storage);
-        BrotliWriteBits(cmd_depth[64] as usize, cmd_bits[64] as u64, storage_ix, storage);
+        BrotliWriteBits(
+            cmd_depth[64] as usize,
+            cmd_bits[64] as u64,
+            storage_ix,
+            storage,
+        );
         cmd_histo[39] += 1;
         cmd_histo[64] += 1;
     }
@@ -299,7 +427,12 @@ fn EmitDistance(
     let prefix = (d >> nbits) & 1;
     let offset = (2 + prefix) << nbits;
     let distcode = 2 * nbits as usize + prefix as usize + 78;
-    BrotliWriteBits(cmd_depth[distcode] as usize, cmd_bits[distcode] as u64, storage_ix, storage);
+    BrotliWriteBits(
+        cmd_depth[distcode] as usize,
+        cmd_bits[distcode] as u64,
+        storage_ix,
+        storage,
+    );
     BrotliWriteBits(nbits as usize, (d - offset) as u64, storage_ix, storage);
     cmd_histo[distcode] += 1;
 }
@@ -314,7 +447,12 @@ fn EmitLiterals(
 ) {
     for j in 0..len {
         let lit = input[j] as usize;
-        BrotliWriteBits(lit_depth[lit] as usize, lit_bits[lit] as u64, storage_ix, storage);
+        BrotliWriteBits(
+            lit_depth[lit] as usize,
+            lit_bits[lit] as u64,
+            storage_ix,
+            storage,
+        );
     }
 }
 
@@ -577,11 +715,27 @@ fn compress_fragment_fast(
                     ip += matched;
 
                     if insert < 6210 {
-                        EmitInsertLen(insert, &cmd_depth, &cmd_bits, &mut cmd_histo, storage_ix, storage);
-                    } else if ShouldUseUncompressedMode(metablock_start, next_emit, insert, literal_ratio) {
+                        EmitInsertLen(
+                            insert,
+                            &cmd_depth,
+                            &cmd_bits,
+                            &mut cmd_histo,
+                            storage_ix,
+                            storage,
+                        );
+                    } else if ShouldUseUncompressedMode(
+                        metablock_start,
+                        next_emit,
+                        insert,
+                        literal_ratio,
+                    ) {
                         EmitUncompressedMetaBlock(
-                            metablock_start, ip, input,
-                            mlen_storage_ix - 3, storage_ix, storage,
+                            metablock_start,
+                            ip,
+                            input,
+                            mlen_storage_ix - 3,
+                            storage_ix,
+                            storage,
                         );
                         remaining -= ip - input_pos;
                         input_pos = ip;
@@ -589,7 +743,14 @@ fn compress_fragment_fast(
                         // Go to next_block.
                         break 'outer;
                     } else {
-                        EmitLongInsertLen(insert, &cmd_depth, &cmd_bits, &mut cmd_histo, storage_ix, storage);
+                        EmitLongInsertLen(
+                            insert,
+                            &cmd_depth,
+                            &cmd_bits,
+                            &mut cmd_histo,
+                            storage_ix,
+                            storage,
+                        );
                     }
 
                     EmitLiterals(
@@ -602,14 +763,33 @@ fn compress_fragment_fast(
                     );
 
                     if distance as i32 == last_distance {
-                        BrotliWriteBits(cmd_depth[64] as usize, cmd_bits[64] as u64, storage_ix, storage);
+                        BrotliWriteBits(
+                            cmd_depth[64] as usize,
+                            cmd_bits[64] as u64,
+                            storage_ix,
+                            storage,
+                        );
                         cmd_histo[64] += 1;
                     } else {
-                        EmitDistance(distance, &cmd_depth, &cmd_bits, &mut cmd_histo, storage_ix, storage);
+                        EmitDistance(
+                            distance,
+                            &cmd_depth,
+                            &cmd_bits,
+                            &mut cmd_histo,
+                            storage_ix,
+                            storage,
+                        );
                         last_distance = distance as i32;
                     }
 
-                    EmitCopyLenLastDistance(matched, &cmd_depth, &cmd_bits, &mut cmd_histo, storage_ix, storage);
+                    EmitCopyLenLastDistance(
+                        matched,
+                        &cmd_depth,
+                        &cmd_bits,
+                        &mut cmd_histo,
+                        storage_ix,
+                        storage,
+                    );
                     next_emit = ip;
 
                     if ip >= ip_limit {
@@ -634,7 +814,10 @@ fn compress_fragment_fast(
                     }
 
                     // Continue matching from current position.
-                    while ip < ip_end && candidate < ip && IsMatch(&input[ip..], &input[candidate..]) {
+                    while ip < ip_end
+                        && candidate < ip
+                        && IsMatch(&input[ip..], &input[candidate..])
+                    {
                         let matched = 5 + FindMatchLengthWithLimit(
                             &input[candidate + 5..],
                             &input[ip + 5..],
@@ -646,7 +829,14 @@ fn compress_fragment_fast(
                         ip += matched;
                         last_distance = (ip - matched - candidate) as i32;
 
-                        EmitCopyLen(matched, &cmd_depth, &cmd_bits, &mut cmd_histo, storage_ix, storage);
+                        EmitCopyLen(
+                            matched,
+                            &cmd_depth,
+                            &cmd_bits,
+                            &mut cmd_histo,
+                            storage_ix,
+                            storage,
+                        );
                         EmitDistance(
                             last_distance as usize,
                             &cmd_depth,
@@ -695,13 +885,48 @@ fn compress_fragment_fast(
         if next_emit < ip_end {
             let insert = ip_end - next_emit;
             if insert < 6210 {
-                EmitInsertLen(insert, &cmd_depth, &cmd_bits, &mut cmd_histo, storage_ix, storage);
-                EmitLiterals(&input[next_emit..], insert, &lit_depth, &lit_bits, storage_ix, storage);
+                EmitInsertLen(
+                    insert,
+                    &cmd_depth,
+                    &cmd_bits,
+                    &mut cmd_histo,
+                    storage_ix,
+                    storage,
+                );
+                EmitLiterals(
+                    &input[next_emit..],
+                    insert,
+                    &lit_depth,
+                    &lit_bits,
+                    storage_ix,
+                    storage,
+                );
             } else if ShouldUseUncompressedMode(metablock_start, next_emit, insert, literal_ratio) {
-                EmitUncompressedMetaBlock(metablock_start, ip_end, input, mlen_storage_ix - 3, storage_ix, storage);
+                EmitUncompressedMetaBlock(
+                    metablock_start,
+                    ip_end,
+                    input,
+                    mlen_storage_ix - 3,
+                    storage_ix,
+                    storage,
+                );
             } else {
-                EmitLongInsertLen(insert, &cmd_depth, &cmd_bits, &mut cmd_histo, storage_ix, storage);
-                EmitLiterals(&input[next_emit..], insert, &lit_depth, &lit_bits, storage_ix, storage);
+                EmitLongInsertLen(
+                    insert,
+                    &cmd_depth,
+                    &cmd_bits,
+                    &mut cmd_histo,
+                    storage_ix,
+                    storage,
+                );
+                EmitLiterals(
+                    &input[next_emit..],
+                    insert,
+                    &lit_depth,
+                    &lit_bits,
+                    storage_ix,
+                    storage,
+                );
             }
         }
         let _ = ip_end; // next_emit tracks end of emitted range.
@@ -741,7 +966,14 @@ fn compress_fragment_fast(
 
     // If output is larger than uncompressed, rewrite.
     if *storage_ix - initial_storage_ix > 31 + (input_size << 3) {
-        EmitUncompressedMetaBlock(0, input_size, input, initial_storage_ix, storage_ix, storage);
+        EmitUncompressedMetaBlock(
+            0,
+            input_size,
+            input,
+            initial_storage_ix,
+            storage_ix,
+            storage,
+        );
     }
 
     let _ = is_last;

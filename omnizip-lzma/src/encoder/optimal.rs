@@ -132,10 +132,7 @@ fn optimal_parse_tuned(
 /// Shared DP body — given a candidate-match table, run the forward
 /// pass and backtrack. Split out from [`optimal_parse`] so the tuned
 /// variant can reuse it without duplicating the DP logic.
-fn optimal_parse_with_matches(
-    input: &[u8],
-    matches: &[Vec<Match>],
-) -> Vec<(usize, ParseAction)> {
+fn optimal_parse_with_matches(input: &[u8], matches: &[Vec<Match>]) -> Vec<(usize, ParseAction)> {
     let n = input.len();
 
     // DP table: opt[i] = cheapest cost to encode input[0..i].
@@ -205,7 +202,10 @@ fn optimal_parse_with_matches(
                     opt[end] = Node {
                         price: new_price,
                         action: Some((
-                            ParseAction::Match { distance: m.distance, length: len },
+                            ParseAction::Match {
+                                distance: m.distance,
+                                length: len,
+                            },
                             i,
                         )),
                         state: new_state,
@@ -321,7 +321,9 @@ mod tests {
             assert_eq!(*start, covered, "gap in parse");
             covered += match action {
                 ParseAction::Literal(_) => 1,
-                ParseAction::Match { length, .. } | ParseAction::Rep0Match { length } => *length as usize,
+                ParseAction::Match { length, .. } | ParseAction::Rep0Match { length } => {
+                    *length as usize
+                }
             };
         }
         assert_eq!(covered, input.len(), "must cover entire input");
@@ -334,7 +336,9 @@ mod tests {
         // a 3-byte repeat at a hash-collision distance) — the match
         // finder correctly finds them. We verify coverage + round-trip
         // rather than asserting a literal count.
-        let input: Vec<u8> = (0..1000u32).map(|i| (i.wrapping_mul(2654435761) >> 16) as u8).collect();
+        let input: Vec<u8> = (0..1000u32)
+            .map(|i| (i.wrapping_mul(2654435761) >> 16) as u8)
+            .collect();
         let actions = optimal_parse_actions(&input, 1 << 16);
 
         // Verify full coverage (no gaps, no overlaps).
@@ -343,7 +347,9 @@ mod tests {
             assert_eq!(*start, covered, "gap in parse");
             covered += match action {
                 ParseAction::Literal(_) => 1,
-                ParseAction::Match { length, .. } | ParseAction::Rep0Match { length } => *length as usize,
+                ParseAction::Match { length, .. } | ParseAction::Rep0Match { length } => {
+                    *length as usize
+                }
             };
         }
         assert_eq!(covered, input.len(), "must cover entire input");
@@ -352,7 +358,9 @@ mod tests {
         let enc = crate::encoder::Lzma1Encoder::with_dict_size(3, 0, 2, 1 << 16);
         let compressed = enc.encode_optimal(&input);
         let mut dec = crate::decoder::Lzma1Decoder::new(3, 0, 2, 1 << 16);
-        let out = dec.decode(&compressed, Some(input.len() as u64), true).expect("decode");
+        let out = dec
+            .decode(&compressed, Some(input.len() as u64), true)
+            .expect("decode");
         assert_eq!(out, input, "optimal parse must round-trip");
     }
 
@@ -366,7 +374,9 @@ mod tests {
             assert_eq!(*start, covered, "gap or overlap in parse");
             covered += match action {
                 ParseAction::Literal(_) => 1,
-                ParseAction::Match { length, .. } | ParseAction::Rep0Match { length } => *length as usize,
+                ParseAction::Match { length, .. } | ParseAction::Rep0Match { length } => {
+                    *length as usize
+                }
             };
         }
         assert_eq!(covered, input.len(), "parse must cover entire input");

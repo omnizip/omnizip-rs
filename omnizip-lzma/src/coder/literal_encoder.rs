@@ -48,13 +48,7 @@ impl LiteralEncoder {
     ///
     /// `lit_state` is the unshifted context value; `lc` is the
     /// literal-context-bits parameter from the LZMA header.
-    pub fn encode_unmatched(
-        &mut self,
-        byte: u8,
-        lit_state: u32,
-        lc: u32,
-        rc: &mut RangeEncoder,
-    ) {
+    pub fn encode_unmatched(&mut self, byte: u8, lit_state: u32, lc: u32, rc: &mut RangeEncoder) {
         let base_offset = 3 * (lit_state << lc);
         // Walk the bit tree top-down. The encoder starts symbol at 1 and
         // emits the high bit of `byte` first (after prepending an implicit
@@ -174,7 +168,9 @@ mod tests {
         let bytes = rc.finish();
         let mut dec = RangeDecoder::new(&bytes).expect("init");
         let mut dec_lit = LiteralDecoder::new(0x300);
-        let recovered = dec_lit.decode_unmatched(lit_state, lc, &mut dec).expect("decode");
+        let recovered = dec_lit
+            .decode_unmatched(lit_state, lc, &mut dec)
+            .expect("decode");
         assert_eq!(recovered, byte);
     }
 

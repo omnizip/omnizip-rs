@@ -51,14 +51,7 @@ pub fn lzma_alone_decompress(input: &[u8]) -> Result<Vec<u8>, LzmaError> {
 
     let dict_size = u32::from_le_bytes([input[1], input[2], input[3], input[4]]);
     let raw_size = u64::from_le_bytes([
-        input[5],
-        input[6],
-        input[7],
-        input[8],
-        input[9],
-        input[10],
-        input[11],
-        input[12],
+        input[5], input[6], input[7], input[8], input[9], input[10], input[11], input[12],
     ]);
 
     let uncompressed_size = if raw_size == UNKNOWN_SIZE {
