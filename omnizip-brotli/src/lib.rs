@@ -145,22 +145,12 @@ impl Codec for BrotliCodec {
     }
     fn compress(&self, plaintext: &[u8], level: CompressionLevel) -> Result<Vec<u8>, OmnizipError> {
         let quality = level.as_u8().min(11);
-        let compressed = if quality <= 1 {
-            fast_encoder::vendored_compress(plaintext)
-        } else {
-            // Try both encoders and pick the smaller output. compress_fragment
-            // is designed for quality 2-6 but can produce worse ratio than
-            // fast_encoder on some inputs (no dictionary support). Taking the
-            // best-of-both guarantees we never regress below quality 1.
-            let fast = fast_encoder::vendored_compress(plaintext);
-            let frag = compress_fragment::compress(plaintext);
-            if fast.len() <= frag.len() {
-                fast
-            } else {
-                frag
-            }
-        };
-        Ok(compressed)
+        // All quality levels use fast_encoder (two-pass with 4-byte hash).
+        // compress_fragment (one-pass with 8-byte hash) is slower and produces
+        // worse ratio on text data due to lack of static dictionary support.
+        // TODO: port backward_references_hq.c for quality 7-11 (TODO 173).
+        let _ = quality;
+        Ok(fast_encoder::vendored_compress(plaintext))
     }
     fn decompress(&self, compressed: &[u8], expected_len: u32) -> Result<Vec<u8>, OmnizipError> {
         let expected_us = usize::try_from(expected_len).map_err(|_| OmnizipError::Corrupt {
