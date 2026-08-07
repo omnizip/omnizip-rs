@@ -28,10 +28,15 @@ use crate::decoder::{
 };
 use crate::prefix::kBlockLengthPrefixCode;
 
-/// Number of distance context bits (RFC 7932 §10.4).
-const K_DISTANCE_CONTEXT_BITS: u32 = 6;
+/// Number of distance context bits (RFC 7932 §10.4 + upstream
+/// `BROTLI_DISTANCE_CONTEXT_BITS`). Distance context is computed from
+/// the copy length's category (4 buckets: <=2, 3-4, 5-8, >=9), so
+/// only 2 bits are needed to index the distance context map.
+const K_DISTANCE_CONTEXT_BITS: u32 = 2;
 
-/// Number of literal context bits (RFC 7932 §10.1).
+/// Number of literal context bits (RFC 7932 §10.1 + upstream
+/// `BROTLI_LITERAL_CONTEXT_BITS`). Literal context uses p1, p2 (top
+/// 6 bits each) → 64 contexts.
 const K_LITERAL_CONTEXT_BITS: u32 = 6;
 
 /// Per-category block-type state (RFC 7932 §9.3).
@@ -383,7 +388,7 @@ pub(crate) fn decode_compressed_metablock_full_with_trees(
     ndirect_raw: usize,
     context_mode_bits: u32,
     ntreesl: u32,
-    ntreesd: u32,
+    ntreesd: Option<u32>,
 ) -> Result<(usize, Vec<u8>), &'static str> {
     let mut br = BitReader::new(data);
     br.bit_pos = bit_pos;
@@ -405,7 +410,7 @@ pub(crate) fn decode_compressed_metablock_full_with_trees(
 
     finish_metablock_decode(
         data, &mut br, mlen, npostfix, ndirect_raw,
-        Some(ntreesl), Some(ntreesd), // NTREES already read by dispatcher
+        Some(ntreesl), ntreesd, // NTREES_L already read; NTREES_D may be inline
         lit_bt, cmd_bt, dist_bt, context_modes,
     )
 }

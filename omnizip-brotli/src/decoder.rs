@@ -897,15 +897,31 @@ fn decode_compressed_metablock(
 
     let _context_mode = br.read_bits(2);
 
+    // Per upstream `DecodeContextMap`: NTREES_L is read via varlen at
+    // the start of the literal context map, and NTREES_D is read at
+    // the start of the DISTANCE context map (AFTER the literal map).
+    // For trivial literal map (NTREES_L == 1), both reads happen at
+    // adjacent bit positions, so reading them sequentially here is
+    // equivalent. But for NTREES_L > 1, the literal map consumes
+    // variable bits between the two NTREES reads, so we must NOT read
+    // NTREES_D upfront — let the full decoder read it inline.
     let ntreesl = read_varlen_uint8(&mut br)? + 1;
-    let ntreesd = read_varlen_uint8(&mut br)? + 1;
-
-    // Dispatch to the full decoder if NTREES > 1 in either category
-    // (multi-tree Huffman groups requiring context maps).
-    if ntreesl > 1 || ntreesd > 1 {
+    if ntreesl > 1 {
+        // Multi-tree literal group: dispatch to full decoder, which
+        // will read the literal context map then NTREES_D inline.
         return crate::decoder_full::decode_compressed_metablock_full_with_trees(
             data, br.bit_pos(), mlen,
-            npostfix, ndirect_raw, _context_mode, ntreesl, ntreesd,
+            npostfix, ndirect_raw, _context_mode, ntreesl, None,
+        );
+    }
+
+    // NTREES_L == 1: literal map is trivial (no bits consumed), so
+    // NTREES_D is at the immediately following bit position.
+    let ntreesd = read_varlen_uint8(&mut br)? + 1;
+    if ntreesd > 1 {
+        return crate::decoder_full::decode_compressed_metablock_full_with_trees(
+            data, br.bit_pos(), mlen,
+            npostfix, ndirect_raw, _context_mode, ntreesl, Some(ntreesd),
         );
     }
 
