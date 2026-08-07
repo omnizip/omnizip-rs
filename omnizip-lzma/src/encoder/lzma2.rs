@@ -72,7 +72,13 @@ pub fn encode_lzma2_stream_with_options(
             encoder.encode_with_tuning(chunk, options.max_chain_length, options.nice_match)
         };
 
-        let usable_compressed_size = compressed.len().saturating_sub(5);
+        // LZMA2 chunks carry the full LZMA1 stream including the EOPM
+        // and range-coder flush. The decoder uses the chunk's
+        // uncompressed-size field to know when to stop — it breaks
+        // before attempting to decode the EOPM (allow_eopm=false).
+        // Stripping trailing bytes corrupts the stream because the
+        // EOPM bits and flush bytes are interleaved at the byte level.
+        let usable_compressed_size = compressed.len();
         if usable_compressed_size > u16::MAX as usize {
             return Err(LzmaError::Corrupt {
                 reason: format!(
@@ -97,7 +103,6 @@ pub fn encode_lzma2_stream_with_options(
         }
 
         out.extend_from_slice(&compressed[..usable_compressed_size]);
-
         offset += chunk_size;
         first_chunk = false;
     }

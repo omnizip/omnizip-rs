@@ -134,14 +134,9 @@ impl LiteralEncoder {
         rc: &mut RangeEncoder,
     ) {
         let mut symbol = start_symbol;
-        // Determine how many bits remain.
-        // symbol starts at start_symbol (between 2 and 0x100).
-        // Each iteration emits one more bit until symbol reaches 0x100.
         while symbol < SYMBOL_DONE {
-            // Bit position: count bits in symbol so far.
-            // start_symbol had `n` bits set; we've added some since.
-            let bits_done = (symbol.leading_zeros() as usize).saturating_sub(24); // 1..=8
-            let bit_pos = 7 - (bits_done as i32);
+            let depth = symbol.ilog2() as usize;
+            let bit_pos = 7 - depth as i32;
             let bit = if bit_pos >= 0 {
                 u32::from((byte >> bit_pos) & 1)
             } else {

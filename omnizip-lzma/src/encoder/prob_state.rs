@@ -129,13 +129,18 @@ impl LzmaProbState {
     }
 
     /// Transition: a match (non-rep) was encoded at `distance`.
+    ///
+    /// `distance` is 1-based (the value the match finder returns and
+    /// the encoder receives). Internally we store `rep0` as 0-based
+    /// (distance - 1) to match the encoder's convention — the rep0
+    /// match check in `optimal.rs` uses `back = i - rep0 - 1`.
     #[must_use]
     pub const fn after_match(self, distance: u32) -> Self {
         Self {
             state: self.state.after_match(),
             prev_byte: self.prev_byte,
             match_byte: self.match_byte,
-            rep0: distance,
+            rep0: distance - 1,
         }
     }
 
@@ -304,10 +309,10 @@ mod tests {
     fn prob_state_transitions_track_rep0() {
         let s = LzmaProbState::new();
         let s1 = s.after_match(100);
-        assert_eq!(s1.rep0, 100);
+        assert_eq!(s1.rep0, 99); // 0-based: distance - 1
         assert_eq!(s1.state.0, 7);
         let s2 = s1.after_literal(0xAA);
-        assert_eq!(s2.rep0, 100); // rep0 carries
+        assert_eq!(s2.rep0, 99); // rep0 carries
         assert_eq!(s2.prev_byte, 0xAA);
         let s3 = s2.after_rep();
         assert_eq!(s3.state.0, 8);
