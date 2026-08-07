@@ -23,6 +23,7 @@ allow = [
     "Unicode-DFS-2016",
     "Unicode-3.0",
     "CC0-1.0",
+    "0BSD",
     # MPL-2.0 is a weak copyleft, file-level license; compatible with
     # BSD-2-Clause distribution. Pulled in by `dirs` → `option-ext`.
     "MPL-2.0",
