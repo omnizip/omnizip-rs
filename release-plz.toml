@@ -7,10 +7,63 @@
 git_release_enable = false
 dependencies_update = true
 allow_dirty = false
-# Always release without comparing against old published versions.
-# The workspace structure changed significantly since 0.14.20
-# (new crates added), so cargo metadata fails at old commits.
 release_always = true
+
+# Explicitly list packages to avoid workspace-wide cargo metadata at
+# old commits (where some workspace members didn't exist yet).
+[[packages]]
+name = "omnizip-codecs"
+
+[[packages]]
+name = "omnizip-filters"
+
+[[packages]]
+name = "omnizip-bzip2"
+
+[[packages]]
+name = "omnizip-brotli"
+
+[[packages]]
+name = "omnizip-deflate"
+
+[[packages]]
+name = "omnizip-deflate64"
+
+[[packages]]
+name = "omnizip-flac"
+
+[[packages]]
+name = "omnizip-fsst"
+
+[[packages]]
+name = "omnizip-glza"
+
+[[packages]]
+name = "omnizip-libdeflate"
+
+[[packages]]
+name = "omnizip-lz4"
+
+[[packages]]
+name = "omnizip-lzma"
+
+[[packages]]
+name = "omnizip-ppmd"
+
+[[packages]]
+name = "omnizip-ricepp"
+
+[[packages]]
+name = "omnizip-snappy"
+
+[[packages]]
+name = "omnizip-zpaq"
+
+[[packages]]
+name = "omnizip-zstd"
+
+[[packages]]
+name = "omnizip-blosc"
 
 [changelog]
 # Group commits by conventional-commit type
