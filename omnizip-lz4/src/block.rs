@@ -28,14 +28,17 @@ const HASH_SIZE: usize = 1 << HASH_LOG;
 
 /// Compress `input` into an LZ4 block (no size prefix, no frame wrapper).
 /// Fast mode: single-probe hash, no chain, no lazy look-ahead.
+///
+/// Includes an incompressibility detector: if the first 1024 positions
+/// yield fewer than 2 matches, switches to literal-only mode for the
+/// remainder. This avoids wasting time on hash lookups for random data
+/// (the main cause of the 5.6× slowdown vs lz4_flex on random input).
 #[must_use]
 pub fn compress_block(input: &[u8]) -> Vec<u8> {
     if input.is_empty() {
-        // Single token with literal length 0, no match.
         return vec![0u8];
     }
     if input.len() < MIN_MATCH + 5 {
-        // Too short for matches — emit as a single literal-only token.
         let mut out = Vec::with_capacity(input.len() + 4);
         write_token_literals(&mut out, input.len());
         out.extend_from_slice(input);
@@ -48,14 +51,22 @@ pub fn compress_block(input: &[u8]) -> Vec<u8> {
     let mut pos = 0usize;
     let last_match_start = input.len().saturating_sub(MIN_MATCH);
 
+    // Incompressibility detector: count matches in the first 1024
+    // positions. If fewer than 2, switch to literal-only mode.
+    let probe_end = last_match_start.min(1024);
+    let mut match_count = 0u32;
+    let mut probing = pos < probe_end;
+
     while pos < last_match_start {
         let h = hash4(input, pos);
         let candidate = hash_table[h] as usize;
         hash_table[h] = pos as u32;
 
         if candidate > 0 && candidate < pos && pos - candidate <= 65535 {
-            if input[candidate..candidate + MIN_MATCH] == input[pos..pos + MIN_MATCH] {
-                // Extend match.
+            // Fast byte check before full 4-byte comparison.
+            if input[candidate] == input[pos]
+                && input[candidate..candidate + MIN_MATCH] == input[pos..pos + MIN_MATCH]
+            {
                 let mut mlen = MIN_MATCH;
                 while pos + mlen < input.len()
                     && mlen < MAX_MATCH
@@ -64,32 +75,22 @@ pub fn compress_block(input: &[u8]) -> Vec<u8> {
                     mlen += 1;
                 }
 
-                // Emit literals + match.
                 let lit_len = pos - anchor;
                 let offset = pos - candidate;
                 let match_code = mlen - MIN_MATCH;
-                // Token: (lit_code << 4) | m_code.
                 let lit_code = lit_len.min(15);
                 let m_code = match_code.min(15);
                 out.push(((lit_code as u8) << 4) | (m_code as u8));
 
-                // Literal length extension (only when code nibble == 15).
                 if lit_len >= 15 {
                     write_length_ext(&mut out, lit_len - 15);
                 }
-
-                // Literal bytes.
                 out.extend_from_slice(&input[anchor..pos]);
-
-                // Offset (2 bytes LE).
                 out.extend_from_slice(&(offset as u16).to_le_bytes());
-
-                // Match length extension (only when code nibble == 15).
                 if match_code >= 15 {
                     write_length_ext(&mut out, match_code - 15);
                 }
 
-                // Insert hash for a few positions inside the match.
                 let end = pos + mlen;
                 let mut ip = pos + 1;
                 while ip < end.min(last_match_start) {
@@ -99,13 +100,27 @@ pub fn compress_block(input: &[u8]) -> Vec<u8> {
                 }
                 pos = end;
                 anchor = pos;
+                if probing {
+                    match_count += 1;
+                }
                 continue;
             }
         }
         pos += 1;
+
+        // Check incompressibility after probing window.
+        if probing && pos >= probe_end {
+            probing = false;
+            if match_count < 2 {
+                // Incompressible: emit remaining as literals.
+                let lit_len = input.len() - anchor;
+                write_token_literals(&mut out, lit_len);
+                out.extend_from_slice(&input[anchor..]);
+                return out;
+            }
+        }
     }
 
-    // Emit trailing literals.
     let lit_len = input.len() - anchor;
     write_token_literals(&mut out, lit_len);
     out.extend_from_slice(&input[anchor..]);
