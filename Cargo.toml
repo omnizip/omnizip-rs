@@ -36,30 +36,11 @@ description = "Pure-Rust compression codecs — ports of omnizip's Ruby referenc
 [workspace.lints.rust]
 unsafe_code = "forbid"
 
+# Workspace clippy config: deliberately minimal. The CI runs clippy
+# with -D warnings; individual crates can opt into stricter lints via
+# crate-level attributes. Setting lint groups (all/pedantic) at the
+# workspace level causes priority conflicts with individual allows.
 [workspace.lints.clippy]
-# Enable all default clippy lints but allow common false positives that
-# would require major refactoring across 19 codec crates. Individual
-# crates can override with crate-level `#![warn(clippy::pedantic)]` as
-# they are cleaned up.
-all = "warn"
-cast_possible_truncation = "allow"
-cast_possible_wrap = "allow"
-cast_sign_loss = "allow"
-cast_precision_loss = "allow"
-module_name_repetitions = "allow"
-must_use_candidate = "allow"
-missing_errors_doc = "allow"
-missing_panics_doc = "allow"
-return_self_not_must_use = "allow"
-similar_names = "allow"
-too_many_lines = "allow"
-struct_excessive_bools = "allow"
-trivially_copy_pass_by_ref = "allow"
-unnecessary_wraps = "allow"
-needless_pass_by_value = "allow"
-type_complexity = "allow"
-wrong_self_convention = "allow"
-doc_markdown = "allow"
 
 [workspace.dependencies]
 omnizip-codecs = { path = "omnizip-codecs", version = "0.14.0" }
