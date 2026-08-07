@@ -1,0 +1,38 @@
+# Release-plz configuration for omnizip-rs
+#
+# Automated versioning and changelog generation driven by conventional commits.
+# See: https://release-plz.dev/docs/config
+#
+# The release.yml workflow runs release-plz on every push to main.
+# When conventional commits indicate a version bump is needed,
+# release-plz opens a "release PR". Merging that PR publishes all
+# crates to crates.io in dependency order.
+
+[workspace]
+# release.yml handles GitHub Release creation on tag push.
+git_release_enable = false
+
+# Update dependencies with `cargo update` as part of release PRs
+dependencies_update = true
+
+# Allow PRs to be created from the release-plz bot
+allow_dirty = false
+
+[changelog]
+# Group commits by conventional-commit type
+body = """
+{% for group, commits in commits | group_by(attribute="group") %}
+### {{ group | upper_first }}
+{% for commit in commits %}
+- {{ commit.message | upper_first }}\
+{% if commit.breaking %} (BREAKING){% endif %}\
+{% if commit.author != "github-actions[bot]" %} by @{{ commit.author }}{% endif %}\
+{% endfor %}
+{% endfor %}
+"""
+
+# Conventional commits configuration
+# - feat: minor version bump
+# - fix: patch version bump
+# - feat! or fix!: major version bump (breaking change)
+# - docs, chore, refactor, test, ci: no version bump (changelog only)
