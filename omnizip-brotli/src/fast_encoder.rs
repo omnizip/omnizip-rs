@@ -25,7 +25,7 @@ impl HuffmanTree {
 
 // ── Utility functions ──
 
-fn Log2FloorNonZero(n: u64) -> u32 { 63 - n.leading_zeros() }
+pub(crate) fn Log2FloorNonZero(n: u64) -> u32 { 63 - n.leading_zeros() }
 
 fn memcpy<T: Clone>(dst: &mut [T], dst_offset: usize, src: &[T], src_offset: usize, size: usize) {
     dst[dst_offset..dst_offset + size].clone_from_slice(&src[src_offset..src_offset + size]);
@@ -39,15 +39,15 @@ pub fn BrotliWriteBits(n_bits: usize, bits: u64, pos: &mut usize, array: &mut [u
     *pos = pos.wrapping_add(n_bits);
 }
 
-fn BROTLI_UNALIGNED_LOAD32(p: &[u8]) -> u32 {
+pub(crate) fn BROTLI_UNALIGNED_LOAD32(p: &[u8]) -> u32 {
     u32::from_le_bytes([p[0], p[1], p[2], p[3]])
 }
-fn BROTLI_UNALIGNED_LOAD64(p: &[u8]) -> u64 {
+pub(crate) fn BROTLI_UNALIGNED_LOAD64(p: &[u8]) -> u64 {
     let mut v = 0u64;
     for i in 0..8.min(p.len()) { v |= (p[i] as u64) << (8 * i); }
     v
 }
-fn FindMatchLengthWithLimit(s1: &[u8], s2: &[u8], limit: usize) -> usize {
+pub(crate) fn FindMatchLengthWithLimit(s1: &[u8], s2: &[u8], limit: usize) -> usize {
     let mut i = 0;
     while i < limit && i < s1.len() && i < s2.len() && s1[i] == s2[i] { i += 1; }
     i
@@ -107,7 +107,7 @@ fn SortHuffmanTreeItems(tree: &mut [HuffmanTree], n: usize, cmp: impl HuffmanCom
 
 // ── Build Huffman tree from histogram ──
 
-fn BrotliCreateHuffmanTree(data: &[u32], length: usize, tree_limit: i32, tree: &mut [HuffmanTree], depth: &mut [u8]) -> bool {
+pub(crate) fn BrotliCreateHuffmanTree(data: &[u32], length: usize, tree_limit: i32, tree: &mut [HuffmanTree], depth: &mut [u8]) -> bool {
     let sentinel = HuffmanTree::new(u32::MAX, -1, -1);
     let mut count_limit: u32 = 1;
     loop {
@@ -150,7 +150,7 @@ fn BrotliCreateHuffmanTree(data: &[u32], length: usize, tree_limit: i32, tree: &
 
 // ── Convert depths to canonical Huffman codes (bit-reversed) ──
 
-fn BrotliConvertBitDepthsToSymbols(depth: &[u8], len: usize, bits: &mut [u16]) {
+pub(crate) fn BrotliConvertBitDepthsToSymbols(depth: &[u8], len: usize, bits: &mut [u16]) {
     let mut bl_count = [0u16; MAX_HUFFMAN_BITS + 1];
     let mut next_code = [0u16; MAX_HUFFMAN_BITS + 1];
     for i in 0..len { bl_count[depth[i] as usize] += 1; }
@@ -583,7 +583,7 @@ fn BrotliStoreHuffmanTreeToBitMask(huffman_tree_size: usize, huffman_tree: &[u8]
     }
 }
 
-fn BrotliStoreHuffmanTree(depths: &[u8], num: usize, tree: &mut [HuffmanTree], storage_ix: &mut usize, storage: &mut [u8]) {
+pub(crate) fn BrotliStoreHuffmanTree(depths: &[u8], num: usize, tree: &mut [HuffmanTree], storage_ix: &mut usize, storage: &mut [u8]) {
     let mut huffman_tree = [0u8; 704];
     let mut huffman_tree_extra_bits = [0u8; 704];
     let mut huffman_tree_size = 0usize;
@@ -612,7 +612,7 @@ fn BrotliStoreHuffmanTree(depths: &[u8], num: usize, tree: &mut [HuffmanTree], s
 
 // ── Build + store Huffman tree (fast variant with simple-form) ──
 
-fn BrotliBuildAndStoreHuffmanTreeFast(
+pub(crate) fn BrotliBuildAndStoreHuffmanTreeFast(
     histogram: &[u32], histogram_total: usize, max_bits: u8,
     depth: &mut [u8], bits: &mut [u16],
     storage_ix: &mut usize, storage: &mut [u8],

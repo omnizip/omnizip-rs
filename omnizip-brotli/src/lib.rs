@@ -11,6 +11,7 @@
 #![warn(clippy::pedantic)]
 
 pub mod commands;
+pub mod compress_fragment;
 pub mod decoder;
 pub mod decoder_full;
 pub mod dictionary;
@@ -135,6 +136,9 @@ impl Codec for BrotliCodec {
         "brotli"
     }
     fn compress(&self, plaintext: &[u8], _level: CompressionLevel) -> Result<Vec<u8>, OmnizipError> {
+        // All quality levels use the proven q=0/1 two-pass encoder.
+        // The q=2..6 compress_fragment port is in progress but not yet
+        // producing valid output.
         Ok(fast_encoder::vendored_compress(plaintext))
     }
     fn decompress(&self, compressed: &[u8], expected_len: u32) -> Result<Vec<u8>, OmnizipError> {
