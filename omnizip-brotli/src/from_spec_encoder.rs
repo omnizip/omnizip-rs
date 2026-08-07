@@ -90,7 +90,11 @@ impl BitWriter {
             return;
         }
         debug_assert!(n <= 32);
-        let mask: u64 = if n >= 32 { u32::MAX as u64 } else { (1u64 << n) - 1 };
+        let mask: u64 = if n >= 32 {
+            u32::MAX as u64
+        } else {
+            (1u64 << n) - 1
+        };
         self.acc |= (u64::from(value) & mask) << self.nbits;
         self.nbits += n;
         while self.nbits >= 8 {
@@ -167,7 +171,11 @@ fn encode_uncompressed_frame(input: &[u8]) -> Vec<u8> {
     let mnibbles_field: u32 = if input.len() < (1 << 16) { 0 } else { 2 };
     bw.write_bits(mnibbles_field, 2);
 
-    let nibbles: u32 = if mnibbles_field == 0 { 4 } else { mnibbles_field + 3 };
+    let nibbles: u32 = if mnibbles_field == 0 {
+        4
+    } else {
+        mnibbles_field + 3
+    };
     let mlen_minus_1 = (input.len() - 1) as u64;
     for i in 0..nibbles {
         let nib = ((mlen_minus_1 >> (4 * u64::from(i))) & 0xF) as u32;
@@ -581,9 +589,8 @@ const CL_CODE_TO_WIRE: [(u32, u8); 6] = [
 ];
 
 /// CODE_LENGTH_CODE_ORDER per RFC 7932 §9.5.2.
-const CODE_LENGTH_CODE_ORDER: [u8; 18] = [
-    1, 2, 3, 4, 0, 5, 17, 6, 16, 7, 8, 9, 10, 11, 12, 13, 14, 15,
-];
+const CODE_LENGTH_CODE_ORDER: [u8; 18] =
+    [1, 2, 3, 4, 0, 5, 17, 6, 16, 7, 8, 9, 10, 11, 12, 13, 14, 15];
 
 /// Write a Huffman table (RFC 7932 §9.5).
 ///
@@ -596,13 +603,20 @@ const CODE_LENGTH_CODE_ORDER: [u8; 18] = [
 /// prefix code's "space" is fully consumed (sum of 32>>len = 32). We
 /// replicate that break here so the bit position after this table
 /// matches the decoder's expectation.
-fn write_huffman_table(bw: &mut BitWriter, lengths: &omnizip_codecs::HuffmanLengths, alphabet: usize) {
+fn write_huffman_table(
+    bw: &mut BitWriter,
+    lengths: &omnizip_codecs::HuffmanLengths,
+    alphabet: usize,
+) {
     // Special case: 0 or 1 non-zero symbols both use the simple form
     // (HSKIP=1, NSYM=1). The complex form requires a valid prefix code
     // over the code-length alphabet, which doesn't exist when no main
     // alphabet symbols are used (e.g. literal table for a metablock
     // with zero literals).
-    let nonzero: Vec<usize> = lengths.lengths.iter().enumerate()
+    let nonzero: Vec<usize> = lengths
+        .lengths
+        .iter()
+        .enumerate()
         .filter(|(_, &l)| l > 0)
         .map(|(i, _)| i)
         .collect();
@@ -814,7 +828,11 @@ mod tests {
             let nbits = ((distval as u32) >> 1) + 1;
             let offset = (((distval & 1) + 2) << nbits) - 4;
             let decoded = (offset + extra as i32 + 1) as u32;
-            assert_eq!(decoded, d, "distance {} round-trip failed: sym={}, extra={}", d, sym, extra);
+            assert_eq!(
+                decoded, d,
+                "distance {} round-trip failed: sym={}, extra={}",
+                d, sym, extra
+            );
         }
     }
 

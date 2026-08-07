@@ -19,9 +19,7 @@
 
 #![forbid(unsafe_code)]
 
-use omnizip_codecs::{
-    CodecId, CompressionLevel, OmnizipError, StreamingDecoder, StreamingEncoder,
-};
+use omnizip_codecs::{CodecId, CompressionLevel, OmnizipError, StreamingDecoder, StreamingEncoder};
 
 use crate::encoder::alone::{lzma_alone_compress_with_options, LzmaOptions};
 use crate::lzma_alone_decompress;

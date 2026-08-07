@@ -241,11 +241,7 @@ mod tests {
                 if li == 0 || lj == 0 {
                     continue;
                 }
-                let (shorter, longer, ls) = if li < lj {
-                    (ci, cj, li)
-                } else {
-                    (cj, ci, lj)
-                };
+                let (shorter, longer, ls) = if li < lj { (ci, cj, li) } else { (cj, ci, lj) };
                 let diff = li.max(lj) - ls;
                 assert_ne!(
                     shorter,
