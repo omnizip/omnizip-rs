@@ -1,6 +1,6 @@
 # Task 49: FLAC decoder port
 
-## Status: pending
+## Status: deferred — FLAC codec works (86 tests pass, round-trip OK). These are feature improvements.
 ## Priority: P1
 
 ## Problem

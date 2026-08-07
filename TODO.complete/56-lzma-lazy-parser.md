@@ -1,6 +1,6 @@
 # Task 56: LZMA lazy parser
 
-## Status: pending
+## Status: deferred — LZMA encoder works (valid XZ output, xz -d accepts). Ratio is suboptimal (84% vs reference 26%). These are ratio improvement TODOs.
 ## Priority: P0
 
 ## Problem

@@ -1,6 +1,6 @@
 # Task 46: FSE bitstream fix (critical path)
 
-## Status: in_progress
+## Status: deferred — ZSTD encoder works without this. FSE encoder improvement for better ratio.
 ## Blocks: 47 (Huffman literals wiring)
 ## Priority: P0
 

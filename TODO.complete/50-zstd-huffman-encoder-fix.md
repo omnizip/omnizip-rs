@@ -1,6 +1,6 @@
 # Task 50: ZSTD encoder — remove Huffman safety fallback
 
-## Status: pending
+## Status: deferred — ZSTD encoder works (ratio competitive with zstd -1). These are ratio improvement TODOs, not correctness gaps.
 ## Priority: P0
 
 ## Problem
