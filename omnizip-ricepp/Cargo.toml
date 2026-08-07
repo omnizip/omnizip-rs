@@ -21,7 +21,7 @@ default = []
 simd-delta = ["dep:wide"]
 
 [dependencies.wide]
-version = "1.6"
+version = "1.5"
 optional = true
 
 [lints]

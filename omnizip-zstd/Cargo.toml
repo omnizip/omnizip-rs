@@ -24,7 +24,7 @@ simd-huffman = ["dep:wide"]
 
 [dependencies]
 omnizip-codecs = { workspace = true }
-wide = { version = "1.6", optional = true }
+wide = { version = "1.5", optional = true }
 
 [lints]
 workspace = true
