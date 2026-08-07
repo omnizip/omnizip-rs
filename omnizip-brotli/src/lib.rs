@@ -117,9 +117,10 @@ impl BrotliCodec {
     }
 
     /// Compress using the from-spec encoder (RFC 7932 from scratch, no
-    /// vendored code). Currently emits an uncompressed metablock — valid
-    /// for any conformant decoder but does not achieve compression.
-    /// Useful when callers need a guaranteed from-spec output path.
+    /// vendored code). Produces Huffman-coded metablocks for inputs that
+    /// benefit from compression, falling back to an uncompressed metablock
+    /// when Huffman coding would be larger. Useful when callers need a
+    /// guaranteed from-spec output path.
     #[must_use]
     pub fn compress_from_spec(&self, plaintext: &[u8]) -> Vec<u8> {
         from_spec_encoder::compress(plaintext)

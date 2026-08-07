@@ -37,7 +37,6 @@
     clippy::items_after_statements
 )]
 
-use crate::dictionary::find_dictionary_match;
 use crate::prefix::kCmdLut;
 
 /// Brotli window bits for the encoder (22 = 4 MB window).
@@ -715,6 +714,33 @@ mod tests {
         assert!(
             compressed.len() < input.len(),
             "compressed {} should be < input {}",
+            compressed.len(),
+            input.len()
+        );
+    }
+
+    #[test]
+    fn compresses_text_input() {
+        let input: Vec<u8> = b"The quick brown fox jumps over the lazy dog. ".repeat(50);
+        let compressed = compress(&input);
+        assert!(
+            compressed.len() < input.len(),
+            "text compressed {} should be < input {}",
+            compressed.len(),
+            input.len()
+        );
+    }
+
+    #[test]
+    fn compresses_csv_input() {
+        let input: Vec<u8> = (0..100)
+            .map(|i| format!("row_{},{},value_{}\n", i, i * 2, i % 7))
+            .collect::<String>()
+            .into_bytes();
+        let compressed = compress(&input);
+        assert!(
+            compressed.len() < input.len(),
+            "csv compressed {} should be < input {}",
             compressed.len(),
             input.len()
         );
