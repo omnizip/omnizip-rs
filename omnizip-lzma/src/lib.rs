@@ -49,6 +49,7 @@ pub mod lzma2;
 pub mod r#match;
 pub mod range_coder;
 pub mod state;
+pub mod streaming;
 pub mod xz_container;
 
 use std::fmt;
@@ -74,6 +75,7 @@ pub use lzma2::decode_lzma2_stream;
 pub use r#match::Match;
 pub use range_coder::{RangeDecoder, RangeEncoder};
 pub use state::{LzmaState, LIT_STATES, MATCH_STATES, NUM_STATES, REP_STATES, SHORT_REP_STATES};
+pub use streaming::{LzmaStreamingDecoder, LzmaStreamingEncoder};
 pub use xz_container::xz_decompress;
 
 /// LZMA compression level 0–9, matching `xz` presets.

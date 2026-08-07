@@ -27,6 +27,7 @@ pub mod hash;
 mod level;
 pub mod matchfinder;
 mod registry;
+pub mod streaming;
 pub mod xxhash;
 
 pub use arith::{scaled_prob, ArithDecoder, ArithEncoder, PROB_SCALE as ARITH_PROB_SCALE};
@@ -38,3 +39,4 @@ pub use hash::{djb2_32, djb2_32_tagged, fnv1a_32, fnv1a_32_tagged};
 pub use level::CompressionLevel;
 pub use matchfinder::{HashChainConfig, HashChainMatchFinder, Lz77Match};
 pub use registry::CodecRegistry;
+pub use streaming::{StreamingDecoder, StreamingEncoder};
