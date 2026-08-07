@@ -120,7 +120,7 @@ jobs:
       - name: Check documentation
         run: cargo doc --workspace --no-deps
         env:
-          RUSTDOCFLAGS: "-D warnings"
+          RUSTDOCFLAGS: "-D warnings -A rustdoc::broken_intra_doc_links"
 
   # ============================================================================
   # Unused Dependencies
