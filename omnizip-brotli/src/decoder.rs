@@ -523,7 +523,10 @@ fn read_simple_form(
             let s1 = br.read_bits(bits_per_sym) as usize;
             let s2 = br.read_bits(bits_per_sym) as usize;
             if s0 >= alphabet_size || s1 >= alphabet_size || s2 >= alphabet_size { return Err("simple-form symbol out of range"); }
-            lengths[s0] = 2;
+            // Per upstream BrotliBuildSimpleHuffmanTable num_symbols=2:
+            // s0 gets depth 1 (code "0x"), s1 and s2 get depth 2
+            // (codes "10" and "11", sorted: min→"10", max→"11").
+            lengths[s0] = 1;
             lengths[s1] = 2;
             lengths[s2] = 2;
         }
