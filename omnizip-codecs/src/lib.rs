@@ -19,6 +19,7 @@
 #![warn(clippy::pedantic)]
 
 pub mod arith;
+pub mod bitstream;
 pub mod checksum;
 mod codec;
 mod error;
@@ -29,6 +30,7 @@ mod registry;
 pub mod xxhash;
 
 pub use arith::{scaled_prob, ArithDecoder, ArithEncoder, PROB_SCALE as ARITH_PROB_SCALE};
+pub use bitstream::{BitReaderBE, BitReaderLE, BitWriterBE, BitWriterLE};
 pub use checksum::{crc32_iso_hdlc, crc32_iso_hdlc_raw, crc32_iso_hdlc_update};
 pub use codec::{Codec, CodecId};
 pub use error::OmnizipError;
