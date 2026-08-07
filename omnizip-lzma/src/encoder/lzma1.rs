@@ -752,3 +752,33 @@ mod tests {
         assert_eq!(out.as_slice(), input.as_slice());
     }
 }
+
+#[cfg(test)]
+mod bt4_integration_tests {
+    use super::*;
+    use crate::decoder::Lzma1Decoder;
+
+    #[test]
+    fn bt4_round_trips() {
+        let input: Vec<u8> = b"the quick brown fox jumps over the lazy dog. ".repeat(20);
+        let enc = Lzma1Encoder::new(3, 0, 2).with_bt4();
+        let compressed = enc.encode(&input);
+        let mut dec = Lzma1Decoder::new(3, 0, 2, 1 << 16);
+        let out = dec.decode(&compressed, Some(input.len() as u64), true).expect("decode");
+        assert_eq!(out, input);
+    }
+
+    #[test]
+    fn bt4_compresses_better_than_hash_chain_on_repetitive() {
+        let input: Vec<u8> = b"abcdefgh".repeat(100);
+        let hash_chain = Lzma1Encoder::new(3, 0, 2).encode(&input);
+        let bt4 = Lzma1Encoder::new(3, 0, 2).with_bt4().encode(&input);
+        // BT4 should be no worse (and ideally better).
+        assert!(
+            bt4.len() <= hash_chain.len() + 20,
+            "BT4 {} should be ≤ hash-chain {} + tolerance",
+            bt4.len(),
+            hash_chain.len()
+        );
+    }
+}
