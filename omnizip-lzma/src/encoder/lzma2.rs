@@ -67,9 +67,12 @@ pub fn encode_lzma2_stream_with_options(
         let chunk = &input[offset..offset + chunk_size];
 
         let prev_byte = if offset > 0 { input[offset - 1] } else { 0 };
-        let encoder = crate::encoder::Lzma1Encoder::new(lc, lp, pb)
+        let mut encoder = crate::encoder::Lzma1Encoder::new(lc, lp, pb)
             .with_base_pos(offset as u32)
             .with_base_prev_byte(prev_byte);
+        if options.use_bt4 {
+            encoder = encoder.with_bt4();
+        }
         let compressed = if use_optimal {
             encoder.encode_optimal_with_tuning(chunk, options.max_chain_length, options.nice_match)
         } else {

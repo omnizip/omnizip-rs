@@ -79,6 +79,9 @@ pub struct LzmaOptions {
     /// worse ratio on inputs where the chain has progressively longer
     /// matches (rare).
     pub nice_match: u32,
+    /// Use the BT4 binary-tree match finder (better ratio, slower).
+    /// Enabled automatically at levels ≥ 7.
+    pub use_bt4: bool,
     /// LZMA2 reset mode for cross-call state reuse. See [`ResetMode`].
     /// Default: [`ResetMode::Full`] (same as fresh allocation every call).
     /// Set to [`ResetMode::ReuseState`] for batch workloads to skip
@@ -117,6 +120,7 @@ impl Default for LzmaOptions {
             use_optimal_parser: false,
             max_chain_length: 0,
             nice_match: 0,
+            use_bt4: false,
             reset_mode: ResetMode::Full,
         }
     }
@@ -188,7 +192,10 @@ pub fn lzma_alone_compress_with_options(
     out.extend_from_slice(&options.dict_size.to_le_bytes());
     out.extend_from_slice(&(input.len() as u64).to_le_bytes());
 
-    let encoder = Lzma1Encoder::new(lc, lp, pb);
+    let mut encoder = Lzma1Encoder::new(lc, lp, pb);
+    if options.use_bt4 {
+        encoder = encoder.with_bt4();
+    }
     let stream = if options.use_optimal_parser {
         encoder.encode_optimal_with_tuning(input, options.max_chain_length, options.nice_match)
     } else {
