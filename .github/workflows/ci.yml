@@ -1,50 +1,359 @@
+# Continuous Integration for Confium
+#
+# Jobs:
+# - Spell check (typos)
+# - Security audit (cargo-audit + cargo-deny)
+# - Format and lint (fmt + clippy + doc)
+# - Unused dependency check (cargo-machete)
+# - Multi-platform Rust tests (Linux, macOS, Windows)
+# - C++ binding tests (cmake + ctest)
+# - Semver compatibility check
+
 name: CI
 
 on:
   push:
     branches: [main]
   pull_request:
-  workflow_dispatch:
+  merge_group:
 
-permissions:
-  contents: read
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  CARGO_NET_RETRY: 10
+  RUST_BACKTRACE: short
+  RUSTFLAGS: "-D warnings"
 
 jobs:
-  test:
-    name: test (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
-
+  # ============================================================================
+  # Typos Check
+  # ============================================================================
+  typos:
+    name: Spell Check
+    runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
+      - uses: crate-ci/typos@v1.48.0
 
-      - name: Install Rust stable
+  # ============================================================================
+  # Pre-flight: skip CI when only docs/markdown changed
+  # ============================================================================
+  preflight:
+    name: Pre-flight Checks
+    runs-on: ubuntu-latest
+    outputs:
+      should_run: ${{ steps.check.outputs.should_run }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 2
+
+      - name: Check if code changed
+        id: check
+        run: |
+          if [[ "${{ github.event_name }}" == "push" ]]; then
+            echo "should_run=true" >> $GITHUB_OUTPUT
+          elif git diff --name-only HEAD^ HEAD | grep -qE '\.(rs|cpp|h|hpp|toml|cmake)$|CMakeLists\.txt'; then
+            echo "should_run=true" >> $GITHUB_OUTPUT
+          else
+            echo "should_run=false" >> $GITHUB_OUTPUT
+          fi
+
+  # ============================================================================
+  # Security Audit
+  # ============================================================================
+  security:
+    name: Security Audit
+    runs-on: ubuntu-latest
+    needs: preflight
+    if: needs.preflight.outputs.should_run == 'true'
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Generate Cargo.lock
+        run: cargo generate-lockfile
+
+      - name: Run cargo-audit
+        uses: rustsec/audit-check@v2.0.0
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install cargo-deny
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny
+
+      - name: Check licenses and advisories
+        run: cargo deny check licenses advisories sources bans
+
+  # ============================================================================
+  # Format and Lint
+  # ============================================================================
+  lint:
+    name: Format and Lint
+    runs-on: ubuntu-latest
+    needs: preflight
+    if: needs.preflight.outputs.should_run == 'true'
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
 
-      - name: Cache cargo registry + index
+      - name: Cache cargo tools
         uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
 
-      - name: Format check
+      - name: Check formatting
         run: cargo fmt --all -- --check
-        continue-on-error: true
+
+      - name: Run clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Check documentation
+        run: cargo doc --workspace --no-deps
+        env:
+          RUSTDOCFLAGS: "-D warnings"
+
+  # ============================================================================
+  # Unused Dependencies
+  # ============================================================================
+  machete:
+    name: Check Unused Dependencies
+    runs-on: ubuntu-latest
+    needs: preflight
+    if: needs.preflight.outputs.should_run == 'true'
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install cargo-machete
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-machete
+
+      - name: Check for unused dependencies
+        run: cargo machete
+
+  # ============================================================================
+  # Publish Check (Dry Run)
+  # ============================================================================
+  publish-check:
+    name: Publish Check
+    runs-on: ubuntu-latest
+    needs: preflight
+    if: needs.preflight.outputs.should_run == 'true'
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+
+      - name: Publish check
+        run: cargo publish --dry-run -p confium-core
+
+  # ============================================================================
+  # Rust Tests (Multi-platform)
+  # ============================================================================
+  test:
+    name: Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    needs: [preflight]
+    if: needs.preflight.outputs.should_run == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+          - os: macos-latest
+          - os: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # rnp-src compiles librnp + Botan from source via cmake. On
+      # Windows, it forces the GCC/MinGW toolchain (via MSYS2 UCRT64).
+      # This requires the GNU Rust target instead of the default MSVC.
+      - name: Set up MSYS2 (Windows)
+        if: runner.os == 'Windows'
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          install: gcc cmake ninja
+
+      - name: Add MSYS2 to PATH (Windows)
+        if: runner.os == 'Windows'
+        run: echo "C:\msys64\ucrt64\bin" >> $GITHUB_PATH
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Switch to GNU toolchain (Windows)
+        if: runner.os == 'Windows'
+        run: rustup default stable-x86_64-pc-windows-gnu
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.os }}
+          cache-on-failure: true
 
       - name: Build
-        run: cargo build --workspace --all-targets
+        run: cargo build --workspace --verbose
 
-      - name: Test
-        run: cargo test --workspace --lib
+      - name: Run tests
+        run: cargo test --workspace --verbose
 
-      - name: Doctest
-        run: cargo test --workspace --doc
-        continue-on-error: true
+  # ============================================================================
+  # C++ Binding Tests
+  # ============================================================================
+  cpp-tests:
+    name: C++ Binding Tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    needs: [preflight]
+    if: needs.preflight.outputs.should_run == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+          # Windows excluded: MarkusJx/install-boost@v2.6.0 fails on the
+          # current windows-latest image because 7z cannot extract boost's
+          # internal symlinks. Re-enable once the boost install action or
+          # the runner image is fixed.
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
 
-      - name: Clippy
-        run: cargo clippy --workspace --all-targets
-        continue-on-error: true
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cbindgen
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cbindgen
+
+      - name: Install cmake
+        uses: lukka/get-cmake@v4.4.0
+
+      - name: Install boost
+        uses: MarkusJx/install-boost@v2.6.0
+        id: install-boost
+        with:
+          boost_version: 1.81.0
+
+      - name: Configure and build
+        env:
+          BOOST_ROOT: ${{ steps.install-boost.outputs.BOOST_ROOT }}
+        run: |
+          mkdir build
+          cd build
+          cmake \
+            -DRust_TOOLCHAIN=stable \
+            -DRust_COMPILER="$(which rustc)" \
+            -DRust_CARGO="$(which cargo)" \
+            -DBUILD_TESTING=yes \
+            -DBUILD_C_BINDINGS=yes \
+            ..
+          cmake --build .
+
+      - name: Run ctest
+        run: |
+          cd build
+          ctest -C Debug -V
+
+  # ============================================================================
+  # WASM Build Check
+  # ============================================================================
+  wasm-build:
+    name: WASM Build
+    runs-on: ubuntu-latest
+    needs: [preflight]
+    if: needs.preflight.outputs.should_run == 'true'
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: wasm
+          cache-on-failure: true
+
+      - name: Build confium-wasm for wasm32-unknown-unknown
+        run: cargo build -p confium-wasm --target wasm32-unknown-unknown --verbose
+
+      - name: Install wasm-pack
+        uses: jetli/wasm-pack-action@v0.4.0
+
+      - name: Build wasm-pack — target=web (browser)
+        run: wasm-pack build crates/confium-wasm --target web --release --scope confium --no-default-features
+
+      - name: Build wasm-pack — target=nodejs (Node.js)
+        run: wasm-pack build crates/confium-wasm --target nodejs --release --scope confium --no-default-features
+
+      - name: Build wasm-pack — target=bundler (Webpack/Vite/Rollup)
+        run: wasm-pack build crates/confium-wasm --target bundler --release --scope confium --no-default-features
+
+      - name: Run wasm-bindgen-test suite under Node
+        run: wasm-pack test --node crates/confium-wasm --release
+
+  # ============================================================================
+  # Semver Compatibility Check
+  # ============================================================================
+  semver:
+    name: Semver Compatibility
+    runs-on: ubuntu-latest
+    needs: [preflight]
+    if: github.event_name == 'pull_request' && needs.preflight.outputs.should_run == 'true'
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+
+      - name: Install cargo-semver-checks
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-semver-checks
+
+      - name: Check semver compatibility
+        run: cargo semver-checks --baseline-rev origin/${{ github.base_ref }}
+
+  # ============================================================================
+  # Summary
+  # ============================================================================
+  ci-success:
+    name: CI Success
+    runs-on: ubuntu-latest
+    needs: [typos, security, lint, machete, publish-check, test, cpp-tests]
+    if: always()
+    steps:
+      - name: Report status
+        if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')
+        run: exit 1
+      - name: All checks passed
+        run: echo "All CI checks passed!"
