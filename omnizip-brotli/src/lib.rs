@@ -135,11 +135,13 @@ impl Codec for BrotliCodec {
     fn name(&self) -> &'static str {
         "brotli"
     }
-    fn compress(&self, plaintext: &[u8], _level: CompressionLevel) -> Result<Vec<u8>, OmnizipError> {
-        // All quality levels use the proven q=0/1 two-pass encoder.
-        // The q=2..6 compress_fragment port is in progress but not yet
-        // producing valid output.
-        Ok(fast_encoder::vendored_compress(plaintext))
+    fn compress(&self, plaintext: &[u8], level: CompressionLevel) -> Result<Vec<u8>, OmnizipError> {
+        let quality = level.as_u8().min(11);
+        let compressed = match quality {
+            0..=1 => fast_encoder::vendored_compress(plaintext),
+            _ => compress_fragment::compress(plaintext),
+        };
+        Ok(compressed)
     }
     fn decompress(&self, compressed: &[u8], expected_len: u32) -> Result<Vec<u8>, OmnizipError> {
         let expected_us = usize::try_from(expected_len).map_err(|_| OmnizipError::Corrupt {

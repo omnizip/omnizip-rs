@@ -416,24 +416,20 @@ const K_CMD_HISTO_SEED: [u32; 128] = [
 /// Main entry point: compress `input` using the q=2..6 algorithm.
 /// Returns a valid brotli stream that any conformant decoder accepts.
 pub fn compress(input: &[u8]) -> Vec<u8> {
-    if input.is_empty() {
-        // Empty input: emit ISLAST + ISLASTEMPTY.
-        let mut storage = vec![0u8; 8];
-        let mut storage_ix = 0usize;
-        BrotliWriteBits(1, 1, &mut storage_ix, &mut storage); // islast
-        BrotliWriteBits(1, 1, &mut storage_ix, &mut storage); // isempty
-        storage_ix = (storage_ix + 7) & !7;
-        storage.truncate(storage_ix >> 3);
-        return storage;
-    }
-
     let mut tree = vec![HuffmanTree::default(); 2 * 704 + 1];
     let mut storage = vec![0u8; input.len() * 2 + 1024];
     let mut storage_ix = 0usize;
 
     // Frame header: WBITS=22 (4MB window, brotli default).
-    // Encoded as 4 bits: 0b1011 (bit0=1, NBL=5 → WBITS=17+5=22).
     BrotliWriteBits(4, 0b1011, &mut storage_ix, &mut storage);
+
+    if input.is_empty() {
+        BrotliWriteBits(1, 1, &mut storage_ix, &mut storage); // ISLAST
+        BrotliWriteBits(1, 1, &mut storage_ix, &mut storage); // ISLASTEMPTY
+        storage_ix = (storage_ix + 7) & !7;
+        storage.truncate(storage_ix >> 3);
+        return storage;
+    }
 
     compress_fragment_fast(
         input,
@@ -540,35 +536,35 @@ fn compress_fragment_fast(
                         let bytes_between = (skip >> 5) as usize;
                         skip += 1;
 
-                        let prev_ip = ip;
-                        ip = prev_ip + bytes_between;
-
-                        if ip > ip_limit {
+                        // Upstream pattern: ip stays at current position,
+                        // next_ip is the NEXT position to try. The hash
+                        // for next_ip is pre-computed for the next iteration.
+                        let next_ip = ip + bytes_between;
+                        if next_ip > ip_limit {
                             break 'outer;
                         }
+                        next_hash = Hash(&input[next_ip..], shift);
 
-                        next_hash = Hash(&input[ip..], shift);
-
-                        // Check last-distance candidate.
-                        let ld_candidate = prev_ip.wrapping_sub(last_distance as usize);
-                        if ld_candidate < input.len()
-                            && prev_ip >= (last_distance as usize)
-                            && IsMatch(&input[prev_ip..], &input[ld_candidate..])
-                            && ld_candidate < prev_ip
-                        {
-                            table[hash as usize] = (prev_ip as i32) - (base_ip as i32);
-                            candidate = ld_candidate;
-                            ip = prev_ip;
-                            break;
+                        // Check last-distance candidate at current ip.
+                        if last_distance > 0 {
+                            let ld_candidate = ip - last_distance as usize;
+                            if IsMatch(&input[ip..], &input[ld_candidate..]) && ld_candidate < ip {
+                                table[hash as usize] = (ip as i32) - (base_ip as i32);
+                                candidate = ld_candidate;
+                                break;
+                            }
                         }
 
+                        // Check hash-table candidate.
                         candidate = base_ip + table[hash as usize] as usize;
-                        table[hash as usize] = (prev_ip as i32) - (base_ip as i32);
-                        ip = prev_ip;
+                        table[hash as usize] = (ip as i32) - (base_ip as i32);
 
-                        if IsMatch(&input[ip..], &input[candidate..]) {
+                        if candidate < ip && IsMatch(&input[ip..], &input[candidate..]) {
                             break;
                         }
+
+                        // No match — advance to next_ip.
+                        ip = next_ip;
                     }
 
                     // Check distance.
