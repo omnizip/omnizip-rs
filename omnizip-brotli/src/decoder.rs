@@ -939,6 +939,10 @@ fn decode_compressed_metablock(
     let mut output = Vec::with_capacity(mlen);
     let mut dist_rb: [u32; 4] = [16, 15, 11, 4];
     let mut dist_rb_idx: i32 = 0;
+    // Per upstream: max_backward_distance = (1 << WBITS) - WINDOW_GAP.
+    // For typical inputs our default WBITS=22 → 4 MB max backward. The
+    // window-gap constant is 0x8000 (32 KB) per RFC 7932 §9.1.
+    let max_backward_distance: u32 = (1u32 << 22).saturating_sub(0x8000);
 
     while output.len() < mlen {
         let cmd_code = cmd_table.read_symbol(&mut br).ok_or("invalid command symbol")? as usize;
@@ -968,19 +972,49 @@ fn decode_compressed_metablock(
         }
 
         if copy_len > 0 {
+            // Read distance (RFC 7932 §10.4 + upstream ProcessCommandsInternal).
             let distance = if v.distance_code >= 0 {
-                take_distance_from_ring_buffer(v.distance_code as i32, &mut dist_rb, &mut dist_rb_idx)
+                // Implicit distance (kCmdLut.distance_code == 0):
+                // use most recent from ring buffer. Matches upstream
+                // CommandPostDecodeLiterals: --idx, dist_rb[idx&3].
+                dist_rb_idx -= 1;
+                dist_rb[(dist_rb_idx & 3) as usize]
             } else {
                 let dist_code = dist_table.read_symbol(&mut br).ok_or("invalid distance symbol")? as i32;
                 decode_distance_from_code(dist_code, num_direct_distance_codes, npostfix as i32, &mut br, &mut dist_rb, &mut dist_rb_idx)
             };
-            if distance == 0 || distance as usize > output.len() {
-                return Err("invalid back-reference distance");
-            }
-            let src = output.len() - distance as usize;
-            for i in 0..copy_len {
-                let b = output[src + i];
-                output.push(b);
+            // Per upstream: max_distance = min(pos, max_backward_distance).
+            // Distances > max_distance are static-dictionary references.
+            let pos = output.len() as u32;
+            let max_distance = if pos < max_backward_distance {
+                pos
+            } else {
+                max_backward_distance
+            };
+            if (distance as i32) > max_distance as i32 {
+                // Static dictionary reference.
+                if crate::dictionary::dictionary_lookup(&mut output, copy_len as u32, distance as i32, max_distance).is_none() {
+                    return Err("invalid static dictionary reference");
+                }
+                // Compensate the dist_rb_idx rollback for implicit distance.
+                // For explicit distance with distance_context=0, no adjustment.
+                // The implicit case already decremented idx; the dictionary
+                // path doesn't write back, so restore idx.
+                if v.distance_code >= 0 {
+                    dist_rb_idx = dist_rb_idx.wrapping_add(1);
+                }
+            } else {
+                if distance == 0 || distance as usize > output.len() {
+                    return Err("invalid back-reference distance");
+                }
+                let src = output.len() - distance as usize;
+                for i in 0..copy_len {
+                    let b = output[src + i];
+                    output.push(b);
+                }
+                // Update recent-distances cache (upstream LZ77 copy path).
+                dist_rb[(dist_rb_idx & 3) as usize] = distance;
+                dist_rb_idx = dist_rb_idx.wrapping_add(1);
             }
         }
 
@@ -1028,12 +1062,10 @@ pub(crate) fn decode_distance_from_code(
     }
     if dist_code < num_direct as i32 {
         // Direct distance code (NDIRECT > 0 only): distance = code - 15.
-        let distance = (dist_code - NUM_DISTANCE_SHORT_CODES + 1) as u32;
-        dist_rb[(*dist_rb_idx as usize) & 3] = distance;
-        *dist_rb_idx = dist_rb_idx.wrapping_add(1);
-        return distance;
+        return (dist_code - NUM_DISTANCE_SHORT_CODES + 1) as u32;
     }
-    // Long-distance code with optional postfix.
+    // Long-distance code with optional postfix. Does NOT write to dist_rb;
+    // the caller's LZ77 copy path updates dist_rb and dist_rb_idx.
     let postfix_mask = (1i32 << npostfix) - 1;
     let mut distval = dist_code - num_direct as i32;
     let postfix = distval & postfix_mask;
@@ -1042,10 +1074,7 @@ pub(crate) fn decode_distance_from_code(
     let offset = (((distval & 1) + 2) << nbits) - 4;
     let extra = br.read_bits(nbits);
     let raw = (offset as i32 + extra as i32) << npostfix;
-    let distance = (raw + postfix + num_direct as i32 - NUM_DISTANCE_SHORT_CODES + 1) as u32;
-    dist_rb[(*dist_rb_idx as usize) & 3] = distance;
-    *dist_rb_idx = dist_rb_idx.wrapping_add(1);
-    distance
+    (raw + postfix + num_direct as i32 - NUM_DISTANCE_SHORT_CODES + 1) as u32
 }
 
 
@@ -1066,29 +1095,36 @@ pub(crate) fn read_varlen_uint8(br: &mut BitReader) -> Result<u32, &'static str>
     Ok((1u32 << nbits) + extra)
 }
 
-/// Mirror of upstream `TakeDistanceFromRingBuffer`: computes the
-/// actual distance for short codes 0..15 from the dist_rb ring buffer.
+/// Mirror of upstream `TakeDistanceFromRingBuffer` (decode.c, line ~1348):
+/// computes the actual distance for short codes 0..15 from the dist_rb
+/// ring buffer. For codes 0..3 also rolls the ring buffer index; for
+/// codes 4..15 the index is unchanged (the LZ77 copy path writes back).
+///
+/// Returns the computed distance. `0x7FFF_FFFF` is a sentinel for
+/// "invalid" (will trip the `distance > output.len()` check downstream).
 pub(crate) fn take_distance_from_ring_buffer(code: i32, dist_rb: &mut [u32; 4], dist_rb_idx: &mut i32) -> u32 {
-    if code == 0 {
-        *dist_rb_idx -= 1;
-        return dist_rb[(*dist_rb_idx & 3) as usize];
-    }
-    // distance_code in the formula is `code << 1` (matches upstream line 1911).
-    let dc = code << 1;
-    const K_INDEX_OFFSET: u32 = 0xaaafff1b;
-    const K_VALUE_OFFSET: u32 = 0xfa5fa500;
-    let v_idx = (*dist_rb_idx + (K_INDEX_OFFSET as i32 >> dc)) as i32 & 0x3;
-    let mut distance = dist_rb[v_idx as usize] as i32;
-    let v_val = (K_VALUE_OFFSET >> dc) as i32 & 0x3;
-    if dc & 3 != 0 {
-        distance += v_val;
+    if code <= 3 {
+        let offset = code - 3;
+        // distance_context = 1 >> code (only nonzero for code == 0)
+        let distance_context = 1 >> code;
+        let idx = (*dist_rb_idx - offset) & 3;
+        let distance = dist_rb[idx as usize];
+        *dist_rb_idx -= distance_context;
+        distance
     } else {
-        distance -= v_val;
+        let (index_delta, base) = if code < 10 {
+            (3, code - 4)
+        } else {
+            (2, code - 10)
+        };
+        let delta = ((0x605142u32 >> (4 * base)) & 0xF) as i32 - 3;
+        let idx = (*dist_rb_idx + index_delta) & 3;
+        let mut distance = dist_rb[idx as usize] as i32 + delta;
         if distance <= 0 {
-            distance = 0x7fff_ffff;
+            distance = 0x7FFF_FFFF;
         }
+        distance as u32
     }
-    distance as u32
 }
 
 #[cfg(test)]
