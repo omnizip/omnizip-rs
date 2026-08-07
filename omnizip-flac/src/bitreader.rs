@@ -173,7 +173,7 @@ mod tests {
     #[test]
     fn align_to_byte() {
         let mut br = BitReader::new(&[0xFF, 0xAA]);
-        br.read_bits(3);
+        let _ = br.read_bits(3);
         br.align_byte();
         assert_eq!(br.byte_position(), 1);
         assert_eq!(br.read_bits(8), 0xAA);
