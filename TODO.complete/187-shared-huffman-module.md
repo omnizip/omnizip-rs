@@ -2,7 +2,7 @@
 
 ## Priority: P3 (DRY)
 
-## Status: pending
+## Status: DONE — HuffmanLengths with package-merge algorithm in omnizip-codecs (7 tests). Canonical code generation included. Ready for ZSTD/Brotli/BZip2 adoption.
 
 ## Context
 

@@ -2,7 +2,7 @@
 
 ## Priority: P1 (ratio improvement at high levels)
 
-## Status: pending
+## Status: DONE — implemented, tested, wired into levels ≥ 7
 
 ## Context
 
