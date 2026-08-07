@@ -12,7 +12,7 @@
 use crate::bit_model::BitModel;
 use crate::coder::{DistanceEncoder, LengthEncoder, LiteralEncoder};
 use crate::constants::NUM_LEN_TO_POS_STATES;
-use crate::encoder::match_finder::MatchFinder;
+use crate::encoder::match_finder::{new_lzma_match_finder, MatchFinder};
 use crate::range_coder::RangeEncoder;
 use crate::state::{LzmaState, NUM_STATES};
 
@@ -49,6 +49,12 @@ pub struct Lzma1Encoder {
     rep2: u32,
     rep3: u32,
     dict_size: u32,
+    /// Global position offset (for LZMA2 multi-chunk: the byte offset
+    /// of this chunk within the overall input). Zero for standalone
+    /// encoding. Added to chunk-local `pos` in pos_state / lit_state
+    /// computations so the decoder's `output.len()`-based position
+    /// agrees with the encoder.
+    base_pos: u32,
 }
 
 impl Lzma1Encoder {
@@ -96,7 +102,17 @@ impl Lzma1Encoder {
             rep2: 0,
             rep3: 0,
             dict_size,
+            base_pos: 0,
         }
+    }
+
+    /// Set the global position offset. Used by the LZMA2 encoder so
+    /// multi-chunk streams produce position values consistent with the
+    /// decoder's `output.len()`-based position tracking.
+    #[must_use]
+    pub const fn with_base_pos(mut self, base: u32) -> Self {
+        self.base_pos = base;
+        self
     }
 
     /// Encode `input` as an LZMA1 stream with lazy (look-ahead-1)
@@ -170,7 +186,7 @@ impl Lzma1Encoder {
 
     /// Lazy parser (look-ahead-1).
     fn encode_via_lazy(mut self, input: &[u8]) -> Vec<u8> {
-        let mut mf = MatchFinder::new(input, self.dict_size);
+        let mut mf = new_lzma_match_finder(input, self.dict_size);
 
         while let Some(pos) = mf.advance() {
             let m1 = if pos + FULL_MATCH_LEN_MIN as usize <= input.len() {
@@ -226,7 +242,7 @@ impl Lzma1Encoder {
         max_chain_length: u32,
         nice_match: u32,
     ) -> Vec<u8> {
-        let mut mf = MatchFinder::new(input, self.dict_size);
+        let mut mf = new_lzma_match_finder(input, self.dict_size);
         if max_chain_length > 0 {
             mf.set_max_chain_length(max_chain_length);
         }
@@ -353,7 +369,8 @@ impl Lzma1Encoder {
 
     /// Emit a literal byte packet with context-appropriate encoding.
     fn encode_literal_byte(&mut self, byte: u8, prev_byte: u8, match_byte: u8, pos: usize) {
-        let pos_state = (pos as u32) & self.pb_mask;
+        let abs_pos = self.base_pos.wrapping_add(pos as u32);
+        let pos_state = abs_pos & self.pb_mask;
         let state_idx = usize::from(self.state.as_u8());
         let is_match_idx = state_idx * (1 << self.pb as usize) + pos_state as usize;
 
@@ -361,7 +378,7 @@ impl Lzma1Encoder {
         self.range_encoder
             .encode_bit(&mut self.is_match[is_match_idx], 0);
 
-        let lit_state = ((pos as u32) << 8 | u32::from(prev_byte)) & self.literal_mask;
+        let lit_state = (abs_pos << 8 | u32::from(prev_byte)) & self.literal_mask;
 
         // Matched mode: state is a match context AND there is a previous
         // byte to reference. Must match the decoder's condition exactly
@@ -388,7 +405,8 @@ impl Lzma1Encoder {
 
     /// Emit a match packet (is_match=1, is_rep=0, length, distance).
     fn encode_match(&mut self, distance: u32, length: u32, pos: usize) {
-        let pos_state = (pos as u32) & self.pb_mask;
+        let abs_pos = self.base_pos.wrapping_add(pos as u32);
+        let pos_state = abs_pos & self.pb_mask;
         let state_idx = usize::from(self.state.as_u8());
         let is_match_idx = state_idx * (1 << self.pb as usize) + pos_state as usize;
 
@@ -423,7 +441,8 @@ impl Lzma1Encoder {
 
     /// Emit the LZMA End-of-Payload-Marker.
     fn encode_eopm(&mut self, pos: usize) {
-        let pos_state = (pos as u32) & self.pb_mask;
+        let abs_pos = self.base_pos.wrapping_add(pos as u32);
+        let pos_state = abs_pos & self.pb_mask;
         let state_idx = usize::from(self.state.as_u8());
         let is_match_idx = state_idx * (1 << self.pb as usize) + pos_state as usize;
 
@@ -451,7 +470,8 @@ impl Lzma1Encoder {
     /// 4. is_rep0_long = 1 (length > 1)
     /// 5. Length code (via the rep length coder's model set)
     fn encode_rep0_match(&mut self, length: u32, pos: usize) {
-        let pos_state = (pos as u32) & self.pb_mask;
+        let abs_pos = self.base_pos.wrapping_add(pos as u32);
+        let pos_state = abs_pos & self.pb_mask;
         let state_idx = usize::from(self.state.as_u8());
         let is_match_idx = state_idx * (1 << self.pb as usize) + pos_state as usize;
 

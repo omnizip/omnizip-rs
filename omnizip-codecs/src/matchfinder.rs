@@ -158,6 +158,11 @@ impl<'a> HashChainMatchFinder<'a> {
     /// `nice_match` is found.
     ///
     /// Returns `None` if no candidate yields a match ≥ `min_match`.
+    ///
+    /// Handles the case where [`advance`](Self::advance) was already
+    /// called for `pos` (inserting `pos` into the hash chain). In that
+    /// case `head[hash(pos)] == pos`, so the first candidate is the
+    /// current position itself — we follow `prev[pos]` to skip it.
     #[must_use]
     pub fn find_match(&self, pos: usize) -> Option<Lz77Match> {
         if pos + 4 > self.data.len() {
@@ -165,6 +170,12 @@ impl<'a> HashChainMatchFinder<'a> {
         }
         let h = Self::hash(self.data, pos, self.hash_log);
         let mut candidate = self.head[h];
+        // If advance() already inserted pos, head[h] == pos and we'd
+        // compute dist=0 (matching ourselves). Skip to the previous
+        // entry in the chain.
+        if candidate == pos as u32 {
+            candidate = self.prev[pos & self.mask as usize];
+        }
         let mut best_len = 0u32;
         let mut best_dist = 0u32;
         let mut chain = 0u32;
@@ -213,6 +224,32 @@ impl<'a> HashChainMatchFinder<'a> {
             *p = SENTINEL;
         }
         self.cur = 0;
+    }
+
+    /// Override the chain-walk depth. 0 = single-probe (fast strategy).
+    pub fn set_max_chain_length(&mut self, n: u32) {
+        self.max_chain_length = n;
+    }
+
+    /// Override the early-exit match length. 0 = disabled.
+    pub fn set_nice_match(&mut self, n: u32) {
+        self.nice_match = n;
+    }
+
+    /// Re-bind to new data, reusing the existing hash/chain allocations
+    /// if the dict_size is unchanged. Grows them if the new dict is
+    /// larger. Equivalent to `drop` + `new` but avoids reallocation.
+    pub fn reuse(&mut self, data: &'a [u8], dict_size: u32) {
+        let dict_size = dict_size.max(4096);
+        let size = dict_size as usize;
+        if size > self.prev.len() {
+            self.prev.resize(size, SENTINEL);
+        }
+        self.mask = size as u32 - 1;
+        self.data = data;
+        self.max_distance = dict_size;
+        self.cur = 0;
+        self.reset();
     }
 
     /// Hash 4 bytes at `data[pos..pos+4]` into `hash_log` bits.
@@ -380,5 +417,23 @@ mod tests {
         assert!(cfg.min_match >= 3);
         assert!(cfg.max_chain_length > 0);
         assert!(cfg.hash_log >= 8);
+    }
+
+    #[test]
+    fn finds_match_after_advance_to_same_pos() {
+        // Regression: if advance(pos) inserts pos into the hash chain,
+        // find_match(pos) must skip the self-match and walk prev[].
+        let data = b"hello world hello there";
+        let cfg = HashChainConfig::default();
+        let mut mf = HashChainMatchFinder::new(data, cfg);
+        // Advance through positions 0..=12. Position 12 = "hello" which
+        // matches position 0.
+        for _ in 0..13 {
+            mf.advance();
+        }
+        // find_match(12) after advance(12) — head[h] == 12, must follow prev.
+        let m = mf.find_match(12).expect("should find match at pos 12");
+        assert_eq!(m.distance, 12);
+        assert!(m.length >= 5);
     }
 }
