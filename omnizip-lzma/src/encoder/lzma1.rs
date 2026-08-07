@@ -55,6 +55,10 @@ pub struct Lzma1Encoder {
     /// computations so the decoder's `output.len()`-based position
     /// agrees with the encoder.
     base_pos: u32,
+    /// The byte immediately before this chunk's start (for LZMA2
+    /// multi-chunk). Zero for standalone encoding. Used as `prev_byte`
+    /// for the first literal so the decoder's `output.last()` agrees.
+    base_prev_byte: u8,
 }
 
 impl Lzma1Encoder {
@@ -103,6 +107,7 @@ impl Lzma1Encoder {
             rep3: 0,
             dict_size,
             base_pos: 0,
+            base_prev_byte: 0,
         }
     }
 
@@ -112,6 +117,16 @@ impl Lzma1Encoder {
     #[must_use]
     pub const fn with_base_pos(mut self, base: u32) -> Self {
         self.base_pos = base;
+        self
+    }
+
+    /// Set the byte immediately preceding this chunk's data (for LZMA2
+    /// multi-chunk). The decoder's `literal_state` uses `output.last()`
+    /// as `prev_byte`; for non-first chunks this is the last byte of
+    /// the previous chunk. The encoder must use the same value.
+    #[must_use]
+    pub const fn with_base_prev_byte(mut self, prev: u8) -> Self {
+        self.base_prev_byte = prev;
         self
     }
 
@@ -212,7 +227,11 @@ impl Lzma1Encoder {
                 };
 
                 if better_at_next {
-                    let prev_byte = if pos > 0 { input[pos - 1] } else { 0 };
+                    let prev_byte = if pos > 0 {
+                        input[pos - 1]
+                    } else {
+                        self.base_prev_byte
+                    };
                     let match_byte = self.get_match_byte(input, pos);
                     self.encode_literal_byte(input[pos], prev_byte, match_byte, pos);
                 } else {
@@ -224,7 +243,11 @@ impl Lzma1Encoder {
                     }
                 }
             } else {
-                let prev_byte = if pos > 0 { input[pos - 1] } else { 0 };
+                let prev_byte = if pos > 0 {
+                    input[pos - 1]
+                } else {
+                    self.base_prev_byte
+                };
                 let match_byte = self.get_match_byte(input, pos);
                 self.encode_literal_byte(input[pos], prev_byte, match_byte, pos);
             }
@@ -273,7 +296,11 @@ impl Lzma1Encoder {
                 };
 
                 if better_at_next {
-                    let prev_byte = if pos > 0 { input[pos - 1] } else { 0 };
+                    let prev_byte = if pos > 0 {
+                        input[pos - 1]
+                    } else {
+                        self.base_prev_byte
+                    };
                     let match_byte = self.get_match_byte(input, pos);
                     self.encode_literal_byte(input[pos], prev_byte, match_byte, pos);
                 } else {
@@ -285,7 +312,11 @@ impl Lzma1Encoder {
                     }
                 }
             } else {
-                let prev_byte = if pos > 0 { input[pos - 1] } else { 0 };
+                let prev_byte = if pos > 0 {
+                    input[pos - 1]
+                } else {
+                    self.base_prev_byte
+                };
                 let match_byte = self.get_match_byte(input, pos);
                 self.encode_literal_byte(input[pos], prev_byte, match_byte, pos);
             }
@@ -305,7 +336,11 @@ impl Lzma1Encoder {
         for (pos, action) in actions {
             match action {
                 ParseAction::Literal(byte) => {
-                    let prev_byte = if pos > 0 { input[pos - 1] } else { 0 };
+                    let prev_byte = if pos > 0 {
+                        input[pos - 1]
+                    } else {
+                        self.base_prev_byte
+                    };
                     let match_byte = self.get_match_byte(input, pos);
                     self.encode_literal_byte(byte, prev_byte, match_byte, pos);
                 }
@@ -340,7 +375,11 @@ impl Lzma1Encoder {
         for (pos, action) in actions {
             match action {
                 ParseAction::Literal(byte) => {
-                    let prev_byte = if pos > 0 { input[pos - 1] } else { 0 };
+                    let prev_byte = if pos > 0 {
+                        input[pos - 1]
+                    } else {
+                        self.base_prev_byte
+                    };
                     let match_byte = self.get_match_byte(input, pos);
                     self.encode_literal_byte(byte, prev_byte, match_byte, pos);
                 }
