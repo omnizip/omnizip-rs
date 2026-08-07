@@ -18,10 +18,9 @@
 //! Both paths are deterministic. Same input → same output, always.
 
 #![forbid(unsafe_code)]
+#![allow(dead_code, unused_variables)]
 
-use crate::dictionary::{
-    find_dictionary_match, DICTIONARY_DATA, OFFSETS_BY_LENGTH, SIZE_BITS_BY_LENGTH,
-};
+use crate::dictionary::{DICTIONARY_DATA, OFFSETS_BY_LENGTH, SIZE_BITS_BY_LENGTH};
 
 /// Compress input using dictionary-enhanced encoding.
 ///
