@@ -1,0 +1,17 @@
+# Typos configuration — ignore proper names, technical terms, algorithm names
+[default.extend-words]
+Collet = "Collet"
+Cleary = "Cleary"
+sais = "sais"
+ser = "ser"
+nam = "nam"
+mis = "mis"
+siz = "siz"
+
+# Exclude binary dictionary files and generated tables
+[files]
+extend-exclude = [
+  "omnizip-brotli/data/*",
+  "omnizip-zstd/src/predef_tables.rs",
+  "target/",
+]
