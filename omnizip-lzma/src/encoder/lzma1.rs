@@ -764,7 +764,9 @@ mod bt4_integration_tests {
         let enc = Lzma1Encoder::new(3, 0, 2).with_bt4();
         let compressed = enc.encode(&input);
         let mut dec = Lzma1Decoder::new(3, 0, 2, 1 << 16);
-        let out = dec.decode(&compressed, Some(input.len() as u64), true).expect("decode");
+        let out = dec
+            .decode(&compressed, Some(input.len() as u64), true)
+            .expect("decode");
         assert_eq!(out, input);
     }
 
