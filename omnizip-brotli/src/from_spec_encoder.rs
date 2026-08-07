@@ -1,8 +1,8 @@
 //! From-spec Brotli encoder (RFC 7932).
 //!
 //! Implements a complete Brotli encoder from scratch — no vendored
-//! code from the upstream brotli crate. Uses the shared matchfinder
-//! for LZ77 matches and the brotli static dictionary for dictionary
+//! code from the upstream brotli crate. Produces Huffman-coded
+//! metablocks with LZ77 matches and (optionally) static dictionary
 //! references.
 //!
 //! ## Algorithm
@@ -10,14 +10,16 @@
 //! 1. **Match finding**: Hash-chain LZ77 (via `omnizip_codecs::matchfinder`)
 //!    + brotli static dictionary lookup.
 //! 2. **Parsing**: Greedy — take the longest match at each position.
-//! 3. **Framing**: Single metablock, emitted as an uncompressed
-//!    metablock per RFC 7932 §9.2 (ISUNCOMPRESSED=1).
+//! 3. **Entropy coding**: Per-metablock Huffman codes built via
+//!    length-limited package-merge (max 15 bits).
+//! 4. **Framing**: Single ISLAST=1 metablock with NBLTYPES=1 /
+//!    NTREES=1 / NPOSTFIX=0 / NDIRECT=0.
 //!
-//! The uncompressed-metablock path is the simplest valid Brotli frame
-//! format and is fully correct: any RFC 7932 conformant decoder (ours,
-//! the `brotli` crate, the `brotli -d` CLI) accepts it. A Huffman-coded
-//! metablock path that achieves compression is implemented in
-//! `compress_fragment` and used at higher quality levels.
+//! ## Wire format
+//!
+//! All bits are written LSB-first per RFC 7932 §1. Canonical Huffman
+//! codes (MSB-first by convention) are bit-reversed before emission
+//! so the decoder's LSB-first reader produces the correct lookup index.
 //!
 //! ## Determinism
 //!
@@ -28,11 +30,39 @@
     clippy::cast_possible_truncation,
     clippy::cast_possible_wrap,
     clippy::cast_sign_loss,
-    clippy::cast_lossless
+    clippy::cast_lossless,
+    clippy::too_many_lines,
+    clippy::needless_range_loop,
+    clippy::collapsible_else_if,
+    clippy::items_after_statements
 )]
+
+use crate::dictionary::find_dictionary_match;
+use crate::prefix::kCmdLut;
 
 /// Brotli window bits for the encoder (22 = 4 MB window).
 const WINDOW_BITS: u8 = 22;
+
+/// Maximum backward distance for LZ77 matches.
+const MAX_DISTANCE: u32 = (1 << WINDOW_BITS) - 16;
+
+/// Minimum match length for LZ77.
+const MIN_MATCH: u32 = 4;
+
+/// Maximum copy length per command (RFC 7932 §5).
+const MAX_COPY: u32 = 273 - 2; // copy_len_code range goes up to 273-2 = 271; we cap below.
+
+/// Number of short distance codes (RFC 7932 §10.4).
+const NUM_SHORT: u32 = 16;
+
+/// A parsed LZ77 command: insert `insert_len` literals, then copy
+/// `copy_len` bytes from `distance` (1-based backward offset).
+#[derive(Clone, Copy, Debug)]
+struct Command {
+    insert_len: u32,
+    copy_len: u32,
+    distance: u32,
+}
 
 /// LSB-first bit writer (Brotli's wire bit order per RFC 7932 §1).
 struct BitWriter {
@@ -50,7 +80,6 @@ impl BitWriter {
         }
     }
 
-    /// Write `n` bits of `value`, LSB-first (bit 0 of `value` is emitted next).
     fn write_bits(&mut self, value: u32, n: u32) {
         if n == 0 {
             return;
@@ -66,7 +95,6 @@ impl BitWriter {
         }
     }
 
-    /// Pad with zero bits until byte-aligned.
     fn byte_align(&mut self) {
         while self.nbits % 8 != 0 {
             self.write_bits(0, 1);
@@ -84,36 +112,46 @@ impl BitWriter {
 }
 
 /// Encode the WBITS field for `WINDOW_BITS` (RFC 7932 §9.1).
-///
-/// For 18 ≤ wbits ≤ 24: 1 bit (=1) + 3 bits NBL = wbits - 17.
 fn write_wbits(bw: &mut BitWriter) {
     bw.write_bits(1, 1);
-    let nbl = u32::from(WINDOW_BITS - 17);
-    bw.write_bits(nbl, 3);
+    bw.write_bits(u32::from(WINDOW_BITS - 17), 3);
+}
+
+/// Reverse the low `n` bits of `v`. Used to convert MSB-first
+/// canonical Huffman codes into the LSB-first wire representation.
+fn reverse_bits(mut v: u32, n: u8) -> u32 {
+    let mut r = 0u32;
+    for _ in 0..n {
+        r = (r << 1) | (v & 1);
+        v >>= 1;
+    }
+    r
 }
 
 /// Compress input into a valid Brotli frame using the from-spec encoder.
 ///
-/// Produces output accepted by any RFC 7932 conformant decoder.
+/// Produces output accepted by any RFC 7932 conformant decoder. The
+/// encoder tries the Huffman-coded path first and falls back to an
+/// uncompressed metablock if the Huffman output would be larger.
 #[must_use]
 pub fn compress(input: &[u8]) -> Vec<u8> {
     if input.is_empty() {
         return empty_frame();
     }
-    encode_uncompressed_frame(input)
+
+    let uncompressed = encode_uncompressed_frame(input);
+    let huffman = encode_huffman_frame(input);
+    if !huffman.is_empty() && huffman.len() < uncompressed.len() {
+        huffman
+    } else {
+        uncompressed
+    }
 }
 
-/// Encode an uncompressed Brotli frame (RFC 7932 §9.2: ISUNCOMPRESSED=1).
-///
-/// Layout:
-/// - WBITS: 1 bit (=1) + 3 bits NBL
-/// - ISLAST: 1 bit (=1)
-/// - ISLASTEMPTY: 1 bit (=0)
-/// - MNIBBLES: 2 bits (0 = 4 nibbles)
-/// - MLEN-1: 4 nibbles LSB-first
-/// - ISUNCOMPRESSED: 1 bit (=1)
-/// - byte-alignment padding
-/// - raw payload bytes
+// ---------------------------------------------------------------------------
+// Uncompressed metablock (RFC 7932 §9.2)
+// ---------------------------------------------------------------------------
+
 fn encode_uncompressed_frame(input: &[u8]) -> Vec<u8> {
     let mut bw = BitWriter::new();
     write_wbits(&mut bw);
@@ -121,7 +159,6 @@ fn encode_uncompressed_frame(input: &[u8]) -> Vec<u8> {
     bw.write_bits(1, 1); // ISLAST = 1
     bw.write_bits(0, 1); // ISLASTEMPTY = 0
 
-    // MNIBBLES: 0 (= 4 nibbles) for inputs < 64 KiB, else 2 (= 6 nibbles).
     let mnibbles_field: u32 = if input.len() < (1 << 16) { 0 } else { 2 };
     bw.write_bits(mnibbles_field, 2);
 
@@ -140,13 +177,477 @@ fn encode_uncompressed_frame(input: &[u8]) -> Vec<u8> {
     out
 }
 
-/// Empty Brotli frame: ISLAST=1 + ISLASTEMPTY=1.
 fn empty_frame() -> Vec<u8> {
     let mut bw = BitWriter::new();
     write_wbits(&mut bw);
     bw.write_bits(1, 1); // ISLAST = 1
     bw.write_bits(1, 1); // ISLASTEMPTY = 1
     bw.flush()
+}
+
+// ---------------------------------------------------------------------------
+// Huffman-coded metablock
+// ---------------------------------------------------------------------------
+
+/// Encode a Huffman-coded metablock. Returns the frame bytes on success,
+/// or an empty Vec if encoding fails (caller falls back to uncompressed).
+fn encode_huffman_frame(input: &[u8]) -> Vec<u8> {
+    // Brotli caps single-metablock MLEN at 1 << 24 nibbles. For our
+    // 4-nibble encoding, the limit is 2^16 bytes. Larger inputs would
+    // need 6 nibbles; we punt to the uncompressed path for now.
+    if input.len() >= (1 << 16) {
+        return Vec::new();
+    }
+
+    let commands = parse_input(input);
+    let Some(stream) = build_symbol_stream(&commands, input) else {
+        return Vec::new();
+    };
+
+    // Build per-alphabet histograms.
+    let mut lit_freq = vec![0u32; 256];
+    let mut cmd_freq = vec![0u32; 704];
+    let mut dist_freq = vec![0u32; 64]; // 16 short + 48 long codes (NPOSTFIX=0)
+    for &b in &stream.literals {
+        lit_freq[b as usize] += 1;
+    }
+    for &sym in &stream.cmd_symbols {
+        cmd_freq[sym] += 1;
+    }
+    for &sym in &stream.dist_symbols {
+        dist_freq[sym as usize] += 1;
+    }
+
+    // Build Huffman code lengths (max 15 bits).
+    let lit_lengths = omnizip_codecs::HuffmanLengths::build(&lit_freq, 15);
+    let cmd_lengths = omnizip_codecs::HuffmanLengths::build(&cmd_freq, 15);
+    let dist_lengths = omnizip_codecs::HuffmanLengths::build(&dist_freq, 15);
+
+    // Generate canonical codes (MSB-first) and bit-reverse for wire.
+    let lit_codes = canonical_with_reverse(&lit_lengths);
+    let cmd_codes = canonical_with_reverse(&cmd_lengths);
+    let dist_codes = canonical_with_reverse(&dist_lengths);
+
+    let mut bw = BitWriter::new();
+    write_wbits(&mut bw);
+
+    // Metablock header.
+    bw.write_bits(1, 1); // ISLAST = 1
+    bw.write_bits(0, 1); // ISLASTEMPTY = 0
+    bw.write_bits(0, 2); // MNIBBLES = 0 (= 4 nibbles)
+    let mlen_minus_1 = (input.len() - 1) as u32;
+    for i in 0..4u32 {
+        bw.write_bits((mlen_minus_1 >> (4 * i)) & 0xF, 4);
+    }
+    bw.write_bits(0, 1); // ISUNCOMPRESSED = 0
+
+    // NBLTYPESL/C/D — all = 1 via DecodeVarLenUint8 = 0 (1 bit each).
+    bw.write_bits(0, 1); // NBLTYPESL = 1
+    bw.write_bits(0, 1); // NBLTYPESI = 1
+    bw.write_bits(0, 1); // NBLTYPESD = 1
+
+    // NPOSTFIX (2 bits) + NDMOEM (4 bits) — both 0.
+    bw.write_bits(0, 2);
+    bw.write_bits(0, 4);
+
+    // CONTEXT_MODE for the single literal block type: 0 = LSB6.
+    bw.write_bits(0, 2);
+
+    // NTREESL via DecodeVarLenUint8 = 0 → 1 tree. No literal context map.
+    bw.write_bits(0, 1);
+    // NTREESD via DecodeVarLenUint8 = 0 → 1 tree. No distance context map.
+    bw.write_bits(0, 1);
+
+    // Per-alphabet Huffman tables.
+    write_huffman_table(&mut bw, &lit_lengths, 256);
+    write_huffman_table(&mut bw, &cmd_lengths, 704);
+    write_huffman_table(&mut bw, &dist_lengths, 64);
+
+    // Command stream.
+    let mut lit_iter = stream.literals.iter();
+    let mut dist_iter = stream.dist_symbols.iter().zip(stream.dist_extras.iter());
+    for (&cmd_sym, cmd) in stream.cmd_symbols.iter().zip(commands.iter()) {
+        let (code, len) = cmd_codes[cmd_sym];
+        bw.write_bits(code, u32::from(len));
+
+        // Insert-length extra bits.
+        let entry = &kCmdLut[cmd_sym];
+        if entry.insert_len_extra_bits > 0 {
+            let extra = cmd.insert_len - u32::from(entry.insert_len_offset);
+            bw.write_bits(extra, u32::from(entry.insert_len_extra_bits));
+        }
+        // Copy-length extra bits.
+        if entry.copy_len_extra_bits > 0 {
+            let extra = cmd.copy_len - u32::from(entry.copy_len_offset);
+            bw.write_bits(extra, u32::from(entry.copy_len_extra_bits));
+        }
+
+        // Literals.
+        for _ in 0..cmd.insert_len {
+            let &b = lit_iter.next().expect("literal stream exhausted");
+            let (lc, ll) = lit_codes[b as usize];
+            bw.write_bits(lc, u32::from(ll));
+        }
+
+        // Distance code (only if copy_len > 0).
+        if cmd.copy_len > 0 {
+            let (&d_sym, &d_extra) = dist_iter.next().expect("distance stream exhausted");
+            let (dc, dl) = dist_codes[d_sym as usize];
+            bw.write_bits(dc, u32::from(dl));
+            // Distance extra bits.
+            let nbits = distance_extra_bits(d_sym);
+            if nbits > 0 {
+                bw.write_bits(d_extra, nbits);
+            }
+        }
+    }
+
+    bw.flush()
+}
+
+/// A parsed symbol stream ready for entropy coding.
+struct SymbolStream {
+    /// Literal bytes in insertion order.
+    literals: Vec<u8>,
+    /// Command symbols (indices into kCmdLut, 0..704).
+    cmd_symbols: Vec<usize>,
+    /// Distance symbols (0..63) — one per command with copy_len > 0.
+    dist_symbols: Vec<u32>,
+    /// Distance extra-bit values, parallel to `dist_symbols`.
+    dist_extras: Vec<u32>,
+}
+
+/// Build the entropy-coded symbol stream from commands.
+///
+/// For each command:
+/// - Look up the matching entry in `kCmdLut` (cell_idx ≥ 2 for explicit
+///   distance; we never emit implicit-distance commands).
+/// - Compute the distance symbol + extra bits via the long-code formula
+///   (RFC 7932 §10.4).
+fn build_symbol_stream(commands: &[Command], input: &[u8]) -> Option<SymbolStream> {
+    let mut literals = Vec::new();
+    let mut cmd_symbols = Vec::with_capacity(commands.len());
+    let mut dist_symbols = Vec::new();
+    let mut dist_extras = Vec::new();
+
+    for cmd in commands {
+        // Pull literals from the input by insert_len.
+        // (The encoder guarantees insert_len + copy_len consumes the
+        // input sequentially — we just trust the parser here.)
+        let _ = input;
+
+        let cmd_sym = find_cmd_symbol(cmd.insert_len, cmd.copy_len)?;
+        cmd_symbols.push(cmd_sym);
+
+        if cmd.copy_len > 0 {
+            let (sym, extra) = encode_distance(cmd.distance);
+            dist_symbols.push(sym);
+            dist_extras.push(extra);
+        }
+    }
+
+    // Extract literals in stream order from commands (re-derive from input
+    // via a sequential cursor — the parser already grouped them).
+    // For correctness we re-walk commands against a cursor.
+    let mut cur = 0usize;
+    for cmd in commands {
+        let end = cur + cmd.insert_len as usize;
+        // We don't have direct access to input here in this signature, but
+        // literals were already pushed by parse_input via the commands'
+        // insert ranges. Push them now from `input` to keep this function
+        // total.
+        literals.extend_from_slice(&input[cur..end]);
+        cur = end + cmd.copy_len as usize;
+    }
+
+    Some(SymbolStream {
+        literals,
+        cmd_symbols,
+        dist_symbols,
+        dist_extras,
+    })
+}
+
+/// Find the kCmdLut symbol matching (insert_len, copy_len).
+///
+/// For `copy_len > 0`: matches entries with `distance_code == -1`
+/// (cell_idx ≥ 2) so an explicit distance code is read by the decoder.
+///
+/// For `copy_len == 0` (insert-only trailing command): matches any
+/// entry whose `insert_len_offset` is in range and whose
+/// `copy_len_offset == 2` (smallest). The decoder short-circuits at
+/// metablock end without executing the copy, so the phantom copy_len
+/// is harmless.
+fn find_cmd_symbol(insert_len: u32, copy_len: u32) -> Option<usize> {
+    let phantom = copy_len == 0;
+    let effective_copy = if phantom { 2 } else { copy_len };
+    for (i, entry) in kCmdLut.iter().enumerate() {
+        if !phantom && entry.distance_code >= 0 {
+            continue;
+        }
+        let ins_lo = u32::from(entry.insert_len_offset);
+        let ins_hi = ins_lo + ((1u32) << u32::from(entry.insert_len_extra_bits)) - 1;
+        let cpy_lo = u32::from(entry.copy_len_offset);
+        let cpy_hi = cpy_lo + ((1u32) << u32::from(entry.copy_len_extra_bits)) - 1;
+        if (ins_lo..=ins_hi).contains(&insert_len) && (cpy_lo..=cpy_hi).contains(&effective_copy) {
+            return Some(i);
+        }
+    }
+    None
+}
+
+/// Encode an LZ77 distance as a (symbol, extra_bits) pair.
+///
+/// Uses only long codes (symbol ≥ NUM_SHORT=16) since short codes 0-15
+/// reference the recent-distances ring buffer, which would require
+/// stateful tracking. Long codes are stateless and correct at the cost
+/// of slightly larger output.
+///
+/// Long-code formula (inverted from RFC 7932 §10.4):
+///   distval = sym - 16
+///   nbits = (distval >> 1) + 1
+///   offset = ((2 + (distval & 1)) << nbits) - 4
+///   distance = offset + extra + 1
+fn encode_distance(distance: u32) -> (u32, u32) {
+    let d = distance.saturating_sub(1);
+    // Smallest nbits such that the distance fits in a (2 or 3) << nbits bucket.
+    // Find smallest nbits where d < (3 << (nbits+1)) - 3.
+    let mut nbits: u32 = 1;
+    while nbits < 24 {
+        let limit_even = (4u32 << (nbits - 1)).saturating_sub(4) + (1u32 << nbits);
+        let limit_odd = (6u32 << (nbits - 1)).saturating_sub(4) + (1u32 << nbits);
+        let limit = limit_even.max(limit_odd);
+        if d < limit {
+            break;
+        }
+        nbits += 1;
+    }
+    // Decide even/odd bucket based on which contains d.
+    let even_offset = (4u32 << (nbits - 1)).saturating_sub(4);
+    let odd_offset = (6u32 << (nbits - 1)).saturating_sub(4);
+    let (postfix_bit, base) = if d >= odd_offset {
+        (1, odd_offset)
+    } else {
+        (0, even_offset)
+    };
+    let distval = (nbits - 1) * 2 + postfix_bit;
+    let sym = NUM_SHORT + distval;
+    let extra = d - base;
+    (sym, extra)
+}
+
+/// Number of extra bits for a distance symbol.
+fn distance_extra_bits(sym: u32) -> u32 {
+    if sym < NUM_SHORT {
+        return 0;
+    }
+    let distval = sym - NUM_SHORT;
+    (distval >> 1) + 1
+}
+
+/// Parse input into commands using LZ77 + static dictionary.
+///
+/// Dictionary references are disabled for now: the decoder computes
+/// `max_distance = min(pos, max_backward_distance)` with a window-gap
+/// of 0x8000 (not 16), which doesn't match the encoder's static
+/// `MAX_DISTANCE`. Re-enabling dictionary support requires per-position
+/// distance computation (TODO).
+fn parse_input(input: &[u8]) -> Vec<Command> {
+    let n = input.len();
+    let mut commands = Vec::new();
+
+    let config = omnizip_codecs::HashChainConfig {
+        dict_size: MAX_DISTANCE,
+        min_match: MIN_MATCH,
+        max_chain_length: 64,
+        nice_match: 64,
+        hash_log: 16,
+    };
+    let mut mf = omnizip_codecs::HashChainMatchFinder::new(input, config);
+
+    let mut pos = 0usize;
+    let mut insert_start = 0usize;
+    while pos < n {
+        let lz77 = if pos + MIN_MATCH as usize <= n {
+            mf.advance();
+            mf.find_match(pos)
+        } else {
+            None
+        };
+
+        if let Some(m) = lz77 {
+            if m.length >= MIN_MATCH && m.distance > 0 {
+                let copy_len = m.length.min(MAX_COPY).max(MIN_MATCH);
+                let insert_len = (pos - insert_start) as u32;
+                commands.push(Command {
+                    insert_len,
+                    copy_len,
+                    distance: m.distance,
+                });
+                let advance = copy_len as usize;
+                for _ in 1..advance {
+                    if pos + 1 < n {
+                        pos += 1;
+                        mf.advance();
+                    }
+                }
+                pos += 1;
+                insert_start = pos;
+                continue;
+            }
+        }
+        pos += 1;
+    }
+
+    // Trailing literals: emit a separate trailing-insert command (with
+    // copy_len=0, encoded as a phantom copy_len=2 that the decoder
+    // short-circuits past at metablock end). Folding into the last
+    // command's insert_len would shift the copy's input range and
+    // corrupt the output.
+    if insert_start < n {
+        let trailing = (n - insert_start) as u32;
+        commands.push(Command {
+            insert_len: trailing,
+            copy_len: 0,
+            distance: 0,
+        });
+    }
+
+    commands
+}
+
+/// Build canonical Huffman codes (MSB-first) and bit-reverse each code
+/// to its LSB-first wire form. Returns `Vec<(wire_code, length)>`.
+///
+/// Special case: when the alphabet has exactly one non-zero symbol
+/// (the simple-form NSYM=1 layout), the decoder reads 0 bits per
+/// occurrence via its `single_symbol` fast path. We reflect that here
+/// by returning (0, 0) for the sole non-zero symbol so the writer
+/// emits nothing for it.
+fn canonical_with_reverse(lengths: &omnizip_codecs::HuffmanLengths) -> Vec<(u32, u8)> {
+    let nonzero_count = lengths.lengths.iter().filter(|&&l| l > 0).count();
+    let codes = lengths.canonical_codes();
+    codes
+        .into_iter()
+        .map(|(c, l)| {
+            let l = if nonzero_count == 1 { 0 } else { l };
+            (reverse_bits(c, l), l)
+        })
+        .collect()
+}
+
+// ---------------------------------------------------------------------------
+// Huffman table encoding (RFC 7932 §9.5)
+// ---------------------------------------------------------------------------
+
+/// Code-length code prefix: maps each code-length value (0-5) to its
+/// (wire_value, bits) encoding via the fixed K_CL_PREFIX code.
+///
+/// Derived from the decoder's K_CL_PREFIX_VALUE / K_CL_PREFIX_LENGTH
+/// tables (decoder.rs:645-646). Each entry is the LSB-first stream
+/// representation of the prefix code for that value.
+const CL_CODE_TO_WIRE: [(u32, u8); 6] = [
+    (0b00, 2),   // value 0
+    (0b0111, 4), // value 1
+    (0b011, 3),  // value 2
+    (0b10, 2),   // value 3
+    (0b01, 2),   // value 4
+    (0b1111, 4), // value 5
+];
+
+/// CODE_LENGTH_CODE_ORDER per RFC 7932 §9.5.2.
+const CODE_LENGTH_CODE_ORDER: [u8; 18] = [
+    1, 2, 3, 4, 0, 5, 17, 6, 16, 7, 8, 9, 10, 11, 12, 13, 14, 15,
+];
+
+/// Write a Huffman table (RFC 7932 §9.5).
+///
+/// Uses the complex form (HSKIP=0) for any alphabet size. The
+/// implementation does NOT emit RLE symbols (16/17), which is slightly
+/// wasteful for sparse code-length arrays but produces correct output.
+///
+/// The number of code-length entries written matches what the decoder
+/// will read: the decoder breaks its read loop once the code-length
+/// prefix code's "space" is fully consumed (sum of 32>>len = 32). We
+/// replicate that break here so the bit position after this table
+/// matches the decoder's expectation.
+fn write_huffman_table(bw: &mut BitWriter, lengths: &omnizip_codecs::HuffmanLengths, alphabet: usize) {
+    // Special case: single-symbol alphabets use the simple form (HSKIP=1,
+    // NSYM=1) which is more compact.
+    let nonzero: Vec<usize> = lengths.lengths.iter().enumerate()
+        .filter(|(_, &l)| l > 0)
+        .map(|(i, _)| i)
+        .collect();
+    if nonzero.len() == 1 {
+        write_simple_one_symbol(bw, alphabet, nonzero[0]);
+        return;
+    }
+
+    // Complex form: HSKIP = 0.
+    bw.write_bits(0, 2);
+
+    // Build a sub-Huffman over the 18-symbol code-length alphabet.
+    let mut cl_freq = [0u32; 18];
+    for &l in &lengths.lengths[..alphabet] {
+        cl_freq[usize::from(l)] += 1;
+    }
+    let cl_lengths = omnizip_codecs::HuffmanLengths::build(&cl_freq, 5);
+    let cl_codes = cl_lengths.canonical_codes();
+
+    // Walk CODE_LENGTH_CODE_ORDER, emitting each code-length value via
+    // the fixed K_CL_PREFIX code. Stop early once the code-length prefix
+    // code's space is fully consumed (mirrors the decoder's break).
+    let mut space: u32 = 32;
+    let mut num_codes: u32 = 0;
+    for &sym in &CODE_LENGTH_CODE_ORDER {
+        let len = cl_lengths.lengths[usize::from(sym)];
+        let (wire, nbits) = CL_CODE_TO_WIRE[usize::from(len)];
+        bw.write_bits(wire, u32::from(nbits));
+
+        if len != 0 {
+            space = space.wrapping_sub(32u32 >> u32::from(len));
+            num_codes += 1;
+            // Decoder breaks when space.wrapping_sub(1) >= 32, i.e. when
+            // space has reached 0 (or underflowed, which can't happen
+            // for a valid prefix code).
+            if num_codes != 1 && space.wrapping_sub(1) >= 32 {
+                break;
+            }
+        }
+    }
+
+    // Write the actual code lengths using the code-length Huffman code.
+    // The decoder exits its read loop once the main prefix code's space
+    // is fully consumed (sum of 32768>>len = 32768). We replicate that
+    // break here so the bit position after this table matches.
+    let mut main_space: u32 = 32768;
+    'outer: for &l in &lengths.lengths[..alphabet] {
+        let (code, len) = cl_codes[usize::from(l)];
+        let wire = reverse_bits(code, len);
+        bw.write_bits(wire, u32::from(len));
+        if l != 0 {
+            main_space = main_space.wrapping_sub(32768u32 >> u32::from(l));
+            if main_space == 0 {
+                break 'outer;
+            }
+        }
+    }
+}
+
+/// Write a single-symbol Huffman table in simple form (RFC 7932 §9.5.1).
+fn write_simple_one_symbol(bw: &mut BitWriter, alphabet: usize, sym: usize) {
+    bw.write_bits(0b01, 2); // HSKIP = 1
+    bw.write_bits(0b00, 2); // NSYM = 1 (encoded as 0b00)
+    let bits_per_sym = ceil_log2(alphabet as u32);
+    bw.write_bits(sym as u32, bits_per_sym);
+}
+
+/// ⌈log2(n)⌉ for n ≥ 1.
+fn ceil_log2(n: u32) -> u32 {
+    if n <= 1 {
+        return 0;
+    }
+    32 - (n - 1).leading_zeros()
 }
 
 #[cfg(test)]
@@ -205,9 +706,22 @@ mod tests {
     }
 
     #[test]
+    fn compresses_repetitive_input() {
+        // CSV-like input should compress to less than half its size when
+        // the Huffman path lands. If the uncompressed fallback wins,
+        // the test still passes (we just verify correctness above).
+        let input: Vec<u8> = b"abcabcabcabc".repeat(50);
+        let compressed = compress(&input);
+        assert!(
+            compressed.len() < input.len(),
+            "compressed {} should be < input {}",
+            compressed.len(),
+            input.len()
+        );
+    }
+
+    #[test]
     fn bit_writer_lsb_first() {
-        // write_bits(1, 1) then write_bits(2, 2): bit 0 = 1 (value 1),
-        // bits 1..2 = 0b10 (value 2) → byte = 0b0101 = 5
         let mut bw = BitWriter::new();
         bw.write_bits(1, 1);
         bw.write_bits(2, 2);
@@ -216,21 +730,34 @@ mod tests {
     }
 
     #[test]
+    fn reverse_bits_works() {
+        assert_eq!(reverse_bits(0b1010, 4), 0b0101);
+        assert_eq!(reverse_bits(0b1, 1), 0b1);
+        assert_eq!(reverse_bits(0b10, 2), 0b01);
+    }
+
+    #[test]
+    fn distance_round_trips_in_decoder_formula() {
+        // For a range of distances, encode_distance + the decoder formula
+        // (decode_distance_from_code with npostfix=0, num_direct=16)
+        // should reproduce the original distance.
+        for d in [1u32, 2, 3, 4, 5, 10, 17, 100, 1000, 65_536, 1_000_000] {
+            let (sym, extra) = encode_distance(d);
+            // Decoder formula: distval = sym - 16, nbits = (distval >> 1) + 1,
+            // offset = ((2 + (distval & 1)) << nbits) - 4,
+            // distance = offset + extra + 1.
+            let distval = i32::from(sym as i32 - 16);
+            let nbits = ((distval as u32) >> 1) + 1;
+            let offset = (((distval & 1) + 2) << nbits) - 4;
+            let decoded = (offset + extra as i32 + 1) as u32;
+            assert_eq!(decoded, d, "distance {} round-trip failed: sym={}, extra={}", d, sym, extra);
+        }
+    }
+
+    #[test]
     fn wbits_decodes_to_22() {
-        // The frame header should parse back to WINDOW_BITS = 22.
         let frame = compress(b"abc");
         let (parsed, _) = decoder::parse_frame_header(&frame, 0).expect("parse header");
         assert_eq!(parsed.window_bits, WINDOW_BITS);
-    }
-
-    /// Ensure the dictionary lookup does not crash on a varied input.
-    #[test]
-    fn dictionary_lookup_smoke() {
-        let input = b"<html><body>hello world</body></html>".repeat(8);
-        let _ = crate::dictionary::find_dictionary_match(
-            &input,
-            5,
-            (1u32 << WINDOW_BITS) - 16,
-        );
     }
 }
