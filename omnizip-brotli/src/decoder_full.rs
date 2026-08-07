@@ -292,18 +292,16 @@ pub(crate) fn read_tree_group(
 // ---------------------------------------------------------------------------
 
 /// Look up a dictionary reference and copy the transformed bytes into
-/// `output` (RFC 7932 §10.3).
-///
-/// Returns `Some(len)` if the reference is valid, `None` to fall through
-/// to the regular distance handling. This stub returns `None` until the
-/// static dictionary data tables are ported (TODO 172 step 4).
+/// Resolve a static dictionary reference (RFC 7932 §10.4) via the
+/// shared `dictionary` module. Returns `Some(())` if the reference is
+/// valid; `None` if the word length or transform index is out of range.
 fn dictionary_lookup(
-    _output: &mut Vec<u8>,
-    _copy_len: u32,
-    _distance_code: i32,
-    _max_distance: u32,
-) -> Option<usize> {
-    None
+    output: &mut Vec<u8>,
+    copy_len: u32,
+    distance_code: i32,
+    max_distance: u32,
+) -> Option<()> {
+    crate::dictionary::dictionary_lookup(output, copy_len, distance_code, max_distance)
 }
 
 /// Decode a Huffman-coded metablock using the full RFC 7932 grammar
@@ -433,8 +431,9 @@ fn finish_metablock_decode(
         return Err("invalid metablock: NPOSTFIX > 3");
     }
     let num_direct_distance_codes = 16u32 + ndirect as u32;
-    let max_backward_distance = 1u32 << 22; // WBITS=22 default
-    let max_distance = max_backward_distance.max(num_direct_distance_codes);
+    // Per RFC 7932 §9.1: max_backward_distance = (1 << WBITS) - WINDOW_GAP.
+    // WBITS=22 default; WINDOW_GAP = 0x8000 (32 KB).
+    let max_backward_distance: u32 = (1u32 << 22).saturating_sub(0x8000);
 
     // ----- Literal context map (RFC 7932 §9.6) -----
     let lit_cm_size = (lit_bt.num_block_types as usize) << K_LITERAL_CONTEXT_BITS;
@@ -538,9 +537,11 @@ fn finish_metablock_decode(
 
         // Distance computation.
         let distance: u32 = if v.distance_code >= 0 {
-            crate::decoder::take_distance_from_ring_buffer(
-                v.distance_code as i32, &mut dist_rb, &mut dist_rb_idx,
-            )
+            // Implicit distance (kCmdLut.distance_code == 0):
+            // use most recent from ring buffer. Matches upstream
+            // CommandPostDecodeLiterals: --idx, dist_rb[idx&3].
+            dist_rb_idx -= 1;
+            dist_rb[(dist_rb_idx & 3) as usize]
         } else {
             // Read distance code from distance tree.
             // distance_context = v.context (per upstream ReadCommandInternal).
@@ -567,12 +568,25 @@ fn finish_metablock_decode(
             dist_bt.block_length -= 1;
         }
 
+        // Per upstream: max_distance = min(pos, max_backward_distance).
+        let pos = output.len() as u32;
+        let max_distance = if pos < max_backward_distance {
+            pos
+        } else {
+            max_backward_distance
+        };
+
         // Static dictionary reference vs LZ77 back-reference.
         if (distance as i32) > max_distance as i32 {
             if dictionary_lookup(&mut output, copy_len as u32, distance as i32, max_distance)
                 .is_none()
             {
                 return Err("static dictionary not supported");
+            }
+            // Compensate dist_rb_idx for implicit distance path (which
+            // decremented idx; the dictionary path doesn't write back).
+            if v.distance_code >= 0 {
+                dist_rb_idx = dist_rb_idx.wrapping_add(1);
             }
         } else {
             if distance == 0 || distance as usize > output.len() {
@@ -583,6 +597,9 @@ fn finish_metablock_decode(
                 let b = output[src + i];
                 output.push(b);
             }
+            // Update recent-distances cache (upstream LZ77 copy path).
+            dist_rb[(dist_rb_idx & 3) as usize] = distance;
+            dist_rb_idx = dist_rb_idx.wrapping_add(1);
         }
 
         // Update p1/p2 from copied bytes.
