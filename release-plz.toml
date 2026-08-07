@@ -4,15 +4,13 @@
 # See: https://release-plz.dev/docs/config
 
 [workspace]
-# Disable auto GitHub releases; the release.yml workflow handles publishing
-# to crates.io only. Tag/release creation can be enabled later if desired.
 git_release_enable = false
-
-# Update dependencies with `cargo update` as part of release PRs
 dependencies_update = true
-
-# Allow PRs to be created from the release-plz bot
 allow_dirty = false
+# Always release without comparing against old published versions.
+# The workspace structure changed significantly since 0.14.20
+# (new crates added), so cargo metadata fails at old commits.
+release_always = true
 
 [changelog]
 # Group commits by conventional-commit type
