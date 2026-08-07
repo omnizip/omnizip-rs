@@ -232,16 +232,17 @@ pub fn parse_metablock_header(
         let mnibbles = if mnibbles_raw == 0 { 4 } else { mnibbles_raw };
         let mnibbles_u8 = u8::try_from(mnibbles).map_err(|_| "mnibbles overflow")?;
         let mlen = br.read_mlen(mnibbles);
-        // Per upstream `BrotliDecoderState::METABLOCK_HEADER_UNCOMPRESSED`:
-        // IS_UNCOMPRESSED is only read when ISLAST=0 (and is_metadata=0).
-        // For ISLAST=1 metablocks, the body is always Huffman-coded.
+        // RFC 7932 §9.2: ISUNCOMPRESSED is read for any non-empty
+        // metablock (including ISLAST=1). RESERVED (1 bit) only
+        // appears when ISLAST=0.
+        let is_uncompressed = br.read_bit();
         return Ok((
             MetablockHeader {
                 is_last,
                 is_last_empty: false,
                 mlen,
                 mnibbles: mnibbles_u8,
-                is_uncompressed: false,
+                is_uncompressed,
             },
             br.bit_pos(),
         ));

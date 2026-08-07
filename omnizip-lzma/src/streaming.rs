@@ -20,12 +20,11 @@
 #![forbid(unsafe_code)]
 
 use omnizip_codecs::{
-    Codec, CodecId, CompressionLevel, OmnizipError, StreamingDecoder, StreamingEncoder,
+    CodecId, CompressionLevel, OmnizipError, StreamingDecoder, StreamingEncoder,
 };
 
 use crate::encoder::alone::{lzma_alone_compress_with_options, LzmaOptions};
 use crate::lzma_alone_decompress;
-use crate::LzmaCodec;
 
 /// Streaming LZMA encoder. Buffers input, compresses on finish.
 pub struct LzmaStreamingEncoder {
@@ -105,6 +104,8 @@ impl StreamingDecoder for LzmaStreamingDecoder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::LzmaCodec;
+    use omnizip_codecs::Codec;
 
     #[test]
     fn streaming_encode_matches_oneshot() {
