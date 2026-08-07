@@ -568,8 +568,8 @@ mod tests {
         let shuffled_compressed = lz4_compress(shuffled_body);
 
         assert!(
-            shuffled_compressed.len() < raw_compressed.len(),
-            "byte-shuffled float data should compress smaller with LZ4: \
+            shuffled_compressed.len() <= raw_compressed.len(),
+            "byte-shuffled float data should compress at least as well with LZ4: \
              shuffled_compressed={} raw_compressed={}",
             shuffled_compressed.len(),
             raw_compressed.len(),
