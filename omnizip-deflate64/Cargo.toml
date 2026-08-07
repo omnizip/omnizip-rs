@@ -5,6 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
 description = "Pure-Rust Deflate64 compression codec (ZIP method 9)"
 keywords = ["compression", "deflate64", "zip"]
 categories = ["compression"]
