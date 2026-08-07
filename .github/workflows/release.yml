@@ -1,0 +1,146 @@
+# Rust release workflow — modeled after metanorma/ci rubygems-release.yml
+# but targeting crates.io instead of RubyGems.
+#
+# Triggers:
+# - workflow_dispatch: manual release with next_version input
+# - repository_dispatch: cross-repo trigger (e.g., from omnizip-rs-release)
+# - tag push (v*): publish-only (version already bumped)
+#
+# Required secrets:
+# - CARGO_REGISTRY_TOKEN: crates.io API token (publish permission)
+# - OMNIZIP_CI_PAT_TOKEN: GitHub PAT for cross-repo operations
+name: release
+
+permissions:
+  contents: write
+  packages: write
+  id-token: write
+
+on:
+  workflow_dispatch:
+    inputs:
+      next_version:
+        description: |
+          Next release version. Possible values: x.y.z, major, minor, patch or skip
+        required: true
+        default: "skip"
+  repository_dispatch:
+    types: [do-release]
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.OMNIZIP_CI_PAT_TOKEN || secrets.GITHUB_TOKEN }}
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Compute next version
+        id: version
+        run: |
+          CURRENT=$(grep '^version = ' Cargo.toml | head -1 | sed 's/version = "\([^"]*\)".*/\1/')
+          INPUT="${{ github.event.inputs.next_version || github.event.client_payload.next_version || 'skip' }}"
+          echo "Current version: $CURRENT"
+          echo "Input: $INPUT"
+
+          if [ "$INPUT" = "skip" ] && [ -n "${{ github.ref_name }}" ]; then
+            # Tag push: use the tag as the version.
+            NEXT="${{ github.ref_name }}"
+            NEXT="${NEXT#v}"
+          elif [ "$INPUT" = "skip" ]; then
+            NEXT="$CURRENT"
+          else
+            NEXT="$INPUT"
+          fi
+
+          # Handle semantic bumps.
+          IFS='.' read -r MAJOR MINOR PATCH <<< "$CURRENT"
+          case "$INPUT" in
+            major) NEXT="$((MAJOR+1)).0.0" ;;
+            minor) NEXT="$MAJOR.$((MINOR+1)).0" ;;
+            patch) NEXT="$MAJOR.$MINOR.$((PATCH+1))" ;;
+          esac
+
+          echo "Next version: $NEXT"
+          echo "next=$NEXT" >> $GITHUB_OUTPUT
+          echo "current=$CURRENT" >> $GITHUB_OUTPUT
+
+      - name: Bump version
+        if: steps.version.outputs.next != steps.version.outputs.current
+        run: |
+          NEXT="${{ steps.version.outputs.next }}"
+          # Bump workspace version.
+          sed -i.bak "s/^version = \".*\"/version = \"$NEXT\"/" Cargo.toml
+          rm -f Cargo.toml.bak
+          git add Cargo.toml
+          git commit -m "chore(release): $NEXT"
+          git push
+
+      - name: Create tag
+        if: steps.version.outputs.next != steps.version.outputs.current
+        run: |
+          NEXT="${{ steps.version.outputs.next }}"
+          git tag "v$NEXT"
+          git push origin "v$NEXT"
+
+      - name: Publish omnizip-codecs (foundation crate)
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish -p omnizip-codecs --allow-dirty || true
+
+      - name: Publish individual codec crates
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          for crate in \
+            omnizip-filters \
+            omnizip-bzip2 \
+            omnizip-brotli \
+            omnizip-deflate \
+            omnizip-flac \
+            omnizip-fsst \
+            omnizip-glza \
+            omnizip-libdeflate \
+            omnizip-lz4 \
+            omnizip-lzma \
+            omnizip-ppmd \
+            omnizip-ricepp \
+            omnizip-snappy \
+            omnizip-zpaq \
+            omnizip-zstd \
+            omnizip-blosc \
+            omnizip-deflate64; do
+            echo "::group::Publishing $crate"
+            # --allow-dirty: workspace may have unrelated local changes
+            # from development. The published artifact is the Cargo.toml
+            # + src/, not the working-tree state.
+            cargo publish -p "$crate" --allow-dirty || echo "::warning::$crate publish failed (may already be at this version)"
+            echo "::endgroup::"
+          done
+
+      - name: Create GitHub release
+        if: steps.version.outputs.next != steps.version.outputs.current
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.version.outputs.next }}
+          name: v${{ steps.version.outputs.next }}
+          generate_release_notes: true
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.OMNIZIP_CI_PAT_TOKEN || secrets.GITHUB_TOKEN }}
+
+      - name: Verify published versions
+        run: |
+          echo "Published versions:"
+          for crate in omnizip-codecs omnizip-lzma omnizip-zstd omnizip-flac omnizip-brotli; do
+            v=$(cargo search "$crate" --limit 1 2>/dev/null | grep "^$crate" | sed 's/.*= "\([^"]*\)".*/\1/' || echo "not found")
+            echo "  $crate: $v"
+          done

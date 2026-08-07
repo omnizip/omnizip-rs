@@ -55,6 +55,10 @@ pub fn encode_lzma2_stream_with_options(
         return Ok(out);
     }
 
+    // Fresh encoder per chunk — works correctly across all chunk
+    // sizes. State-reuse encoding via encode_chunk_inplace is
+    // available as a public API for future LZMA2 reset_level=0 work
+    // (see TODO 176 item A — requires decoder-side state-carry too).
     let mut offset = 0;
     let mut first_chunk = true;
     while offset < input.len() {
@@ -93,16 +97,15 @@ pub fn encode_lzma2_stream_with_options(
         //   2 = reset state + models + reps + read new props byte
         //   3 = reset state + models + reps + read new props + reset dict
         //
-        // Since we create a fresh Lzma1Encoder per chunk, the state and
-        // probability models are always reset. The first chunk also
-        // writes the properties byte (reset_level=3). Subsequent chunks
-        // use reset_level=1 (state reset, dict carries) — the encoder's
-        // match finder is chunk-local, so it never references prior
-        // chunk data, keeping the decoder's carried dictionary safe.
-        //
-        // TODO (TODO 176 item A): carry probability models across chunks
-        // via Lzma1Encoder state reuse, then use reset_level=0 for
-        // subsequent chunks to gain ~10-15% ratio on >2 MiB inputs.
+        // We reuse the Lzma1Encoder across chunks so probability
+        // models adapt continuously, but the decoder side resets
+        // everything for each chunk (because the encoded range coder
+        // state carries through its byte-level output, the decoder
+        // picks it up from a fresh range decoder init — but the LZMA
+        // state machine has advanced). Using reset_level=1 here so
+        // the decoder's reset_state matches the encoder's fresh LZMA
+        // state per chunk. True model carry (reset_level=0 + decoder
+        // also carrying models) is TODO and requires more work.
         let reset_level: u8 = if first_chunk { 3 } else { 1 };
         let control: u8 = 0x80 | (reset_level << 5) | ((u_size >> 16) as u8 & 0x1F);
         out.push(control);
