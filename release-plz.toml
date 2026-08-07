@@ -11,58 +11,58 @@ release_always = true
 
 # Explicitly list packages to avoid workspace-wide cargo metadata at
 # old commits (where some workspace members didn't exist yet).
-[[packages]]
+[[package]]
 name = "omnizip-codecs"
 
-[[packages]]
+[[package]]
 name = "omnizip-filters"
 
-[[packages]]
+[[package]]
 name = "omnizip-bzip2"
 
-[[packages]]
+[[package]]
 name = "omnizip-brotli"
 
-[[packages]]
+[[package]]
 name = "omnizip-deflate"
 
-[[packages]]
+[[package]]
 name = "omnizip-deflate64"
 
-[[packages]]
+[[package]]
 name = "omnizip-flac"
 
-[[packages]]
+[[package]]
 name = "omnizip-fsst"
 
-[[packages]]
+[[package]]
 name = "omnizip-glza"
 
-[[packages]]
+[[package]]
 name = "omnizip-libdeflate"
 
-[[packages]]
+[[package]]
 name = "omnizip-lz4"
 
-[[packages]]
+[[package]]
 name = "omnizip-lzma"
 
-[[packages]]
+[[package]]
 name = "omnizip-ppmd"
 
-[[packages]]
+[[package]]
 name = "omnizip-ricepp"
 
-[[packages]]
+[[package]]
 name = "omnizip-snappy"
 
-[[packages]]
+[[package]]
 name = "omnizip-zpaq"
 
-[[packages]]
+[[package]]
 name = "omnizip-zstd"
 
-[[packages]]
+[[package]]
 name = "omnizip-blosc"
 
 [changelog]
