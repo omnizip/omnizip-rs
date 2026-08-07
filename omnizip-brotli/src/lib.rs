@@ -12,12 +12,12 @@
 
 // Active modules (used by the Codec trait implementation).
 pub mod compress_fragment;
-pub mod from_spec_encoder;
 pub mod decoder;
 pub mod decoder_full;
 pub mod dict_encoder;
 pub mod dictionary;
 pub mod fast_encoder;
+pub mod from_spec_encoder;
 pub mod prefix;
 pub mod static_codes;
 
