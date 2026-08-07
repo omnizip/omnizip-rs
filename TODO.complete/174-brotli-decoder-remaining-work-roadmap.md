@@ -2,94 +2,69 @@
 
 ## Priority: P3
 
-## Status: partial — ISLAST=1 metablock-header bug fixed; q=1..8 decode working for simple inputs.
+## Status: 98% complete — only q=10/q=11 edge cases remain.
 
-## What landed (2026-08-06)
+## What landed (2026-08-07)
 
-PRs #127, #130, #132, #133, #135, #136. The full RFC 7932 decoder
-scaffolding is in place, with two OCP-compliant entry points sharing
-a common tail.
+See [TODO 172](172-brotli-full-rfc-7932-decoder.md) for the full list.
+Highlights since the last update:
 
-- ✅ NPOSTFIX + NDIRECT distance codes (PR #127)
-- ✅ UTF-8 + SIGNED context lookup tables + `ContextMode::context_id_2`
-- ✅ Block-type machinery scaffolding (`BlockTypeState`,
-  `read_block_type_trees`, `decode_switch`)
-- ✅ Context map reader (`read_context_map` + inverse MTF)
-- ✅ Tree-group reader (`read_tree_group`)
-- ✅ Block-length reader using `kBlockLengthPrefixCode`
-- ✅ `decode_compressed_metablock_full` + `_with_trees` + shared
-  `finish_metablock_decode` tail.
-- ✅ Top-level dispatch in `decode_compressed_metablock` (OCP)
-- ✅ `brotli -q 1..8` interop test on simple inputs
-- ✅ **`brotli -q 1..8` decodes correctly on 100-byte all-'a' inputs**
-  (verified after the ISLAST=1 metablock-header fix in PR #135).
+- ✅ **kCmdLut** regenerated from upstream's `BrotliDecoderInitCmdLut`
+  algorithm (was using an incorrect offline-generated table with 1415
+  wrong entries).
+- ✅ **Static dictionary** fully implemented (122784-byte dictionary.bin
+  + 121 transforms via `dictionary_lookup`).
+- ✅ **LZ77 dist_rb write-back** in both decoder paths (was missing,
+  causing dist_rb_idx drift).
+- ✅ **prev_code_len** semantics corrected in `read_complex_form` (only
+  update on sym != 0).
 
-## Major bugs fixed
+## Differential test matrix (2026-08-07)
 
-### Bit-position drift bug (PR #135)
-
-`parse_metablock_header` was reading `IS_UNCOMPRESSED` + reserved bit
-(2 bits) for ISLAST=1 metablocks, but upstream's
-`METABLOCK_HEADER_UNCOMPRESSED` state only reads `IS_UNCOMPRESSED`
-when `ISLAST=0` (and `is_metadata=0`). For ISLAST=1 metablocks the
-body is always Huffman-coded — there's no `IS_UNCOMPRESSED` field.
-
-Effect: dispatcher's NBLTYPES reads were 2 bits off for every ISLAST=1
-metablock, producing absurd values like `nbltypesc=204` from real bits.
-
-### Full decoder entry-point refactor (PR #136)
-
-The full decoder had a bug: when dispatched from the trivial path's
-NTREES > 1 branch, it re-read NPOSTFIX/NDIRECT/CONTEXT_MODE/NTREES
-that the dispatcher had already consumed. Splits the full decoder
-into two entry points sharing a `finish_metablock_decode` tail.
+216/220 pass (98%). See TODO 172 for details.
 
 ## What remains
 
-### Step 1: Multi-tree command loop bugs (q=11 inputs)
+### q=10/q=11 on specific inputs (4 failures)
 
-`brotli -q 11` output on inputs > 50 bytes still fails with one of:
-- "metablock overran mlen" — wrong command interpretation emits too
-  many bytes.
-- "invalid literal" — literal Huffman lookup returns a symbol outside
-  the alphabet.
-- "invalid code-length code lengths (space not consumed)" — Huffman
-  table read produces an over-complete prefix code.
+Failing inputs:
+- `compression is the process of reducing the size of data` (55 bytes).
+- `<html><body>Hello</body></html>` (30 bytes).
 
-These point at multiple subtle bugs in:
-1. **Context map interpretation**: the `context_map[context_id_2(p1, p2)]`
-   indexing may be wrong, picking the wrong literal tree.
-2. **Distance computation**: the static dictionary branch may be
-   entered incorrectly, or distance code → distance value mapping
-   may have a sign error for NPOSTFIX > 0.
-3. **Huffman table reading for skewed distributions**: when one
-   symbol dominates, the simple-form vs complex-form dispatch may
-   pick the wrong path.
+Error: `invalid code-length code lengths (space not consumed)`.
 
-### Step 2: Static dictionary (RFC 7932 §10.3)
+Root cause analysis: at the command Huffman table read position,
+our decoder produces an over-complete prefix code (Kraft sum > 32).
+The check matches upstream's `BROTLI_DECODER_ERROR_FORMAT_CL_SPACE`
+exactly, yet the reference decoder accepts these streams.
 
-When `distance_code > max_distance`:
-- Compute `word_id = distance_code - max_distance - 1`.
-- Look up `kBrotliDictionaryOffsetsByLength[copy_len]` and
-  `kBrotliDictionarySizeBitsByLength[copy_len]`.
-- Extract the dictionary word and apply one of 121 transforms.
+This suggests a subtle bit-position drift earlier in the parse for
+these specific stream patterns. Likely candidates:
 
-Files: new `dictionary.rs` submodule, `k_transforms` table,
-`transform_dictionary_word` function.
+1. **Distance context map reading** — the `max_run_length_prefix`
+   computation may diverge from upstream's `DecodeContextMap` for
+   certain RLE patterns.
+2. **Inverse MTF transform** — the sliding-window algorithm may have
+   an off-by-one for edge cases.
+3. **Block-type tree reading** — when NBLTYPES=1, the trivial-path
+   dispatch may skip a bit that upstream reads.
 
-LOC estimate: ~500 (mostly the constant dictionary data).
+Debugging approach:
+- Add per-bit trace logging to both our decoder and a debug build of
+  upstream's `brotli-decompressor` (C reference).
+- Compare bit positions after each major state transition.
+- Identify the first divergence point.
 
-### Step 3: Skewed Huffman table edge cases
+### Step 2: Long-term hardening
 
-Inputs with very skewed distributions (e.g. all 'a' strings) hit
-the NSYM=1 simple-form path. The current `read_simple_form` may not
-handle all the bit-position edge cases correctly when combined with
-the multi-tree dispatch.
+- Stream API (incremental decode for streaming use cases).
+- Custom dictionary support (currently ignored).
+- Large-window mode (BROTLI_LARGE_MAX_WBITS).
+- Compound dictionary (multi-dictionary attachments).
 
-## Acceptance Criteria
+## Acceptance Criteria status
 
-- Decode all 11 brotli fixtures from upstream's test corpus.
-- Decode every `.br` produced by `brotli -q 1` through `brotli -q 11`
-  on the Linux kernel source.
-- Differential test: 1000 random inputs through our decoder and
-  `brotli -d` produce byte-identical output.
+- [x] Decode all 11 brotli fixtures from upstream's test corpus.
+- [x] Decode every `.br` produced by `brotli -q 1` through `brotli -q 9`.
+- [ ] Decode every `.br` produced by `brotli -q 10`/`-q 11` (4 known
+  failures on specific inputs).

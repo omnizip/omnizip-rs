@@ -2,14 +2,14 @@
 
 ## Priority: P4
 
-## Status: pending — comprehensive port plan documented.
+## Status: deferred — substantial scope, no consumer unblocking.
 
 ## Context
 
-The pure-Rust brotli encoder (`fast_encoder.rs`) is a verbatim port of
-upstream's `compress_fragment_two_pass`, the q=0/q=1 fast path. It uses
-the 3-tuple `INSERT + DISTANCE + COPY-LD` pattern, with separate
-Huffman codes for each.
+The pure-Rust brotli encoder (`fast_encoder.rs`, 1545 LOC) is a verbatim
+port of upstream's `compress_fragment_two_pass.c` — the q=0/q=1 fast
+path. It uses the 3-tuple `INSERT + DISTANCE + COPY-LD` pattern, with
+separate Huffman codes for each.
 
 The q≥2 encoder (`compress_fragment.rs` and the optimal parser in
 `backward_references_hq.rs`) emits combined INSERT+COPY commands via
@@ -19,10 +19,9 @@ ratio at 10–100× the CPU cost.
 
 ## What's needed
 
-### Step 1: Port `compress_fragment.rs` (q=2..6, ~700 LOC of actual code)
+### Step 1: Port `compress_fragment.rs` (q=2..6, ~790 LOC of C)
 
-Upstream file: `brotli-8.0.4/src/enc/compress_fragment.rs` (1179 LOC
-including boilerplate).
+Upstream file: `brotli/c/enc/compress_fragment.c` (790 LOC).
 
 **Caution** (from upstream's header comment):
 > lots of the functions look structurally the same as two_pass, but
@@ -39,7 +38,8 @@ Key differences from `compress_fragment_two_pass.rs`:
    match quality.
 2. **IsMatch**: checks 5 bytes (4 + 1) instead of 4.
 3. **BuildAndStoreCommandPrefixCode**: the 704-entry scatter pattern
-   differs from two_pass. The memcpy offsets are different.
+   differs from two_pass. The memcpy offsets are different
+   (`memcpy(tmp_depth+24, depth+40, 8)` vs `+24, +40`).
 4. **StoreCommand**: emits combined INSERT+COPY via
    `combine_length_codes(inscode, copycode, use_last_distance)`.
 5. **kCmdHistoSeed**: a 128-entry seed histogram that biases toward
@@ -72,17 +72,13 @@ fn compress(&self, plaintext: &[u8], level: CompressionLevel) -> Result<Vec<u8>,
 Our `compress_fragment_two_pass` encoder already produces valid brotli
 that any conformant decoder (including ours, `brotli -d`, browsers)
 accepts. The compression ratio is competitive with upstream's q=1.
+
 LimniFS cares about determinism + round-trip integrity, not max ratio.
 
 A q≥2 path would add ~5K LOC and significant complexity for a ratio
-bump that doesn't unblock any consumer.
-
-## Acceptance Criteria
-
-- Round-trip via own decoder + `brotli -d` at every quality 0..11.
-- Ratio on `enwik8` within 5% of upstream `brotli -q N`.
-- No nondeterminism: same input + quality always produces identical
-  bytes across runs, machines, and Rust versions.
+bump that doesn't unblock any consumer. The decoder (TODO 172) is the
+critical path because consumers may receive brotli streams from any
+encoder (browsers, upstream CLI, etc.).
 
 ## Implementation skeleton (for the next session)
 
@@ -124,3 +120,10 @@ match quality {
     _ => Ok(fast_encoder::vendored_compress(plaintext)), // fallback
 }
 ```
+
+## Acceptance Criteria
+
+- Round-trip via own decoder + `brotli -d` at every quality 0..11.
+- Ratio on `enwik8` within 5% of upstream `brotli -q N`.
+- No nondeterminism: same input + quality always produces identical
+  bytes across runs, machines, and Rust versions.
