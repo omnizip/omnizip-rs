@@ -163,31 +163,29 @@ fn read_block_length(tree: &HuffmanTable, br: &mut BitReader) -> Result<u32, &'s
 
 /// Read a context map (RFC 7932 §9.6).
 ///
-/// Returns the context map as a `Vec<u8>` and the number of distinct
-/// Huffman-tree indices it contains (i.e. `NTREES`).
+/// `num_htrees` is passed in (already read by the caller via
+/// `read_varlen_uint8`). This function starts at the RLE flag.
 ///
-/// Layout:
-/// 1. `num_htrees` via `DecodeVarLenUint8 + 1`.
-/// 2. If `num_htrees <= 1`: zero-filled context map, no further data.
-/// 3. Else: optional RLE flag (1 bit), then context-map code Huffman
-///    tree (alphabet `max_rle + num_htrees`), then the per-context
-///    entries with optional run-length encoding of zeros, then an
-///    optional inverse-MTF flag (1 bit).
+/// Layout when `num_htrees <= 1`: zero-filled context map, no data.
+/// Layout when `num_htrees > 1`: optional RLE flag (1 bit), then
+/// context-map code Huffman tree (alphabet `max_rle + num_htrees`),
+/// then the per-context entries with optional run-length encoding
+/// of zeros, then an optional inverse-MTF flag (1 bit).
 pub(crate) fn read_context_map(
     data: &[u8],
     bit_pos: usize,
     context_map_size: usize,
+    num_htrees: u32,
     max_rle_override: u32,
-) -> Result<(Vec<u8>, u32, usize), &'static str> {
+) -> Result<(Vec<u8>, usize), &'static str> {
     let mut br = BitReader::new(data);
     br.bit_pos = bit_pos;
 
-    let num_htrees = read_varlen_uint8(&mut br)? + 1;
     let mut context_map = vec![0u8; context_map_size];
 
     if num_htrees <= 1 {
         // Trivial: every context maps to tree 0.
-        return Ok((context_map, num_htrees, br.bit_pos()));
+        return Ok((context_map, br.bit_pos()));
     }
 
     // RLE flag (RFC 7932 §9.6). Upstream reads 5 bits as a peek:
@@ -243,7 +241,7 @@ pub(crate) fn read_context_map(
         inverse_move_to_front(&mut context_map);
     }
 
-    Ok((context_map, num_htrees, br.bit_pos()))
+    Ok((context_map, br.bit_pos()))
 }
 
 /// Inverse Move-to-Front transform (RFC 7932 §9.6).
@@ -361,8 +359,15 @@ pub(crate) fn decode_compressed_metablock_full(
         context_modes.push(mode);
     }
 
+    // NTREESL and NTREESD are NOT read here — they're interleaved with
+    // the context map reads inside finish_metablock_decode (per upstream:
+    // NTREESL is read first, then literal context map, then NTREESD,
+    // then distance context map).
+
     finish_metablock_decode(
-        data, &mut br, mlen, npostfix, ndirect_raw, lit_bt, cmd_bt, dist_bt, context_modes,
+        data, &mut br, mlen, npostfix, ndirect_raw,
+        None, None, // NTREES read inline (NBLTYPES > 1 path)
+        lit_bt, cmd_bt, dist_bt, context_modes,
     )
 }
 
@@ -379,6 +384,8 @@ pub(crate) fn decode_compressed_metablock_full_with_trees(
     npostfix: usize,
     ndirect_raw: usize,
     context_mode_bits: u32,
+    ntreesl: u32,
+    ntreesd: u32,
 ) -> Result<(usize, Vec<u8>), &'static str> {
     let mut br = BitReader::new(data);
     br.bit_pos = bit_pos;
@@ -399,7 +406,9 @@ pub(crate) fn decode_compressed_metablock_full_with_trees(
     let context_modes = vec![mode];
 
     finish_metablock_decode(
-        data, &mut br, mlen, npostfix, ndirect_raw, lit_bt, cmd_bt, dist_bt, context_modes,
+        data, &mut br, mlen, npostfix, ndirect_raw,
+        Some(ntreesl), Some(ntreesd), // NTREES already read by dispatcher
+        lit_bt, cmd_bt, dist_bt, context_modes,
     )
 }
 
@@ -412,6 +421,8 @@ fn finish_metablock_decode(
     mlen: usize,
     npostfix: usize,
     ndirect_raw: usize,
+    ntreesl_opt: Option<u32>,
+    ntreesd_opt: Option<u32>,
     mut lit_bt: BlockTypeState,
     mut cmd_bt: BlockTypeState,
     mut dist_bt: BlockTypeState,
@@ -427,23 +438,23 @@ fn finish_metablock_decode(
 
     // ----- Literal context map (RFC 7932 §9.6) -----
     let lit_cm_size = (lit_bt.num_block_types as usize) << K_LITERAL_CONTEXT_BITS;
-    let (lit_context_map, ntreesl, p) =
-        read_context_map(data, br.bit_pos(), lit_cm_size, 0)?;
+    let ntreesl = match ntreesl_opt {
+        Some(v) => v,
+        None => read_varlen_uint8(&mut br)? + 1,
+    };
+    let (lit_context_map, p) =
+        read_context_map(data, br.bit_pos(), lit_cm_size, ntreesl, 0)?;
     br.bit_pos = p;
 
     // ----- Distance context map (§9.6) -----
     let dist_cm_size = (dist_bt.num_block_types as usize) << K_DISTANCE_CONTEXT_BITS;
-    let (mut dist_context_map, ntreesd, p) =
-        read_context_map(data, br.bit_pos(), dist_cm_size, 0)?;
+    let ntreesd = match ntreesd_opt {
+        Some(v) => v,
+        None => read_varlen_uint8(&mut br)? + 1,
+    };
+    let (dist_context_map, p) =
+        read_context_map(data, br.bit_pos(), dist_cm_size, ntreesd, 0)?;
     br.bit_pos = p;
-
-    // For trivial distance context (no MTF), the LSB of each entry is
-    // inverted per RFC 7932 §9.6.
-    if dist_bt.num_block_types == 1 {
-        for entry in &mut dist_context_map {
-            *entry ^= 1;
-        }
-    }
 
     // ----- Huffman tree groups -----
     let (lit_trees, p) = read_tree_group(data, br.bit_pos(), 256, ntreesl)?;
