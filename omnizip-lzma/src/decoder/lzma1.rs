@@ -40,9 +40,7 @@
 
 use crate::bit_model::BitModel;
 use crate::coder::{DistanceDecoder, LengthDecoder};
-use crate::constants::{
-    MATCH_LEN_MAX, MATCH_LEN_MIN, NUM_LEN_TO_POS_STATES, NUM_STATES,
-};
+use crate::constants::{MATCH_LEN_MAX, MATCH_LEN_MIN, NUM_LEN_TO_POS_STATES, NUM_STATES};
 use crate::range_coder::RangeDecoder;
 use crate::state::LzmaState;
 use crate::LzmaError;
@@ -271,9 +269,7 @@ impl Lzma1Decoder {
             let actual = output.len() as u64;
             if actual != target {
                 return Err(LzmaError::Corrupt {
-                    reason: format!(
-                        "decoded size mismatch: expected {target}, got {actual}"
-                    ),
+                    reason: format!("decoded size mismatch: expected {target}, got {actual}"),
                 });
             }
         }
@@ -300,18 +296,14 @@ impl Lzma1Decoder {
             }
 
             let pos_state = (output.len() as u32) & self.pb_mask;
-            let model_idx = (usize::from(self.state.as_u8()) * self.pb_shift) + usize::try_from(pos_state).unwrap_or(0);
+            let model_idx = (usize::from(self.state.as_u8()) * self.pb_shift)
+                + usize::try_from(pos_state).unwrap_or(0);
             let is_match = range_decoder.decode_bit(&mut self.is_match[model_idx])?;
 
             if is_match == 0 {
                 self.decode_literal(range_decoder, output)?;
             } else {
-                let eos = self.decode_match(
-                    range_decoder,
-                    output,
-                    pos_state,
-                    cfg,
-                )?;
+                let eos = self.decode_match(range_decoder, output, pos_state, cfg)?;
                 if eos {
                     break;
                 }
@@ -474,7 +466,9 @@ impl Lzma1Decoder {
         pos_state: u32,
         cfg: DecodeConfig,
     ) -> Result<bool, LzmaError> {
-        let length_encoded = self.length_coder.decode(range_decoder, usize::try_from(pos_state).unwrap_or(0))?;
+        let length_encoded = self
+            .length_coder
+            .decode(range_decoder, usize::try_from(pos_state).unwrap_or(0))?;
         let mut length = length_encoded + MATCH_LEN_MIN;
 
         // Length-state for the distance coder (XZ Utils get_dist_state).
@@ -484,7 +478,9 @@ impl Lzma1Decoder {
             NUM_LEN_TO_POS_STATES - 1
         };
 
-        let distance = self.distance_coder.decode(range_decoder, len_state as usize)?;
+        let distance = self
+            .distance_coder
+            .decode(range_decoder, len_state as usize)?;
 
         // EOPM detection.
         if distance == EOPM_DISTANCE {
@@ -548,14 +544,18 @@ impl Lzma1Decoder {
 
         if is_rep0_bit == 0 {
             // Rep0 path.
-            let long_model_idx = (state_idx * self.pb_shift) + usize::try_from(pos_state).unwrap_or(0);
+            let long_model_idx =
+                (state_idx * self.pb_shift) + usize::try_from(pos_state).unwrap_or(0);
             let is_rep0_long = range_decoder.decode_bit(&mut self.is_rep0_long[long_model_idx])?;
             if is_rep0_long == 0 {
                 // Short rep: length 1, no rotation.
                 length = 1;
                 self.state.on_short_rep();
             } else {
-                length = self.rep_length_coder.decode(range_decoder, usize::try_from(pos_state).unwrap_or(0))? + MATCH_LEN_MIN;
+                length = self
+                    .rep_length_coder
+                    .decode(range_decoder, usize::try_from(pos_state).unwrap_or(0))?
+                    + MATCH_LEN_MIN;
                 self.state.on_rep();
             }
             distance = self.rep0;
@@ -583,7 +583,10 @@ impl Lzma1Decoder {
                     self.rep0 = distance;
                 }
             }
-            length = self.rep_length_coder.decode(range_decoder, usize::try_from(pos_state).unwrap_or(0))? + MATCH_LEN_MIN;
+            length = self
+                .rep_length_coder
+                .decode(range_decoder, usize::try_from(pos_state).unwrap_or(0))?
+                + MATCH_LEN_MIN;
             self.state.on_rep();
         }
 

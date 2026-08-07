@@ -32,11 +32,7 @@ impl Codec for ZstdCodec {
         "zstd"
     }
 
-    fn compress(
-        &self,
-        plaintext: &[u8],
-        level: CompressionLevel,
-    ) -> Result<Vec<u8>, OmnizipError> {
+    fn compress(&self, plaintext: &[u8], level: CompressionLevel) -> Result<Vec<u8>, OmnizipError> {
         let zstd_level = match level.as_u8() {
             0..=2 => ZstdLevel::Fastest,
             3..=9 => ZstdLevel::Fast,

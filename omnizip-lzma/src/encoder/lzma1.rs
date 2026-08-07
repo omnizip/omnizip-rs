@@ -11,10 +11,10 @@
 
 use crate::bit_model::BitModel;
 use crate::coder::{DistanceEncoder, LengthEncoder, LiteralEncoder};
+use crate::constants::NUM_LEN_TO_POS_STATES;
 use crate::encoder::match_finder::MatchFinder;
 use crate::range_coder::RangeEncoder;
 use crate::state::{LzmaState, NUM_STATES};
-use crate::constants::NUM_LEN_TO_POS_STATES;
 
 /// Minimum match length for LZMA (2 for rep matches, 3 for full matches).
 const MATCH_LEN_MIN: u32 = 2;
@@ -27,7 +27,8 @@ const MATCH_LEN_MAX: u32 = 273;
 #[derive(Debug)]
 pub struct Lzma1Encoder {
     lc: u32,
-    #[allow(dead_code)] lp: u32,
+    #[allow(dead_code)]
+    lp: u32,
     pb: u32,
     pb_mask: u32,
     literal_mask: u32,
@@ -120,7 +121,12 @@ impl Lzma1Encoder {
     /// `nice_match > 0` stops the chain walk once a match this long
     /// is found. Pass 0 for either to use the encoder default.
     #[must_use]
-    pub fn encode_with_tuning(self, input: &[u8], max_chain_length: u32, nice_match: u32) -> Vec<u8> {
+    pub fn encode_with_tuning(
+        self,
+        input: &[u8],
+        max_chain_length: u32,
+        nice_match: u32,
+    ) -> Vec<u8> {
         if max_chain_length == 0 && nice_match == 0 {
             return self.encode_with_parser(input, false);
         }
@@ -524,7 +530,9 @@ mod tests {
         let enc = Lzma1Encoder::new(3, 0, 2);
         let compressed = enc.encode(input);
         let mut dec = Lzma1Decoder::new(3, 0, 2, 1 << 16);
-        let out = dec.decode(&compressed, Some(input.len() as u64), true).expect("decode");
+        let out = dec
+            .decode(&compressed, Some(input.len() as u64), true)
+            .expect("decode");
         assert_eq!(out.as_slice(), input.as_ref());
     }
 
@@ -534,7 +542,9 @@ mod tests {
         let enc = Lzma1Encoder::new(3, 0, 2);
         let compressed = enc.encode(&input);
         let mut dec = Lzma1Decoder::new(3, 0, 2, 1 << 16);
-        let out = dec.decode(&compressed, Some(input.len() as u64), true).expect("decode");
+        let out = dec
+            .decode(&compressed, Some(input.len() as u64), true)
+            .expect("decode");
         assert_eq!(out.as_slice(), input.as_slice());
     }
 
@@ -553,7 +563,9 @@ mod tests {
 
     #[test]
     fn determinism_same_input_same_output() {
-        let encode_once = || Lzma1Encoder::new(3, 0, 2).encode(b"determinism test input with repetition repetition");
+        let encode_once = || {
+            Lzma1Encoder::new(3, 0, 2).encode(b"determinism test input with repetition repetition")
+        };
         let a = encode_once();
         let b = encode_once();
         assert_eq!(a, b, "LZMA1 encoder non-deterministic");
@@ -562,12 +574,15 @@ mod tests {
     #[test]
     fn tuned_encoder_is_deterministic() {
         let input: Vec<u8> = (0..4096)
-            .map(|i| if i % 100 < 50 { (i % 26 + b'a' as i32) as u8 } else { (i % 256) as u8 })
+            .map(|i| {
+                if i % 100 < 50 {
+                    (i % 26 + b'a' as i32) as u8
+                } else {
+                    (i % 256) as u8
+                }
+            })
             .collect();
-        let encode = || {
-            Lzma1Encoder::new(3, 0, 2)
-                .encode_with_tuning(&input, 128, 64)
-        };
+        let encode = || Lzma1Encoder::new(3, 0, 2).encode_with_tuning(&input, 128, 64);
         let a = encode();
         let b = encode();
         assert_eq!(a, b, "tuned encoder non-deterministic");
@@ -576,12 +591,15 @@ mod tests {
     #[test]
     fn tuned_optimal_is_deterministic() {
         let input: Vec<u8> = (0..4096)
-            .map(|i| if i % 100 < 50 { (i % 26 + b'a' as i32) as u8 } else { (i % 256) as u8 })
+            .map(|i| {
+                if i % 100 < 50 {
+                    (i % 26 + b'a' as i32) as u8
+                } else {
+                    (i % 256) as u8
+                }
+            })
             .collect();
-        let encode = || {
-            Lzma1Encoder::new(3, 0, 2)
-                .encode_optimal_with_tuning(&input, 256, 128)
-        };
+        let encode = || Lzma1Encoder::new(3, 0, 2).encode_optimal_with_tuning(&input, 256, 128);
         let a = encode();
         let b = encode();
         assert_eq!(a, b, "tuned optimal encoder non-deterministic");
@@ -590,12 +608,20 @@ mod tests {
     #[test]
     fn large_input_round_trips() {
         let input: Vec<u8> = (0..10_000)
-            .map(|i| if i % 100 < 50 { (i % 26 + b'a' as i32) as u8 } else { (i % 256) as u8 })
+            .map(|i| {
+                if i % 100 < 50 {
+                    (i % 26 + b'a' as i32) as u8
+                } else {
+                    (i % 256) as u8
+                }
+            })
             .collect();
         let enc = Lzma1Encoder::new(3, 0, 2);
         let compressed = enc.encode(&input);
         let mut dec = Lzma1Decoder::new(3, 0, 2, 1 << 16);
-        let out = dec.decode(&compressed, Some(input.len() as u64), true).expect("decode");
+        let out = dec
+            .decode(&compressed, Some(input.len() as u64), true)
+            .expect("decode");
         assert_eq!(out.as_slice(), input.as_slice());
     }
 }

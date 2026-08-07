@@ -164,7 +164,13 @@ pub fn parse_frame_header(
         return Err("window size out of range");
     }
 
-    Ok((FrameHeader { window_bits: wbits, is_last: false }, br.bit_pos()))
+    Ok((
+        FrameHeader {
+            window_bits: wbits,
+            is_last: false,
+        },
+        br.bit_pos(),
+    ))
 }
 
 /// Metablock header (RFC 7932 §9.2).
@@ -419,7 +425,9 @@ impl HuffmanTable {
         let mut codes = vec![0u16; n];
         let mut bl_count = [0u32; 17];
         for &l in lengths {
-            if l > 0 { bl_count[usize::from(l)] += 1; }
+            if l > 0 {
+                bl_count[usize::from(l)] += 1;
+            }
         }
         let mut next_code = [0u16; 17];
         let mut code = 0u16;
@@ -437,7 +445,9 @@ impl HuffmanTable {
         let nonzero_count: usize = lengths.iter().filter(|&&l| l != 0).count();
         let single_symbol = if nonzero_count == 1 {
             Some(lengths.iter().position(|&l| l != 0).unwrap() as u32)
-        } else { None };
+        } else {
+            None
+        };
 
         // Build flat 2^15 lookup table: for each symbol with code
         // length L, its bit-reversed canonical code fills all
@@ -455,7 +465,10 @@ impl HuffmanTable {
                 }
             }
         }
-        Self { lookup, single_symbol }
+        Self {
+            lookup,
+            single_symbol,
+        }
     }
 
     /// Build a Huffman table for the NSYM=4 tree_select=1 simple form
@@ -500,7 +513,10 @@ impl HuffmanTable {
         for idx in 0..32768 {
             lookup[idx] = pattern[idx & 7];
         }
-        Self { lookup, single_symbol: None }
+        Self {
+            lookup,
+            single_symbol: None,
+        }
     }
 
     /// O(1) symbol decode via 15-bit peek + flat table lookup.
@@ -510,7 +526,9 @@ impl HuffmanTable {
         }
         let bits = br.peek_bits(15);
         let (sym, len) = self.lookup[bits as usize];
-        if len == 0 { return None; }
+        if len == 0 {
+            return None;
+        }
         br.drop_bits(len as u32);
         Some(sym as u32)
     }
@@ -553,13 +571,17 @@ fn read_simple_form(
     match nsym {
         1 => {
             let s = br.read_bits(bits_per_sym) as usize;
-            if s >= alphabet_size { return Err("simple-form symbol out of range"); }
+            if s >= alphabet_size {
+                return Err("simple-form symbol out of range");
+            }
             lengths[s] = 1;
         }
         2 => {
             let s0 = br.read_bits(bits_per_sym) as usize;
             let s1 = br.read_bits(bits_per_sym) as usize;
-            if s0 >= alphabet_size || s1 >= alphabet_size { return Err("simple-form symbol out of range"); }
+            if s0 >= alphabet_size || s1 >= alphabet_size {
+                return Err("simple-form symbol out of range");
+            }
             lengths[s0] = 1;
             lengths[s1] = 1;
         }
@@ -567,7 +589,9 @@ fn read_simple_form(
             let s0 = br.read_bits(bits_per_sym) as usize;
             let s1 = br.read_bits(bits_per_sym) as usize;
             let s2 = br.read_bits(bits_per_sym) as usize;
-            if s0 >= alphabet_size || s1 >= alphabet_size || s2 >= alphabet_size { return Err("simple-form symbol out of range"); }
+            if s0 >= alphabet_size || s1 >= alphabet_size || s2 >= alphabet_size {
+                return Err("simple-form symbol out of range");
+            }
             // Per upstream BrotliBuildSimpleHuffmanTable num_symbols=2:
             // s0 gets depth 1 (code "0x"), s1 and s2 get depth 2
             // (codes "10" and "11", sorted: min→"10", max→"11").
@@ -580,7 +604,13 @@ fn read_simple_form(
             let s1 = br.read_bits(bits_per_sym) as usize;
             let s2 = br.read_bits(bits_per_sym) as usize;
             let s3 = br.read_bits(bits_per_sym) as usize;
-            if s0 >= alphabet_size || s1 >= alphabet_size || s2 >= alphabet_size || s3 >= alphabet_size { return Err("simple-form symbol out of range"); }
+            if s0 >= alphabet_size
+                || s1 >= alphabet_size
+                || s2 >= alphabet_size
+                || s3 >= alphabet_size
+            {
+                return Err("simple-form symbol out of range");
+            }
             let tree_select = br.read_bits(1);
             if tree_select == 1 {
                 // 1+1+2+2 layout: canonical Huffman can't represent this.
@@ -697,7 +727,9 @@ fn read_complex_form(
                     lengths[i] = new_len as u8;
                     i += 1;
                     space = space.wrapping_sub(32768u32 >> new_len);
-                    if space == 0 { break; }
+                    if space == 0 {
+                        break;
+                    }
                 }
             } else {
                 // Zero run: just advance i.
@@ -734,9 +766,8 @@ pub fn read_huffman_table_simple(
 // ---------------------------------------------------------------------------
 
 /// Code-length code order per RFC 7932 §9.5.2.
-const CODE_LENGTH_CODE_ORDER: [u8; 18] = [
-    1, 2, 3, 4, 0, 5, 17, 6, 16, 7, 8, 9, 10, 11, 12, 13, 14, 15,
-];
+const CODE_LENGTH_CODE_ORDER: [u8; 18] =
+    [1, 2, 3, 4, 0, 5, 17, 6, 16, 7, 8, 9, 10, 11, 12, 13, 14, 15];
 
 /// Read a complex-form Huffman table (RFC 7932 §9.5.2).
 ///
@@ -874,14 +905,17 @@ pub fn decode(compressed: &[u8]) -> Result<Vec<u8>, &'static str> {
 
         if mb.is_uncompressed {
             let byte_offset = (bit_pos + 7) / 8;
-            let needed = byte_offset.checked_add(mb.mlen as usize).ok_or("mlen overflow")?;
+            let needed = byte_offset
+                .checked_add(mb.mlen as usize)
+                .ok_or("mlen overflow")?;
             if needed > compressed.len() {
                 return Err("uncompressed metablock extends past input");
             }
             output.extend_from_slice(&compressed[byte_offset..needed]);
             bit_pos = needed * 8;
         } else {
-            let (new_pos, bytes_emitted) = decode_compressed_metablock(compressed, bit_pos, mb.mlen as usize)?;
+            let (new_pos, bytes_emitted) =
+                decode_compressed_metablock(compressed, bit_pos, mb.mlen as usize)?;
             bit_pos = new_pos;
             output.extend(bytes_emitted);
         }
@@ -920,7 +954,12 @@ fn decode_compressed_metablock(
     // Dispatch to the full decoder for non-trivial layouts.
     if nbltypesl > 1 || nbltypesc > 1 || nbltypesd > 1 {
         return crate::decoder_full::decode_compressed_metablock_full(
-            data, br.bit_pos(), mlen, nbltypesl, nbltypesc, nbltypesd,
+            data,
+            br.bit_pos(),
+            mlen,
+            nbltypesl,
+            nbltypesc,
+            nbltypesd,
         );
     }
 
@@ -956,8 +995,14 @@ fn decode_compressed_metablock(
         // Multi-tree literal group: dispatch to full decoder, which
         // will read the literal context map then NTREES_D inline.
         return crate::decoder_full::decode_compressed_metablock_full_with_trees(
-            data, br.bit_pos(), mlen,
-            npostfix, ndirect_raw, _context_mode, ntreesl, None,
+            data,
+            br.bit_pos(),
+            mlen,
+            npostfix,
+            ndirect_raw,
+            _context_mode,
+            ntreesl,
+            None,
         );
     }
 
@@ -966,8 +1011,14 @@ fn decode_compressed_metablock(
     let ntreesd = read_varlen_uint8(&mut br)? + 1;
     if ntreesd > 1 {
         return crate::decoder_full::decode_compressed_metablock_full_with_trees(
-            data, br.bit_pos(), mlen,
-            npostfix, ndirect_raw, _context_mode, ntreesl, Some(ntreesd),
+            data,
+            br.bit_pos(),
+            mlen,
+            npostfix,
+            ndirect_raw,
+            _context_mode,
+            ntreesl,
+            Some(ntreesd),
         );
     }
 
@@ -999,15 +1050,21 @@ fn decode_compressed_metablock(
     let max_backward_distance: u32 = (1u32 << 22).saturating_sub(0x8000);
 
     while output.len() < mlen {
-        let cmd_code = cmd_table.read_symbol(&mut br).ok_or("invalid command symbol")? as usize;
+        let cmd_code = cmd_table
+            .read_symbol(&mut br)
+            .ok_or("invalid command symbol")? as usize;
         let v = &crate::prefix::kCmdLut[cmd_code];
 
         let insert_len_extra = if v.insert_len_extra_bits > 0 {
             br.read_bits(u32::from(v.insert_len_extra_bits))
-        } else { 0 };
+        } else {
+            0
+        };
         let copy_length = if v.copy_len_extra_bits > 0 {
             br.read_bits(u32::from(v.copy_len_extra_bits))
-        } else { 0 };
+        } else {
+            0
+        };
 
         let insert_len = usize::from(v.insert_len_offset) + insert_len_extra as usize;
         let copy_len = usize::from(v.copy_len_offset) + copy_length as usize;
@@ -1034,8 +1091,17 @@ fn decode_compressed_metablock(
                 dist_rb_idx -= 1;
                 dist_rb[(dist_rb_idx & 3) as usize]
             } else {
-                let dist_code = dist_table.read_symbol(&mut br).ok_or("invalid distance symbol")? as i32;
-                decode_distance_from_code(dist_code, num_direct_distance_codes, npostfix as i32, &mut br, &mut dist_rb, &mut dist_rb_idx)
+                let dist_code = dist_table
+                    .read_symbol(&mut br)
+                    .ok_or("invalid distance symbol")? as i32;
+                decode_distance_from_code(
+                    dist_code,
+                    num_direct_distance_codes,
+                    npostfix as i32,
+                    &mut br,
+                    &mut dist_rb,
+                    &mut dist_rb_idx,
+                )
             };
             // Per upstream: max_distance = min(pos, max_backward_distance).
             // Distances > max_distance are static-dictionary references.
@@ -1047,7 +1113,14 @@ fn decode_compressed_metablock(
             };
             if (distance as i32) > max_distance as i32 {
                 // Static dictionary reference.
-                if crate::dictionary::dictionary_lookup(&mut output, copy_len as u32, distance as i32, max_distance).is_none() {
+                if crate::dictionary::dictionary_lookup(
+                    &mut output,
+                    copy_len as u32,
+                    distance as i32,
+                    max_distance,
+                )
+                .is_none()
+                {
                     return Err("invalid static dictionary reference");
                 }
                 // Compensate the dist_rb_idx rollback for implicit distance.
@@ -1131,7 +1204,6 @@ pub(crate) fn decode_distance_from_code(
     (raw + postfix + num_direct as i32 - NUM_DISTANCE_SHORT_CODES + 1) as u32
 }
 
-
 /// Read a `DecodeVarLenUint8`-encoded value (RFC 7932 §9.3 MoreBlockLengths).
 ///
 /// - 1 bit = 0 → value = 0
@@ -1156,7 +1228,11 @@ pub(crate) fn read_varlen_uint8(br: &mut BitReader) -> Result<u32, &'static str>
 ///
 /// Returns the computed distance. `0x7FFF_FFFF` is a sentinel for
 /// "invalid" (will trip the `distance > output.len()` check downstream).
-pub(crate) fn take_distance_from_ring_buffer(code: i32, dist_rb: &mut [u32; 4], dist_rb_idx: &mut i32) -> u32 {
+pub(crate) fn take_distance_from_ring_buffer(
+    code: i32,
+    dist_rb: &mut [u32; 4],
+    dist_rb_idx: &mut i32,
+) -> u32 {
     if code <= 3 {
         let offset = code - 3;
         // distance_context = 1 >> code (only nonzero for code == 0)
@@ -1304,7 +1380,7 @@ mod tests {
         // there is no reserved bit to validate.
         let mut data = [0u8; 3];
         data[0] = 0b0000_0000; // ISLAST=0, MNIBBLES=00
-        // bit 20 in the stream is just whatever comes after the header.
+                               // bit 20 in the stream is just whatever comes after the header.
         let result = parse_metablock_header(&data, 0);
         assert!(result.is_ok(), "ISLAST=0 metablock has no reserved bit");
     }
@@ -1612,11 +1688,11 @@ mod tests {
         //   bit 6 = bit 2 = 1
         //   bits 7-19 = rest 0
         stream[0] |= 0b0100_0000; // bit 6 = 1
-        // IS_UNCOMPRESSED at bit 20 = bit 4 of byte 2
+                                  // IS_UNCOMPRESSED at bit 20 = bit 4 of byte 2
         stream[2] |= 0b0001_0000; // bit 4 = 1
-        // reserved at bit 21 = bit 5 of byte 2 = 0
-        // bits 22-23 = padding = 0
-        // Literals "hello" at bytes 3-7
+                                  // reserved at bit 21 = bit 5 of byte 2 = 0
+                                  // bits 22-23 = padding = 0
+                                  // Literals "hello" at bytes 3-7
         stream[3..8].copy_from_slice(b"hello");
         // ISLAST=1 + ISLASTEMPTY=1 at byte 8
         stream[8] = 0b0000_0011;
@@ -1632,9 +1708,7 @@ mod tests {
     fn decode_upstream_brotli_hello() {
         // Hard-coded bytes from `brotli -c -q 6 /tmp/h.bin` where
         // /tmp/h.bin contains "hello".
-        let compressed = [
-            0x21, 0x10, 0x00, 0x04, 0x68, 0x65, 0x6c, 0x6c, 0x6f, 0x03,
-        ];
+        let compressed = [0x21, 0x10, 0x00, 0x04, 0x68, 0x65, 0x6c, 0x6c, 0x6f, 0x03];
         let decoded = decode(&compressed).expect("decode");
         assert_eq!(decoded, b"hello");
     }
@@ -1658,8 +1732,10 @@ mod tests {
         let compressed = match enc {
             Ok(o) if o.status.success() => o.stdout,
             Ok(o) => {
-                eprintln!("[skip] brotli -q 1 failed: {}",
-                          String::from_utf8_lossy(&o.stderr));
+                eprintln!(
+                    "[skip] brotli -q 1 failed: {}",
+                    String::from_utf8_lossy(&o.stderr)
+                );
                 return;
             }
             Err(e) => {

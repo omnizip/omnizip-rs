@@ -35,10 +35,12 @@ pub const XZ_MAGIC: [u8; 6] = [0xFD, b'7', b'z', b'X', b'Z', 0x00];
 pub const XZ_FOOTER_MAGIC: [u8; 2] = [b'Y', b'Z'];
 
 /// Stream-header size in bytes.
-#[allow(dead_code)] pub const STREAM_HEADER_SIZE: usize = 12;
+#[allow(dead_code)]
+pub const STREAM_HEADER_SIZE: usize = 12;
 
 /// Footer size in bytes.
-#[allow(dead_code)] pub const STREAM_FOOTER_SIZE: usize = 12;
+#[allow(dead_code)]
+pub const STREAM_FOOTER_SIZE: usize = 12;
 
 /// Decode an XZ container, returning the concatenated payload of all
 /// blocks. The decoder stops after the first stream; concatenated
@@ -208,9 +210,7 @@ fn decode_block(input: &[u8], check_size: usize) -> Result<(Vec<u8>, usize), Lzm
             }
             _ => {
                 return Err(LzmaError::Corrupt {
-                    reason: format!(
-                        "XZ filter 0x{filter_id:X} not supported"
-                    ),
+                    reason: format!("XZ filter 0x{filter_id:X} not supported"),
                 });
             }
         }
@@ -219,8 +219,12 @@ fn decode_block(input: &[u8], check_size: usize) -> Result<(Vec<u8>, usize), Lzm
 
     // Skip to end of header (padding), then verify CRC32.
     let header_bytes = &input[..header_size];
-    let expected_hdr_crc =
-        u32::from_le_bytes([header_bytes[header_size - 4], header_bytes[header_size - 3], header_bytes[header_size - 2], header_bytes[header_size - 1]]);
+    let expected_hdr_crc = u32::from_le_bytes([
+        header_bytes[header_size - 4],
+        header_bytes[header_size - 3],
+        header_bytes[header_size - 2],
+        header_bytes[header_size - 1],
+    ]);
     let actual_hdr_crc = crc32(&header_bytes[..header_size - 4]);
     if expected_hdr_crc != actual_hdr_crc {
         return Err(LzmaError::Corrupt {
@@ -310,7 +314,8 @@ fn bcj_x86_reverse(data: &[u8]) -> Vec<u8> {
     while i <= limit {
         let b = output[i];
         if b == 0xE8 || b == 0xE9 {
-            let abs = u32::from_le_bytes([output[i + 1], output[i + 2], output[i + 3], output[i + 4]]);
+            let abs =
+                u32::from_le_bytes([output[i + 1], output[i + 2], output[i + 3], output[i + 4]]);
             let rel = abs.wrapping_sub(i as u32);
             output[i + 1..i + 5].copy_from_slice(&rel.to_le_bytes());
             i += 5;
@@ -324,9 +329,9 @@ fn bcj_x86_reverse(data: &[u8]) -> Vec<u8> {
 /// Number of bytes used by the trailing check, given the check type.
 fn check_size_bytes(check_type: u8) -> usize {
     match check_type {
-        0x01 | 0x02 => 4,          // CRC32
-        0x03 | 0x04 => 8,          // CRC64
-        0x0A => 32,                // SHA-256
+        0x01 | 0x02 => 4, // CRC32
+        0x03 | 0x04 => 8, // CRC64
+        0x0A => 32,       // SHA-256
         // 0x00 (None) and any reserved value contribute no check bytes.
         _ => 0,
     }

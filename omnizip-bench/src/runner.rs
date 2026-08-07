@@ -182,10 +182,7 @@ mod tests {
     fn skipped_level_is_recorded_not_panicked() {
         // ZPAQ supports 0..=9; level 99 must skip silently.
         let zpaq = BenchCodec::new("zpaq", Box::new(ZpaqCodec), vec![99]);
-        let corpus = Corpus::new(
-            "test",
-            vec![CorpusFile::in_memory("x", b"data".to_vec())],
-        );
+        let corpus = Corpus::new("test", vec![CorpusFile::in_memory("x", b"data".to_vec())]);
         let results = run_suite(std::slice::from_ref(&zpaq), &corpus, 1);
         assert_eq!(results.len(), 1);
         assert!(!results[0].error.is_empty(), "expected skip reason");

@@ -154,7 +154,10 @@ fn libdeflate_round_trips_property_fixtures() {
         let decompressed = codec
             .decompress(&compressed, input.len() as u32)
             .unwrap_or_else(|e| panic!("libdeflate decompress {name}: {e}"));
-        assert_eq!(decompressed, input, "libdeflate round-trip mismatch on {name}");
+        assert_eq!(
+            decompressed, input,
+            "libdeflate round-trip mismatch on {name}"
+        );
     }
 }
 
@@ -182,7 +185,10 @@ fn lz4_fast_round_trips_property_fixtures() {
         let decompressed = codec
             .decompress(&compressed, input.len() as u32)
             .unwrap_or_else(|e| panic!("lz4 fast decompress {name}: {e}"));
-        assert_eq!(decompressed, input, "lz4 fast round-trip mismatch on {name}");
+        assert_eq!(
+            decompressed, input,
+            "lz4 fast round-trip mismatch on {name}"
+        );
     }
 }
 
@@ -277,8 +283,12 @@ fn all_codecs_are_deterministic_across_calls() {
 
     let brotli = BrotliCodec::new();
     assert_eq!(
-        brotli.compress(&input, CompressionLevel::default()).unwrap(),
-        brotli.compress(&input, CompressionLevel::default()).unwrap(),
+        brotli
+            .compress(&input, CompressionLevel::default())
+            .unwrap(),
+        brotli
+            .compress(&input, CompressionLevel::default())
+            .unwrap(),
         "brotli nondeterministic"
     );
 
@@ -291,8 +301,12 @@ fn all_codecs_are_deterministic_across_calls() {
 
     let deflate = DeflateCodec::new();
     assert_eq!(
-        deflate.compress(&input, CompressionLevel::default()).unwrap(),
-        deflate.compress(&input, CompressionLevel::default()).unwrap(),
+        deflate
+            .compress(&input, CompressionLevel::default())
+            .unwrap(),
+        deflate
+            .compress(&input, CompressionLevel::default())
+            .unwrap(),
         "deflate nondeterministic"
     );
 

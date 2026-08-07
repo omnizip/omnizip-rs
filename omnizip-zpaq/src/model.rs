@@ -758,7 +758,9 @@ impl Default for Order3Model {
 impl Order3Model {
     #[must_use]
     pub fn new() -> Self {
-        Self { table: HashMap::new() }
+        Self {
+            table: HashMap::new(),
+        }
     }
 
     /// Probability lookup with an explicit 3-byte context (used by
@@ -771,14 +773,7 @@ impl Order3Model {
         }
     }
 
-    fn update_with_context(
-        &mut self,
-        prev2: u8,
-        prev1: u8,
-        last: u8,
-        bit_pos: u8,
-        bit: bool,
-    ) {
+    fn update_with_context(&mut self, prev2: u8, prev1: u8, last: u8, bit_pos: u8, bit: bool) {
         let ctx = make_order3_ctx(prev2, prev1, last);
         let entry = self.table.entry((ctx, bit_pos)).or_default();
         entry.observe(bit);

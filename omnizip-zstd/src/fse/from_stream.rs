@@ -77,8 +77,8 @@ impl<'a> BitReader<'a> {
             self.bit_count &= 7;
         }
         let bytes = &self.src[self.byte_pos..self.byte_pos + 4];
-        self.bit_window = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])
-            >> self.bit_count;
+        self.bit_window =
+            u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) >> self.bit_count;
         Ok(())
     }
 
@@ -125,9 +125,11 @@ pub fn read_fse_table(src: &[u8]) -> Result<(Table, usize), ZstdError> {
 
     // tableLog: 4-bit field, biased by FSE_MIN_ACCURACY_LOG.
     let table_log_raw = (br.peek() & 0xF) as u8;
-    let table_log = table_log_raw.checked_add(FSE_MIN_ACCURACY_LOG).ok_or_else(|| ZstdError::Corrupt {
-        reason: format!("FSE tableLog overflow: {table_log_raw} + {FSE_MIN_ACCURACY_LOG}"),
-    })?;
+    let table_log = table_log_raw
+        .checked_add(FSE_MIN_ACCURACY_LOG)
+        .ok_or_else(|| ZstdError::Corrupt {
+            reason: format!("FSE tableLog overflow: {table_log_raw} + {FSE_MIN_ACCURACY_LOG}"),
+        })?;
     if table_log > FSE_MAX_ACCURACY_LOG {
         return Err(ZstdError::Corrupt {
             reason: format!("FSE tableLog {table_log} exceeds max {FSE_MAX_ACCURACY_LOG}"),

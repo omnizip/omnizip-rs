@@ -80,8 +80,8 @@ pub fn encode(input: &[u8]) -> Vec<u8> {
 ///
 /// Returns `&'static str` on malformed input.
 pub fn decode(input: &[u8]) -> Result<Vec<u8>, &'static str> {
-    let (uncompressed_len, bytes_consumed) = read_varint(input)
-        .ok_or("invalid varint length preamble")?;
+    let (uncompressed_len, bytes_consumed) =
+        read_varint(input).ok_or("invalid varint length preamble")?;
     let uncompressed_len = uncompressed_len as usize;
     let mut out = Vec::with_capacity(uncompressed_len);
     let mut i = bytes_consumed;
@@ -191,9 +191,7 @@ impl HashTable {
             return None;
         }
         let mut len = MIN_MATCH;
-        while len < MAX_MATCH
-            && pos + len < data.len()
-            && data[candidate + len] == data[pos + len]
+        while len < MAX_MATCH && pos + len < data.len() && data[candidate + len] == data[pos + len]
         {
             len += 1;
         }
@@ -232,9 +230,7 @@ fn emit_literal(out: &mut Vec<u8>, lit: &[u8]) {
 fn emit_copy(out: &mut Vec<u8>, dist: usize, len: usize) {
     // COPY_1 handles dist 1..=2047 and len 4..=11.
     if dist <= 2047 && len <= 11 {
-        let tag = ((dist >> 8) << 5)
-            | (((len - 4) & 0b111) << 2)
-            | 0b01;
+        let tag = ((dist >> 8) << 5) | (((len - 4) & 0b111) << 2) | 0b01;
         out.push(tag as u8);
         out.push((dist & 0xFF) as u8);
         return;
@@ -312,7 +308,16 @@ mod tests {
 
     #[test]
     fn varint_round_trip() {
-        for &v in &[0u64, 1, 127, 128, 0xFF, 0xFFFF, 0xFFFF_FFFF, u32::MAX as u64] {
+        for &v in &[
+            0u64,
+            1,
+            127,
+            128,
+            0xFF,
+            0xFFFF,
+            0xFFFF_FFFF,
+            u32::MAX as u64,
+        ] {
             let mut buf = Vec::new();
             write_varint(&mut buf, v);
             let (got, consumed) = read_varint(&buf).expect("read");
@@ -336,7 +341,9 @@ mod tests {
 
     #[test]
     fn round_trip_incompressible() {
-        let input: Vec<u8> = (0..4096u32).map(|i| (i.wrapping_mul(2654435761) % 251) as u8).collect();
+        let input: Vec<u8> = (0..4096u32)
+            .map(|i| (i.wrapping_mul(2654435761) % 251) as u8)
+            .collect();
         let encoded = encode(&input);
         let decoded = decode(&encoded).expect("decode");
         assert_eq!(decoded, input);

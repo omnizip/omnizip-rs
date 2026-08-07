@@ -141,11 +141,7 @@ impl<C: Codec, F: Filter> Codec for FilteredCodec<C, F> {
         self.codec.name()
     }
 
-    fn compress(
-        &self,
-        plaintext: &[u8],
-        level: CompressionLevel,
-    ) -> Result<Vec<u8>, OmnizipError> {
+    fn compress(&self, plaintext: &[u8], level: CompressionLevel) -> Result<Vec<u8>, OmnizipError> {
         let filtered = self.filter.encode(plaintext);
         self.codec.compress(&filtered, level)
     }
@@ -218,7 +214,9 @@ mod round_trip_tests {
         // when random data coincidentally matches multiple template
         // patterns. The IA-64 module's own tests verify round-trip on
         // structured input.
-        let data: Vec<u8> = (0..1024u32).map(|i| (i.wrapping_mul(2654435761) >> 16) as u8).collect();
+        let data: Vec<u8> = (0..1024u32)
+            .map(|i| (i.wrapping_mul(2654435761) >> 16) as u8)
+            .collect();
         round_trip(&BcjArmFilter, &data);
         round_trip(&BcjArm64Filter, &data);
         round_trip(&BcjArmThumbFilter, &data);
@@ -301,11 +299,7 @@ mod round_trip_tests {
             fn name(&self) -> &'static str {
                 "test-codec"
             }
-            fn compress(
-                &self,
-                _: &[u8],
-                _: CompressionLevel,
-            ) -> Result<Vec<u8>, OmnizipError> {
+            fn compress(&self, _: &[u8], _: CompressionLevel) -> Result<Vec<u8>, OmnizipError> {
                 Ok(Vec::new())
             }
             fn decompress(&self, _: &[u8], _: u32) -> Result<Vec<u8>, OmnizipError> {

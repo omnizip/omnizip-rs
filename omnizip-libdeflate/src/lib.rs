@@ -86,11 +86,7 @@ impl Codec for LibdeflateCodec {
         "libdeflate"
     }
 
-    fn compress(
-        &self,
-        plaintext: &[u8],
-        level: CompressionLevel,
-    ) -> Result<Vec<u8>, OmnizipError> {
+    fn compress(&self, plaintext: &[u8], level: CompressionLevel) -> Result<Vec<u8>, OmnizipError> {
         let _ = level;
         // Strategy: try fixed-Huffman first, then stored. Pick the
         // smallest valid output for each input. This mirrors what
@@ -118,11 +114,7 @@ impl Codec for LibdeflateCodec {
         Ok(wrap_zlib(&best.expect("at least stored always succeeds")))
     }
 
-    fn decompress(
-        &self,
-        compressed: &[u8],
-        expected_len: u32,
-    ) -> Result<Vec<u8>, OmnizipError> {
+    fn decompress(&self, compressed: &[u8], expected_len: u32) -> Result<Vec<u8>, OmnizipError> {
         let expected_us = usize::try_from(expected_len).map_err(|_| OmnizipError::Corrupt {
             codec: CodecId::LIBDEFLATE,
             reason: format!("expected_len {expected_len} exceeds usize"),
@@ -133,12 +125,11 @@ impl Codec for LibdeflateCodec {
         // miniz_oxide fallback was removed once the in-house decoder
         // round-tripped every fixture (TODO 136).
         let raw = strip_zlib_wrapper(compressed);
-        let decoded = inflate::inflate(raw, expected_us).map_err(|e| {
-            OmnizipError::DecodeFailed {
+        let decoded =
+            inflate::inflate(raw, expected_us).map_err(|e| OmnizipError::DecodeFailed {
                 codec: CodecId::LIBDEFLATE,
                 reason: format!("inflate failed: {e}"),
-            }
-        })?;
+            })?;
         if decoded.len() != expected_us {
             return Err(OmnizipError::LengthMismatch {
                 codec: CodecId::LIBDEFLATE,

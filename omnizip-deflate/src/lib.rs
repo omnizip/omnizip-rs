@@ -43,20 +43,12 @@ impl Codec for DeflateCodec {
         "deflate"
     }
 
-    fn compress(
-        &self,
-        plaintext: &[u8],
-        level: CompressionLevel,
-    ) -> Result<Vec<u8>, OmnizipError> {
+    fn compress(&self, plaintext: &[u8], level: CompressionLevel) -> Result<Vec<u8>, OmnizipError> {
         // Delegate to omnizip-libdeflate (pure-Rust, no external deps).
         omnizip_libdeflate::LibdeflateCodec::new().compress(plaintext, level)
     }
 
-    fn decompress(
-        &self,
-        compressed: &[u8],
-        expected_len: u32,
-    ) -> Result<Vec<u8>, OmnizipError> {
+    fn decompress(&self, compressed: &[u8], expected_len: u32) -> Result<Vec<u8>, OmnizipError> {
         omnizip_libdeflate::LibdeflateCodec::new().decompress(compressed, expected_len)
     }
 }
@@ -67,10 +59,7 @@ impl Codec for DeflateCodec {
 /// # Errors
 ///
 /// See [`omnizip_libdeflate::LibdeflateCodec::compress`].
-pub fn compress_to_vec_zlib(
-    input: &[u8],
-    level: impl Into<u8>,
-) -> Vec<u8> {
+pub fn compress_to_vec_zlib(input: &[u8], level: impl Into<u8>) -> Vec<u8> {
     let codec = omnizip_libdeflate::LibdeflateCodec::new();
     codec
         .compress(input, CompressionLevel::new(level.into()))
@@ -119,9 +108,7 @@ mod tests {
         let compressed = DeflateCodec
             .compress(b"", CompressionLevel::default())
             .expect("compress");
-        let decompressed = DeflateCodec
-            .decompress(&compressed, 0)
-            .expect("decompress");
+        let decompressed = DeflateCodec.decompress(&compressed, 0).expect("decompress");
         assert!(decompressed.is_empty());
     }
 

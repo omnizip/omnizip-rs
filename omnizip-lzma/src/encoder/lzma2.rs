@@ -7,8 +7,8 @@
 
 #![forbid(unsafe_code)]
 
-use crate::LzmaError;
 use super::alone::LzmaOptions;
+use crate::LzmaError;
 
 /// Default LZMA parameters (matches lzip/xz-utils defaults).
 #[allow(dead_code)]
@@ -17,7 +17,8 @@ const DEFAULT_LC: u32 = 3;
 const DEFAULT_LP: u32 = 0;
 #[allow(dead_code)]
 const DEFAULT_PB: u32 = 2;
-#[allow(dead_code)] const DEFAULT_DICT_SIZE: u32 = 16 * 1024 * 1024;
+#[allow(dead_code)]
+const DEFAULT_DICT_SIZE: u32 = 16 * 1024 * 1024;
 
 /// Maximum uncompressed size per LZMA2 chunk: `(1 << 21) - 1`.
 const MAX_CHUNK_UNCOMPRESSED: usize = (1 << 21) - 1;
@@ -63,11 +64,7 @@ pub fn encode_lzma2_stream_with_options(
 
         let encoder = crate::encoder::Lzma1Encoder::new(lc, lp, pb);
         let compressed = if use_optimal {
-            encoder.encode_optimal_with_tuning(
-                chunk,
-                options.max_chain_length,
-                options.nice_match,
-            )
+            encoder.encode_optimal_with_tuning(chunk, options.max_chain_length, options.nice_match)
         } else {
             encoder.encode_with_tuning(chunk, options.max_chain_length, options.nice_match)
         };
@@ -81,18 +78,14 @@ pub fn encode_lzma2_stream_with_options(
         let usable_compressed_size = compressed.len();
         if usable_compressed_size > u16::MAX as usize {
             return Err(LzmaError::Corrupt {
-                reason: format!(
-                    "LZMA2 chunk compressed size {usable_compressed_size} exceeds u16"
-                ),
+                reason: format!("LZMA2 chunk compressed size {usable_compressed_size} exceeds u16"),
             });
         }
         let u_size = chunk_size - 1;
         let c_size = usable_compressed_size - 1;
 
         let reset_level: u8 = if first_chunk { 3 } else { 0 };
-        let control: u8 = 0x80
-            | (reset_level << 5)
-            | ((u_size >> 16) as u8 & 0x1F);
+        let control: u8 = 0x80 | (reset_level << 5) | ((u_size >> 16) as u8 & 0x1F);
         out.push(control);
         out.extend_from_slice(&((u_size & 0xFFFF) as u16).to_be_bytes());
         out.extend_from_slice(&((c_size & 0xFFFF) as u16).to_be_bytes());

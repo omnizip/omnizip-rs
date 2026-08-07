@@ -367,8 +367,12 @@ phase2 ratio {:.4} ({} payload bytes, {} total)",
             "Fast and Best portfolios must produce different output"
         );
         // Both must round-trip via the matching decoder.
-        let dec_fast = codec.decompress(&fast, data.len() as u32).expect("decode fast");
-        let dec_best = codec.decompress(&best, data.len() as u32).expect("decode best");
+        let dec_fast = codec
+            .decompress(&fast, data.len() as u32)
+            .expect("decode fast");
+        let dec_best = codec
+            .decompress(&best, data.len() as u32)
+            .expect("decode best");
         assert_eq!(dec_fast, data);
         assert_eq!(dec_best, data);
     }

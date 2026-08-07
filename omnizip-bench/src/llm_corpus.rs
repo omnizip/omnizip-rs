@@ -54,18 +54,65 @@ const CODE_FENCE_TEMPLATES: &[&str] = &[
 const JSON_BLOCK_TEMPLATE: &str = "{\n  \"name\": \"{name}\",\n  \"type\": \"function\",\n  \"description\": \"{desc}\",\n  \"parameters\": {params}\n}\n";
 
 const NAME_POOL: &[&str] = &[
-    "add", "sub", "mul", "div", "mod", "inc", "dec", "scale", "shift",
-    "rotate", "translate", "normalize", "denormalize", "encode", "decode",
-    "encrypt", "decrypt", "hash", "sign", "verify", "parse", "format",
-    "serialize", "deserialize", "validate", "sanitize", "trim", "split",
-    "join", "merge", "filter", "map", "reduce", "fold", "scan", "zip",
-    "unzip", "sort", "search", "insert", "remove", "delete", "update",
+    "add",
+    "sub",
+    "mul",
+    "div",
+    "mod",
+    "inc",
+    "dec",
+    "scale",
+    "shift",
+    "rotate",
+    "translate",
+    "normalize",
+    "denormalize",
+    "encode",
+    "decode",
+    "encrypt",
+    "decrypt",
+    "hash",
+    "sign",
+    "verify",
+    "parse",
+    "format",
+    "serialize",
+    "deserialize",
+    "validate",
+    "sanitize",
+    "trim",
+    "split",
+    "join",
+    "merge",
+    "filter",
+    "map",
+    "reduce",
+    "fold",
+    "scan",
+    "zip",
+    "unzip",
+    "sort",
+    "search",
+    "insert",
+    "remove",
+    "delete",
+    "update",
 ];
 
 const ARG_POOL: &[&str] = &[
-    "x: i64", "y: i64", "n: usize", "s: &str", "buf: &mut [u8]",
-    "data: Vec<u8>", "key: &[u8]", "count: u32", "index: usize",
-    "offset: u64", "length: usize", "input: &str", "output: &mut String",
+    "x: i64",
+    "y: i64",
+    "n: usize",
+    "s: &str",
+    "buf: &mut [u8]",
+    "data: Vec<u8>",
+    "key: &[u8]",
+    "count: u32",
+    "index: usize",
+    "offset: u64",
+    "length: usize",
+    "input: &str",
+    "output: &mut String",
 ];
 
 /// Generate a ChatGPT-conversational-style response of roughly
@@ -219,7 +266,11 @@ mod tests {
     fn structured_json_produces_braces() {
         let mut xs = XorShift::new(99);
         let v = structured_json(&mut xs, 1024);
-        assert!(v.iter().all(|&b| b == b'{' || b == b'}' || b.is_ascii_graphic() || b == b' ' || b == b'\n'));
+        assert!(v.iter().all(|&b| b == b'{'
+            || b == b'}'
+            || b.is_ascii_graphic()
+            || b == b' '
+            || b == b'\n'));
         assert!(v.contains(&b'{')); // ensure not zero-filled
     }
 

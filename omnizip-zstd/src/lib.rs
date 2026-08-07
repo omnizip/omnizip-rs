@@ -21,7 +21,12 @@
 // value ranges are guaranteed by upstream protocol checks. The pedantic
 // cast lints fire on every such conversion without knowing the invariant;
 // they're more useful at API boundaries than on every arithmetic site.
-#![allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap, clippy::cast_sign_loss, clippy::cast_lossless)]
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless
+)]
 
 pub mod codec;
 pub mod constants;
@@ -55,8 +60,7 @@ pub use frame::{detect_frame_kind, strip_magic, BlockHeader, FrameHeader};
 pub use fse::{BitStream, ForwardBitStream, FseDecoder, FseState, Table};
 pub use huffman::{HuffmanDecoder, HuffmanTable};
 pub use literals::decode_literals_section;
-pub use sequences::{decode_sequences_section, Sequence, SequenceExecutor,
-                    SequencesSection};
+pub use sequences::{decode_sequences_section, Sequence, SequenceExecutor, SequencesSection};
 
 pub use encoder::match_finder::MatchState;
 
@@ -118,11 +122,7 @@ impl ZstdCompressor {
     /// # Errors
     ///
     /// Returns [`ZstdError::Corrupt`] on internal encoder failures.
-    pub fn compress(
-        &mut self,
-        input: &[u8],
-        level: ZstdLevel,
-    ) -> Result<Vec<u8>, ZstdError> {
+    pub fn compress(&mut self, input: &[u8], level: ZstdLevel) -> Result<Vec<u8>, ZstdError> {
         let level_u8 = level.as_reference_level();
         let mut params = crate::encoder::cparams::get_params(level_u8);
         params.hash_log =
@@ -329,7 +329,9 @@ mod tests {
             (0..10_000).map(|i| (i % 251) as u8).collect(),
         ];
         for input in &inputs {
-            let compressed = compressor.compress(input, ZstdLevel::Default).expect("compress");
+            let compressed = compressor
+                .compress(input, ZstdLevel::Default)
+                .expect("compress");
             let decoded = decompress(&compressed, input.len() as u32).expect("decompress");
             assert_eq!(decoded, *input, "round-trip mismatch");
         }
@@ -345,7 +347,9 @@ mod tests {
         let big_out = compressor.compress(&big, ZstdLevel::Default).expect("big");
         // Then a small input (forces small hash_log via cap).
         let small = b"tiny";
-        let small_out = compressor.compress(small, ZstdLevel::Default).expect("small");
+        let small_out = compressor
+            .compress(small, ZstdLevel::Default)
+            .expect("small");
         // Both must round-trip.
         assert_eq!(decompress(&big_out, big.len() as u32).unwrap(), big);
         assert_eq!(decompress(&small_out, small.len() as u32).unwrap(), small);
@@ -379,8 +383,8 @@ mod tests {
         let sample = b"{\"id\":99,\"name\":\"newitem\",\"type\":\"product\",\"price\":50}".to_vec();
         let compressed =
             compress_with_dict(&sample, ZstdLevel::Default, &dict).expect("encode with dict");
-        let decompressed =
-            decompress_with_dict(&compressed, sample.len() as u32, &dict).expect("decode with dict");
+        let decompressed = decompress_with_dict(&compressed, sample.len() as u32, &dict)
+            .expect("decode with dict");
         assert_eq!(decompressed, sample);
     }
 
@@ -402,7 +406,8 @@ mod tests {
         let dict = ZstdDictionary::from_raw(7, &content);
 
         // New sample that shares the corpus's common substrings.
-        let sample = b"function handler_X() { return CONSTANT_PREFIX_X + SHARED_SUFFIX; }\n".to_vec();
+        let sample =
+            b"function handler_X() { return CONSTANT_PREFIX_X + SHARED_SUFFIX; }\n".to_vec();
 
         let with_dict =
             compress_with_dict(&sample, ZstdLevel::Default, &dict).expect("encode with dict");
@@ -434,7 +439,10 @@ mod tests {
         // lives in bits 0-1 of the descriptor.
         let descriptor = compressed[4];
         let did_flag = descriptor & 0x03;
-        assert!(did_flag != 0, "expected Dictionary_ID_flag != 0, got {did_flag}");
+        assert!(
+            did_flag != 0,
+            "expected Dictionary_ID_flag != 0, got {did_flag}"
+        );
 
         // For id = 0xAB (≤ 255), flag should be 1 (1-byte field).
         assert_eq!(did_flag, 1, "expected 1-byte Dictionary_ID encoding");
@@ -449,7 +457,8 @@ mod tests {
         let dict = ZstdDictionary::from_raw(1, b"");
         let sample = b"hello world";
         let compressed = compress_with_dict(sample, ZstdLevel::Default, &dict).expect("encode");
-        let decompressed = decompress_with_dict(&compressed, sample.len() as u32, &dict).expect("decode");
+        let decompressed =
+            decompress_with_dict(&compressed, sample.len() as u32, &dict).expect("decode");
         assert_eq!(decompressed, sample);
     }
 
@@ -513,15 +522,15 @@ mod e2e_fse_tests {
             .collect();
 
         // Compress with our encoder.
-        let compressed = super::compress(&input, super::ZstdLevel::Fast)
-            .expect("compress");
+        let compressed = super::compress(&input, super::ZstdLevel::Fast).expect("compress");
 
         // Decompress and verify round-trip.
-        let decompressed = decompress(&compressed, input.len() as u32)
-            .expect("decompress");
+        let decompressed = decompress(&compressed, input.len() as u32).expect("decompress");
 
-        assert_eq!(decompressed, input,
-            "Round-trip failed for FSE-compressed Huffman weights input");
+        assert_eq!(
+            decompressed, input,
+            "Round-trip failed for FSE-compressed Huffman weights input"
+        );
     }
 
     /// Cross-compatibility test: decode a zstd frame produced by the C
@@ -541,20 +550,24 @@ mod e2e_fse_tests {
         // The FSE payload (30 bytes after the tree byte 0x1e) encodes
         // a 256-symbol Huffman weight table at tableLog=5.
         let fse_header: &[u8] = &[
-            0x1e, 0x10, 0xd8, 0xda, 0x72, 0x0c, 0x03, 0xb8,
-            0xa2, 0x61, 0x70, 0x4d, 0x92, 0x3a, 0x91, 0x6e,
-            0xa1, 0x26, 0x12, 0xd9, 0x6e, 0xa1, 0xa5, 0x95,
-            0xed, 0x16, 0x35, 0x0c, 0x53, 0x91, 0x02,
+            0x1e, 0x10, 0xd8, 0xda, 0x72, 0x0c, 0x03, 0xb8, 0xa2, 0x61, 0x70, 0x4d, 0x92, 0x3a,
+            0x91, 0x6e, 0xa1, 0x26, 0x12, 0xd9, 0x6e, 0xa1, 0xa5, 0x95, 0xed, 0x16, 0x35, 0x0c,
+            0x53, 0x91, 0x02,
         ];
 
         let (table, consumed) = crate::huffman::weights::read_huffman_table(fse_header)
             .expect("read FSE-compressed Huffman table");
 
         // The table should have 256 symbols (255 FSE-decoded + 1 implied).
-        assert_eq!(table.symbol_count(), 256,
-            "Huffman table should have 256 symbols");
-        assert_eq!(consumed, 31,
-            "Should consume all 31 bytes (tree byte + 30 FSE bytes)");
+        assert_eq!(
+            table.symbol_count(),
+            256,
+            "Huffman table should have 256 symbols"
+        );
+        assert_eq!(
+            consumed, 31,
+            "Should consume all 31 bytes (tree byte + 30 FSE bytes)"
+        );
 
         // Verify the weights match the C reference output.
         let weights = table.weights();

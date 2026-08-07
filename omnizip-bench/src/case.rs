@@ -17,7 +17,11 @@ pub struct BenchCodec {
 impl BenchCodec {
     #[must_use]
     pub fn new(name: &'static str, codec: Box<dyn Codec>, levels: Vec<u8>) -> Self {
-        Self { name, codec, levels }
+        Self {
+            name,
+            codec,
+            levels,
+        }
     }
 
     #[must_use]
@@ -66,11 +70,7 @@ impl BenchCodec {
     /// # Errors
     ///
     /// See [`CodecError`].
-    pub fn decompress(
-        &self,
-        compressed: &[u8],
-        expected_len: u32,
-    ) -> Result<Vec<u8>, CodecError> {
+    pub fn decompress(&self, compressed: &[u8], expected_len: u32) -> Result<Vec<u8>, CodecError> {
         match self.codec.decompress(compressed, expected_len) {
             Ok(bytes) => Ok(bytes),
             Err(e) => Err(CodecError::Decode(e.to_string())),
@@ -126,13 +126,7 @@ pub struct BenchmarkResult {
 
 impl BenchmarkResult {
     /// Mark this case as skipped (level out of range, etc.).
-    pub(crate) fn skipped(
-        codec: &str,
-        level: u8,
-        corpus: &str,
-        file: &str,
-        reason: &str,
-    ) -> Self {
+    pub(crate) fn skipped(codec: &str, level: u8, corpus: &str, file: &str, reason: &str) -> Self {
         Self {
             codec: codec.to_string(),
             level,

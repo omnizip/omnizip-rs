@@ -122,8 +122,6 @@ impl Default for LzmaOptions {
     }
 }
 
-
-
 impl LzmaOptions {
     /// Validate the parameters against the LZMA spec.
     ///
@@ -150,7 +148,10 @@ impl LzmaOptions {
             return Err(LzmaError::Corrupt {
                 reason: format!(
                     "lc + lp = {} + {} = {} exceeds {} (spec hard limit)",
-                    self.lc, self.lp, self.lc + self.lp, LC_LP_SUM_MAX
+                    self.lc,
+                    self.lp,
+                    self.lc + self.lp,
+                    LC_LP_SUM_MAX
                 ),
             });
         }
@@ -189,17 +190,9 @@ pub fn lzma_alone_compress_with_options(
 
     let encoder = Lzma1Encoder::new(lc, lp, pb);
     let stream = if options.use_optimal_parser {
-        encoder.encode_optimal_with_tuning(
-            input,
-            options.max_chain_length,
-            options.nice_match,
-        )
+        encoder.encode_optimal_with_tuning(input, options.max_chain_length, options.nice_match)
     } else {
-        encoder.encode_with_tuning(
-            input,
-            options.max_chain_length,
-            options.nice_match,
-        )
+        encoder.encode_with_tuning(input, options.max_chain_length, options.nice_match)
     };
     out.extend_from_slice(&stream);
 

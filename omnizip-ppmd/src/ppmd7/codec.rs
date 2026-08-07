@@ -82,7 +82,8 @@ pub fn compress_with_budget(
     let mut out = Vec::with_capacity(64);
     out.extend_from_slice(PPMD7_MAGIC);
     out.push(max_order);
-    let uncompressed_size = u32::try_from(input.len()).map_err(|_| Ppmd7Error::TooLarge(input.len()))?;
+    let uncompressed_size =
+        u32::try_from(input.len()).map_err(|_| Ppmd7Error::TooLarge(input.len()))?;
     out.extend_from_slice(&uncompressed_size.to_le_bytes());
 
     if input.is_empty() {
@@ -433,7 +434,9 @@ mod tests {
     fn codec_trait_round_trip() {
         let codec = Ppmd7Codec::new();
         let input = TEXT.as_bytes();
-        let compressed = codec.compress(input, CompressionLevel::default()).expect("compress");
+        let compressed = codec
+            .compress(input, CompressionLevel::default())
+            .expect("compress");
         let decompressed = codec
             .decompress(&compressed, u32::try_from(input.len()).unwrap())
             .expect("decompress");
@@ -474,9 +477,7 @@ mod tests {
     }
     #[test]
     fn round_trip_large_input() {
-        let input: Vec<u8> = (0..100_000u64)
-            .map(|i| ((i * 7919) % 251) as u8)
-            .collect();
+        let input: Vec<u8> = (0..100_000u64).map(|i| ((i * 7919) % 251) as u8).collect();
         let compressed = compress(&input, 4).expect("compress");
         let out = decompress(&compressed, input.len()).expect("decompress");
         assert_eq!(out, input);

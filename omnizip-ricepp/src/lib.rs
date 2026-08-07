@@ -35,7 +35,12 @@
 
 #![forbid(unsafe_code)]
 #![warn(clippy::pedantic)]
-#![allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap, clippy::cast_sign_loss, clippy::cast_lossless)]
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless
+)]
 
 use omnizip_codecs::{Codec, CodecId, CompressionLevel, OmnizipError};
 
@@ -280,7 +285,11 @@ impl<'a> BitstreamReader<'a> {
             let take = remaining.min(avail);
             let byte = u64::from(self.data[byte_idx]);
             let shifted = byte >> bit_in_byte;
-            let mask = if take >= 64 { u64::MAX } else { (1u64 << take) - 1 };
+            let mask = if take >= 64 {
+                u64::MAX
+            } else {
+                (1u64 << take) - 1
+            };
             result |= (shifted & mask) << out_bit;
             self.bit_pos += take as usize;
             out_bit += take;
@@ -514,7 +523,11 @@ fn encode_block(
 
     let delta = &mut delta_scratch[..block.len()];
     let sum = delta_zigzag_sum(block, *last_value, pixel_msb, pixel_bits, delta);
-    *last_value = if block.is_empty() { *last_value } else { block[block.len() - 1] };
+    *last_value = if block.is_empty() {
+        *last_value
+    } else {
+        block[block.len() - 1]
+    };
 
     if sum > 0 {
         let (fs, bits_used) = compute_best_split(delta, sum, pixel_bits);
@@ -604,7 +617,14 @@ pub fn compress(input: &[u8], config: CodecConfig) -> Result<Vec<u8>, OmnizipErr
 
     let pixel_count = input.len() / bytes_per_pixel;
     let pixels: Vec<u64> = (0..pixel_count)
-        .map(|i| read_pixel(input, i * bytes_per_pixel, config.pixel_bits, config.byte_order))
+        .map(|i| {
+            read_pixel(
+                input,
+                i * bytes_per_pixel,
+                config.pixel_bits,
+                config.byte_order,
+            )
+        })
         .collect();
 
     let mut writer = BitstreamWriter::new();
@@ -659,8 +679,10 @@ pub fn decompress(compressed: &[u8]) -> Result<Vec<u8>, OmnizipError> {
         reason: format!("unsupported pixel bits: {}", compressed[0]),
     })?;
     let byte_order = ByteOrder::from_u8(compressed[1]);
-    let block_size = u32::from_le_bytes([compressed[2], compressed[3], compressed[4], compressed[5]]) as usize;
-    let pixel_count = u32::from_le_bytes([compressed[6], compressed[7], compressed[8], compressed[9]]) as usize;
+    let block_size =
+        u32::from_le_bytes([compressed[2], compressed[3], compressed[4], compressed[5]]) as usize;
+    let pixel_count =
+        u32::from_le_bytes([compressed[6], compressed[7], compressed[8], compressed[9]]) as usize;
 
     let mut reader = BitstreamReader::new(&compressed[10..]);
     let mut pixels = vec![0u64; pixel_count];
@@ -719,7 +741,11 @@ impl Codec for RiceppCodec {
         "ricepp"
     }
 
-    fn compress(&self, plaintext: &[u8], _level: CompressionLevel) -> Result<Vec<u8>, OmnizipError> {
+    fn compress(
+        &self,
+        plaintext: &[u8],
+        _level: CompressionLevel,
+    ) -> Result<Vec<u8>, OmnizipError> {
         compress(plaintext, self.config)
     }
 
@@ -735,7 +761,12 @@ mod tests {
     fn round_trip(input: &[u8], config: CodecConfig) {
         let compressed = compress(input, config).expect("compress");
         let decompressed = decompress(&compressed).expect("decompress");
-        assert_eq!(decompressed, input, "round-trip failed for {} bytes", input.len());
+        assert_eq!(
+            decompressed,
+            input,
+            "round-trip failed for {} bytes",
+            input.len()
+        );
     }
 
     #[test]
@@ -799,8 +830,12 @@ mod tests {
     fn codec_trait_round_trips() {
         let codec = RiceppCodec::new();
         let input: Vec<u8> = (0..32u16).flat_map(|v| v.to_be_bytes()).collect();
-        let compressed = codec.compress(&input, CompressionLevel::default()).expect("compress");
-        let decompressed = codec.decompress(&compressed, input.len() as u32).expect("decompress");
+        let compressed = codec
+            .compress(&input, CompressionLevel::default())
+            .expect("compress");
+        let decompressed = codec
+            .decompress(&compressed, input.len() as u32)
+            .expect("decompress");
         assert_eq!(decompressed, input);
     }
 

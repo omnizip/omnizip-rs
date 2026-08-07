@@ -4,13 +4,19 @@
 //! downloading Silesia/Enwik8 is too slow. Each variant generates a
 //! deterministic byte sequence (seeded RNG, no time source).
 
-use crate::corpus::{Corpus, CorpusFile, CorpusError};
-use crate::llm_corpus::{XorShift, chat_response, code_gen, structured_json};
+use crate::corpus::{Corpus, CorpusError, CorpusFile};
+use crate::llm_corpus::{chat_response, code_gen, structured_json, XorShift};
 
 /// Names of the synthetic corpora known to [`all`].
 pub const NAMES: &[&str] = &[
-    "zeros", "random", "text", "mixed",
-    "llm-chat", "llm-code", "llm-json", "llm-mixed",
+    "zeros",
+    "random",
+    "text",
+    "mixed",
+    "llm-chat",
+    "llm-code",
+    "llm-json",
+    "llm-mixed",
     "ait-mix",
 ];
 
@@ -23,10 +29,7 @@ pub fn by_name(name: &str, size: usize) -> Result<Corpus, CorpusError> {
     let content = generate(name, size)?;
     Ok(Corpus::new(
         format!("synthetic-{name}"),
-        vec![CorpusFile::in_memory(
-            format!("{name}.bin"),
-            content,
-        )],
+        vec![CorpusFile::in_memory(format!("{name}.bin"), content)],
     ))
 }
 
@@ -64,9 +67,18 @@ fn generate(name: &str, size: usize) -> Result<Vec<u8>, CorpusError> {
             while out.len() < size {
                 let chunk_size = size / 3 + 1;
                 match master.next_usize(3) {
-                    0 => out.extend_from_slice(&chat_response(&mut XorShift::new(master.next_u64()), chunk_size)),
-                    1 => out.extend_from_slice(&code_gen(&mut XorShift::new(master.next_u64()), chunk_size)),
-                    _ => out.extend_from_slice(&structured_json(&mut XorShift::new(master.next_u64()), chunk_size)),
+                    0 => out.extend_from_slice(&chat_response(
+                        &mut XorShift::new(master.next_u64()),
+                        chunk_size,
+                    )),
+                    1 => out.extend_from_slice(&code_gen(
+                        &mut XorShift::new(master.next_u64()),
+                        chunk_size,
+                    )),
+                    _ => out.extend_from_slice(&structured_json(
+                        &mut XorShift::new(master.next_u64()),
+                        chunk_size,
+                    )),
                 }
             }
             out.truncate(size);
@@ -95,7 +107,9 @@ fn generate(name: &str, size: usize) -> Result<Vec<u8>, CorpusError> {
             out.truncate(size);
             Ok(out)
         }
-        _ => Err(CorpusError::UnknownCorpus { name: name.to_string() }),
+        _ => Err(CorpusError::UnknownCorpus {
+            name: name.to_string(),
+        }),
     }
 }
 
@@ -174,7 +188,9 @@ mod tests {
         let content = c.files()[0].content();
         assert_eq!(content.len(), 200);
         // First 100 bytes should be text (printable).
-        assert!(content[..100].iter().all(|&b| b.is_ascii_graphic() || b == b' '));
+        assert!(content[..100]
+            .iter()
+            .all(|&b| b.is_ascii_graphic() || b == b' '));
     }
 
     #[test]
@@ -196,8 +212,15 @@ mod tests {
         let c = by_name("llm-json", 2048).unwrap();
         let content = c.files()[0].content();
         // All bytes should be JSON-ish (printable + whitespace).
-        assert!(content.iter().all(|&b| b == b'{' || b == b'}' || b == b'"' || b == b':'
-            || b == b',' || b == b'\n' || b == b'\t' || b.is_ascii_graphic() || b == b' '));
+        assert!(content.iter().all(|&b| b == b'{'
+            || b == b'}'
+            || b == b'"'
+            || b == b':'
+            || b == b','
+            || b == b'\n'
+            || b == b'\t'
+            || b.is_ascii_graphic()
+            || b == b' '));
     }
 
     #[test]
@@ -206,7 +229,7 @@ mod tests {
         let content = c.files()[0].content();
         assert!(content.contains(&b'{')); // JSON
         assert!(content.windows(3).any(|w| w == b"```")); // code
-        // No need to assert chat explicitly — the mix contains all three.
+                                                          // No need to assert chat explicitly — the mix contains all three.
     }
 
     #[test]
@@ -218,7 +241,7 @@ mod tests {
         // pseudo-random sections (covered by general length check).
         assert!(content.windows(3).any(|w| w == b"```")); // code
         assert!(content.contains(&b'{')); // JSON
-        // The first chunk is text — assert first byte is ASCII lowercase.
+                                          // The first chunk is text — assert first byte is ASCII lowercase.
         assert!(content[0].is_ascii_lowercase() || content[0] == b' ');
         assert!(content[1].is_ascii_lowercase() || content[1] == b' ');
     }

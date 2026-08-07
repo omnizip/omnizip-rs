@@ -37,17 +37,12 @@ fn rotl64(x: u64, r: u32) -> u64 {
 
 #[inline]
 fn round32(acc: u32, input: u32) -> u32 {
-    rotl(acc.wrapping_add(input.wrapping_mul(PRIME32_2)), 13)
-        .wrapping_mul(PRIME32_1)
+    rotl(acc.wrapping_add(input.wrapping_mul(PRIME32_2)), 13).wrapping_mul(PRIME32_1)
 }
 
 #[inline]
 fn round64(acc: u64, input: u64) -> u64 {
-    rotl64(
-        acc.wrapping_add(input.wrapping_mul(PRIME64_2)),
-        31,
-    )
-    .wrapping_mul(PRIME64_1)
+    rotl64(acc.wrapping_add(input.wrapping_mul(PRIME64_2)), 31).wrapping_mul(PRIME64_1)
 }
 
 #[inline]

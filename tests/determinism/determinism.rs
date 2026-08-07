@@ -20,7 +20,10 @@ const FIXTURES: &[(&str, &[u8])] = &[
     ("single_byte", b"x"),
     ("ascii_short", b"hello world"),
     ("ascii_repeated", &[b'A'; 1024]),
-    ("binary_short", &[0u8, 1, 2, 3, 4, 5, 6, 7, 8, 9, 255, 254, 253]),
+    (
+        "binary_short",
+        &[0u8, 1, 2, 3, 4, 5, 6, 7, 8, 9, 255, 254, 253],
+    ),
     ("random_64", &[0xDEu8; 64]),
     ("random_4096", &[0xADu8; 4096]),
 ];
@@ -45,7 +48,10 @@ fn encoder_outputs_match_recording() {
         ("flac", Box::new(omnizip_flac::FlacCodec::new())),
         ("bzip2", Box::new(omnizip_bzip2::Bzip2Codec::new())),
         ("deflate", Box::new(omnizip_deflate::DeflateCodec::new())),
-        ("libdeflate", Box::new(omnizip_libdeflate::LibdeflateCodec::new())),
+        (
+            "libdeflate",
+            Box::new(omnizip_libdeflate::LibdeflateCodec::new()),
+        ),
         ("ppmd", Box::new(omnizip_ppmd::Ppmd7Codec::new())),
         ("lz4", Box::new(omnizip_lz4::Lz4FastCodec)),
         ("snappy", Box::new(omnizip_snappy::SnappyCodec)),
@@ -89,8 +95,8 @@ fn encoder_outputs_match_recording() {
     // test enforces byte-identical future runs.
     if recorded.is_empty() {
         eprintln!("Determinism recording file is empty — bootstrap path. Writing current hashes.");
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("determinism_recorded.txt");
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("determinism_recorded.txt");
         let mut out = String::from("# Determinism hashes captured from first run.\n");
         for (key, hash) in &computed {
             out.push_str(&format!("{} = {}\n", key, hex(hash)));
@@ -121,10 +127,7 @@ fn encoder_outputs_match_recording() {
     }
 
     if !failures.is_empty() {
-        panic!(
-            "Determinism regression detected:\n{}",
-            failures.join("\n")
-        );
+        panic!("Determinism regression detected:\n{}", failures.join("\n"));
     }
 }
 
@@ -157,8 +160,7 @@ fn hex(b: &[u8]) -> String {
 /// writing the current hashes.
 fn read_recorded_hashes() -> std::collections::BTreeMap<String, [u8; 32]> {
     use std::collections::BTreeMap;
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("determinism_recorded.txt");
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("determinism_recorded.txt");
     let Ok(s) = std::fs::read_to_string(&path) else {
         return BTreeMap::new();
     };

@@ -64,10 +64,7 @@ pub fn cap_hash_log_for_input(hash_log: u32, input_len: usize) -> u32 {
 /// # Errors
 ///
 /// Returns [`ZstdError::Corrupt`] on internal failures.
-pub fn encode_frame_compressed(
-    plaintext: &[u8],
-    level: u8,
-) -> Result<Vec<u8>, ZstdError> {
+pub fn encode_frame_compressed(plaintext: &[u8], level: u8) -> Result<Vec<u8>, ZstdError> {
     let mut params = crate::encoder::cparams::get_params(level);
     params.hash_log = cap_hash_log_for_input(params.hash_log, plaintext.len());
     let mut out = Vec::with_capacity(plaintext.len() / 2 + 64);
@@ -123,7 +120,15 @@ fn encode_frame_into(
         let is_last = offset + chunk_size == plaintext.len();
         let chunk = &plaintext[offset..offset + chunk_size];
 
-        write_block(out, chunk, is_last, match_state, &mut rep_offsets, params, &mut last_huf_weights)?;
+        write_block(
+            out,
+            chunk,
+            is_last,
+            match_state,
+            &mut rep_offsets,
+            params,
+            &mut last_huf_weights,
+        )?;
         offset += chunk_size;
     }
 
@@ -414,7 +419,11 @@ fn write_block(
         Strategy::Lazy => {
             ms.enable_chain(1 << params.search_log.min(4));
         }
-        Strategy::Lazy2 | Strategy::Btlazy2 | Strategy::Btopt | Strategy::Btultra | Strategy::Btultra2 => {
+        Strategy::Lazy2
+        | Strategy::Btlazy2
+        | Strategy::Btopt
+        | Strategy::Btultra
+        | Strategy::Btultra2 => {
             ms.enable_chain(1 << params.search_log);
         }
     }
@@ -429,21 +438,21 @@ fn write_block(
         Strategy::Lazy => {
             compress_block_lazy(chunk, &mut seq_store, ms, min_match);
         }
-        Strategy::Lazy2 | Strategy::Btlazy2 | Strategy::Btopt | Strategy::Btultra | Strategy::Btultra2 => {
+        Strategy::Lazy2
+        | Strategy::Btlazy2
+        | Strategy::Btopt
+        | Strategy::Btultra
+        | Strategy::Btultra2 => {
             compress_block_lazy2(chunk, &mut seq_store, ms, min_match);
         }
     }
     *rep_offsets = seq_store.rep_offsets;
 
     let mut compressed_content = Vec::new();
-    let encode_result = encode_compressed_content(
-        &mut compressed_content,
-        &seq_store,
-        last_huf_weights,
-    );
+    let encode_result =
+        encode_compressed_content(&mut compressed_content, &seq_store, last_huf_weights);
 
-    let use_compressed = encode_result.is_ok()
-        && compressed_content.len() < chunk.len();
+    let use_compressed = encode_result.is_ok() && compressed_content.len() < chunk.len();
 
     if use_compressed {
         write_compressed_block_header(out, compressed_content.len(), is_last);
@@ -469,31 +478,30 @@ fn encode_compressed_content(
     write_raw_literals(&mut raw_literals, &seq_store.literals);
 
     // Build Huffman literals section (Compressed, block_type=2).
-    let (huf_literals, huf_weights) = match crate::huffman::encoder::encode_literals_with_weights(
-        &seq_store.literals,
-        false,
-    ) {
-        Ok((data, weights)) => (data, Some(weights)),
-        Err(_) => (Vec::new(), None),
-    };
+    let (huf_literals, huf_weights) =
+        match crate::huffman::encoder::encode_literals_with_weights(&seq_store.literals, false) {
+            Ok((data, weights)) => (data, Some(weights)),
+            Err(_) => (Vec::new(), None),
+        };
 
     // Try Treeless (block_type=3) if previous block established a
     // Huffman table with identical weights.
     let treeless_literals = match (last_huf_weights.as_ref(), &huf_weights) {
         (Some(prev), Some(curr)) if prev == curr => {
-            crate::huffman::encoder::encode_literals_with_weights(
-                &seq_store.literals,
-                true,
-            )
-            .map(|(data, _)| data)
-            .unwrap_or_default()
+            crate::huffman::encoder::encode_literals_with_weights(&seq_store.literals, true)
+                .map(|(data, _)| data)
+                .unwrap_or_default()
         }
         _ => Vec::new(),
     };
 
     // Pick the smallest literals representation.
     let raw_len = raw_literals.len();
-    let huf_len = if !huf_literals.is_empty() { Some(huf_literals.len()) } else { None };
+    let huf_len = if !huf_literals.is_empty() {
+        Some(huf_literals.len())
+    } else {
+        None
+    };
     let treeless_len = if !treeless_literals.is_empty() {
         Some(treeless_literals.len())
     } else {
@@ -563,18 +571,16 @@ fn write_raw_literals(out: &mut Vec<u8>, literals: &[u8]) {
 
 /// Write a Raw block header (3 bytes LE) + data.
 fn write_raw_block(out: &mut Vec<u8>, data: &[u8], is_last: bool) {
-    let hdr: u32 = usize::from(is_last) as u32
-        | (u32::from(BLOCK_TYPE_RAW) << 1)
-        | ((data.len() as u32) << 3);
+    let hdr: u32 =
+        usize::from(is_last) as u32 | (u32::from(BLOCK_TYPE_RAW) << 1) | ((data.len() as u32) << 3);
     out.extend_from_slice(&hdr.to_le_bytes()[..3]);
     out.extend_from_slice(data);
 }
 
 /// Write an RLE block header + the repeated byte.
 fn write_rle_block(out: &mut Vec<u8>, byte: u8, size: usize, is_last: bool) {
-    let hdr: u32 = usize::from(is_last) as u32
-        | (u32::from(BLOCK_TYPE_RLE) << 1)
-        | ((size as u32) << 3);
+    let hdr: u32 =
+        usize::from(is_last) as u32 | (u32::from(BLOCK_TYPE_RLE) << 1) | ((size as u32) << 3);
     out.extend_from_slice(&hdr.to_le_bytes()[..3]);
     out.push(byte);
 }
@@ -630,7 +636,11 @@ mod tests {
         // 500 KiB of mixed data.
         let input: Vec<u8> = (0..500_000)
             .map(|i| {
-                if i % 100 < 50 { (i % 26 + b'a' as i32) as u8 } else { (i % 256) as u8 }
+                if i % 100 < 50 {
+                    (i % 26 + b'a' as i32) as u8
+                } else {
+                    (i % 256) as u8
+                }
             })
             .collect();
         let compressed = encode_frame_compressed(&input, 1).expect("encode");
@@ -684,7 +694,13 @@ mod tests {
         // Representative strategies: Fast (L1), Greedy (L5), Lazy (L6),
         // Lazy2 (L8). Each must produce decodable output.
         let input: Vec<u8> = (0..2_000)
-            .map(|i| if i % 50 < 40 { b'a' + (i % 3) as u8 } else { (i % 256) as u8 })
+            .map(|i| {
+                if i % 50 < 40 {
+                    b'a' + (i % 3) as u8
+                } else {
+                    (i % 256) as u8
+                }
+            })
             .collect();
         for &level in &[1u8, 5, 6, 8] {
             let compressed = encode_frame_compressed(&input, level)

@@ -78,10 +78,7 @@ impl Bzip2Codec {
         plaintext: &[u8],
         block_size: usize,
     ) -> Result<Vec<u8>, OmnizipError> {
-        if block_size < MIN_BLOCK_SIZE
-            || block_size > MAX_BLOCK_SIZE
-            || block_size % 100_000 != 0
-        {
+        if block_size < MIN_BLOCK_SIZE || block_size > MAX_BLOCK_SIZE || block_size % 100_000 != 0 {
             return Err(OmnizipError::LevelOutOfRange {
                 codec: CodecId::BZIP2,
                 level: 0,
@@ -431,9 +428,13 @@ mod tests {
         for input in [
             b"foo".as_ref(),
             b"hello world hello world".as_ref(),
-            b"the quick brown fox jumps over the lazy dog. ".repeat(20).as_slice(),
+            b"the quick brown fox jumps over the lazy dog. "
+                .repeat(20)
+                .as_slice(),
         ] {
-            let encoded = comp.compress(input, CompressionLevel::default()).expect("compress");
+            let encoded = comp
+                .compress(input, CompressionLevel::default())
+                .expect("compress");
             let decoded = Bzip2Codec::new()
                 .decompress(&encoded, input.len() as u32)
                 .expect("decode");

@@ -205,7 +205,8 @@ pub fn decompress_container(data: &[u8]) -> Result<Vec<u8>, ContainerError> {
     }
 
     // Phase 2: dispatch by portfolio config id.
-    let portfolio = Portfolio::from_config_id(config).ok_or(ContainerError::UnknownConfig(config))?;
+    let portfolio =
+        Portfolio::from_config_id(config).ok_or(ContainerError::UnknownConfig(config))?;
     let mut dec = ArithmeticDecoder::new(body);
     let mut model = MultiModel::with_portfolio(portfolio);
     for _ in 0..size_us {

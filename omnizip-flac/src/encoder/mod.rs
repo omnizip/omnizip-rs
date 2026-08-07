@@ -190,9 +190,7 @@ fn encode_stream_inner(
     deinterleave_into(input, params, bytes_per_sample, total_frames, channels_data)?;
 
     // Clamp block size to spec max (65535) and to total_frames.
-    let block_size = requested_block_size
-        .min(65535)
-        .min(total_frames.max(1));
+    let block_size = requested_block_size.min(65535).min(total_frames.max(1));
 
     let mut out = Vec::with_capacity(42 + input.len() / 2);
     out.extend_from_slice(&FLAC_MAGIC);
@@ -298,7 +296,12 @@ fn deinterleave_into(
         for ch in 0..params.channels as usize {
             let sample_start = frame_start + ch * bytes_per_sample;
             let sample_bytes = &input[sample_start..sample_start + bytes_per_sample];
-            let val = read_sample(sample_bytes, bytes_per_sample, is_le, params.bits_per_sample);
+            let val = read_sample(
+                sample_bytes,
+                bytes_per_sample,
+                is_le,
+                params.bits_per_sample,
+            );
             channels_data[ch].push(val);
         }
     }
@@ -381,7 +384,11 @@ mod tests {
         };
         let encoded = encode_stream(&pcm, &params).expect("encode");
         // STREAMINFO (42) + frame (~10-20 bytes for CONSTANT) → well under 100.
-        assert!(encoded.len() < 100, "DC signal encoded to {} bytes", encoded.len());
+        assert!(
+            encoded.len() < 100,
+            "DC signal encoded to {} bytes",
+            encoded.len()
+        );
     }
 
     #[test]
@@ -500,7 +507,12 @@ mod tests {
         // And ratio should be reasonable: heuristic output should be
         // within 50% of best.
         let ratio = encoded_heur.len() as f64 / encoded_best.len() as f64;
-        assert!(ratio < 1.5, "heuristic output {} vs best {}", encoded_heur.len(), encoded_best.len());
+        assert!(
+            ratio < 1.5,
+            "heuristic output {} vs best {}",
+            encoded_heur.len(),
+            encoded_best.len()
+        );
 
         // Both round-trip.
         let dec_heur = decoder::decode_stream(&encoded_heur).expect("decode");

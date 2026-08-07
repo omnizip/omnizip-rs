@@ -319,7 +319,9 @@ mod tests {
         let mut state = seed;
         let mut out = Vec::with_capacity(n);
         for _ in 0..n {
-            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             out.push((state >> 56) as u8);
         }
         out
@@ -328,7 +330,12 @@ mod tests {
     fn round_trip<F: Filter>(filter: &F, data: &[u8]) {
         let encoded = filter.encode(data);
         let decoded = filter.decode(&encoded);
-        assert_eq!(decoded.as_slice(), data, "round-trip mismatch for {}", filter.name());
+        assert_eq!(
+            decoded.as_slice(),
+            data,
+            "round-trip mismatch for {}",
+            filter.name()
+        );
     }
 
     // -----------------------------------------------------------------
@@ -503,7 +510,10 @@ mod tests {
         let filter = BitShuffle::new(1);
         let data = [0x80u8, 0x00, 0x80, 0x00, 0x80, 0x00, 0x00, 0x00];
         let encoded = filter.encode(&data);
-        assert_eq!(&encoded[HEADER_LEN..], &[0xA8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]);
+        assert_eq!(
+            &encoded[HEADER_LEN..],
+            &[0xA8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]
+        );
     }
 
     // -----------------------------------------------------------------

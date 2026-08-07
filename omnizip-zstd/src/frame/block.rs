@@ -49,9 +49,7 @@ impl BlockHeader {
                 ),
             });
         }
-        let raw = u32::from(input[0])
-            | (u32::from(input[1]) << 8)
-            | (u32::from(input[2]) << 16);
+        let raw = u32::from(input[0]) | (u32::from(input[1]) << 8) | (u32::from(input[2]) << 16);
         Ok((
             Self {
                 last_block: (raw & 0x01) != 0,

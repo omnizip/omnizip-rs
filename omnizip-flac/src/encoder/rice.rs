@@ -284,9 +284,7 @@ fn best_rice_parameter(partition: &[i32]) -> u8 {
     }
     // Now acc == T[15]. Iterate k=14..=0 to fill in t[k].
     for k in (0..=14usize).rev() {
-        acc = acc
-            .saturating_mul(2)
-            .saturating_add(bit_count[k]);
+        acc = acc.saturating_mul(2).saturating_add(bit_count[k]);
         t[k] = acc;
     }
 
@@ -368,17 +366,14 @@ mod tests {
 
     #[test]
     fn round_trip_via_decoder() {
-        let residuals: Vec<i32> = vec![
-            0, 1, -1, 2, -2, 3, -3, 100, -100, 0, 0, 0, 5, -5, 10, -10,
-        ];
+        let residuals: Vec<i32> = vec![0, 1, -1, 2, -2, 3, -3, 100, -100, 0, 0, 0, 5, -5, 10, -10];
         let mut w = BitWriter::new();
         encode_residuals(&mut w, &residuals, 16, 0, 0, 16).expect("encode");
         w.flush_byte_aligned();
         let bytes = w.finish();
 
         let mut reader = BitReader::new(&bytes);
-        let decoded = rice::decode_residual(&mut reader, residuals.len(), 0)
-            .expect("decode");
+        let decoded = rice::decode_residual(&mut reader, residuals.len(), 0).expect("decode");
         assert_eq!(decoded, residuals);
     }
 
@@ -391,8 +386,7 @@ mod tests {
         let bytes = w.finish();
 
         let mut reader = BitReader::new(&bytes);
-        let decoded = rice::decode_residual(&mut reader, residuals.len(), 0)
-            .expect("decode");
+        let decoded = rice::decode_residual(&mut reader, residuals.len(), 0).expect("decode");
         assert_eq!(decoded, residuals);
     }
 
@@ -457,12 +451,19 @@ mod tests {
             vec![i32::MAX; 64],
             vec![i32::MIN; 64],
             vec![1, -1, 1, -1],
-            (0..1024).map(|i| (i as i32).wrapping_mul(0x10_0000)).collect(),
+            (0..1024)
+                .map(|i| (i as i32).wrapping_mul(0x10_0000))
+                .collect(),
         ];
         for partition in &cases {
             let fast = best_rice_parameter(partition);
             let brute = best_rice_parameter_bruteforce(partition);
-            assert_eq!(fast, brute, "mismatch on partition of len {}", partition.len());
+            assert_eq!(
+                fast,
+                brute,
+                "mismatch on partition of len {}",
+                partition.len()
+            );
         }
     }
 }

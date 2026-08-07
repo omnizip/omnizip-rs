@@ -31,43 +31,38 @@
 
 #![forbid(unsafe_code)]
 
-use crate::constants::{DEFAULT_REPEAT_OFFSETS, MODE_PREDEFINED, MODE_REPEAT, MODE_RLE,
-    MODE_FSE};
+use crate::constants::{DEFAULT_REPEAT_OFFSETS, MODE_FSE, MODE_PREDEFINED, MODE_REPEAT, MODE_RLE};
 use crate::fse::BitStream;
-use crate::predef_tables::{LL_PREDEF, ML_PREDEF, OF_PREDEF, PredefEntry,
-    LL_ACCURACY_LOG, OF_ACCURACY_LOG, ML_ACCURACY_LOG};
+use crate::predef_tables::{
+    PredefEntry, LL_ACCURACY_LOG, LL_PREDEF, ML_ACCURACY_LOG, ML_PREDEF, OF_ACCURACY_LOG, OF_PREDEF,
+};
 use crate::ZstdError;
 
 /// Code-to-base-value and code-to-extra-bits lookup tables for FSE mode.
 const LL_BASE: [u32; 36] = [
-    0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15,
-    16, 18, 20, 22, 24, 28, 32, 40, 48, 64, 128, 256, 512, 1024, 2048, 4096,
-    8192, 16384, 32768, 65536,
+    0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 18, 20, 22, 24, 28, 32, 40, 48, 64,
+    128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536,
 ];
 const LL_BITS: [u8; 36] = [
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    1, 1, 1, 1, 2, 2, 3, 3, 4, 6, 7, 8, 9, 10, 11, 12,
-    13, 14, 15, 16,
-];
-const ML_BASE: [u32; 53] = [
-    3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18,
-    19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34,
-    35, 37, 39, 41, 43, 47, 51, 59, 67, 83, 99, 131, 259, 515, 1027, 2051,
-    4099, 8195, 16387, 32771, 65539,
-];
-const ML_BITS: [u8; 53] = [
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    1, 1, 1, 1, 2, 2, 3, 3, 4, 4, 5, 7, 8, 9, 10, 11,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 3, 3, 4, 6, 7, 8, 9, 10, 11,
     12, 13, 14, 15, 16,
 ];
+const ML_BASE: [u32; 53] = [
+    3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27,
+    28, 29, 30, 31, 32, 33, 34, 35, 37, 39, 41, 43, 47, 51, 59, 67, 83, 99, 131, 259, 515, 1027,
+    2051, 4099, 8195, 16387, 32771, 65539,
+];
+const ML_BITS: [u8; 53] = [
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    1, 1, 1, 1, 2, 2, 3, 3, 4, 4, 5, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16,
+];
 const OF_BASE: [u32; 32] = [
-    1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16,
-    17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32,
+    1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26,
+    27, 28, 29, 30, 31, 32,
 ];
 const OF_BITS: [u8; 32] = [
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    1, 1, 1, 1, 2, 2, 3, 3, 4, 4, 5, 7, 8, 9, 10, 11,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 3, 3, 4, 4, 5, 7, 8, 9, 10,
+    11,
 ];
 
 /// One decoded sequence. `offset` is the resolved byte distance (the
@@ -97,7 +92,7 @@ pub struct SequencesSection {
 ///
 /// Returns [`ZstdError::Corrupt`] on any structural problem,
 /// [`ZstdError::Unsupported`] when an FSE-mode table is encountered
-/// 
+///
 pub fn decode_sequences_section(
     input: &[u8],
     _previous_tables: &(),
@@ -133,9 +128,30 @@ pub fn decode_sequences_section(
     let mut cursor = &after_count[1..];
 
     // 3. Per-mode table.
-    let ll_tbl = get_table(ll_mode, &LL_PREDEF, LL_ACCURACY_LOG, &mut cursor, &LL_BASE, &LL_BITS)?;
-    let of_tbl = get_table(of_mode, &OF_PREDEF, OF_ACCURACY_LOG, &mut cursor, &OF_BASE, &OF_BITS)?;
-    let ml_tbl = get_table(ml_mode, &ML_PREDEF, ML_ACCURACY_LOG, &mut cursor, &ML_BASE, &ML_BITS)?;
+    let ll_tbl = get_table(
+        ll_mode,
+        &LL_PREDEF,
+        LL_ACCURACY_LOG,
+        &mut cursor,
+        &LL_BASE,
+        &LL_BITS,
+    )?;
+    let of_tbl = get_table(
+        of_mode,
+        &OF_PREDEF,
+        OF_ACCURACY_LOG,
+        &mut cursor,
+        &OF_BASE,
+        &OF_BITS,
+    )?;
+    let ml_tbl = get_table(
+        ml_mode,
+        &ML_PREDEF,
+        ML_ACCURACY_LOG,
+        &mut cursor,
+        &ML_BASE,
+        &ML_BITS,
+    )?;
 
     // 4. Bitstream: everything left in `cursor` is the FSE bitstream.
     let mut bs = BitStream::new(cursor);
@@ -590,7 +606,9 @@ mod tests {
             match_length: 1,
             offset: 0,
         };
-        let err = e.execute(&[], std::slice::from_ref(&seq), &mut out).unwrap_err();
+        let err = e
+            .execute(&[], std::slice::from_ref(&seq), &mut out)
+            .unwrap_err();
         assert!(matches!(err, ZstdError::Corrupt { .. }));
     }
 

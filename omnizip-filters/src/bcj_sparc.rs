@@ -39,8 +39,7 @@ fn sparc_transform(data: &mut [u8], is_encoder: bool) {
     while i + 4 <= len {
         let b0 = data[i];
         let b1 = data[i + 1];
-        let is_call = (b0 == 0x40 && (b1 & 0xC0) == 0x00)
-            || (b0 == 0x7F && (b1 & 0xC0) == 0xC0);
+        let is_call = (b0 == 0x40 && (b1 & 0xC0) == 0x00) || (b0 == 0x7F && (b1 & 0xC0) == 0xC0);
         if is_call {
             let src = (u32::from(b0) << 24)
                 | (u32::from(b1) << 16)

@@ -16,15 +16,17 @@
 
 #![forbid(unsafe_code)]
 
+use super::alone::LzmaOptions;
 use crate::crc32::crc32;
 use crate::LzmaError;
-use super::alone::LzmaOptions;
 
 const XZ_MAGIC: [u8; 6] = [0xFD, b'7', b'z', b'X', b'Z', 0x00];
 const XZ_FOOTER_MAGIC: [u8; 2] = [b'Y', b'Z'];
 
-#[allow(dead_code)] const STREAM_HEADER_SIZE: usize = 12;
-#[allow(dead_code)] const STREAM_FOOTER_SIZE: usize = 12;
+#[allow(dead_code)]
+const STREAM_HEADER_SIZE: usize = 12;
+#[allow(dead_code)]
+const STREAM_FOOTER_SIZE: usize = 12;
 
 /// Compress `input` into an XZ container using LZMA2 with default
 /// LZMA parameters (lc=3, lp=0, pb=2).
@@ -47,10 +49,7 @@ pub fn xz_compress(input: &[u8]) -> Result<Vec<u8>, LzmaError> {
 ///
 /// Returns [`LzmaError::Corrupt`] on parameter validation failure or
 /// internal arithmetic overflow.
-pub fn xz_compress_with_options(
-    input: &[u8],
-    options: &LzmaOptions,
-) -> Result<Vec<u8>, LzmaError> {
+pub fn xz_compress_with_options(input: &[u8], options: &LzmaOptions) -> Result<Vec<u8>, LzmaError> {
     options.validate()?;
     let mut out = Vec::new();
 
@@ -74,8 +73,8 @@ pub fn xz_compress_with_options(
 
     out.push(0x21); // Filter ID: LZMA2
     out.push(0x01); // Properties size: 1 byte
-    // Dict size code: derived from options.dict_size, clamped to LZMA2's
-    // 40..=40 range. (Real spec uses a complex mapping; we use 40 = max.)
+                    // Dict size code: derived from options.dict_size, clamped to LZMA2's
+                    // 40..=40 range. (Real spec uses a complex mapping; we use 40 = max.)
     let dict_code = dict_size_to_lzma2_code(options.dict_size);
     out.push(dict_code);
 
@@ -144,10 +143,10 @@ fn dict_size_to_lzma2_code(dict_size: u32) -> u8 {
     }
     let log = (dict_size.max(1).next_power_of_two()).trailing_zeros();
     let code = log.saturating_sub(11); // log2(2048) = 11 -> code 0... actually:
-    // spec: bits 0-5 = (dict_size_id), where dict_size_id in [0, 40]
-    // Mapping: dict_size = (2 | (bits[0:1])) << (bits[2:6] + 11)
-    // For our purposes, use the next_power_of_two's log2 - 11 + 40-ish.
-    // Simplest: clamp to [40, 40] for now (always max dict).
+                                       // spec: bits 0-5 = (dict_size_id), where dict_size_id in [0, 40]
+                                       // Mapping: dict_size = (2 | (bits[0:1])) << (bits[2:6] + 11)
+                                       // For our purposes, use the next_power_of_two's log2 - 11 + 40-ish.
+                                       // Simplest: clamp to [40, 40] for now (always max dict).
     let _ = code;
     40
 }

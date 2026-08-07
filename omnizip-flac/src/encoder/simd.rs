@@ -29,12 +29,7 @@ use wide::i32x8;
 /// `qlpc` has length `order`; `qlpc[j]` multiplies `samples[i-1-j]`.
 /// Wrapping arithmetic — mirrors libFLAC's decoder exactly.
 #[cfg(feature = "simd-lpc")]
-pub(crate) fn residuals_i32x8(
-    qlpc: &[i32],
-    shift: i8,
-    samples: &[i32],
-    order: usize,
-) -> Vec<i32> {
+pub(crate) fn residuals_i32x8(qlpc: &[i32], shift: i8, samples: &[i32], order: usize) -> Vec<i32> {
     let n_out = samples.len() - order;
     let mut out = vec![0i32; n_out];
     let lanes = 8usize;
@@ -105,12 +100,7 @@ pub(crate) fn residuals_i32x8(
 /// arithmetic semantics to the SIMD path so callers don't need to
 /// branch on the feature.
 #[cfg(not(feature = "simd-lpc"))]
-pub(crate) fn residuals_i32x8(
-    qlpc: &[i32],
-    shift: i8,
-    samples: &[i32],
-    order: usize,
-) -> Vec<i32> {
+pub(crate) fn residuals_i32x8(qlpc: &[i32], shift: i8, samples: &[i32], order: usize) -> Vec<i32> {
     let n_out = samples.len() - order;
     let mut out = Vec::with_capacity(n_out);
     for k in 0..n_out {

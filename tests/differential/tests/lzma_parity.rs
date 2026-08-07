@@ -30,7 +30,9 @@ fn run_parity(filename: &str) {
     let compressed =
         fs::read(&fixture).unwrap_or_else(|e| panic!("read {}: {e}", fixture.display()));
 
-    let oracle = if let Some(o) = xz_oracle_decode(&fixture).expect("oracle invocation") { o.bytes } else {
+    let oracle = if let Some(o) = xz_oracle_decode(&fixture).expect("oracle invocation") {
+        o.bytes
+    } else {
         eprintln!("skipped (no xz oracle): {filename}");
         return;
     };
@@ -38,7 +40,8 @@ fn run_parity(filename: &str) {
     let rust = lzma_alone_decompress(&compressed).expect("rust decode");
 
     assert_eq!(
-        rust, oracle,
+        rust,
+        oracle,
         "{}: byte mismatch — Rust {} bytes, oracle {} bytes",
         filename,
         rust.len(),

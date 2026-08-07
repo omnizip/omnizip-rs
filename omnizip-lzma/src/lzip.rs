@@ -108,8 +108,8 @@ fn decode_one_member(input: &[u8], output: &mut Vec<u8>) -> Result<usize, LzmaEr
     if version == 0 {
         let trailer = &input[input.len() - trailer_size..];
         let data_size = u64::from_le_bytes([
-            trailer[0], trailer[1], trailer[2], trailer[3],
-            trailer[4], trailer[5], trailer[6], trailer[7],
+            trailer[0], trailer[1], trailer[2], trailer[3], trailer[4], trailer[5], trailer[6],
+            trailer[7],
         ]);
         let compressed = &input[LZIP_HEADER_SIZE..input.len() - trailer_size];
         if compressed.is_empty() {
@@ -128,16 +128,27 @@ fn decode_one_member(input: &[u8], output: &mut Vec<u8>) -> Result<usize, LzmaEr
     for member_end in min_member_size..=input.len() {
         let trailer = &input[member_end - trailer_size..member_end];
         let member_size = u64::from_le_bytes([
-            trailer[12], trailer[13], trailer[14],
-            trailer[15], trailer[16], trailer[17],
-            trailer[18], trailer[19],
+            trailer[12],
+            trailer[13],
+            trailer[14],
+            trailer[15],
+            trailer[16],
+            trailer[17],
+            trailer[18],
+            trailer[19],
         ]);
         if member_size as usize != member_end {
             continue;
         }
         let data_size = u64::from_le_bytes([
-            trailer[4], trailer[5], trailer[6], trailer[7],
-            trailer[8], trailer[9], trailer[10], trailer[11],
+            trailer[4],
+            trailer[5],
+            trailer[6],
+            trailer[7],
+            trailer[8],
+            trailer[9],
+            trailer[10],
+            trailer[11],
         ]);
         let compressed = &input[LZIP_HEADER_SIZE..member_end - trailer_size];
         if compressed.is_empty() {
@@ -156,7 +167,7 @@ fn decode_one_member(input: &[u8], output: &mut Vec<u8>) -> Result<usize, LzmaEr
     })
 }
 
-#[must_use] 
+#[must_use]
 pub fn decode_dict_size(code: u8) -> u32 {
     let n = u32::from(code);
     let exp = n / 2 + 11;

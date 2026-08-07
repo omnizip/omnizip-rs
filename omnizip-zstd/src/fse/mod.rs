@@ -16,8 +16,10 @@ pub mod interleaved;
 pub mod table;
 
 pub use bitstream::{BitStream, ForwardBitStream};
-pub use encoder::{build_ctable, compress as fse_compress, compress_using_ctable,
-                  normalize_count, optimal_table_log, write_ncount, CTable};
+pub use encoder::{
+    build_ctable, compress as fse_compress, compress_using_ctable, normalize_count,
+    optimal_table_log, write_ncount, CTable,
+};
 pub use from_stream::read_fse_table;
 pub use interleaved::decode_stream;
 pub use table::{FseDecoder, FseState, Table};

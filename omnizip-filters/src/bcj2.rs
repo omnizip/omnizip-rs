@@ -435,9 +435,18 @@ mod tests {
     #[test]
     fn call_and_jump_streams_get_right_entries() {
         let data = vec![
-            OPCODE_CALL, 0x01, 0x00, 0x00, 0x00, // CALL at pos 0
-            0x90, 0x90, // NOP padding
-            OPCODE_JMP, 0x02, 0x00, 0x00, 0x00, // JMP at pos 7
+            OPCODE_CALL,
+            0x01,
+            0x00,
+            0x00,
+            0x00, // CALL at pos 0
+            0x90,
+            0x90, // NOP padding
+            OPCODE_JMP,
+            0x02,
+            0x00,
+            0x00,
+            0x00, // JMP at pos 7
         ];
         let streams = split_streams(&data);
 
@@ -455,20 +464,10 @@ mod tests {
 
     #[test]
     fn main_stream_has_zeroed_offsets() {
-        let data = vec![
-            OPCODE_CALL,
-            0x11,
-            0x22,
-            0x33,
-            0x44,
-            0x90,
-        ];
+        let data = vec![OPCODE_CALL, 0x11, 0x22, 0x33, 0x44, 0x90];
         let streams = split_streams(&data);
         // Opcode preserved, offset bytes zeroed.
-        assert_eq!(
-            streams.main,
-            vec![OPCODE_CALL, 0, 0, 0, 0, 0x90]
-        );
+        assert_eq!(streams.main, vec![OPCODE_CALL, 0, 0, 0, 0, 0x90]);
     }
 
     #[test]
@@ -511,19 +510,7 @@ mod tests {
         let call_abs = 0x10u32.wrapping_add(5);
         let jump_abs = 0x20u32.wrapping_add(6 + 5);
         let streams = Bcj2Streams {
-            main: vec![
-                OPCODE_CALL,
-                0,
-                0,
-                0,
-                0,
-                0x90,
-                OPCODE_JMP,
-                0,
-                0,
-                0,
-                0,
-            ],
+            main: vec![OPCODE_CALL, 0, 0, 0, 0, 0x90, OPCODE_JMP, 0, 0, 0, 0],
             call: call_abs.to_be_bytes().to_vec(),
             jump: jump_abs.to_be_bytes().to_vec(),
             extra: vec![EXTRA_CALL, EXTRA_JUMP],
@@ -539,24 +526,14 @@ mod tests {
         let encoded = Bcj2Filter.encode(&data);
 
         // Main length prefix.
-        let main_len = u32::from_le_bytes([
-            encoded[0],
-            encoded[1],
-            encoded[2],
-            encoded[3],
-        ]);
+        let main_len = u32::from_le_bytes([encoded[0], encoded[1], encoded[2], encoded[3]]);
         assert_eq!(main_len, 5);
 
         // Main bytes follow.
         assert_eq!(&encoded[4..9], &[OPCODE_CALL, 0, 0, 0, 0]);
 
         // Call length = 4.
-        let call_len = u32::from_le_bytes([
-            encoded[9],
-            encoded[10],
-            encoded[11],
-            encoded[12],
-        ]);
+        let call_len = u32::from_le_bytes([encoded[9], encoded[10], encoded[11], encoded[12]]);
         assert_eq!(call_len, 4);
     }
 

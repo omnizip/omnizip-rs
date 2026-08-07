@@ -23,7 +23,10 @@ pub struct AudioFrame {
 /// # Errors
 ///
 /// Returns `String` on malformed frame data.
-pub fn decode_frame(reader: &mut BitReader, info: &StreamInfo) -> Result<(AudioFrame, usize), String> {
+pub fn decode_frame(
+    reader: &mut BitReader,
+    info: &StreamInfo,
+) -> Result<(AudioFrame, usize), String> {
     let frame_start = reader.byte_position();
 
     // Sync code: 14 bits of 0x3FFE.

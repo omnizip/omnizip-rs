@@ -87,7 +87,8 @@ impl<'a> MatchFinder<'a> {
             return 0;
         }
         let word = u32::from_le_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]);
-        ((word.wrapping_mul(0x9E37_79B1)) >> (32 - Self::HASH_SHIFT)) as usize & (Self::HASH_SIZE - 1)
+        ((word.wrapping_mul(0x9E37_79B1)) >> (32 - Self::HASH_SHIFT)) as usize
+            & (Self::HASH_SIZE - 1)
     }
 
     /// Maximum chain length to walk per position.
@@ -201,17 +202,26 @@ impl<'a> MatchFinder<'a> {
         let mut len = 0usize;
 
         // Fast path: 8-byte word stepping.
-        while len + 8 <= max
-            && a + len + 8 <= data.len()
-            && b + len + 8 <= data.len()
-        {
+        while len + 8 <= max && a + len + 8 <= data.len() && b + len + 8 <= data.len() {
             let wa = u64::from_le_bytes([
-                data[a + len], data[a + len + 1], data[a + len + 2], data[a + len + 3],
-                data[a + len + 4], data[a + len + 5], data[a + len + 6], data[a + len + 7],
+                data[a + len],
+                data[a + len + 1],
+                data[a + len + 2],
+                data[a + len + 3],
+                data[a + len + 4],
+                data[a + len + 5],
+                data[a + len + 6],
+                data[a + len + 7],
             ]);
             let wb = u64::from_le_bytes([
-                data[b + len], data[b + len + 1], data[b + len + 2], data[b + len + 3],
-                data[b + len + 4], data[b + len + 5], data[b + len + 6], data[b + len + 7],
+                data[b + len],
+                data[b + len + 1],
+                data[b + len + 2],
+                data[b + len + 3],
+                data[b + len + 4],
+                data[b + len + 5],
+                data[b + len + 6],
+                data[b + len + 7],
             ]);
             if wa == wb {
                 len += 8;
@@ -436,7 +446,11 @@ mod tests {
 
         let bigger: Vec<u8> = vec![0; 8192];
         mf.reuse(&bigger, 8192);
-        assert_eq!(mf.prev.len(), 8192, "prev should grow to match new dict_size");
+        assert_eq!(
+            mf.prev.len(),
+            8192,
+            "prev should grow to match new dict_size"
+        );
     }
 
     #[test]

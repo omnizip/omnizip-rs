@@ -35,7 +35,10 @@ pub struct Corpus {
 impl Corpus {
     #[must_use]
     pub fn new(name: impl Into<String>, files: Vec<CorpusFile>) -> Self {
-        Self { name: name.into(), files }
+        Self {
+            name: name.into(),
+            files,
+        }
     }
 
     #[must_use]
@@ -50,7 +53,10 @@ impl Corpus {
 
     #[must_use]
     pub fn total_size(&self) -> u64 {
-        self.files.iter().map(|f| u64::try_from(f.content().len()).unwrap_or(0)).sum()
+        self.files
+            .iter()
+            .map(|f| u64::try_from(f.content().len()).unwrap_or(0))
+            .sum()
     }
 }
 
@@ -65,7 +71,10 @@ pub struct CorpusFile {
 impl CorpusFile {
     #[must_use]
     pub fn in_memory(name: impl Into<String>, bytes: Vec<u8>) -> Self {
-        Self { name: name.into(), bytes }
+        Self {
+            name: name.into(),
+            bytes,
+        }
     }
 
     #[must_use]
@@ -113,9 +122,8 @@ pub fn known_corpora() -> &'static [CorpusSpec] {
             approx_size: 3_000_000,
             url: "http://corpus.canterbury.ac.nz/resources/cantrbry.zip",
             files: &[
-                "bib", "book1", "book2", "geo", "news", "obj1", "obj2",
-                "paper1", "paper2", "paper3", "paper4", "paper5", "paper6",
-                "pic", "progc", "progl", "progp", "trans",
+                "bib", "book1", "book2", "geo", "news", "obj1", "obj2", "paper1", "paper2",
+                "paper3", "paper4", "paper5", "paper6", "pic", "progc", "progl", "progp", "trans",
             ],
         },
         CorpusSpec {
@@ -124,9 +132,18 @@ pub fn known_corpora() -> &'static [CorpusSpec] {
             approx_size: 3_000_000,
             url: "http://corpus.canterbury.ac.nz/resources/cantrbry.zip",
             files: &[
-                "grammar.lsp", "xargs.1", "fields.c", "cp.html",
-                "grammar.lsp", "lecture.txt", "lctet10.txt", "plrabn12.txt",
-                "ptt5", "sum", "kennedy.xls", "sep9811.txt",
+                "grammar.lsp",
+                "xargs.1",
+                "fields.c",
+                "cp.html",
+                "grammar.lsp",
+                "lecture.txt",
+                "lctet10.txt",
+                "plrabn12.txt",
+                "ptt5",
+                "sum",
+                "kennedy.xls",
+                "sep9811.txt",
             ],
         },
         CorpusSpec {
@@ -135,9 +152,8 @@ pub fn known_corpora() -> &'static [CorpusSpec] {
             approx_size: 200_000_000,
             url: "https://sun.aei.polsl.pl/~sdeor/corpus/silesia.zip",
             files: &[
-                "dickens", "mozilla", "mr", "nci", "ooffice",
-                "osdb", "reymont", "samba", "sao", "webster",
-                "xml", "x-ray",
+                "dickens", "mozilla", "mr", "nci", "ooffice", "osdb", "reymont", "samba", "sao",
+                "webster", "xml", "x-ray",
             ],
         },
         CorpusSpec {
@@ -194,7 +210,9 @@ pub fn load(name: &str) -> Result<Corpus, CorpusError> {
     let spec = known_corpora()
         .iter()
         .find(|c| c.name == name)
-        .ok_or_else(|| CorpusError::UnknownCorpus { name: name.to_string() })?;
+        .ok_or_else(|| CorpusError::UnknownCorpus {
+            name: name.to_string(),
+        })?;
 
     let cache = cache_dir_for(name);
     if !cache_is_populated(&cache, spec) {
@@ -228,9 +246,7 @@ fn cache_is_populated(dir: &Path, spec: &CorpusSpec) -> bool {
     if !dir.is_dir() {
         return false;
     }
-    spec.files
-        .iter()
-        .all(|f| find_cached_file(dir, f).is_ok())
+    spec.files.iter().all(|f| find_cached_file(dir, f).is_ok())
 }
 
 fn find_cached_file(dir: &Path, name: &str) -> Result<PathBuf, CorpusError> {
@@ -261,7 +277,11 @@ fn download_and_extract(spec: &CorpusSpec, dest: &Path) -> Result<(), CorpusErro
     fs::create_dir_all(dest)
         .map_err(|e| CorpusError::CacheIo(format!("mkdir {}: {e}", dest.display())))?;
 
-    eprintln!("[bench] downloading {} (~{} MB)...", spec.url, spec.approx_size / 1_000_000);
+    eprintln!(
+        "[bench] downloading {} (~{} MB)...",
+        spec.url,
+        spec.approx_size / 1_000_000
+    );
     let zip_bytes = download(spec.url)?;
     eprintln!("[bench] extracting {} bytes...", zip_bytes.len());
     extract_zip(&zip_bytes, dest, spec)?;
@@ -288,20 +308,17 @@ fn download(url: &str) -> Result<Vec<u8>, CorpusError> {
 
 fn extract_zip(bytes: &[u8], dest: &Path, spec: &CorpusSpec) -> Result<(), CorpusError> {
     let cursor = std::io::Cursor::new(bytes);
-    let mut archive = zip::ZipArchive::new(cursor)
-        .map_err(|e| CorpusError::Download {
-            url: spec.url.to_string(),
-            reason: format!("zip parse: {e}"),
-        })?;
+    let mut archive = zip::ZipArchive::new(cursor).map_err(|e| CorpusError::Download {
+        url: spec.url.to_string(),
+        reason: format!("zip parse: {e}"),
+    })?;
 
     let mut wanted: Vec<&str> = spec.files.to_vec();
     for idx in 0..archive.len() {
-        let entry = archive
-            .by_index(idx)
-            .map_err(|e| CorpusError::Download {
-                url: spec.url.to_string(),
-                reason: format!("zip entry {idx}: {e}"),
-            })?;
+        let entry = archive.by_index(idx).map_err(|e| CorpusError::Download {
+            url: spec.url.to_string(),
+            reason: format!("zip entry {idx}: {e}"),
+        })?;
         let entry_name = entry.name().to_string();
         // Match by suffix so a leading directory is tolerated.
         if let Some(pos) = wanted.iter().position(|w| entry_name.ends_with(w)) {
@@ -318,9 +335,8 @@ fn extract_zip(bytes: &[u8], dest: &Path, spec: &CorpusSpec) -> Result<(), Corpu
                     url: spec.url.to_string(),
                     reason: format!("read {}: {e}", entry_name),
                 })?;
-            let mut file = fs::File::create(&out_path).map_err(|e| {
-                CorpusError::CacheIo(format!("create {}: {e}", out_path.display()))
-            })?;
+            let mut file = fs::File::create(&out_path)
+                .map_err(|e| CorpusError::CacheIo(format!("create {}: {e}", out_path.display())))?;
             file.write_all(&content)
                 .map_err(|e| CorpusError::CacheIo(format!("write {}: {e}", out_path.display())))?;
         }

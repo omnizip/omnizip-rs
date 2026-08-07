@@ -29,12 +29,17 @@
 // value ranges are guaranteed by upstream protocol checks. The pedantic
 // cast lints fire on every such conversion without knowing the invariant;
 // they're more useful at API boundaries than on every arithmetic site.
-#![allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap, clippy::cast_sign_loss, clippy::cast_lossless)]
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless
+)]
 
 pub mod bit_model;
 pub mod codec;
-pub mod constants;
 pub mod coder;
+pub mod constants;
 pub mod crc32;
 pub mod decoder;
 pub mod dictionary;
@@ -50,20 +55,20 @@ use std::fmt;
 
 pub use bit_model::{BitModel, BitModelArray};
 pub use codec::{LzmaCodec, LzmaCompressor};
-pub use coder::{DistanceDecoder, DistanceEncoder, LengthDecoder, LengthEncoder,
-                 LiteralDecoder, LiteralEncoder};
+pub use coder::{
+    DistanceDecoder, DistanceEncoder, LengthDecoder, LengthEncoder, LiteralDecoder, LiteralEncoder,
+};
 pub use constants::{COMPRESSION_LEVEL_MAX, COMPRESSION_LEVEL_MIN};
 pub use crc32::crc32;
 pub use decoder::{lzma_alone_decompress, Lzma1Decoder};
 pub use dictionary::Dictionary;
-pub use encoder::{lzma_alone_compress, lzip_compress, xz_compress, Lzma1Encoder,
-                   MatchFinder};
 pub use encoder::alone::{
-    lzma_alone_compress_with_options, LzmaOptions, ResetMode, LC_LP_SUM_MAX, MAX_DICT_SIZE,
-    MAX_LC, MAX_LP, MAX_PB, MIN_DICT_SIZE,
+    lzma_alone_compress_with_options, LzmaOptions, ResetMode, LC_LP_SUM_MAX, MAX_DICT_SIZE, MAX_LC,
+    MAX_LP, MAX_PB, MIN_DICT_SIZE,
 };
 pub use encoder::lzma2::encode_lzma2_stream_with_options;
 pub use encoder::xz::xz_compress_with_options;
+pub use encoder::{lzip_compress, lzma_alone_compress, xz_compress, Lzma1Encoder, MatchFinder};
 pub use lzip::lzip_decompress;
 pub use lzma2::decode_lzma2_stream;
 pub use r#match::Match;

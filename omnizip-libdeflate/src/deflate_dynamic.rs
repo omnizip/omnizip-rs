@@ -128,7 +128,8 @@ pub fn deflate_dynamic_huffman(input: &[u8]) -> Result<Option<Vec<u8>>, OmnizipE
     for s in cl_symbols.iter() {
         match s.symbol {
             0..=15 => {
-                writer.write_huffman_code(cl_codes[s.symbol as usize], cl_lengths[s.symbol as usize]);
+                writer
+                    .write_huffman_code(cl_codes[s.symbol as usize], cl_lengths[s.symbol as usize]);
                 prev = s.symbol;
             }
             16 => {
@@ -164,7 +165,8 @@ pub fn deflate_dynamic_huffman(input: &[u8]) -> Result<Option<Vec<u8>>, OmnizipE
                 if len_extra_bits > 0 {
                     writer.write_bits(u64::from(len_extra_val), len_extra_bits);
                 }
-                let (dist_sym, dist_extra_bits, dist_extra_val) = distance_to_symbol_full(*distance);
+                let (dist_sym, dist_extra_bits, dist_extra_val) =
+                    distance_to_symbol_full(*distance);
                 writer.write_huffman_code(dist_codes[dist_sym], dist_lengths[dist_sym]);
                 if dist_extra_bits > 0 {
                     writer.write_bits(u64::from(dist_extra_val), dist_extra_bits);
@@ -217,12 +219,19 @@ fn build_huffman_lengths(freqs: &[u32], max_len: u8, lengths: &mut [u8]) {
         nodes.sort_by(|a, b| a.freq.cmp(&b.freq));
         let mut right = nodes.remove(1);
         let mut left = nodes.remove(0);
-        for (_, d) in &mut left.leaves { *d += 1; }
-        for (_, d) in &mut right.leaves { *d += 1; }
+        for (_, d) in &mut left.leaves {
+            *d += 1;
+        }
+        for (_, d) in &mut right.leaves {
+            *d += 1;
+        }
         let merged_freq = left.freq + right.freq;
         let mut merged_leaves = left.leaves;
         merged_leaves.append(&mut right.leaves);
-        nodes.push(Node { freq: merged_freq, leaves: merged_leaves });
+        nodes.push(Node {
+            freq: merged_freq,
+            leaves: merged_leaves,
+        });
     }
 
     // Extract lengths.
@@ -324,34 +333,52 @@ fn run_length_encode(lengths: &[u8]) -> Vec<ClSymbol> {
             // Use 17 (3-10 zeros) or 18 (11-138 zeros).
             while run >= 11 {
                 let take = run.min(138) as u8;
-                out.push(ClSymbol { symbol: 18, extra: take - 11 });
+                out.push(ClSymbol {
+                    symbol: 18,
+                    extra: take - 11,
+                });
                 run -= take as usize;
                 i += take as usize;
             }
             while run >= 3 {
                 let take = run.min(10) as u8;
-                out.push(ClSymbol { symbol: 17, extra: take - 3 });
+                out.push(ClSymbol {
+                    symbol: 17,
+                    extra: take - 3,
+                });
                 run -= take as usize;
                 i += take as usize;
             }
             while run > 0 {
-                out.push(ClSymbol { symbol: 0, extra: 0 });
+                out.push(ClSymbol {
+                    symbol: 0,
+                    extra: 0,
+                });
                 run -= 1;
                 i += 1;
             }
         } else {
             // Emit one literal, then use 16 (3-6 repeats) for runs.
-            out.push(ClSymbol { symbol: cur, extra: 0 });
+            out.push(ClSymbol {
+                symbol: cur,
+                extra: 0,
+            });
             i += 1;
             run -= 1;
             while run >= 3 {
                 let take = run.min(6) as u8;
-                out.push(ClSymbol { symbol: 16, extra: take - 3 });
+                out.push(ClSymbol {
+                    symbol: 16,
+                    extra: take - 3,
+                });
                 run -= take as usize;
                 i += take as usize;
             }
             while run > 0 {
-                out.push(ClSymbol { symbol: cur, extra: 0 });
+                out.push(ClSymbol {
+                    symbol: cur,
+                    extra: 0,
+                });
                 run -= 1;
                 i += 1;
             }
@@ -387,13 +414,34 @@ fn count_trailing_zeros(lengths: &[u8], min_count: usize) -> usize {
 /// Returns `(symbol, extra_bits, base_length)`.
 fn length_table() -> &'static [(u16, u8, u16)] {
     &[
-        (257, 0, 3), (258, 0, 4), (259, 0, 5), (260, 0, 6),
-        (261, 0, 7), (262, 0, 8), (263, 0, 9), (264, 0, 10),
-        (265, 1, 11), (266, 1, 13), (267, 1, 15), (268, 1, 17),
-        (269, 2, 19), (270, 2, 23), (271, 2, 27), (272, 2, 31),
-        (273, 3, 35), (274, 3, 43), (275, 3, 51), (276, 3, 59),
-        (277, 4, 67), (278, 4, 83), (279, 4, 99), (280, 4, 115),
-        (281, 5, 131), (282, 5, 163), (283, 5, 195), (284, 5, 227),
+        (257, 0, 3),
+        (258, 0, 4),
+        (259, 0, 5),
+        (260, 0, 6),
+        (261, 0, 7),
+        (262, 0, 8),
+        (263, 0, 9),
+        (264, 0, 10),
+        (265, 1, 11),
+        (266, 1, 13),
+        (267, 1, 15),
+        (268, 1, 17),
+        (269, 2, 19),
+        (270, 2, 23),
+        (271, 2, 27),
+        (272, 2, 31),
+        (273, 3, 35),
+        (274, 3, 43),
+        (275, 3, 51),
+        (276, 3, 59),
+        (277, 4, 67),
+        (278, 4, 83),
+        (279, 4, 99),
+        (280, 4, 115),
+        (281, 5, 131),
+        (282, 5, 163),
+        (283, 5, 195),
+        (284, 5, 227),
         (285, 0, 258),
     ]
 }
@@ -401,14 +449,36 @@ fn length_table() -> &'static [(u16, u8, u16)] {
 /// DEFLATE distance symbol table (RFC 1951 §3.2.5).
 fn distance_table() -> &'static [(u8, u8, u16)] {
     &[
-        (0, 0, 1), (1, 0, 2), (2, 0, 3), (3, 0, 4),
-        (4, 1, 5), (5, 1, 7), (6, 2, 9), (7, 2, 13),
-        (8, 3, 17), (9, 3, 25), (10, 4, 33), (11, 4, 49),
-        (12, 5, 65), (13, 5, 97), (14, 6, 129), (15, 6, 193),
-        (16, 7, 257), (17, 7, 385), (18, 8, 513), (19, 8, 769),
-        (20, 9, 1025), (21, 9, 1537), (22, 10, 2049), (23, 10, 3073),
-        (24, 11, 4097), (25, 11, 6145), (26, 12, 8193), (27, 12, 12289),
-        (28, 13, 16385), (29, 13, 24577),
+        (0, 0, 1),
+        (1, 0, 2),
+        (2, 0, 3),
+        (3, 0, 4),
+        (4, 1, 5),
+        (5, 1, 7),
+        (6, 2, 9),
+        (7, 2, 13),
+        (8, 3, 17),
+        (9, 3, 25),
+        (10, 4, 33),
+        (11, 4, 49),
+        (12, 5, 65),
+        (13, 5, 97),
+        (14, 6, 129),
+        (15, 6, 193),
+        (16, 7, 257),
+        (17, 7, 385),
+        (18, 8, 513),
+        (19, 8, 769),
+        (20, 9, 1025),
+        (21, 9, 1537),
+        (22, 10, 2049),
+        (23, 10, 3073),
+        (24, 11, 4097),
+        (25, 11, 6145),
+        (26, 12, 8193),
+        (27, 12, 12289),
+        (28, 13, 16385),
+        (29, 13, 24577),
     ]
 }
 

@@ -360,7 +360,8 @@ pub fn dictionary_lookup(
     distance_code: i32,
     max_distance: u32,
 ) -> Option<()> {
-    if !(MIN_DICTIONARY_WORD_LENGTH as u32..=MAX_DICTIONARY_WORD_LENGTH as u32).contains(&copy_len) {
+    if !(MIN_DICTIONARY_WORD_LENGTH as u32..=MAX_DICTIONARY_WORD_LENGTH as u32).contains(&copy_len)
+    {
         return None;
     }
     let len = copy_len as usize;

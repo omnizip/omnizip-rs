@@ -58,7 +58,12 @@ pub fn parse_wav(bytes: &[u8]) -> Option<PcmParams> {
 
     while pos + 8 <= bytes.len() {
         let chunk_id = &bytes[pos..pos + 4];
-        let chunk_size = u32::from_le_bytes([bytes[pos + 4], bytes[pos + 5], bytes[pos + 6], bytes[pos + 7]]);
+        let chunk_size = u32::from_le_bytes([
+            bytes[pos + 4],
+            bytes[pos + 5],
+            bytes[pos + 6],
+            bytes[pos + 7],
+        ]);
         pos += 8;
 
         if chunk_id == b"fmt " {
@@ -67,7 +72,12 @@ pub fn parse_wav(bytes: &[u8]) -> Option<PcmParams> {
             }
             let format_code = u16::from_le_bytes([bytes[pos], bytes[pos + 1]]);
             let channels = u16::from_le_bytes([bytes[pos + 2], bytes[pos + 3]]);
-            let sample_rate = u32::from_le_bytes([bytes[pos + 4], bytes[pos + 5], bytes[pos + 6], bytes[pos + 7]]);
+            let sample_rate = u32::from_le_bytes([
+                bytes[pos + 4],
+                bytes[pos + 5],
+                bytes[pos + 6],
+                bytes[pos + 7],
+            ]);
             let bits_per_sample = u16::from_le_bytes([bytes[pos + 14], bytes[pos + 15]]);
             // Only PCM (format code 1) is supported.
             if format_code != 1 {
@@ -130,7 +140,12 @@ pub fn parse_aiff(bytes: &[u8]) -> Option<PcmParams> {
 
     while pos + 8 <= bytes.len() {
         let chunk_id = &bytes[pos..pos + 4];
-        let chunk_size = u32::from_be_bytes([bytes[pos + 4], bytes[pos + 5], bytes[pos + 6], bytes[pos + 7]]);
+        let chunk_size = u32::from_be_bytes([
+            bytes[pos + 4],
+            bytes[pos + 5],
+            bytes[pos + 6],
+            bytes[pos + 7],
+        ]);
         pos += 8;
 
         if chunk_id == b"COMM" {
@@ -138,7 +153,12 @@ pub fn parse_aiff(bytes: &[u8]) -> Option<PcmParams> {
                 return None;
             }
             let channels = u16::from_be_bytes([bytes[pos], bytes[pos + 1]]);
-            let frames = u32::from_be_bytes([bytes[pos + 2], bytes[pos + 3], bytes[pos + 4], bytes[pos + 5]]);
+            let frames = u32::from_be_bytes([
+                bytes[pos + 2],
+                bytes[pos + 3],
+                bytes[pos + 4],
+                bytes[pos + 5],
+            ]);
             let bits_per_sample = u16::from_be_bytes([bytes[pos + 6], bytes[pos + 7]]);
             // 80-bit IEEE 754 extended float sample rate (big-endian).
             let sample_rate = parse_extended_float(&bytes[pos + 8..pos + 18])?;
@@ -213,16 +233,16 @@ mod tests {
             0x24, 0x00, 0x00, 0x00, // size = 36
             b'W', b'A', b'V', b'E', // "WAVE"
             b'f', b'm', b't', b' ', // "fmt "
-            16, 0, 0, 0,            // chunk size = 16
-            1, 0,                   // PCM format
-            1, 0,                   // mono
+            16, 0, 0, 0, // chunk size = 16
+            1, 0, // PCM format
+            1, 0, // mono
             0x44, 0xAC, 0x00, 0x00, // 44100 Hz
             0x88, 0x58, 0x01, 0x00, // byte rate
-            2, 0,                   // block align
-            16, 0,                  // 16 bits
+            2, 0, // block align
+            16, 0, // 16 bits
             b'd', b'a', b't', b'a', // "data"
-            4, 0, 0, 0,             // 4 bytes
-            0, 0, 0, 0,             // PCM data
+            4, 0, 0, 0, // 4 bytes
+            0, 0, 0, 0, // PCM data
         ];
         let params = parse_wav(&wav).expect("parse");
         assert_eq!(params.sample_rate, 44100);
@@ -242,17 +262,14 @@ mod tests {
     fn parse_stereo_wav() {
         // Stereo 48kHz 16-bit, 8 bytes of data = 1 sample frame.
         let wav: Vec<u8> = vec![
-            b'R', b'I', b'F', b'F', 0x00, 0x00, 0x00, 0x00,
-            b'W', b'A', b'V', b'E',
-            b'f', b'm', b't', b' ', 16, 0, 0, 0,
-            1, 0,                     // PCM format
-            2, 0,                     // stereo
-            0x80, 0xBB, 0x00, 0x00,   // 48000 Hz
-            0x00, 0xEE, 0x02, 0x00,   // byte rate
-            4, 0,                     // block align
-            16, 0,                    // 16 bits
-            b'd', b'a', b't', b'a', 8, 0, 0, 0,
-            0, 0, 0, 0, 0, 0, 0, 0,
+            b'R', b'I', b'F', b'F', 0x00, 0x00, 0x00, 0x00, b'W', b'A', b'V', b'E', b'f', b'm',
+            b't', b' ', 16, 0, 0, 0, 1, 0, // PCM format
+            2, 0, // stereo
+            0x80, 0xBB, 0x00, 0x00, // 48000 Hz
+            0x00, 0xEE, 0x02, 0x00, // byte rate
+            4, 0, // block align
+            16, 0, // 16 bits
+            b'd', b'a', b't', b'a', 8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         ];
         let params = parse_wav(&wav).expect("parse");
         assert_eq!(params.sample_rate, 48000);

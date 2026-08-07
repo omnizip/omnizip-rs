@@ -88,12 +88,8 @@ fn decompress_lz4(
             reason: "input too short for size prefix".into(),
         });
     }
-    let stored_len = u32::from_le_bytes([
-        compressed[0],
-        compressed[1],
-        compressed[2],
-        compressed[3],
-    ]) as usize;
+    let stored_len =
+        u32::from_le_bytes([compressed[0], compressed[1], compressed[2], compressed[3]]) as usize;
     let block_data = &compressed[4..];
     let decoded = block::decompress_block(block_data, stored_len).map_err(|reason| {
         OmnizipError::DecodeFailed {
@@ -199,7 +195,13 @@ mod tests {
     #[test]
     fn hc_produces_different_output_than_fast() {
         let data: Vec<u8> = (0..10_000)
-            .map(|i| if i % 100 < 50 { (i % 26 + b'a' as i32) as u8 } else { (i % 256) as u8 })
+            .map(|i| {
+                if i % 100 < 50 {
+                    (i % 26 + b'a' as i32) as u8
+                } else {
+                    (i % 256) as u8
+                }
+            })
             .collect();
         let fast = Lz4FastCodec
             .compress(&data, CompressionLevel::default())

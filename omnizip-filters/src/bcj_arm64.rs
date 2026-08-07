@@ -43,7 +43,11 @@ fn arm64_transform(data: &mut [u8], is_encoder: bool) {
             // BL: convert full 26-bit immediate.
             let src = instr;
             let pc = (i as u32) >> 2;
-            let pc = if is_encoder { pc } else { 0u32.wrapping_sub(pc) };
+            let pc = if is_encoder {
+                pc
+            } else {
+                0u32.wrapping_sub(pc)
+            };
             let new_instr = 0x9400_0000u32 | ((src.wrapping_add(pc)) & 0x03FF_FFFF);
             write_le_32(&mut data[i..i + 4], new_instr);
         } else if (instr & 0x9F00_0000) == 0x9000_0000 {
@@ -55,7 +59,11 @@ fn arm64_transform(data: &mut [u8], is_encoder: bool) {
                 continue;
             }
             let pc = (i as u32) >> 12;
-            let pc = if is_encoder { pc } else { 0u32.wrapping_sub(pc) };
+            let pc = if is_encoder {
+                pc
+            } else {
+                0u32.wrapping_sub(pc)
+            };
             let dest = src.wrapping_add(pc);
             let mut new_instr = instr & 0x9000_001F;
             new_instr |= (dest & 3) << 29;

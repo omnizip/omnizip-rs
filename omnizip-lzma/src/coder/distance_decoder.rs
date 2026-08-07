@@ -120,7 +120,11 @@ impl DistanceDecoder {
 
         let slot_tree_size = 1usize << (NUM_DIST_SLOT_BITS + 1);
         let base = len_state * slot_tree_size;
-        let slot = decode_tree(range_decoder, &mut self.slot_encoders[base..], NUM_DIST_SLOT_BITS)?;
+        let slot = decode_tree(
+            range_decoder,
+            &mut self.slot_encoders[base..],
+            NUM_DIST_SLOT_BITS,
+        )?;
 
         if slot < START_POS_MODEL_INDEX {
             return Ok(slot);
@@ -135,24 +139,16 @@ impl DistanceDecoder {
             // effective index 0. See coder/decoder.rs docs.
             let slot_base = (2 | (slot & 1)) << footer_bits;
             let pos_idx = i64::from(slot_base as u32) - i64::from(slot) - 1;
-            let extra = decode_reverse_tree(
-                range_decoder,
-                &mut self.pos_encoders,
-                pos_idx,
-                footer_bits,
-            )?;
+            let extra =
+                decode_reverse_tree(range_decoder, &mut self.pos_encoders, pos_idx, footer_bits)?;
             Ok(slot_base + extra)
         } else {
             // Slots ≥14: high direct bits + low aligned bits.
             let num_direct_bits = footer_bits - DIST_ALIGN_BITS;
             let mut result = 2 + (slot & 1);
             result = range_decoder.decode_direct_bits_with_base(num_direct_bits, result)?;
-            let low_bits = decode_reverse_tree(
-                range_decoder,
-                &mut self.align_encoder,
-                0,
-                DIST_ALIGN_BITS,
-            )?;
+            let low_bits =
+                decode_reverse_tree(range_decoder, &mut self.align_encoder, 0, DIST_ALIGN_BITS)?;
             Ok((result << DIST_ALIGN_BITS) + low_bits)
         }
     }

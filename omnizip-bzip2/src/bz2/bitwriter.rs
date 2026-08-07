@@ -135,9 +135,6 @@ mod tests {
         let mut w = Bz2BitWriter::new();
         w.write48(0x3141_5926_5359);
         let out = w.finish();
-        assert_eq!(
-            out,
-            vec![0x31, 0x41, 0x59, 0x26, 0x53, 0x59]
-        );
+        assert_eq!(out, vec![0x31, 0x41, 0x59, 0x26, 0x53, 0x59]);
     }
 }

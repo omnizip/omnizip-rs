@@ -24,9 +24,9 @@
 
 pub mod wav;
 
+use std::io::Write;
 use std::path::Path;
 use std::process::{Command, Stdio};
-use std::io::Write;
 
 /// Output of running the reference oracle on an input, or `None` if no
 /// oracle is installed.
@@ -39,9 +39,9 @@ pub struct OracleOutput {
 pub fn which(cmd: &str) -> std::io::Result<Option<String>> {
     let output = Command::new("which").arg(cmd).output();
     match output {
-        Ok(o) if o.status.success() => Ok(Some(
-            String::from_utf8_lossy(&o.stdout).trim().to_string(),
-        )),
+        Ok(o) if o.status.success() => {
+            Ok(Some(String::from_utf8_lossy(&o.stdout).trim().to_string()))
+        }
         Ok(_) => Ok(None),
         Err(e) => Err(e),
     }
@@ -71,7 +71,9 @@ pub fn xz_oracle_decode(fixture_path: &Path) -> std::io::Result<Option<OracleOut
             String::from_utf8_lossy(&output.stderr)
         )));
     }
-    Ok(Some(OracleOutput { bytes: output.stdout }))
+    Ok(Some(OracleOutput {
+        bytes: output.stdout,
+    }))
 }
 
 /// Pipe `compressed` bytes into a CLI decoder, returning its stdout.
@@ -156,7 +158,9 @@ pub fn python_zlib_oracle_decode(
             String::from_utf8_lossy(&output.stderr)
         )));
     }
-    Ok(Some(OracleOutput { bytes: output.stdout }))
+    Ok(Some(OracleOutput {
+        bytes: output.stdout,
+    }))
 }
 
 #[cfg(test)]

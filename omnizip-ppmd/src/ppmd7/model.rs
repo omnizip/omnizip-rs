@@ -163,11 +163,7 @@ impl PpmModel {
         }
         let take = order.min(self.history_len);
         let cap = self.history.len();
-        let start = if self.history_len < cap {
-            0
-        } else {
-            self.head
-        };
+        let start = if self.history_len < cap { 0 } else { self.head };
         out.reserve(take);
         for i in 0..take {
             out.push(self.history[(start + i) % cap]);

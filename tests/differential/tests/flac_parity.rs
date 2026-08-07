@@ -70,7 +70,10 @@ fn assert_parity(label: &str, wav: &[u8]) {
             String::from_utf8_lossy(&out.stderr)
         );
     }
-    eprintln!("[ok] {label}: libFLAC decodes our output byte-identically ({} bytes)", out.stdout.len());
+    eprintln!(
+        "[ok] {label}: libFLAC decodes our output byte-identically ({} bytes)",
+        out.stdout.len()
+    );
 }
 
 // `which` is provided by `omnizip_differential::which` — no local copy needed.

@@ -31,8 +31,9 @@
 
 #![forbid(unsafe_code)]
 
-use crate::constants::{LITERALS_BLOCK_COMPRESSED, LITERALS_BLOCK_RAW,
-                       LITERALS_BLOCK_RLE, LITERALS_BLOCK_TREELESS};
+use crate::constants::{
+    LITERALS_BLOCK_COMPRESSED, LITERALS_BLOCK_RAW, LITERALS_BLOCK_RLE, LITERALS_BLOCK_TREELESS,
+};
 use crate::huffman::HuffmanTable;
 use crate::ZstdError;
 
@@ -114,7 +115,8 @@ fn decode_size_format_raw_rle(header0: u8, input: &[u8]) -> Result<(u32, usize),
                     reason: "truncated 3-byte Raw/RLE literals header".into(),
                 });
             }
-            let lhc = u32::from(input[0]) | (u32::from(input[1]) << 8) | (u32::from(input[2]) << 16);
+            let lhc =
+                u32::from(input[0]) | (u32::from(input[1]) << 8) | (u32::from(input[2]) << 16);
             Ok((lhc >> 4, 3))
         }
         _ => unreachable!("lhl_code is masked to 2 bits"),
@@ -126,9 +128,11 @@ fn decode_size_format_raw_rle(header0: u8, input: &[u8]) -> Result<(u32, usize),
 fn decode_raw(input: &[u8]) -> Result<LiteralsSection<'_>, ZstdError> {
     let (regen_size, header_size) = decode_size_format_raw_rle(input[0], input)?;
     let size = regen_size as usize;
-    let end = header_size.checked_add(size).ok_or_else(|| ZstdError::Corrupt {
-        reason: format!("raw literals size {size} overflows usize"),
-    })?;
+    let end = header_size
+        .checked_add(size)
+        .ok_or_else(|| ZstdError::Corrupt {
+            reason: format!("raw literals size {size} overflows usize"),
+        })?;
     if input.len() < end {
         return Err(ZstdError::Corrupt {
             reason: format!(
@@ -147,9 +151,11 @@ fn decode_raw(input: &[u8]) -> Result<LiteralsSection<'_>, ZstdError> {
 
 fn decode_rle(input: &[u8]) -> Result<LiteralsSection<'_>, ZstdError> {
     let (regen_size, header_size) = decode_size_format_raw_rle(input[0], input)?;
-    let needed = header_size.checked_add(1).ok_or_else(|| ZstdError::Corrupt {
-        reason: format!("rle literals header size {header_size} overflows usize"),
-    })?;
+    let needed = header_size
+        .checked_add(1)
+        .ok_or_else(|| ZstdError::Corrupt {
+            reason: format!("rle literals header size {header_size} overflows usize"),
+        })?;
     if input.len() < needed {
         return Err(ZstdError::Corrupt {
             reason: "truncated RLE literals: missing repeated byte".into(),
@@ -192,7 +198,8 @@ fn decode_compressed<'t>(
     if is_repeat && previous_table.is_none() {
         // C: `RETURN_ERROR_IF(dctx->litEntropy==0, dictionary_corrupted, "")`.
         return Err(ZstdError::Corrupt {
-            reason: "treeless literals block requires a prior compressed block in the same frame".into(),
+            reason: "treeless literals block requires a prior compressed block in the same frame"
+                .into(),
         });
     }
     let header0 = input[0];
@@ -206,12 +213,7 @@ fn decode_compressed<'t>(
                 });
             }
             let lhc = u32::from_le_bytes([input[0], input[1], input[2], 0]);
-            (
-                (lhc >> 4) & 0x3FF,
-                (lhc >> 14) & 0x3FF,
-                3,
-                lhl_code == 0,
-            )
+            ((lhc >> 4) & 0x3FF, (lhc >> 14) & 0x3FF, 3, lhl_code == 0)
         }
         2 => {
             if input.len() < 4 {
@@ -241,9 +243,11 @@ fn decode_compressed<'t>(
 
     let lit_size_us = lit_size as usize;
     let lit_c_size_us = lit_c_size as usize;
-    let needed = lh_size.checked_add(lit_c_size_us).ok_or_else(|| ZstdError::Corrupt {
-        reason: format!("compressed literals size {lit_c_size} overflows usize"),
-    })?;
+    let needed = lh_size
+        .checked_add(lit_c_size_us)
+        .ok_or_else(|| ZstdError::Corrupt {
+            reason: format!("compressed literals size {lit_c_size} overflows usize"),
+        })?;
     if input.len() < needed {
         return Err(ZstdError::Corrupt {
             reason: format!(
@@ -287,11 +291,7 @@ fn decode_compressed<'t>(
 
     Ok(LiteralsSection {
         literals,
-        huffman_table: if is_repeat {
-            None
-        } else {
-            Some(table.clone())
-        },
+        huffman_table: if is_repeat { None } else { Some(table.clone()) },
         consumed: needed,
         _phantom: std::marker::PhantomData,
     })
@@ -299,11 +299,7 @@ fn decode_compressed<'t>(
 
 /// Single-stream Huffman decode: one forward bitstream decoded into all
 /// `lit_size` symbols. Used when `lhl_code == 0` (singleStream=1).
-fn decode_single_stream(
-    table: &HuffmanTable,
-    src: &[u8],
-    out: &mut [u8],
-) -> Result<(), ZstdError> {
+fn decode_single_stream(table: &HuffmanTable, src: &[u8], out: &mut [u8]) -> Result<(), ZstdError> {
     let mut dec = crate::huffman::HuffmanDecoder::new(table, src);
     dec.decode_into(out)
 }
@@ -323,11 +319,7 @@ fn decode_single_stream(
 /// Each stream is read backwards (last byte first, MSB-first within
 /// each byte) using `BitStream`, matching the C reference's
 /// `BIT_initDStream` per stream.
-fn decode_four_stream(
-    table: &HuffmanTable,
-    src: &[u8],
-    out: &mut [u8],
-) -> Result<(), ZstdError> {
+fn decode_four_stream(table: &HuffmanTable, src: &[u8], out: &mut [u8]) -> Result<(), ZstdError> {
     use crate::fse::BitStream;
     if src.len() < 10 {
         return Err(ZstdError::Corrupt {
@@ -469,7 +461,10 @@ mod tests {
         // section is too short.
         let input = [LITERALS_BLOCK_COMPRESSED, 0, 0, 0, 0];
         let result = decode_literals_section(&input, None);
-        assert!(matches!(result, Err(ZstdError::Corrupt { .. } | ZstdError::Unsupported { .. })));
+        assert!(matches!(
+            result,
+            Err(ZstdError::Corrupt { .. } | ZstdError::Unsupported { .. })
+        ));
     }
 
     #[test]

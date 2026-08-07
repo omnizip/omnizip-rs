@@ -41,7 +41,12 @@
 
 #![forbid(unsafe_code)]
 #![warn(clippy::pedantic)]
-#![allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap, clippy::cast_sign_loss, clippy::cast_lossless)]
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless
+)]
 
 use omnizip_codecs::{Codec, CodecId, CompressionLevel, OmnizipError};
 
@@ -87,9 +92,11 @@ pub fn compress(input: &[u8], params: &PcmParams) -> Result<Vec<u8>, OmnizipErro
         });
     }
 
-    encoder::encode_stream(&input[..expected], params).map_err(|reason| OmnizipError::EncodeFailed {
-        codec: CodecId::FLAC,
-        reason,
+    encoder::encode_stream(&input[..expected], params).map_err(|reason| {
+        OmnizipError::EncodeFailed {
+            codec: CodecId::FLAC,
+            reason,
+        }
     })
 }
 
@@ -137,9 +144,11 @@ pub fn extract_params(compressed: &[u8]) -> Result<PcmParams, OmnizipError> {
             reason: "stream too short for STREAMINFO".into(),
         });
     }
-    let info = crate::streaminfo::StreamInfo::parse(&compressed[8..42]).ok_or_else(|| OmnizipError::DecodeFailed {
-        codec: CodecId::FLAC,
-        reason: "invalid STREAMINFO".into(),
+    let info = crate::streaminfo::StreamInfo::parse(&compressed[8..42]).ok_or_else(|| {
+        OmnizipError::DecodeFailed {
+            codec: CodecId::FLAC,
+            reason: "invalid STREAMINFO".into(),
+        }
     })?;
     Ok(PcmParams {
         sample_rate: info.sample_rate,
@@ -171,7 +180,11 @@ impl Codec for FlacCodec {
         "flac"
     }
 
-    fn compress(&self, plaintext: &[u8], _level: CompressionLevel) -> Result<Vec<u8>, OmnizipError> {
+    fn compress(
+        &self,
+        plaintext: &[u8],
+        _level: CompressionLevel,
+    ) -> Result<Vec<u8>, OmnizipError> {
         // Default PCM params: 44.1 kHz stereo 16-bit LE.
         let params = PcmParams {
             sample_rate: 44_100,
@@ -245,11 +258,7 @@ impl FlacCompressor {
     /// # Errors
     ///
     /// Returns [`OmnizipError::EncodeFailed`] on configuration errors.
-    pub fn compress(
-        &mut self,
-        input: &[u8],
-        params: &PcmParams,
-    ) -> Result<Vec<u8>, OmnizipError> {
+    pub fn compress(&mut self, input: &[u8], params: &PcmParams) -> Result<Vec<u8>, OmnizipError> {
         // Resize channel buffers if channel count changed.
         let ch = usize::from(params.channels);
         if self.last_channels != params.channels || self.channels_data.len() != ch {
@@ -303,8 +312,12 @@ mod tests {
         // FlacCodec::compress assumes 44.1 kHz stereo 16-bit LE, 4 bytes/sample.
         // Build a valid 8-frame stereo input (32 bytes).
         let input = vec![0u8; 32];
-        let compressed = codec.compress(&input, CompressionLevel::default()).expect("compress");
-        let decompressed = codec.decompress(&compressed, input.len() as u32).expect("decompress");
+        let compressed = codec
+            .compress(&input, CompressionLevel::default())
+            .expect("compress");
+        let decompressed = codec
+            .decompress(&compressed, input.len() as u32)
+            .expect("decompress");
         assert_eq!(decompressed, input);
     }
 
@@ -312,8 +325,12 @@ mod tests {
     fn determinism() {
         let codec = FlacCodec::new();
         let input = vec![0u8; 64];
-        let a = codec.compress(&input, CompressionLevel::default()).expect("compress");
-        let b = codec.compress(&input, CompressionLevel::default()).expect("compress");
+        let a = codec
+            .compress(&input, CompressionLevel::default())
+            .expect("compress");
+        let b = codec
+            .compress(&input, CompressionLevel::default())
+            .expect("compress");
         assert_eq!(a, b);
     }
 
@@ -329,7 +346,11 @@ mod tests {
         };
         let compressed = compress(&pcm, &params).expect("compress");
         // CONSTANT subframe: should compress 384 bytes → well under 80.
-        assert!(compressed.len() < 80, "DC signal compressed to {} bytes", compressed.len());
+        assert!(
+            compressed.len() < 80,
+            "DC signal compressed to {} bytes",
+            compressed.len()
+        );
     }
 
     #[test]
@@ -346,7 +367,10 @@ mod tests {
 
         let mut reusable = FlacCompressor::new();
         let reusable_out = reusable.compress(&pcm, &params).expect("reusable");
-        assert_eq!(one_shot, reusable_out, "FlacCompressor must produce identical output to compress");
+        assert_eq!(
+            one_shot, reusable_out,
+            "FlacCompressor must produce identical output to compress"
+        );
     }
 
     #[test]
@@ -371,12 +395,18 @@ mod tests {
     fn reusable_compressor_handles_channel_count_change() {
         let mut comp = FlacCompressor::new();
         let mono_params = PcmParams {
-            sample_rate: 8_000, channels: 1, bits_per_sample: 16,
-            endianness: Endianness::LittleEndian, sample_count: 192,
+            sample_rate: 8_000,
+            channels: 1,
+            bits_per_sample: 16,
+            endianness: Endianness::LittleEndian,
+            sample_count: 192,
         };
         let stereo_params = PcmParams {
-            sample_rate: 8_000, channels: 2, bits_per_sample: 16,
-            endianness: Endianness::LittleEndian, sample_count: 192,
+            sample_rate: 8_000,
+            channels: 2,
+            bits_per_sample: 16,
+            endianness: Endianness::LittleEndian,
+            sample_count: 192,
         };
         let mono_pcm = mono_sine(440.0, 8_000, 192);
         let stereo_pcm: Vec<u8> = (0..384).map(|i| (i % 100) as u8).collect();
