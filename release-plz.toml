@@ -1,4 +1,4 @@
-# Release-plz configuration for confium
+# Release-plz configuration for omnizip-rs
 #
 # Automated versioning and changelog generation driven by conventional commits.
 # See: https://release-plz.dev/docs/config
