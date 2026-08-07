@@ -201,21 +201,59 @@ pub fn distance_slot(distance: u32) -> (u8, u8) {
 }
 
 /// Price (in 1/8-bit units) of encoding `len` through the LZMA length
-/// coder. Uses the slot + extra-bits decomposition.
+/// coder. Accurately models the 3-tier choice structure:
+///
+/// - len 2..9: 1 choice bit (choice=0) + 3 symbol bits ≈ 40 price units
+/// - len 10..15: 2 choice bits + 3 symbol bits ≈ 48 price units
+/// - len 16..271: 2 choice bits + 8 symbol bits ≈ 80 price units
+///
+/// Choice bits use a single `BitModel` (8 price units at INIT_PROBS).
+/// Symbol bits use the position-keyed tree (~8 price units per bit at
+/// INIT_PROBS = 0.5). This more accurately represents the true cost
+/// than the previous flat `slot*4 + extra*8` heuristic.
 #[must_use]
 pub fn length_price(len: u32) -> u32 {
-    let (slot, extra) = length_slot(len);
-    // Each slot is ~3 bits to encode + extra bits for the offset.
-    u32::from(slot) * 4 + u32::from(extra) * 8
+    let len = len.min(273);
+    // LEN_LOW_SYMBOLS = 8 (lengths 2..9), LEN_MID_SYMBOLS = 8 (lengths 10..15).
+    if len < 10 {
+        // choice=0 (8 price) + 3-bit low symbol (24).
+        32
+    } else if len < 18 {
+        // choice=1 (8) + choice2=0 (8) + 3-bit mid symbol (24).
+        40
+    } else {
+        // choice=1 (8) + choice2=1 (8) + 8-bit high symbol (64).
+        80
+    }
 }
 
-/// Price (in 1/8-bit units) of encoding `distance` through the
-/// LZMA distance coder.
+/// Price (in 1/8-bit units) of encoding `distance` through the LZMA
+/// distance coder. Approximates the bit cost per slot region.
 #[must_use]
 pub fn distance_price(distance: u32) -> u32 {
-    let (slot, extra) = distance_slot(distance);
-    // Distance slot encoding: ~5 bits base + extra bits.
-    u32::from(slot) * 4 + u32::from(extra) * 8
+    let dist = distance.max(1);
+    // Compute slot from distance (mirrors distance_slot in encoder).
+    let slot = if dist <= 4 {
+        dist as u8
+    } else {
+        let high = 32 - (dist - 1).leading_zeros();
+        (high + 1) as u8
+    };
+    // 6-bit slot tree: ~48 price units.
+    let mut price = 48u32;
+    if slot < 4 {
+        // Just the slot.
+    } else if slot < 14 {
+        // Slot + reverse-tree bits (footer_bits).
+        let footer_bits = (u32::from(slot) >> 1) - 1;
+        price += footer_bits * 8;
+    } else {
+        // Slot + direct bits + align bits.
+        let footer_bits = (u32::from(slot) >> 1) - 1;
+        let num_direct = footer_bits - 4; // DIST_ALIGN_BITS = 4
+        price += (num_direct + 4) * 8;
+    }
+    price
 }
 
 /// State-conditioned literal price.
