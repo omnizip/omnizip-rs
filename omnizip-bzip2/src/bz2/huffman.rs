@@ -242,7 +242,7 @@ mod tests {
             assert!(seen.insert(c), "duplicate code {c}");
         }
         // Lengths match what code_lengths produced.
-        for (sym, &(c, len)) in codes.iter().enumerate() {
+        for (sym, &(_c, len)) in codes.iter().enumerate() {
             assert_eq!(len, l[sym]);
         }
     }
