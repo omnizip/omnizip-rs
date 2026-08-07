@@ -156,13 +156,13 @@ impl Codec for BrotliCodec {
         "brotli"
     }
     fn compress(&self, plaintext: &[u8], level: CompressionLevel) -> Result<Vec<u8>, OmnizipError> {
-        let quality = level.as_u8().min(11);
-        // All quality levels use fast_encoder (two-pass with 4-byte hash).
-        // compress_fragment (one-pass with 8-byte hash) is slower and produces
-        // worse ratio on text data due to lack of static dictionary support.
-        // TODO: port backward_references_hq.c for quality 7-11 (TODO 173).
-        let _ = quality;
-        Ok(fast_encoder::vendored_compress(plaintext))
+        // Quality is currently ignored: all levels use the from-spec
+        // encoder (Huffman-coded metablocks with LZ77 + static
+        // dictionary references, no vendored code). The vendored
+        // fast_encoder remains available via compress_with_options
+        // for callers that need maximum ratio today.
+        let _ = level;
+        Ok(from_spec_encoder::compress(plaintext))
     }
     fn decompress(&self, compressed: &[u8], expected_len: u32) -> Result<Vec<u8>, OmnizipError> {
         let expected_us = usize::try_from(expected_len).map_err(|_| OmnizipError::Corrupt {
