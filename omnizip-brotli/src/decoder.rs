@@ -537,12 +537,6 @@ fn read_simple_form(
             let s3 = br.read_bits(bits_per_sym) as usize;
             if s0 >= alphabet_size || s1 >= alphabet_size || s2 >= alphabet_size || s3 >= alphabet_size { return Err("simple-form symbol out of range"); }
             let tree_select = br.read_bits(1);
-            let len = if tree_select == 0 { 2 } else { 3 };
-            // For tree_select=0: 2-bit codes for all 4 symbols.
-            // For tree_select=1: first 2 symbols get 1-bit codes (s0=0, s1=1), last 2 get 2-bit codes starting at 00.
-            // Wait — per RFC 7932 §9.5.1 Table: tree_select=1 means 1+1+2+2 layout, NOT 3-bit codes.
-            // Actually re-reading: tree_select=0 → 2+2+2+2; tree_select=1 → 1+1+2+2 with s0,s1 getting 1-bit codes (s0=0, s1=1) and s2,s3 getting codes 00+something.
-            // For our from_lengths builder, we just need the per-symbol lengths.
             if tree_select == 0 {
                 lengths[s0] = 2;
                 lengths[s1] = 2;
@@ -554,7 +548,6 @@ fn read_simple_form(
                 lengths[s2] = 2;
                 lengths[s3] = 2;
             }
-            let _ = len;
         }
         _ => unreachable!(),
     }
@@ -595,8 +588,6 @@ fn read_complex_form(
             }
         }
     }
-    if alphabet_size >= 64 {
-    }
     if !(num_codes == 1 || space == 0) {
         return Err("invalid code-length code lengths (space not consumed)");
     }
@@ -605,7 +596,7 @@ fn read_complex_form(
 
     let mut lengths = vec![0u8; alphabet_size];
     let mut i: usize = 0;
-    let mut prev_code_len: u8 = 8;
+    let mut prev_code_len: u8 = 8; // BROTLI_INITIAL_REPEATED_CODE_LENGTH
     let mut repeat: u32 = 0;
     let mut repeat_code_len: u32 = 0;
     let mut space: u32 = 32768;
@@ -614,15 +605,21 @@ fn read_complex_form(
             .read_symbol(br)
             .ok_or("invalid code-length symbol")? as u8;
         if sym < 16 {
+            // Mirrors upstream `ProcessSingleCodeLength`:
+            // - Always reset `repeat = 0` (single symbol breaks any
+            //   in-progress repeat accumulation).
+            // - Update prev_code_len ONLY if sym != 0 (a 0 code length
+            //   leaves prev_code_len unchanged so a subsequent code-16
+            //   repeat will use the last non-zero value).
+            // - DO NOT update repeat_code_len (only ProcessRepeatedCodeLength
+            //   sets it).
             lengths[i] = sym;
-            prev_code_len = sym;
             if sym != 0 {
+                prev_code_len = sym;
                 space = space.wrapping_sub(32768u32 >> sym);
             }
             i += 1;
-            // Reset accumulator on literal symbol.
             repeat = 0;
-            repeat_code_len = sym as u32;
         } else {
             // sym == 16: repeat prev (2 extra bits).
             // sym == 17: zero run (3 extra bits).
@@ -653,17 +650,12 @@ fn read_complex_form(
                 for _ in 0..actual_delta {
                     lengths[i] = new_len as u8;
                     i += 1;
-                    if new_len != 0 {
-                        space = space.wrapping_sub(32768u32 >> new_len);
-                    }
+                    space = space.wrapping_sub(32768u32 >> new_len);
                     if space == 0 { break; }
                 }
             } else {
                 // Zero run: just advance i.
                 i += actual_delta as usize;
-            }
-            if sym == 16 {
-                // prev_code_len is unchanged (we just repeated it).
             }
         }
     }
