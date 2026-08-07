@@ -19,7 +19,9 @@
 
 #![forbid(unsafe_code)]
 
-use crate::dictionary::{find_dictionary_match, DICTIONARY_DATA, OFFSETS_BY_LENGTH, SIZE_BITS_BY_LENGTH};
+use crate::dictionary::{
+    find_dictionary_match, DICTIONARY_DATA, OFFSETS_BY_LENGTH, SIZE_BITS_BY_LENGTH,
+};
 
 /// Compress input using dictionary-enhanced encoding.
 ///
@@ -29,7 +31,7 @@ use crate::dictionary::{find_dictionary_match, DICTIONARY_DATA, OFFSETS_BY_LENGT
 pub fn compress_with_dictionary(input: &[u8]) -> Vec<u8> {
     // Always have the fast_encoder output as baseline.
     let fast_output = crate::fast_encoder::vendored_compress(input);
-    
+
     // For small inputs, the fast_encoder is fine — dictionary overhead
     // exceeds any savings.
     if input.len() < 64 {
@@ -63,12 +65,12 @@ impl DictHash {
         // SIZE_BITS_BY_LENGTH[4] = 10, so 1024 words.
         let num_words = 1usize << SIZE_BITS_BY_LENGTH[4] as usize;
         let offset_base = OFFSETS_BY_LENGTH[4] as usize;
-        
+
         // Use a 12-bit hash table (4096 entries) for the 1024 words.
         let hash_log = 12u32;
         let table_size = 1usize << hash_log;
         let mut table = vec![-1i32; table_size];
-        
+
         for word_idx in 0..num_words {
             let dict_offset = offset_base + word_idx * 4;
             if dict_offset + 4 > DICTIONARY_DATA.len() {
@@ -87,17 +89,15 @@ impl DictHash {
                 idx = (idx + 1) & (table_size - 1);
             }
         }
-        
+
         Self { table, hash_log }
     }
-    
+
     fn lookup(&self, data: &[u8], pos: usize) -> Option<usize> {
         if pos + 4 > data.len() {
             return None;
         }
-        let word = u32::from_le_bytes([
-            data[pos], data[pos + 1], data[pos + 2], data[pos + 3],
-        ]);
+        let word = u32::from_le_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]);
         let h = (word.wrapping_mul(0x9E37_79B1) >> (32 - self.hash_log)) as usize;
         let table_size = self.table.len();
         let mut idx = h;
