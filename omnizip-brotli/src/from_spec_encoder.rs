@@ -37,19 +37,25 @@
     clippy::items_after_statements
 )]
 
+use crate::dictionary::find_dictionary_match;
 use crate::prefix::kCmdLut;
 
 /// Brotli window bits for the encoder (22 = 4 MB window).
 const WINDOW_BITS: u8 = 22;
 
+/// Window gap per RFC 7932 §9.1: 32 KiB reserved to disambiguate
+/// dictionary references from LZ77 back-references.
+const WINDOW_GAP: u32 = 0x8000;
+
 /// Maximum backward distance for LZ77 matches.
-const MAX_DISTANCE: u32 = (1 << WINDOW_BITS) - 16;
+/// Per RFC 7932 §9.1: max_backward_distance = (1 << WBITS) - WINDOW_GAP.
+const MAX_BACKWARD_DISTANCE: u32 = (1 << WINDOW_BITS) - WINDOW_GAP;
 
 /// Minimum match length for LZ77.
 const MIN_MATCH: u32 = 4;
 
 /// Maximum copy length per command (RFC 7932 §5).
-const MAX_COPY: u32 = 273 - 2; // copy_len_code range goes up to 273-2 = 271; we cap below.
+const MAX_COPY: u32 = 273 - 2;
 
 /// Number of short distance codes (RFC 7932 §10.4).
 const NUM_SHORT: u32 = 16;
@@ -446,17 +452,16 @@ fn distance_extra_bits(sym: u32) -> u32 {
 
 /// Parse input into commands using LZ77 + static dictionary.
 ///
-/// Dictionary references are disabled for now: the decoder computes
-/// `max_distance = min(pos, max_backward_distance)` with a window-gap
-/// of 0x8000 (not 16), which doesn't match the encoder's static
-/// `MAX_DISTANCE`. Re-enabling dictionary support requires per-position
-/// distance computation (TODO).
+/// Tracks the output position to compute `max_distance = min(pos,
+/// max_backward_distance)` per RFC 7932 §10.4. Dictionary references
+/// use `distance = max_distance + 1 + address` so the decoder resolves
+/// them via the static dictionary lookup path.
 fn parse_input(input: &[u8]) -> Vec<Command> {
     let n = input.len();
     let mut commands = Vec::new();
 
     let config = omnizip_codecs::HashChainConfig {
-        dict_size: MAX_DISTANCE,
+        dict_size: MAX_BACKWARD_DISTANCE,
         min_match: MIN_MATCH,
         max_chain_length: 64,
         nice_match: 64,
@@ -467,6 +472,9 @@ fn parse_input(input: &[u8]) -> Vec<Command> {
     let mut pos = 0usize;
     let mut insert_start = 0usize;
     while pos < n {
+        // max_distance at this output position (RFC 7932 §10.4).
+        let max_dist = (pos as u32).min(MAX_BACKWARD_DISTANCE);
+
         let lz77 = if pos + MIN_MATCH as usize <= n {
             mf.advance();
             mf.find_match(pos)
@@ -474,14 +482,34 @@ fn parse_input(input: &[u8]) -> Vec<Command> {
             None
         };
 
-        if let Some(m) = lz77 {
-            if m.length >= MIN_MATCH && m.distance > 0 {
-                let copy_len = m.length.min(MAX_COPY).max(MIN_MATCH);
+        // Reject LZ77 matches whose distance exceeds max_distance — the
+        // decoder would interpret those as dictionary references.
+        let lz77_valid = lz77.as_ref().map_or(false, |m| m.distance <= max_dist);
+
+        let best = if lz77_valid {
+            let m = lz77.as_ref().unwrap();
+            if m.length >= 8 {
+                Some((m.distance, m.length, false))
+            } else {
+                let dict = find_dictionary_match(input, pos, max_dist);
+                match dict {
+                    Some((d, l)) if l > m.length => Some((d, l, true)),
+                    _ => Some((m.distance, m.length, false)),
+                }
+            }
+        } else {
+            let dict = find_dictionary_match(input, pos, max_dist);
+            dict.map(|(d, l)| (d, l, true))
+        };
+
+        if let Some((distance, length, _is_dict)) = best {
+            if length >= MIN_MATCH && distance > 0 {
+                let copy_len = length.min(MAX_COPY).max(MIN_MATCH);
                 let insert_len = (pos - insert_start) as u32;
                 commands.push(Command {
                     insert_len,
                     copy_len,
-                    distance: m.distance,
+                    distance,
                 });
                 let advance = copy_len as usize;
                 for _ in 1..advance {
@@ -500,9 +528,7 @@ fn parse_input(input: &[u8]) -> Vec<Command> {
 
     // Trailing literals: emit a separate trailing-insert command (with
     // copy_len=0, encoded as a phantom copy_len=2 that the decoder
-    // short-circuits past at metablock end). Folding into the last
-    // command's insert_len would shift the copy's input range and
-    // corrupt the output.
+    // short-circuits past at metablock end).
     if insert_start < n {
         let trailing = (n - insert_start) as u32;
         commands.push(Command {
@@ -571,14 +597,18 @@ const CODE_LENGTH_CODE_ORDER: [u8; 18] = [
 /// replicate that break here so the bit position after this table
 /// matches the decoder's expectation.
 fn write_huffman_table(bw: &mut BitWriter, lengths: &omnizip_codecs::HuffmanLengths, alphabet: usize) {
-    // Special case: single-symbol alphabets use the simple form (HSKIP=1,
-    // NSYM=1) which is more compact.
+    // Special case: 0 or 1 non-zero symbols both use the simple form
+    // (HSKIP=1, NSYM=1). The complex form requires a valid prefix code
+    // over the code-length alphabet, which doesn't exist when no main
+    // alphabet symbols are used (e.g. literal table for a metablock
+    // with zero literals).
     let nonzero: Vec<usize> = lengths.lengths.iter().enumerate()
         .filter(|(_, &l)| l > 0)
         .map(|(i, _)| i)
         .collect();
-    if nonzero.len() == 1 {
-        write_simple_one_symbol(bw, alphabet, nonzero[0]);
+    if nonzero.len() <= 1 {
+        let sym = nonzero.first().copied().unwrap_or(0);
+        write_simple_one_symbol(bw, alphabet, sym);
         return;
     }
 
@@ -753,6 +783,14 @@ mod tests {
         bw.write_bits(2, 2);
         let out = bw.flush();
         assert_eq!(out, vec![0b0101]);
+    }
+
+    #[test]
+    fn constant_256_round_trips() {
+        let input = vec![0u8; 256];
+        let compressed = compress(&input);
+        let decoded = decoder::decode(&compressed).expect("decode");
+        assert_eq!(decoded, input);
     }
 
     #[test]
