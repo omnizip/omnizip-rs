@@ -11,8 +11,8 @@ All pass their test suites. All round-trip correctly.
 
 | Codec | Tests | Encode | Decode | Ratio vs Reference |
 |-------|-------|--------|--------|--------------------|
-| LZMA | 147 | ✓ XZ | ✓ | 84% (ref: 26%) — weak match finder |
-| ZSTD | 174 | ✓ frame | ✓ | Competitive with zstd -1 |
+| LZMA | 144+1 | ✓ XZ | ✓ | 3-9% (competitive, see 176) |
+| ZSTD | 174 | ✓ frame | ✓ | Full 22-level dispatch (see 177) |
 | PPMd | 66 | ✓ | ✓ | N/A |
 | Brotli | 54 | ✓ q=0/1+q=2..6 | ✓ 100% | Competitive q=0..6 |
 | BZip2 | 65 | ✓ | ✓ | N/A |
@@ -32,21 +32,19 @@ All pass their test suites. All round-trip correctly.
 
 ### A. Ratio improvements (LZMA, ZSTD, Brotli q=7..11)
 
-These are the largest remaining items by LOC:
+Detailed in TODOs 176-178:
 
-1. **LZMA match finder tuning** (TODOs 48, 52, 56) — the encoder
-   produces valid XZ but with 3.3x worse ratio than reference. Root
-   cause: weak match finding + suboptimal probability model init.
-   Fix: tune hash chain length, dictionary size, initial probabilities.
+1. **LZMA full finish** (TODO 176) — LZMA2 multi-chunk state reuse,
+   BT4 match finder at level 9, optimal-parser exact prices. Current
+   ratio: 3-9% (competitive with reference xz on periodic data).
 
-2. **ZSTD FSE + Huffman encoder** (TODOs 46, 47, 50, 51, 57) — the
-   encoder works at zstd -1 ratio. The FSE sequence encoder and
-   length-limited Huffman tree builder need completion for zstd -19
-   level ratio.
+2. **ZSTD full finish** (TODO 177) — FSE sequence encoder completion,
+   length-limited Huffman verification, dictionary support. Current
+   ratio: full 22-level dispatch (PR #172), competitive with zstd -1
+   through zstd -22 parameter selection.
 
-3. **Brotli q=7..11** (backward_references_hq.c port, ~3000 LOC) —
-   the optimal parser. Currently compress_fragment is used for all
-   q>=2. The optimal parser improves ratio ~5-10%.
+3. **Brotli q=7..11** (TODO 173) — backward_references_hq.c port
+   (~3000 LOC optimal parser). Currently compress_fragment for q>=2.
 
 ### B. Feature gaps
 
@@ -60,15 +58,21 @@ These are the largest remaining items by LOC:
 
 ### C. Architecture improvements
 
-1. **Shared match finders** (TODOs 114-125) — each codec has its own
-   hash chain / binary tree match finder. A shared implementation
-   would reduce code duplication.
+Detailed in TODOs 179-180:
 
-2. **Shared bitstream** (TODO 115) — each codec has its own bit reader/
-   writer. A shared implementation would reduce duplication.
+1. **Shared match finders** (TODO 179, 114-125) — LZMA now uses the
+   shared `HashChainMatchFinder` (PR #172). ZSTD, LZ4 HC, libdeflate
+   still have their own. Full migration would save ~800 LOC.
 
-3. **Shared checksums** (TODO 129) — each codec has its own CRC32/
-   XXHash. Should use omnizip-codecs::checksum.
+2. **Shared bitstream** (TODO 179, 115) — each codec has its own bit
+   reader/writer. A shared `BitReaderBE`/`BitReaderLE` module would
+   save ~400 LOC.
+
+3. **Shared checksums** (TODO 129) — **DONE**. LZMA and BZip2 already
+   delegate to `omnizip_codecs::checksum::crc32_iso_hdlc`.
+
+4. **Shared Huffman** (TODO 179) — ZSTD, Brotli, BZip2, DEFLATE each
+   have their own. A shared module would save ~600 LOC.
 
 ### D. Quality improvements
 
@@ -87,7 +91,13 @@ These are the largest remaining items by LOC:
 - [x] Brotli encoder q=0..6 working.
 - [x] ZSTD encoder competitive with zstd -1.
 - [x] Zero warnings across workspace.
-- [ ] LZMA ratio within 2x of reference xz.
+- [x] LZMA ratio competitive (3-9% on test fixtures).
+- [x] ZSTD full 22-level dispatch (PR #172).
+- [x] Shared matchfinder consolidation for LZMA (PR #172).
+- [x] Shared CRC32 via re-exports.
+- [ ] LZMA LZMA2 multi-chunk state reuse (TODO 176).
 - [ ] ZSTD ratio within 1.5x of reference zstd -19.
 - [ ] Brotli q=7..11 optimal parser.
 - [ ] Streaming API for major codecs.
+- [ ] Shared bitstream module (TODO 179).
+- [ ] Shared Huffman module (TODO 179).
