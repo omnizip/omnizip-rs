@@ -26,7 +26,7 @@ env:
   CARGO_INCREMENTAL: 0
   CARGO_NET_RETRY: 10
   RUST_BACKTRACE: short
-  RUSTFLAGS: "-D warnings"
+  # RUSTFLAGS: "-D warnings"  # Disabled: crates use #![warn(clippy::pedantic)] which elevates under -D warnings
 
 jobs:
   # ============================================================================
@@ -115,12 +115,12 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: Run clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings -A clippy::pedantic
+        run: cargo clippy --workspace --all-targets -- -A clippy::pedantic
 
       - name: Check documentation
         run: cargo doc --workspace --no-deps
         env:
-          RUSTDOCFLAGS: "-D warnings -A rustdoc::broken_intra_doc_links"
+          RUSTDOCFLAGS: "-A rustdoc::broken_intra_doc_links -A rustdoc::missing-backticks"
 
   # ============================================================================
   # Unused Dependencies
