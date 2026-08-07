@@ -1,72 +1,17 @@
 # Release-plz configuration for omnizip-rs
-#
-# Automated versioning and changelog generation driven by conventional commits.
-# See: https://release-plz.dev/docs/config
+# https://release-plz.dev/docs/config
 
 [workspace]
+# release-plz handles versioning + publishing for the whole workspace.
 git_release_enable = false
 dependencies_update = true
 allow_dirty = false
+# Always create a release PR when there are changes on main.
+# This skips the "did packages change since last release?" check
+# which fails because old git commits have broken workspace manifests.
 release_always = true
 
-# Explicitly list packages to avoid workspace-wide cargo metadata at
-# old commits (where some workspace members didn't exist yet).
-[[package]]
-name = "omnizip-codecs"
-
-[[package]]
-name = "omnizip-filters"
-
-[[package]]
-name = "omnizip-bzip2"
-
-[[package]]
-name = "omnizip-brotli"
-
-[[package]]
-name = "omnizip-deflate"
-
-[[package]]
-name = "omnizip-deflate64"
-
-[[package]]
-name = "omnizip-flac"
-
-[[package]]
-name = "omnizip-fsst"
-
-[[package]]
-name = "omnizip-glza"
-
-[[package]]
-name = "omnizip-libdeflate"
-
-[[package]]
-name = "omnizip-lz4"
-
-[[package]]
-name = "omnizip-lzma"
-
-[[package]]
-name = "omnizip-ppmd"
-
-[[package]]
-name = "omnizip-ricepp"
-
-[[package]]
-name = "omnizip-snappy"
-
-[[package]]
-name = "omnizip-zpaq"
-
-[[package]]
-name = "omnizip-zstd"
-
-[[package]]
-name = "omnizip-blosc"
-
 [changelog]
-# Group commits by conventional-commit type
 body = """
 {% for group, commits in commits | group_by(attribute="group") %}
 ### {{ group | upper_first }}
@@ -77,9 +22,3 @@ body = """
 {% endfor %}
 {% endfor %}
 """
-
-# Conventional commits configuration
-# - feat: minor version bump
-# - fix: patch version bump
-# - feat! or fix!: major version bump (breaking change)
-# - docs, chore, refactor, test, ci: no version bump (changelog only)
