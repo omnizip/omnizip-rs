@@ -59,6 +59,8 @@ pub struct Lzma1Encoder {
     /// multi-chunk). Zero for standalone encoding. Used as `prev_byte`
     /// for the first literal so the decoder's `output.last()` agrees.
     base_prev_byte: u8,
+    /// Use BT4 binary-tree match finder.
+    use_bt4: bool,
 }
 
 impl Lzma1Encoder {
@@ -108,6 +110,7 @@ impl Lzma1Encoder {
             dict_size,
             base_pos: 0,
             base_prev_byte: 0,
+            use_bt4: false,
         }
     }
 
@@ -127,6 +130,13 @@ impl Lzma1Encoder {
     #[must_use]
     pub const fn with_base_prev_byte(mut self, prev: u8) -> Self {
         self.base_prev_byte = prev;
+        self
+    }
+
+    /// Enable the BT4 binary-tree match finder.
+    #[must_use]
+    pub const fn with_bt4(mut self) -> Self {
+        self.use_bt4 = true;
         self
     }
 
@@ -192,11 +202,69 @@ impl Lzma1Encoder {
             return self.range_encoder.finish();
         }
 
-        if use_optimal {
+        if self.use_bt4 {
+            // BT4 binary-tree match finder (levels ≥ 7).
+            self.encode_via_bt4(input)
+        } else if use_optimal {
             self.encode_via_optimal(input)
         } else {
             self.encode_via_lazy(input)
         }
+    }
+
+    /// BT4 binary-tree match finder encode path.
+    ///
+    /// Uses the BT4 finder for better match quality at the cost of
+    /// slower encode. Greedy parsing (take the longest match found).
+    fn encode_via_bt4(mut self, input: &[u8]) -> Vec<u8> {
+        use crate::encoder::bt4_match_finder::Bt4MatchFinder;
+
+        let depth = 32u32; // 1 << 5, matching liblzma search_log for level 7-9
+        let nice = if self.dict_size >= (1 << 20) {
+            273
+        } else {
+            128
+        };
+        let mut mf = Bt4MatchFinder::new(input, self.dict_size, depth, nice);
+
+        while mf.position() < input.len() {
+            let pos = mf.position();
+            if pos + FULL_MATCH_LEN_MIN as usize > input.len() {
+                // Emit remaining as literals.
+                let prev_byte = if pos > 0 {
+                    input[pos - 1]
+                } else {
+                    self.base_prev_byte
+                };
+                let match_byte = self.get_match_byte(input, pos);
+                self.encode_literal_byte(input[pos], prev_byte, match_byte, pos);
+                mf.skip();
+                continue;
+            }
+
+            if let Some(m) = mf.find_best() {
+                let len = m.length.min(MATCH_LEN_MAX);
+                self.encode_match(m.distance, len, pos);
+                // Skip the rest of the match (find_best already advanced 1).
+                for _ in 1..len {
+                    if mf.position() < input.len() {
+                        mf.skip();
+                    }
+                }
+            } else {
+                let prev_byte = if pos > 0 {
+                    input[pos - 1]
+                } else {
+                    self.base_prev_byte
+                };
+                let match_byte = self.get_match_byte(input, pos);
+                self.encode_literal_byte(input[pos], prev_byte, match_byte, pos);
+            }
+        }
+
+        self.encode_eopm(input.len());
+        self.range_encoder.flush();
+        self.range_encoder.finish()
     }
 
     /// Lazy parser (look-ahead-1).

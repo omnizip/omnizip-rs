@@ -127,12 +127,11 @@ impl<'a> Bt4MatchFinder<'a> {
 
         let pos = self.pos as usize;
         let cur = &self.data[pos..];
-        let len_limit = (self.data.len() - pos)
-            .min(if self.nice_len > 0 {
-                self.nice_len as usize
-            } else {
-                273
-            }) as u32;
+        let len_limit = (self.data.len() - pos).min(if self.nice_len > 0 {
+            self.nice_len as usize
+        } else {
+            273
+        }) as u32;
 
         let (h2, h3, h4) = self.hash4_at(pos);
         let delta2 = self.pos.wrapping_sub(self.hash[h2]);
@@ -269,11 +268,7 @@ impl<'a> Bt4MatchFinder<'a> {
 
             let pair_cyclic = cyclic_pos
                 .wrapping_sub(delta)
-                .wrapping_add(if delta > cyclic_pos {
-                    cyclic_size
-                } else {
-                    0
-                });
+                .wrapping_add(if delta > cyclic_pos { cyclic_size } else { 0 });
             let pair_idx = (pair_cyclic as usize) * 2;
 
             let back = cur_pos.wrapping_sub(delta as usize);
@@ -353,11 +348,7 @@ impl<'a> Bt4MatchFinder<'a> {
 
             let pair_cyclic = cyclic_pos
                 .wrapping_sub(delta)
-                .wrapping_add(if delta > cyclic_pos {
-                    cyclic_size
-                } else {
-                    0
-                });
+                .wrapping_add(if delta > cyclic_pos { cyclic_size } else { 0 });
             let pair_idx = (pair_cyclic as usize) * 2;
             let back = cur_pos.wrapping_sub(delta as usize);
 

@@ -101,6 +101,7 @@ impl Codec for LzmaCodec {
             use_optimal_parser: use_optimal,
             max_chain_length,
             nice_match,
+            use_bt4: lv >= 7,
             ..Default::default()
         };
         xz_compress_with_options(plaintext, &opts).map_err(map_encode_error)
