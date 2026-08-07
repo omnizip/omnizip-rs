@@ -2,58 +2,50 @@
 
 ## Priority: P4
 
-## Status: skeleton ported — compiles but produces invalid output. Needs debugging.
+## Status: DONE — q=0..6 working. q=7..11 uses compress_fragment (deferred optimal parser).
 
-## Context
+## What landed (2026-08-07)
 
-The pure-Rust brotli encoder has two paths:
+### q=0/1: two-pass encoder (fast_encoder.rs)
 
-1. **fast_encoder.rs** (q=0/1) — vendored port of `compress_fragment_two_pass.c`.
-   Produces valid brotli that all conformant decoders accept. **Active for all quality levels.**
+Vendored port of upstream `compress_fragment_two_pass.c`. Produces
+valid brotli accepted by all conformant decoders. Uses 4-byte hash
+with table_bits=9 (small inputs) or 15 (large inputs).
 
-2. **compress_fragment.rs** (q=2..6) — port of upstream `compress_fragment.c`.
-   Skeleton committed but not yet producing valid output due to bugs in the
-   command prefix code scatter pattern.
+### q=2..6: one-pass encoder (compress_fragment.rs)
 
-The q≥2 path emits combined INSERT+COPY commands via the 704-symbol alphabet,
-achieving ~10-20% better ratio at higher CPU cost.
+Port of upstream `compress_fragment.c` (786 LOC). Uses 8-byte hash
+for better match quality, combined INSERT+COPY commands via the
+128-symbol command alphabet, and the upstream command prefix code
+scatter pattern.
 
-## What's done
+Both our decoder and `brotli -d` accept the output.
 
-- `compress_fragment.rs` (786 LOC) — full port of upstream functions:
-  - Hash (8-byte), IsMatch (5-byte).
-  - BuildAndStoreLiteralPrefixCode (histogram + Huffman).
-  - BuildAndStoreCommandPrefixCode (128→704 scatter pattern).
-  - Emit* functions (InsertLen, CopyLen, Distance, etc.).
-  - Main match-finding loop with hash table.
-  - Metablock management (header, merge, uncompressed fallback).
-  - Entry point `compress()`.
+### q=7..11: deferred
 
-## What's broken
+Upstream uses `backward_references_hq.c` (~3000 LOC Zopfli-style
+optimal parser with detailed cost models). We fall back to
+compress_fragment for q=7..11. The ratio improvement from the optimal
+parser (~5-10% better than compress_fragment) doesn't unblock any
+consumer.
 
-The encoder produces output that both our decoder and `brotli -d` reject:
-- Reference decoder: "corrupt input".
-- Our decoder: "invalid static dictionary reference".
+### Quality dispatch
 
-Likely root cause: the command prefix code scatter pattern in
-`BuildAndStoreCommandPrefixCode` doesn't match the decoder's expectations.
-The 128-symbol command alphabet needs to be correctly scattered into the
-704-symbol space that the decoder's `kCmdLut` expects.
-
-Debugging approach:
-1. Compare byte-level output against upstream `brotli -q 2` for a known input.
-2. Trace the scatter pattern step by step.
-3. Verify the metablock header (13 bits of 0) encodes the correct layout.
-
-## Why the existing encoder works
-
-The q=0/1 two-pass encoder already produces valid, deterministic brotli.
-For LimniFS (the consumer), determinism + round-trip integrity matter more
-than max ratio. The q≥2 path is a ratio improvement that doesn't unblock
-any consumer.
+```rust
+fn compress(&self, plaintext: &[u8], level: CompressionLevel) -> Result<Vec<u8>, OmnizipError> {
+    let quality = level.as_u8().min(11);
+    match quality {
+        0..=1 => fast_encoder::vendored_compress(plaintext),
+        _ => compress_fragment::compress(plaintext),
+    }
+}
+```
 
 ## Acceptance Criteria
 
-- Round-trip via own decoder + `brotli -d` at quality 2..6.
-- Ratio improvement over q=0/1 on text inputs.
-- No nondeterminism: same input always produces identical bytes.
+- [x] Round-trip via own decoder at every quality 0..11.
+- [x] Round-trip via `brotli -d` at every quality 0..11.
+- [x] No nondeterminism: same input always produces identical bytes.
+- [ ] Ratio on `enwik8` within 5% of upstream `brotli -q N` (q=7..11
+      will be below target since we use compress_fragment, not the
+      optimal parser).

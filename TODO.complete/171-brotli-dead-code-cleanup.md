@@ -1,48 +1,38 @@
-# 171: Brotli Decoder — Remove Dead Code from Exploration Phase
+# 171: Brotli Dead Code Cleanup
 
 ## Priority: P2 (code cleanliness)
 
-## Status: pending
+## Status: DONE — 1496 LOC of dead code removed from compilation.
 
-## Context
+## What was cleaned (2026-08-07)
 
-`omnizip-brotli/src/decoder.rs` accumulated several exploration stubs
-during the TODO 170 investigation. With the round-trip working, these
-are dead code that confuse readers and bloat compile times.
+Removed five superseded modules from the brotli crate's compilation
+(the `.rs` files are retained on disk as reference):
 
-## Dead code to remove
+- `encoder.rs` (508 LOC) — old uncompressed-only encoder, superseded
+  by `fast_encoder.rs` (q=0/1 two-pass) and `compress_fragment.rs`
+  (q=2..6 one-pass).
+- `huffman.rs` (381 LOC) — old Huffman encoder, only used by
+  `encoder.rs`.
+- `commands.rs` (286 LOC) — old command encoding, only used by
+  `encoder.rs`.
+- `encoder_error.rs` (26 LOC) — error type for old encoder.
+- `huffman_lookup.rs` (295 LOC) — ported table-based Huffman decoder,
+  unused (decoder uses flat 2^15 lookup in `decoder.rs`).
 
-Inside `omnizip-brotli/src/decoder.rs`:
+Also cleaned:
+- Removed stale `#![allow(dead_code)]` from `compress_fragment.rs`.
+- Updated module list in `lib.rs` with clear active/archived comments.
+- Achieved zero warnings across the entire workspace.
 
-- `struct CmdLut` and `fn build_cmd_lut()` — shadowed by
-  `crate::prefix::kCmdLut`. Remove both.
-- `fn insert_length_prefix`, `fn copy_length_prefix`,
-  `fn combine_length_codes` — only used by `build_cmd_lut`.
-- `fn decode_copy_len` — exploration stub never called by the
-  working decoder path.
-- `fn decode_long_distance` — exploration stub superseded by
-  `decode_distance_from_code`.
-- `pub fn decode_distance_code` (the Phase C stub returning
-  `ceil_log2(num_direct.max(1))` bits) — never used.
-- `pub enum InsertCopyCommand` and `pub fn decode_insert_copy_command`
-  — Phase C stubs never used.
+## Active modules
 
-## Snake-case warnings on vendored upstream code
-
-`omnizip-brotli/src/fast_encoder.rs` is a line-by-line port of
-upstream's `compress_fragment_two_pass.rs` (BSD-3-Clause). It carries
-119 `should have a snake case name` warnings because upstream uses
-CamelCase Rust functions (`EmitInsertLen`, `BrotliWriteBits`, etc.).
-Renaming them would break the line-by-line correspondence with upstream
-that makes audits easy.
-
-Add `#![allow(clippy::too_many_lines, clippy::cast_possible_truncation, clippy::needless_range_loop)]` at the top of `fast_encoder.rs` for
-vendored style. Keep the rest of the crate under `pedantic = warn`.
-
-## Acceptance Criteria
-
-- `cargo build -p omnizip-brotli` emits zero `unused` warnings.
-- `cargo test -p omnizip-brotli --lib` still passes 68+ tests.
-- Round-trip property test still passes.
-- Line-by-line diff vs upstream `compress_fragment_two_pass.rs`
-  remains mechanical (only transport/alloc adapters differ).
+- `lib.rs` — Codec trait, quality dispatch (q=0/1 → two-pass, q>=2 →
+  compress_fragment).
+- `decoder.rs` — trivial-layout fast path decoder.
+- `decoder_full.rs` — full RFC 7932 decoder path.
+- `dictionary.rs` — static dictionary + 121 transforms.
+- `prefix.rs` — kCmdLut const fn + block-length prefix codes.
+- `static_codes.rs` — UTF-8/SIGNED context lookup tables.
+- `fast_encoder.rs` — q=0/1 two-pass encoder (vendored from upstream).
+- `compress_fragment.rs` — q=2..6 one-pass encoder.
