@@ -234,6 +234,84 @@ fn zstd_round_trips_property_fixtures() {
     }
 }
 
+/// Validates ZSTD wire-format correctness by decoding our encoder's
+/// output with the reference `zstd -d` CLI (v1.5.7+). A non-zero exit
+/// status or byte mismatch indicates our output is not RFC 8478 compliant
+/// at the given level. Skipped if `zstd` is not on PATH.
+#[test]
+fn zstd_reference_decoder_validates_output() {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    fn reference_decode(our_output: &[u8], expected_len: usize) -> Option<Vec<u8>> {
+        let mut child = Command::new("zstd")
+            .arg("-d")
+            .arg("-c")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .ok()?;
+        if let Some(stdin) = child.stdin.as_mut() {
+            stdin.write_all(our_output).ok()?;
+        }
+        let output = child.wait_with_output().ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        if output.stdout.len() != expected_len {
+            return None;
+        }
+        Some(output.stdout)
+    }
+
+    let zstd_ok = std::path::Path::new("/usr/bin/zstd").exists()
+        || std::path::Path::new("/usr/local/bin/zstd").exists()
+        || std::path::Path::new("/opt/homebrew/bin/zstd").exists();
+    if !zstd_ok {
+        eprintln!("skipping: zstd CLI not found");
+        return;
+    }
+
+    let inputs: Vec<(&str, Vec<u8>)> = vec![
+        ("text_short", b"hello zstd world".to_vec()),
+        (
+            "text_repeated",
+            b"the quick brown fox jumps over the lazy dog. ".repeat(20),
+        ),
+        (
+            "binary_periodic",
+            (0u32..256)
+                .map(|i| (i % 256) as u8)
+                .collect::<Vec<u8>>()
+                .repeat(10),
+        ),
+    ];
+
+    let codec = ZstdCodec::new();
+    for level in 1..=6 {
+        let mut failures = Vec::new();
+        for (name, data) in &inputs {
+            let ours = codec.compress(data, CompressionLevel::new(level)).unwrap();
+            match reference_decode(&ours, data.len()) {
+                Some(decoded) if decoded.as_slice() == data.as_slice() => {
+                    eprintln!(
+                        "zstd -d OK level={level} {name}: {} compressed bytes",
+                        ours.len()
+                    );
+                }
+                Some(_) => failures.push(format!("{name}: decoded but bytes differ")),
+                None => failures.push(format!("{name}: zstd -d rejected output")),
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "zstd level {level} failures: {}",
+            failures.join(", ")
+        );
+    }
+}
+
 #[test]
 fn flac_round_trips_property_fixtures() {
     let codec = FlacCodec::new();
