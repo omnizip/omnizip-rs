@@ -15,6 +15,7 @@ pub mod compress_fragment;
 pub mod decoder;
 pub mod decoder_full;
 pub mod dictionary;
+pub mod dict_encoder;
 pub mod fast_encoder;
 pub mod prefix;
 pub mod static_codes;
