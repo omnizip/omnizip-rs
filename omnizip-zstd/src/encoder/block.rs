@@ -14,8 +14,8 @@
 use crate::constants::{BLOCK_TYPE_COMPRESSED, BLOCK_TYPE_RAW, BLOCK_TYPE_RLE};
 use crate::encoder::ldm::LdmHashTable;
 use crate::encoder::match_finder::{
-    compress_block_lazy, compress_block_lazy2, compress_block_lazy2_with_ldm,
-    compress_block_with_min_match, MatchState, SeqStore,
+    compress_block_fast_with_prefix, compress_block_lazy, compress_block_lazy2,
+    compress_block_lazy2_with_ldm, compress_block_with_min_match, MatchState, SeqStore,
 };
 use crate::encoder::sequences::encode_section;
 use crate::xxhash;
@@ -155,6 +155,23 @@ fn encode_frame_into(
         match_state.disable_chain();
     }
 
+    // Cross-block matching for Fast/Greedy strategies (L1-L5): these
+    // strategies use single-probe matching (no chain), so we can safely
+    // use absolute positions and find matches across block boundaries
+    // without clearing the hash table. This gives a ~2× match window
+    // (up to 128 KiB back vs just the current block).
+    let cross_block = !ldm_enabled
+        && matches!(
+            params.strategy,
+            crate::encoder::cparams::Strategy::Fast
+                | crate::encoder::cparams::Strategy::DoubleFast
+                | crate::encoder::cparams::Strategy::Greedy
+        );
+
+    if cross_block {
+        match_state.disable_chain();
+    }
+
     // In LDM mode, the distance cap is the full frame window. For
     // single-segment frames (input ≤ 4 GiB), the window = FCS =
     // input length, so any backward reference is valid.
@@ -186,6 +203,18 @@ fn encode_frame_into(
                     .as_ref()
                     .expect("ldm table exists when ldm_enabled"),
                 max_distance,
+            )?;
+        } else if cross_block {
+            write_block_cross(
+                out,
+                plaintext,
+                offset,
+                block_end,
+                is_last,
+                match_state,
+                &mut rep_offsets,
+                params,
+                &mut last_huf_weights,
             )?;
         } else {
             write_block(
@@ -579,6 +608,53 @@ fn write_block_ldm(
     *rep_offsets = seq_store.rep_offsets;
 
     // Try compressed block, fall back to Raw.
+    let mut compressed_content = Vec::new();
+    let encode_result =
+        encode_compressed_content(&mut compressed_content, &seq_store, last_huf_weights);
+
+    let use_compressed = encode_result.is_ok() && compressed_content.len() < chunk.len();
+
+    if use_compressed {
+        write_compressed_block_header(out, compressed_content.len(), is_last);
+        out.extend_from_slice(&compressed_content);
+    } else {
+        write_raw_block(out, chunk, is_last);
+        *last_huf_weights = None;
+    }
+
+    Ok(())
+}
+
+/// Write one block using cross-block matching (absolute positions).
+/// Used for Fast/DoubleFast/Greedy strategies where single-probe
+/// matching suffices and the hash table persists across blocks.
+fn write_block_cross(
+    out: &mut Vec<u8>,
+    plaintext: &[u8],
+    block_start: usize,
+    block_end: usize,
+    is_last: bool,
+    ms: &mut MatchState,
+    rep_offsets: &mut [u32; 3],
+    params: &crate::encoder::cparams::CompressionParams,
+    last_huf_weights: &mut Option<Vec<u8>>,
+) -> Result<(), ZstdError> {
+    let chunk = &plaintext[block_start..block_end];
+
+    if chunk.len() >= 2 && chunk.iter().all(|&b| b == chunk[0]) {
+        write_rle_block(out, chunk[0], chunk.len(), is_last);
+        *last_huf_weights = None;
+        return Ok(());
+    }
+
+    let mut seq_store = SeqStore::new();
+    seq_store.reset(*rep_offsets);
+    let min_match = params.min_match.max(4) as usize;
+
+    let src = &plaintext[..block_end];
+    compress_block_fast_with_prefix(src, block_start, &mut seq_store, ms, min_match);
+    *rep_offsets = seq_store.rep_offsets;
+
     let mut compressed_content = Vec::new();
     let encode_result =
         encode_compressed_content(&mut compressed_content, &seq_store, last_huf_weights);
