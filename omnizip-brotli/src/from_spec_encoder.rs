@@ -626,7 +626,7 @@ impl DistanceConfig {
     /// (max 15 for NPOSTFIX=0). Adding direct codes that don't match the
     /// actual distances just enlarges the alphabet and hurts Huffman.
     fn choose(commands: &[Command]) -> Self {
-        let mut dists_in_direct_range = 0u32; // distances 1..=15
+        let mut dists_in_direct_range = 0u32;
         let mut total_dists = 0u32;
         for cmd in commands {
             if cmd.copy_len > 0 && cmd.distance > 0 {
@@ -636,7 +636,6 @@ impl DistanceConfig {
                 }
             }
         }
-        // Only add direct codes if ≥ 20% of distances fall in the direct range.
         let ndmoem = if total_dists > 0 && dists_in_direct_range * 5 >= total_dists * 4 {
             12
         } else {
