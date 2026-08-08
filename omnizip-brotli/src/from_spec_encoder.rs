@@ -38,8 +38,10 @@
 )]
 
 use crate::dictionary::find_dictionary_match;
+use crate::encoder::bitwriter::BitWriter;
+use crate::encoder::context::{compute_context_id, is_text_like};
+use crate::encoder::distance_config::{DistanceConfig, NUM_SHORT};
 use crate::prefix::kCmdLut;
-use crate::static_codes::K_UTF8_CONTEXT_LOOKUP;
 
 /// Brotli window bits for the encoder (22 = 4 MB window).
 const WINDOW_BITS: u8 = 22;
@@ -58,67 +60,13 @@ const MIN_MATCH: u32 = 4;
 /// Maximum copy length per command (RFC 7932 §5).
 const MAX_COPY: u32 = 273 - 2;
 
-/// Number of short distance codes (RFC 7932 §10.4).
-const NUM_SHORT: u32 = 16;
-
 /// A parsed LZ77 command: insert `insert_len` literals, then copy
 /// `copy_len` bytes from `distance` (1-based backward offset).
 #[derive(Clone, Copy, Debug)]
-struct Command {
-    insert_len: u32,
-    copy_len: u32,
-    distance: u32,
-}
-
-/// LSB-first bit writer (Brotli's wire bit order per RFC 7932 §1).
-struct BitWriter {
-    out: Vec<u8>,
-    acc: u64,
-    nbits: u32,
-}
-
-impl BitWriter {
-    fn new() -> Self {
-        Self {
-            out: Vec::new(),
-            acc: 0,
-            nbits: 0,
-        }
-    }
-
-    fn write_bits(&mut self, value: u32, n: u32) {
-        if n == 0 {
-            return;
-        }
-        debug_assert!(n <= 32);
-        let mask: u64 = if n >= 32 {
-            u32::MAX as u64
-        } else {
-            (1u64 << n) - 1
-        };
-        self.acc |= (u64::from(value) & mask) << self.nbits;
-        self.nbits += n;
-        while self.nbits >= 8 {
-            self.out.push((self.acc & 0xFF) as u8);
-            self.acc >>= 8;
-            self.nbits -= 8;
-        }
-    }
-
-    fn byte_align(&mut self) {
-        while self.nbits % 8 != 0 {
-            self.write_bits(0, 1);
-        }
-    }
-
-    fn flush(mut self) -> Vec<u8> {
-        if self.nbits > 0 {
-            self.out.push((self.acc & 0xFF) as u8);
-            self.acc = 0;
-            self.nbits = 0;
-        }
-        self.out
-    }
+pub struct Command {
+    pub insert_len: u32,
+    pub copy_len: u32,
+    pub distance: u32,
 }
 
 /// Encode the WBITS field for `WINDOW_BITS` (RFC 7932 §9.1).
@@ -590,67 +538,6 @@ fn find_cmd_symbol(insert_len: u32, copy_len: u32) -> Option<usize> {
         }
     }
     None
-}
-
-/// Distance-code configuration (RFC 7932 §9.4).
-///
-/// Controls NPOSTFIX and NDIRECT, which together determine the
-/// distance-code alphabet layout:
-///
-/// ```text
-///   [0..16)         = short codes (ring buffer)
-///   [16..16+NDIRECT) = direct codes (no extra bits)
-///   [16+NDIRECT..)   = long codes (with optional postfix bits)
-/// ```
-#[derive(Clone, Copy, Debug)]
-struct DistanceConfig {
-    npostfix: u8,
-    ndmoem: u8,
-}
-
-impl DistanceConfig {
-    const fn new(npostfix: u8, ndmoem: u8) -> Self {
-        Self { npostfix, ndmoem }
-    }
-
-    /// NDIRECT = NDMOEM << NPOSTFIX (RFC 7932 §9.4).
-    const fn ndirect(&self) -> u32 {
-        (self.ndmoem as u32) << self.npostfix
-    }
-
-    /// Total direct + short codes in the alphabet.
-    const fn num_direct(&self) -> u32 {
-        NUM_SHORT + self.ndirect()
-    }
-
-    /// Full distance alphabet size.
-    fn alphabet_size(&self) -> usize {
-        self.num_direct() as usize + (48usize << self.npostfix)
-    }
-
-    /// Choose NPOSTFIX/NDMOEM heuristically from the distance distribution.
-    ///
-    /// Direct codes only help when many matches have distances ≤ NDIRECT
-    /// (max 15 for NPOSTFIX=0). Adding direct codes that don't match the
-    /// actual distances just enlarges the alphabet and hurts Huffman.
-    fn choose(commands: &[Command]) -> Self {
-        let mut dists_in_direct_range = 0u32;
-        let mut total_dists = 0u32;
-        for cmd in commands {
-            if cmd.copy_len > 0 && cmd.distance > 0 {
-                total_dists += 1;
-                if cmd.distance <= 15 {
-                    dists_in_direct_range += 1;
-                }
-            }
-        }
-        let ndmoem = if total_dists > 0 && dists_in_direct_range * 5 >= total_dists * 4 {
-            12
-        } else {
-            0
-        };
-        Self::new(0, ndmoem)
-    }
 }
 
 /// Encode an LZ77 distance as a (symbol, extra_bits) pair using the
@@ -1152,40 +1039,6 @@ fn build_rle_sequence(lengths: &[u8]) -> Vec<(u8, u8)> {
         }
     }
     out
-}
-
-/// Check if input looks like text (printable ASCII + whitespace).
-/// Used to select UTF8 context mode over LSB6 for better ratio.
-fn is_text_like(input: &[u8]) -> bool {
-    if input.is_empty() {
-        return false;
-    }
-    let text_bytes = input.iter().filter(|&&b| is_text_byte(b)).count();
-    text_bytes * 10 > input.len() * 9 // > 90% text bytes
-}
-
-/// A byte is "text-like" if it's printable ASCII or common whitespace.
-fn is_text_byte(b: u8) -> bool {
-    matches!(b, 0x09 | 0x0A | 0x0D) || (0x20..=0x7E).contains(&b)
-}
-
-/// Compute a literal context ID (RFC 7932 §10.1) for the given mode.
-///
-/// - `mode == 0` (LSB6): `p1 & 0x3F` (6-bit context from previous byte)
-/// - `mode == 2` (UTF8): lookup-table-based context separating UTF-8
-///   character classes
-///
-/// MSB6 (1) and Signed (3) are not used by the encoder but documented
-/// for completeness.
-fn compute_context_id(p1: u8, p2: u8, mode: u32) -> u8 {
-    match mode {
-        0 => p1 & 0x3F, // LSB6
-        2 => {
-            K_UTF8_CONTEXT_LOOKUP[p1 as usize]              // UTF8
-            | K_UTF8_CONTEXT_LOOKUP[(p2 as usize) | 256]
-        }
-        _ => p1 & 0x3F, // fallback to LSB6
-    }
 }
 
 /// Write a DecodeVarLenUint8-encoded value (RFC 7932 §9.3).
