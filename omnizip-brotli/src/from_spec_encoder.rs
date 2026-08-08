@@ -171,18 +171,29 @@ fn encode_huffman_chunk_into(
     }
     bw.write_bits(0, 1); // ISUNCOMPRESSED = 0
 
-    bw.write_bits(0, 1); // NBLTYPESL = 1
-    bw.write_bits(0, 1); // NBLTYPESI = 1
-    bw.write_bits(0, 1); // NBLTYPESD = 1
-
     // Context modeling: at quality >= 4, split literals into 2 context
-    // trees based on the LSB6 context of the previous byte. This gives
-    // ~10-15% ratio improvement on large text inputs.
-    // Disabled for inputs < 4 KiB (overhead exceeds savings) and for
-    // quality < 4 (not worth the complexity at fast levels).
+    // trees based on the LSB6 context of the previous byte.
     let use_context = quality >= 4 && input.len() >= 4096;
 
-    let commands = parse_input_with_offset(input, mlen_offset, quality, use_context);
+    // Block type switching: implemented but disabled pending decoder
+    // compatibility debugging (write_block_type_trees + block-switch
+    // emission exist but produce wire-format mismatches in the full
+    // decoder path). The infrastructure is ready for re-enablement.
+    let use_block_switch = false;
+    // Write all three NBLTYPES first (RFC 7932 §9.3: all block-type
+    // counts precede any block-type code trees).
+    let nbltypes_l: u32 = if use_block_switch { 2 } else { 1 };
+    write_varlen_uint8(bw, nbltypes_l - 1); // NBLTYPESL
+    write_varlen_uint8(bw, 0); // NBLTYPESI = 1
+    write_varlen_uint8(bw, 0); // NBLTYPESD = 1
+
+    // Block-type code trees follow NBLTYPES for each category with > 1 type.
+    if nbltypes_l > 1 {
+        write_block_type_trees(bw, nbltypes_l);
+    }
+
+    let commands =
+        parse_input_with_offset(input, mlen_offset, quality, use_context || use_block_switch);
 
     // Choose distance-code configuration from the parsed commands.
     let dist_cfg = DistanceConfig::choose(&commands);
@@ -196,16 +207,25 @@ fn encode_huffman_chunk_into(
     } else {
         0 // LSB6
     };
-    bw.write_bits(context_mode, 2);
+    // Context mode: one field PER literal block type (RFC 7932 §9.3).
+    for _ in 0..nbltypes_l {
+        bw.write_bits(context_mode, 2);
+    }
 
-    let ntrees_l: u32 = if use_context { 2 } else { 1 };
+    let ntrees_l: u32 = if use_context || use_block_switch {
+        2
+    } else {
+        1
+    };
 
-    // Build the literal context map (64 entries, each → tree 0 or 1).
-    // For both LSB6 and UTF8 modes: split based on whether the context
-    // is "letter-like". For LSB6, letter bytes map to specific contexts.
-    // For UTF8, the lookup table assigns different IDs to different
-    // character classes; we use a simple 50/50 split on the context ID.
-    let lit_ctx_map: Vec<u8> = if use_context {
+    // Build the literal context map.
+    // For context modeling: 64 entries mapping contexts to trees.
+    // For block switching: 128 entries (2 blocks × 64 contexts) mapping
+    // block 0 → tree 0, block 1 → tree 1.
+    let lit_ctx_map: Vec<u8> = if use_block_switch {
+        // NBLTYPESL=2: 128 entries. Block 0 (0-63) → 0, block 1 (64-127) → 1.
+        (0..128u8).map(|i| i >> 6).collect()
+    } else if use_context {
         (0..64u8).map(|ctx| u8::from(ctx >= 32)).collect()
     } else {
         Vec::new()
@@ -264,19 +284,35 @@ fn encode_huffman_chunk_into(
     let mut p2: u8 = 0;
     lit_idx = 0;
     let mut out_pos = 0usize;
+    let mut lit_block_type: usize = 0;
+    let mut lit_block_remaining: usize = if use_block_switch { 128 } else { usize::MAX };
     for cmd in &commands {
         for _ in 0..cmd.insert_len {
             let b = output_sim[out_pos];
-            let ctx = compute_context_id(p1, p2, context_mode) as usize;
-            let tree = if ntrees > 1 {
-                lit_ctx_map[ctx] as usize
+            let ctx = if use_block_switch {
+                // Block switching: tree = block_type (simplified since
+                // context map maps each block to a distinct tree).
+                let cm_idx = (lit_block_type << 6) + (compute_context_id(p1, p2, 0) as usize);
+                lit_ctx_map[cm_idx] as usize
             } else {
-                0
+                let ctx_id = compute_context_id(p1, p2, context_mode) as usize;
+                if ntrees > 1 {
+                    lit_ctx_map[ctx_id] as usize
+                } else {
+                    0
+                }
             };
-            lit_freqs[tree][b as usize] += 1;
+            lit_freqs[ctx][b as usize] += 1;
             p2 = p1;
             p1 = b;
             out_pos += 1;
+            if use_block_switch {
+                lit_block_remaining -= 1;
+                if lit_block_remaining == 0 {
+                    lit_block_type = 1 - lit_block_type;
+                    lit_block_remaining = 128;
+                }
+            }
         }
         if cmd.copy_len > 0 {
             out_pos += cmd.copy_len as usize;
@@ -322,6 +358,8 @@ fn encode_huffman_chunk_into(
     p2 = 0;
     lit_idx = 0;
     out_pos = 0;
+    lit_block_type = 0;
+    lit_block_remaining = if use_block_switch { 128 } else { usize::MAX };
     for (&cmd_sym, cmd) in stream.cmd_symbols.iter().zip(commands.iter()) {
         let (code, len) = cmd_codes[cmd_sym];
         bw.write_bits(code, u32::from(len));
@@ -337,9 +375,23 @@ fn encode_huffman_chunk_into(
         }
 
         for _ in 0..cmd.insert_len {
+            // Emit block-switch command at literal block boundary.
+            if use_block_switch && lit_block_remaining == 0 {
+                // Block-type code: symbol 3 for type 0→1, symbol 2 for type 1→0.
+                // Simple tree: symbol 2 → code 0 (1 bit), symbol 3 → code 1 (1 bit).
+                let bt_sym = if lit_block_type == 0 { 1u32 } else { 0u32 }; // 1 bit
+                bw.write_bits(bt_sym, 1);
+                // Block-length extra: 128 - 113 = 15 in 5 bits (code 12).
+                bw.write_bits(15, 5);
+                lit_block_type = 1 - lit_block_type;
+                lit_block_remaining = 128;
+            }
+
             let b = stream.literals[lit_idx];
-            let ctx = compute_context_id(p1, p2, context_mode) as usize;
-            let tree = if ntrees > 1 {
+            let tree = if use_block_switch {
+                lit_block_type
+            } else if ntrees > 1 {
+                let ctx = compute_context_id(p1, p2, context_mode) as usize;
                 lit_ctx_map[ctx] as usize
             } else {
                 0
@@ -350,6 +402,9 @@ fn encode_huffman_chunk_into(
             p1 = b;
             lit_idx += 1;
             out_pos += 1;
+            if use_block_switch {
+                lit_block_remaining -= 1;
+            }
         }
 
         if cmd.copy_len > 0 {
@@ -1175,6 +1230,35 @@ fn build_rle_sequence(lengths: &[u8]) -> Vec<(u8, u8)> {
         }
     }
     out
+}
+
+/// Write block-type code trees and initial block length (RFC 7932 §9.3).
+///
+/// For NBLTYPES=2:
+/// - Block-type code tree: simple form NSYM=2, symbols [2, 3] (1 bit each)
+///   symbol 2 → type 0, symbol 3 → type 1
+/// - Block-length code tree: simple form NSYM=1, symbol = block-length code
+/// - Initial block length: code 12 (offset=113) + extra (for 128 bytes)
+fn write_block_type_trees(bw: &mut BitWriter, _nbltypes: u32) {
+    // Block-type code tree: alphabet 2 + 2 = 4.
+    // Simple form NSYM=2: symbols 2 and 3 (each 1 bit).
+    bw.write_bits(0b01, 2); // HSKIP = 1
+    bw.write_bits(0b01, 2); // NSYM-1 = 1 (NSYM=2)
+    let bits_per_sym = ceil_log2(4); // ceil(log2(4)) = 2
+    bw.write_bits(2, bits_per_sym); // s0 = 2 (type 0)
+    bw.write_bits(3, bits_per_sym); // s1 = 3 (type 1)
+
+    // Block-length code tree: alphabet 26.
+    // Simple form NSYM=1: symbol = 12 (block-length code for ~128 bytes).
+    // kBlockLengthPrefixCode[12] = offset=113, nbits=5 → range [113, 144].
+    bw.write_bits(0b01, 2); // HSKIP = 1
+    bw.write_bits(0b00, 2); // NSYM-1 = 0 (NSYM=1)
+    let bl_bits_per_sym = ceil_log2(26); // ceil(log2(26)) = 5
+    bw.write_bits(12, bl_bits_per_sym); // symbol = 12
+
+    // Initial block length: read symbol 12 (0 bits, single_symbol), then
+    // extra bits: 128 - 113 = 15 in 5 bits.
+    bw.write_bits(15, 5); // extra = 15 → block_length = 113 + 15 = 128
 }
 
 /// Write a DecodeVarLenUint8-encoded value (RFC 7932 §9.3).
