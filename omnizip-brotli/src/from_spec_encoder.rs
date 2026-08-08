@@ -111,8 +111,10 @@ pub fn compress_with_quality(input: &[u8], quality: i32) -> Vec<u8> {
         return empty_frame();
     }
 
-    // Inputs ≤ 64 KiB: single metablock, Huffman or uncompressed.
-    if input.len() < (1 << 16) {
+    // Inputs ≤ 1 MiB: single metablock, Huffman or uncompressed.
+    // Larger metablocks reduce per-block Huffman table overhead and
+    // allow the match finder to find longer-range matches.
+    if input.len() < (1 << 20) {
         let uncompressed = encode_uncompressed_frame(input);
         let huffman = encode_huffman_frame_q(input, q);
         if !huffman.is_empty() && huffman.len() < uncompressed.len() {
@@ -121,12 +123,12 @@ pub fn compress_with_quality(input: &[u8], quality: i32) -> Vec<u8> {
         return uncompressed;
     }
 
-    // Large inputs (> 64 KiB): split into 64 KiB-1 chunks and emit
+    // Large inputs (> 1 MiB): split into 1 MiB-1 chunks and emit
     // each as a Huffman-coded metablock. Each chunk is independently
     // Huffman-coded with its own LZ77 + dictionary pass; the decoder
     // threads the cumulative output position so dictionary references
     // resolve at the correct global offset.
-    let chunk_size = (1 << 16) - 1;
+    let chunk_size = (1 << 20) - 1;
     let mut bw = BitWriter::new();
     write_wbits(&mut bw);
 
@@ -165,9 +167,20 @@ fn encode_huffman_chunk_into(
     if is_last {
         bw.write_bits(0, 1); // ISLASTEMPTY = 0
     }
-    bw.write_bits(0, 2); // MNIBBLES = 0 (= 4 nibbles)
+    // MLEN encoding: pick smallest MNIBBLES that fits.
+    // MNIBBLES=0 → 4 nibbles (max 65536)
+    // MNIBBLES=1 → 5 nibbles (max 1,048,576 = 1 MiB)
+    // MNIBBLES=2 → 6 nibbles (max 16,777,216 = 16 MiB)
     let mlen_minus_1 = (input.len() - 1) as u32;
-    for i in 0..4u32 {
+    let (mnibbles, num_nibbles): (u32, u32) = if mlen_minus_1 < (1 << 16) {
+        (0, 4)
+    } else if mlen_minus_1 < (1 << 20) {
+        (1, 5)
+    } else {
+        (2, 6)
+    };
+    bw.write_bits(mnibbles, 2);
+    for i in 0..num_nibbles {
         bw.write_bits((mlen_minus_1 >> (4 * i)) & 0xF, 4);
     }
     bw.write_bits(0, 1); // ISUNCOMPRESSED = 0
@@ -463,7 +476,7 @@ fn encode_uncompressed_frame(input: &[u8]) -> Vec<u8> {
     let nibbles: u32 = if mnibbles_field == 0 {
         4
     } else {
-        mnibbles_field + 3
+        mnibbles_field + 4
     };
     let mlen_minus_1 = (input.len() - 1) as u64;
     for i in 0..nibbles {
