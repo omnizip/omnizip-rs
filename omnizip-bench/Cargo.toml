@@ -9,6 +9,7 @@ homepage.workspace = true
 description = "Benchmark suite for omnizip-rs codecs (Silesia, Enwik8, Calgary, Canterbury corpora)"
 keywords = ["compression", "benchmark", "silesia", "enwik8"]
 categories = ["compression", "development-tools::profiling"]
+publish = false
 
 [[bin]]
 name = "omnizip-bench"
