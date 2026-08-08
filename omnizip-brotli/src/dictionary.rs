@@ -406,9 +406,14 @@ pub fn dictionary_lookup(
 /// Try to find a dictionary word match at the given input position.
 /// Returns `(distance_code, copy_len)` if a match is found, or `None`.
 ///
-/// Uses a simple linear scan over 4-byte dictionary words (identity
-/// transform only). The distance_code is set to `max_distance + 1 +
-/// word_idx` so the decoder interprets it as a dictionary reference.
+/// Tries three transforms per word:
+/// - Identity (transform 0): verbatim dictionary word
+/// - Uppercase-first (transform 10): first letter capitalized
+/// - Uppercase-all (transform 11): all letters capitalized
+///
+/// These three cover the most common real-world matches (e.g., "Hello"
+/// matching dictionary "hello"). The full 121 transforms would require
+/// a precomputed hash table for acceptable performance.
 ///
 /// `max_distance` should be `min(output_len, (1 << window_bits) - 1)`.
 #[must_use]
@@ -416,6 +421,14 @@ pub fn find_dictionary_match(input: &[u8], pos: usize, max_distance: u32) -> Opt
     if pos + 4 > input.len() {
         return None;
     }
+
+    // Transform INDICES into TRANSFORM_DATA (not transform_type constants).
+    // Only try transforms that don't change the output length (no prefix,
+    // no suffix, no OmitFirst/OmitLast):
+    //   0  = (none, IDENTITY, none)
+    //   9  = (none, UPPERCASE_FIRST, none)
+    //   42 = (none, UPPERCASE_ALL, none)
+    const TRANSFORMS_TO_TRY: [usize; 3] = [0, 9, 42];
 
     // Try word lengths 4..=8 (the most common in text).
     for len in 4u32..=8u32 {
@@ -435,15 +448,20 @@ pub fn find_dictionary_match(input: &[u8], pos: usize, max_distance: u32) -> Opt
             if dict_offset + len_us > DICTIONARY_DATA.len() {
                 break;
             }
-            // Fast first-byte check before full comparison.
-            if DICTIONARY_DATA[dict_offset] != input[pos] {
-                continue;
-            }
-            if &DICTIONARY_DATA[dict_offset..dict_offset + len_us] == &input[pos..pos + len_us] {
-                // Found a match! Compute the distance code.
-                let address = word_idx as u32; // transform_idx = 0 (identity)
-                let distance = max_distance + 1 + address;
-                return Some((distance, len));
+            let word = &DICTIONARY_DATA[dict_offset..dict_offset + len_us];
+
+            // Try each pure transform on this word.
+            for &transform_idx in &TRANSFORMS_TO_TRY {
+                let mut transformed = Vec::with_capacity(len_us);
+                let n = transform_dictionary_word(&mut transformed, word, transform_idx);
+                if n == 0 || pos + n > input.len() {
+                    continue;
+                }
+                if &input[pos..pos + n] == &transformed[..n] {
+                    let address = ((transform_idx as u32) << shift) | word_idx as u32;
+                    let distance = max_distance + 1 + address;
+                    return Some((distance, n as u32));
+                }
             }
         }
     }
