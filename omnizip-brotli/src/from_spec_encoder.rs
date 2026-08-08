@@ -602,6 +602,137 @@ fn distance_extra_bits(sym: u32, cfg: &DistanceConfig) -> u32 {
 ///
 /// Convenience wrapper for chunks at the start of the input (offset=0).
 #[allow(dead_code)]
+/// Cost-aware DP optimal parser (TODO 201).
+///
+/// Uses dynamic programming to find the command sequence with minimum
+/// estimated bit cost. The cost model uses Shannon entropy for literals
+/// and fixed estimates for command/distance overhead.
+///
+/// Steps:
+/// 1. Collect best match at each position via the hash-chain match finder.
+/// 2. Build literal cost model from byte frequency distribution.
+/// 3. Backward DP: `cost[i]` = minimum bits to encode `input[i..n]`.
+/// 4. Forward reconstruction: walk the DP table to emit commands.
+fn optimal_parse(
+    input: &[u8],
+    mf: &mut omnizip_codecs::HashChainMatchFinder,
+    mlen_offset: usize,
+    use_dict: bool,
+) -> Vec<Command> {
+    let n = input.len();
+    if n == 0 {
+        return Vec::new();
+    }
+
+    // --- Step 1: Collect matches at each position ---
+    let mut matches_at: Vec<Option<(u32, u32)>> = vec![None; n];
+    for pos in 0..n {
+        let global_pos = mlen_offset + pos;
+        let max_dist = (global_pos as u32).min(MAX_BACKWARD_DISTANCE);
+
+        if pos + MIN_MATCH as usize <= n {
+            mf.advance();
+            if let Some(m) = mf.find_match(pos) {
+                if m.distance <= max_dist && m.length >= MIN_MATCH {
+                    let copy_len = m.length.min(MAX_COPY).max(MIN_MATCH);
+                    matches_at[pos] = Some((m.distance, copy_len));
+                }
+            }
+        }
+
+        if matches_at[pos].is_none() && use_dict {
+            if let Some((d, l)) = find_dictionary_match(input, pos, max_dist) {
+                if l >= MIN_MATCH {
+                    matches_at[pos] = Some((d, l));
+                }
+            }
+        }
+    }
+
+    // --- Step 2: Build literal cost model (Shannon entropy) ---
+    let mut freq = [0u32; 256];
+    for &b in input {
+        freq[b as usize] += 1;
+    }
+    let lit_cost: [f32; 256] = {
+        let mut arr = [0.0f32; 256];
+        for i in 0..256 {
+            if freq[i] > 0 {
+                let p = freq[i] as f32 / n as f32;
+                let bits = -p.log2();
+                arr[i] = bits.max(1.0);
+            } else {
+                arr[i] = 8.0;
+            }
+        }
+        arr
+    };
+
+    // --- Step 3: Backward DP ---
+    let mut cost = vec![0.0f32; n + 1];
+    let mut back_len: Vec<u32> = vec![0; n]; // 0 = literal, else = copy_len
+
+    for i in (0..n).rev() {
+        // Option A: Insert 1 literal.
+        let lit_cost_total = lit_cost[input[i] as usize] + cost[i + 1];
+        let mut best = lit_cost_total;
+        let mut best_action = 0u32;
+
+        // Option B: Take match at position i.
+        if let Some((_, match_len)) = matches_at[i] {
+            let end = (i + match_len as usize).min(n);
+            let actual_len = (end - i) as u32;
+
+            // Match cost: command symbol (~5 bits) + distance symbol
+            // (~5 bits) + extra bits for copy_len/distance (~8 bits).
+            // The per-byte cost decreases with longer matches.
+            let match_overhead = 18.0_f32;
+            let total = match_overhead + cost[end];
+
+            if total < best {
+                best = total;
+                best_action = actual_len;
+            }
+        }
+
+        cost[i] = best;
+        back_len[i] = best_action;
+    }
+
+    // --- Step 4: Forward reconstruction ---
+    let mut commands = Vec::new();
+    let mut pos = 0;
+    let mut insert_start = 0;
+
+    while pos < n {
+        if back_len[pos] > 0 {
+            let copy_len = back_len[pos];
+            let (dist, _) = matches_at[pos].unwrap();
+            let insert_len = (pos - insert_start) as u32;
+            commands.push(Command {
+                insert_len,
+                copy_len,
+                distance: dist,
+            });
+            pos += copy_len as usize;
+            insert_start = pos;
+        } else {
+            pos += 1;
+        }
+    }
+
+    // Trailing literals.
+    if insert_start < n {
+        commands.push(Command {
+            insert_len: (n - insert_start) as u32,
+            copy_len: 0,
+            distance: 0,
+        });
+    }
+
+    commands
+}
+
 fn parse_input(input: &[u8]) -> Vec<Command> {
     parse_input_with_offset(input, 0, 11, false)
 }
@@ -650,6 +781,11 @@ fn parse_input_with_offset(
         hash_log: 16,
     };
     let mut mf = omnizip_codecs::HashChainMatchFinder::new(input, config);
+
+    // Quality >= 10: use cost-aware DP optimal parser.
+    if quality >= 10 {
+        return optimal_parse(input, &mut mf, mlen_offset, use_dict);
+    }
 
     let mut pos = 0usize;
     let mut insert_start = 0usize;
