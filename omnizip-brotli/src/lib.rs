@@ -157,10 +157,7 @@ impl Codec for BrotliCodec {
         "brotli"
     }
     fn compress(&self, plaintext: &[u8], level: CompressionLevel) -> Result<Vec<u8>, OmnizipError> {
-        // Map CompressionLevel (0–22 workspace scale) to Brotli quality
-        // (0–11). The from-spec encoder responds to quality via
-        // match-finder effort and dictionary lookup gating.
-        let q = (level.as_u8() / 2).min(11) as i32;
+        let q = level.as_u8().min(11) as i32;
         Ok(from_spec_encoder::compress_with_quality(plaintext, q))
     }
     fn decompress(&self, compressed: &[u8], expected_len: u32) -> Result<Vec<u8>, OmnizipError> {
