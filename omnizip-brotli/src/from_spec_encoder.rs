@@ -719,10 +719,21 @@ fn write_huffman_table(
     // Complex form: HSKIP = 0.
     bw.write_bits(0, 2);
 
-    // Build a sub-Huffman over the 18-symbol code-length alphabet.
+    // Build the RLE-compressed code-length sequence (RFC 7932 §9.5).
+    // Symbol 16 = repeat previous code length 3+extra(2) times (3-6).
+    // Symbol 17 = repeat zero 3+extra(3) times (3-10).
+    // This reduces table description size for inputs with many
+    // same-length codes (typical for near-uniform byte distributions).
+    // Returns Vec<(symbol, extra_bits)> so the writer doesn't need to
+    // re-derive counts from the raw lengths.
+    let rle = build_rle_sequence(&lengths.lengths[..alphabet]);
+
+    // Build a sub-Huffman over the 18-symbol code-length alphabet,
+    // using frequencies from the RLE-compressed sequence (not the raw
+    // lengths). This accounts for symbols 16/17 in the code-length code.
     let mut cl_freq = [0u32; 18];
-    for &l in &lengths.lengths[..alphabet] {
-        cl_freq[usize::from(l)] += 1;
+    for &(sym, _) in &rle {
+        cl_freq[usize::from(sym)] += 1;
     }
     let cl_lengths = omnizip_codecs::HuffmanLengths::build(&cl_freq, 5);
     let cl_codes = cl_lengths.canonical_codes();
@@ -754,27 +765,114 @@ fn write_huffman_table(
         }
     }
 
-    // Write the actual code lengths using the code-length Huffman code.
+    // Write the actual code lengths using the code-length Huffman code,
+    // emitting RLE symbols (16/17) from the pre-computed sequence.
     // The decoder exits its read loop once the main prefix code's space
     // is fully consumed (sum of 32768>>len = 32768). We replicate that
     // break here so the bit position after this table matches.
     let mut main_space: u32 = 32768;
-    'outer: for &l in &lengths.lengths[..alphabet] {
-        if cl_single {
-            // Single-symbol cl code: decoder reads 0 bits per occurrence.
-            // Only track main_space; write nothing.
-        } else {
-            let (code, len) = cl_codes[usize::from(l)];
-            let wire = reverse_bits(code, len);
-            bw.write_bits(wire, u32::from(len));
+    let mut prev_code_len: u8 = 8;
+    for &(sym, extra) in &rle {
+        let (val, count) = match sym {
+            16 => (prev_code_len, 3 + extra as usize),
+            17 => (0u8, 3 + extra as usize),
+            v => (v, 1usize),
+        };
+
+        if !cl_single {
+            let (code, clen) = cl_codes[usize::from(sym)];
+            let wire = reverse_bits(code, clen);
+            bw.write_bits(wire, u32::from(clen));
+            if sym == 16 {
+                bw.write_bits(extra as u32, 2);
+            } else if sym == 17 {
+                bw.write_bits(extra as u32, 3);
+            }
         }
-        if l != 0 {
-            main_space = main_space.wrapping_sub(32768u32 >> u32::from(l));
-            if main_space == 0 {
-                break 'outer;
+
+        if val != 0 {
+            prev_code_len = val;
+            for _ in 0..count {
+                main_space = main_space.wrapping_sub(32768u32 >> u32::from(val));
+                if main_space == 0 {
+                    return;
+                }
             }
         }
     }
+}
+
+/// Build an RLE-compressed code-length sequence from raw lengths.
+///
+/// Returns `Vec<(symbol, extra_bits)>`:
+/// - Symbols 0-15: literal code-length values (extra = 0).
+/// - Symbol 16: repeat previous code length `3 + extra` times (extra ∈ 0..4).
+/// - Symbol 17: repeat zero `3 + extra` times (extra ∈ 0..8).
+///
+/// To avoid the decoder's iterated accumulator (which combines
+/// consecutive repeat symbols non-linearly), a literal symbol is
+/// inserted between consecutive repeats of the same value.
+fn build_rle_sequence(lengths: &[u8]) -> Vec<(u8, u8)> {
+    let n = lengths.len();
+    let mut out = Vec::with_capacity(n);
+    let mut i = 0;
+    while i < n {
+        let val = lengths[i];
+        let mut run = 1usize;
+        while i + run < n && lengths[i + run] == val {
+            run += 1;
+        }
+
+        if val == 0 {
+            // Emit leading 1-2 zeros individually (symbol 17 needs ≥3).
+            let lead = run.min(2);
+            for _ in 0..lead {
+                out.push((0, 0));
+            }
+            run -= lead;
+            i += lead;
+            // Use symbol 17 for remaining zero runs (count 3-10).
+            // Insert a literal 0 between consecutive symbol-17s to
+            // avoid the decoder's iterated accumulator.
+            while run >= 3 {
+                let chunk = run.min(10);
+                out.push((17, (chunk - 3) as u8));
+                run -= chunk;
+                i += chunk;
+                if run >= 3 {
+                    out.push((0, 0));
+                    run -= 1;
+                    i += 1;
+                }
+            }
+            for _ in 0..run {
+                out.push((0, 0));
+            }
+            i += run;
+        } else {
+            out.push((val, 0));
+            i += 1;
+            run -= 1;
+            // Use symbol 16 for repeat runs (count 3-6).
+            // Insert a literal between consecutive symbol-16s.
+            while run >= 3 {
+                let chunk = run.min(6);
+                out.push((16, (chunk - 3) as u8));
+                run -= chunk;
+                i += chunk;
+                if run >= 3 {
+                    out.push((val, 0));
+                    run -= 1;
+                    i += 1;
+                }
+            }
+            for _ in 0..run {
+                out.push((val, 0));
+            }
+            i += run;
+        }
+    }
+    out
 }
 
 /// Write a single-symbol Huffman table in simple form (RFC 7932 §9.5.1).
