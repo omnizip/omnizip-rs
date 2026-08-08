@@ -37,9 +37,10 @@
     clippy::items_after_statements
 )]
 
-use crate::dictionary::{dictionary_lookup, find_dictionary_match};
+use crate::dictionary::dictionary_lookup;
 use crate::encoder::bitwriter::BitWriter;
 use crate::encoder::context::{compute_context_id, is_text_like};
+use crate::encoder::dict_hash;
 use crate::encoder::distance_config::{DistanceConfig, NUM_SHORT};
 use crate::prefix::kCmdLut;
 
@@ -699,7 +700,7 @@ fn optimal_parse(
         }
 
         if matches_at[pos].is_none() && use_dict {
-            if let Some((d, l)) = find_dictionary_match(input, pos, max_dist) {
+            if let Some((d, l)) = dict_hash::find_match(input, pos, max_dist) {
                 if l >= MIN_MATCH {
                     matches_at[pos] = Some((d, l));
                 }
@@ -867,14 +868,14 @@ fn parse_input_with_offset(
             if m.length >= 8 || !use_dict {
                 Some((m.distance, m.length, false))
             } else {
-                let dict = find_dictionary_match(input, pos, max_dist);
+                let dict = dict_hash::find_match(input, pos, max_dist);
                 match dict {
                     Some((d, l)) if l > m.length => Some((d, l, true)),
                     _ => Some((m.distance, m.length, false)),
                 }
             }
         } else if use_dict {
-            let dict = find_dictionary_match(input, pos, max_dist);
+            let dict = dict_hash::find_match(input, pos, max_dist);
             dict.map(|(d, l)| (d, l, true))
         } else {
             None
@@ -905,14 +906,14 @@ fn parse_input_with_offset(
                         if nm.length >= 8 || !use_dict {
                             Some((nm.distance, nm.length))
                         } else {
-                            let dict = find_dictionary_match(input, next_pos, next_max);
+                            let dict = dict_hash::find_match(input, next_pos, next_max);
                             match dict {
                                 Some((d, l)) if l > nm.length => Some((d, l)),
                                 _ => Some((nm.distance, nm.length)),
                             }
                         }
                     } else if use_dict {
-                        find_dictionary_match(input, next_pos, next_max)
+                        dict_hash::find_match(input, next_pos, next_max)
                     } else {
                         None
                     };
@@ -931,7 +932,7 @@ fn parse_input_with_offset(
                                             if m.length >= 8 || !use_dict {
                                                 (m.distance, m.length)
                                             } else {
-                                                let d = find_dictionary_match(
+                                                let d = dict_hash::find_match(
                                                     input, next2_pos, next2_max,
                                                 );
                                                 d.filter(|(_, l)| *l > m.length)
@@ -940,7 +941,7 @@ fn parse_input_with_offset(
                                         })
                                         .or_else(|| {
                                             if use_dict {
-                                                find_dictionary_match(input, next2_pos, next2_max)
+                                                dict_hash::find_match(input, next2_pos, next2_max)
                                             } else {
                                                 None
                                             }
