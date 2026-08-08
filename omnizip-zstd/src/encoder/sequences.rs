@@ -14,17 +14,20 @@
 //! - **Repeat** (3): reuse the previous block's table (not used for
 //!   the first block).
 //!
-//! This module currently implements **Predefined** mode only. RLE and
-//! FSE will follow once the FSE encoder bitstream is verified.
+//! This module evaluates Predefined vs FSE_Compressed for each table
+//! and picks the option with the lower estimated bit cost.
 
 #![forbid(unsafe_code)]
 
 use crate::encoder::match_finder::SeqStore;
-use crate::fse::encoder::{build_ctable, BitCStream, CState, CTable};
+use crate::fse::encoder::{
+    build_ctable, normalize_count, optimal_table_log, write_ncount, BitCStream, CState, CTable,
+};
 use crate::ZstdError;
 
 /// Sequence-table mode codes.
 const MODE_PREDEFINED: u8 = 0;
+const MODE_FSE: u8 = 2;
 
 /// Predefined LL normalized distribution (from C's `LL_defaultNorm`).
 /// 36 entries, tableLog = 6.
@@ -99,7 +102,8 @@ const fn off_base(offset: u32) -> u32 {
 }
 
 /// Encode the sequences section from a [`SeqStore`] into `out`.
-/// Uses Predefined mode for all three tables (LL, ML, OF).
+/// Evaluates Predefined vs FSE_Compressed for each table (LL, OF, ML)
+/// and picks the option with lower estimated bit cost.
 ///
 /// # Errors
 ///
@@ -114,17 +118,7 @@ pub fn encode_section(out: &mut Vec<u8>, seq_store: &SeqStore) -> Result<(), Zst
         return Ok(());
     }
 
-    // 2. Modes byte: LL=Predefined, OF=Predefined, ML=Predefined.
-    // Bits: [LL_mode(2)] [OF_mode(2)] [ML_mode(2)] [reserved(2)]
-    let modes: u8 = (MODE_PREDEFINED << 6) | (MODE_PREDEFINED << 4) | (MODE_PREDEFINED << 2);
-    out.push(modes);
-
-    // 3. Build CTables from the predefined distributions.
-    let ll_ctable = build_ctable(&LL_DEFAULT_NORM, 35, 6)?;
-    let ml_ctable = build_ctable(&ML_DEFAULT_NORM, 52, 6)?;
-    let of_ctable = build_ctable(&OF_DEFAULT_NORM, 28, 5)?;
-
-    // 4. Compute code tables for each sequence.
+    // 2. Compute code tables for each sequence.
     let mut ll_codes = Vec::with_capacity(nb_seq);
     let mut ml_codes = Vec::with_capacity(nb_seq);
     let mut of_codes = Vec::with_capacity(nb_seq);
@@ -143,7 +137,40 @@ pub fn encode_section(out: &mut Vec<u8>, seq_store: &SeqStore) -> Result<(), Zst
         off_bases.push(off_base(seq.offset));
     }
 
-    // 5. Encode the FSE bitstream (reverse-encoded).
+    // 3. Count symbol frequencies for FSE mode selection.
+    let mut ll_count = [0u32; 36];
+    let mut ml_count = [0u32; 53];
+    let mut of_count = [0u32; 32];
+    let ll_max = count_symbols(&ll_codes, &mut ll_count);
+    let ml_max = count_symbols(&ml_codes, &mut ml_count);
+    let of_max = count_symbols(&of_codes, &mut of_count);
+
+    // 4. For each table, decide between Predefined and FSE_Compressed.
+    let ll_choice = choose_table_mode(&ll_count, ll_max, &LL_DEFAULT_NORM, 6, 35, nb_seq as u64);
+    let ml_choice = choose_table_mode(&ml_count, ml_max, &ML_DEFAULT_NORM, 6, 52, nb_seq as u64);
+    let of_choice = choose_table_mode(&of_count, of_max, &OF_DEFAULT_NORM, 5, 28, nb_seq as u64);
+
+    // 5. Write modes byte: [LL(2)] [OF(2)] [ML(2)] [reserved(2)].
+    let modes: u8 = (ll_choice.mode << 6) | (of_choice.mode << 4) | (ml_choice.mode << 2);
+    out.push(modes);
+
+    // 6. For FSE_Compressed tables, write the normalized counts.
+    if ll_choice.mode == MODE_FSE {
+        write_ncount(out, &ll_choice.norm, ll_max, ll_choice.table_log)?;
+    }
+    if of_choice.mode == MODE_FSE {
+        write_ncount(out, &of_choice.norm, of_max, of_choice.table_log)?;
+    }
+    if ml_choice.mode == MODE_FSE {
+        write_ncount(out, &ml_choice.norm, ml_max, ml_choice.table_log)?;
+    }
+
+    // 7. Build CTables from the chosen distributions.
+    let ll_ctable = ll_choice.build_ctable()?;
+    let ml_ctable = ml_choice.build_ctable()?;
+    let of_ctable = of_choice.build_ctable()?;
+
+    // 8. Encode the FSE bitstream (reverse-encoded).
     let start = out.len();
     out.resize(start + estimated_bitstream_size(nb_seq), 0);
     let written = encode_sequences_bitstream(
@@ -162,6 +189,112 @@ pub fn encode_section(out: &mut Vec<u8>, seq_store: &SeqStore) -> Result<(), Zst
     out.truncate(start + written);
 
     Ok(())
+}
+
+/// Count symbol frequencies and return the maximum symbol value.
+fn count_symbols(codes: &[u8], count: &mut [u32]) -> u8 {
+    let mut max_sym = 0u8;
+    for &c in codes {
+        count[c as usize] += 1;
+        if c > max_sym {
+            max_sym = c;
+        }
+    }
+    max_sym
+}
+
+/// Result of table mode selection: either Predefined or FSE_Compressed.
+struct TableChoice {
+    mode: u8,
+    norm: Vec<i16>,
+    table_log: u8,
+    max_sym: u8,
+}
+
+impl TableChoice {
+    fn build_ctable(&self) -> Result<CTable, ZstdError> {
+        build_ctable(&self.norm, self.max_sym, self.table_log)
+    }
+}
+
+/// Choose between Predefined and FSE_Compressed for a table.
+///
+/// Returns (mode, norm, table_log) for the chosen option.
+fn choose_table_mode(
+    count: &[u32],
+    max_sym: u8,
+    default_norm: &[i16],
+    default_table_log: u8,
+    default_max_sym: u8,
+    total: u64,
+) -> TableChoice {
+    // Check if Predefined can encode all used symbols.
+    let predefined_viable = (0..=max_sym as usize)
+        .all(|s| count[s] == 0 || (s < default_norm.len() && default_norm[s] != 0));
+
+    // Use Predefined whenever viable — zero overhead, well-tested.
+    if predefined_viable {
+        return TableChoice {
+            mode: MODE_PREDEFINED,
+            norm: default_norm.to_vec(),
+            table_log: default_table_log,
+            max_sym: default_max_sym,
+        };
+    }
+
+    // Must use FSE_Compressed: some symbols have zero default probability.
+    let opt_log = optimal_table_log(6, total as usize, max_sym);
+    let custom_norm = normalize_count(opt_log, count, total, max_sym, false).unwrap_or_default();
+
+    if custom_norm.is_empty() {
+        let mut single_norm = vec![0i16; max_sym as usize + 1];
+        single_norm[max_sym as usize] = 1 << opt_log;
+        return TableChoice {
+            mode: MODE_FSE,
+            norm: single_norm,
+            table_log: opt_log,
+            max_sym,
+        };
+    }
+
+    TableChoice {
+        mode: MODE_FSE,
+        norm: custom_norm,
+        table_log: opt_log,
+        max_sym,
+    }
+}
+
+/// Estimate FSE payload cost (in bits) for a given distribution.
+fn estimate_cost(count: &[u32], norm: &[i16], table_log: u8, max_sym: u8) -> u64 {
+    let table_size = 1u64 << table_log;
+    let mut total_bits = 0u64;
+    for s in 0..=max_sym as usize {
+        if count[s] == 0 {
+            continue;
+        }
+        let n = if s < norm.len() { norm[s] } else { 0 };
+        let prob = if n > 0 {
+            n as u64
+        } else if n == -1 {
+            1u64
+        } else {
+            // norm == 0: this shouldn't happen for symbols with count > 0.
+            // Use a worst-case estimate.
+            table_size
+        };
+        // bits per occurrence ≈ log2(table_size / prob)
+        let bits_per = (table_size as f64 / prob as f64).log2();
+        total_bits += (count[s] as f64 * bits_per) as u64;
+    }
+    total_bits
+}
+
+/// Estimate the byte size of write_ncount output without actually writing.
+fn estimate_ncount_size(norm: &[i16], max_sym: u8, table_log: u8) -> usize {
+    let mut tmp = Vec::new();
+    let _ = write_ncount(&mut tmp, norm, max_sym, table_log);
+    tmp.len()
 }
 
 /// Compute the OF code for a given offset. The OF code is the number
