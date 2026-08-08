@@ -226,21 +226,26 @@ fn encode_huffman_chunk_into(
     bw.write_bits(0, 1); // NBLTYPESI = 1
     bw.write_bits(0, 1); // NBLTYPESD = 1
 
-    bw.write_bits(0, 2); // NPOSTFIX = 0
-    bw.write_bits(0, 4); // NDMOEM = 0
+    let commands = parse_input_with_offset(input, mlen_offset, quality);
+
+    // Choose distance-code configuration from the parsed commands.
+    let dist_cfg = DistanceConfig::choose(&commands);
+    bw.write_bits(dist_cfg.npostfix as u32, 2); // NPOSTFIX
+    bw.write_bits(dist_cfg.ndmoem as u32, 4); // NDMOEM
 
     bw.write_bits(0, 2); // CONTEXT_MODE = LSB6
     bw.write_bits(0, 1); // NTREESL = 1
     bw.write_bits(0, 1); // NTREESD = 1
 
-    let commands = parse_input_with_offset(input, mlen_offset, quality);
-    let Some(stream) = build_symbol_stream(&commands, input) else {
+    let Some(stream) = build_symbol_stream(&commands, input, &dist_cfg) else {
         return;
     };
 
+    let dist_alphabet = dist_cfg.alphabet_size();
+
     let mut lit_freq = vec![0u32; 256];
     let mut cmd_freq = vec![0u32; 704];
-    let mut dist_freq = vec![0u32; 64];
+    let mut dist_freq = vec![0u32; dist_alphabet];
     for &b in &stream.literals {
         lit_freq[b as usize] += 1;
     }
@@ -261,7 +266,7 @@ fn encode_huffman_chunk_into(
 
     write_huffman_table(bw, &lit_lengths, 256);
     write_huffman_table(bw, &cmd_lengths, 704);
-    write_huffman_table(bw, &dist_lengths, 64);
+    write_huffman_table(bw, &dist_lengths, dist_alphabet);
 
     let mut lit_iter = stream.literals.iter();
     let mut dist_iter = stream.dist_symbols.iter().zip(stream.dist_extras.iter());
@@ -289,7 +294,7 @@ fn encode_huffman_chunk_into(
             let (&d_sym, &d_extra) = dist_iter.next().expect("distance stream exhausted");
             let (dc, dl) = dist_codes[d_sym as usize];
             bw.write_bits(dc, u32::from(dl));
-            let nbits = distance_extra_bits(d_sym);
+            let nbits = distance_extra_bits(d_sym, &dist_cfg);
             if nbits > 0 {
                 bw.write_bits(d_extra, nbits);
             }
@@ -394,7 +399,11 @@ struct SymbolStream {
 ///   distance; we never emit implicit-distance commands).
 /// - Compute the distance symbol + extra bits via the long-code formula
 ///   (RFC 7932 §10.4).
-fn build_symbol_stream(commands: &[Command], input: &[u8]) -> Option<SymbolStream> {
+fn build_symbol_stream(
+    commands: &[Command],
+    input: &[u8],
+    dist_cfg: &DistanceConfig,
+) -> Option<SymbolStream> {
     let mut literals = Vec::new();
     let mut cmd_symbols = Vec::with_capacity(commands.len());
     let mut dist_symbols = Vec::new();
@@ -410,7 +419,7 @@ fn build_symbol_stream(commands: &[Command], input: &[u8]) -> Option<SymbolStrea
         cmd_symbols.push(cmd_sym);
 
         if cmd.copy_len > 0 {
-            let (sym, extra) = encode_distance(cmd.distance);
+            let (sym, extra) = encode_distance(cmd.distance, dist_cfg);
             dist_symbols.push(sym);
             dist_extras.push(extra);
         }
@@ -466,22 +475,86 @@ fn find_cmd_symbol(insert_len: u32, copy_len: u32) -> Option<usize> {
     None
 }
 
-/// Encode an LZ77 distance as a (symbol, extra_bits) pair.
+/// Distance-code configuration (RFC 7932 §9.4).
 ///
-/// Uses only long codes (symbol ≥ NUM_SHORT=16) since short codes 0-15
-/// reference the recent-distances ring buffer, which would require
-/// stateful tracking. Long codes are stateless and correct at the cost
-/// of slightly larger output.
+/// Controls NPOSTFIX and NDIRECT, which together determine the
+/// distance-code alphabet layout:
 ///
-/// Long-code formula (inverted from RFC 7932 §10.4):
-///   distval = sym - 16
-///   nbits = (distval >> 1) + 1
-///   offset = ((2 + (distval & 1)) << nbits) - 4
-///   distance = offset + extra + 1
-fn encode_distance(distance: u32) -> (u32, u32) {
-    let d = distance.saturating_sub(1);
-    // Smallest nbits such that the distance fits in a (2 or 3) << nbits bucket.
-    // Find smallest nbits where d < (3 << (nbits+1)) - 3.
+/// ```text
+///   [0..16)         = short codes (ring buffer)
+///   [16..16+NDIRECT) = direct codes (no extra bits)
+///   [16+NDIRECT..)   = long codes (with optional postfix bits)
+/// ```
+#[derive(Clone, Copy, Debug)]
+struct DistanceConfig {
+    npostfix: u8,
+    ndmoem: u8,
+}
+
+impl DistanceConfig {
+    const fn new(npostfix: u8, ndmoem: u8) -> Self {
+        Self { npostfix, ndmoem }
+    }
+
+    /// NDIRECT = NDMOEM << NPOSTFIX (RFC 7932 §9.4).
+    const fn ndirect(&self) -> u32 {
+        (self.ndmoem as u32) << self.npostfix
+    }
+
+    /// Total direct + short codes in the alphabet.
+    const fn num_direct(&self) -> u32 {
+        NUM_SHORT + self.ndirect()
+    }
+
+    /// Full distance alphabet size.
+    fn alphabet_size(&self) -> usize {
+        self.num_direct() as usize + (48usize << self.npostfix)
+    }
+
+    /// Choose NPOSTFIX/NDMOEM heuristically from the distance distribution.
+    ///
+    /// Direct codes only help when many matches have distances ≤ NDIRECT
+    /// (max 15 for NPOSTFIX=0). Adding direct codes that don't match the
+    /// actual distances just enlarges the alphabet and hurts Huffman.
+    fn choose(commands: &[Command]) -> Self {
+        let mut dists_in_direct_range = 0u32; // distances 1..=15
+        let mut total_dists = 0u32;
+        for cmd in commands {
+            if cmd.copy_len > 0 && cmd.distance > 0 {
+                total_dists += 1;
+                if cmd.distance <= 15 {
+                    dists_in_direct_range += 1;
+                }
+            }
+        }
+        // Only add direct codes if ≥ 20% of distances fall in the direct range.
+        let ndmoem = if total_dists > 0 && dists_in_direct_range * 5 >= total_dists * 4 {
+            12
+        } else {
+            0
+        };
+        Self::new(0, ndmoem)
+    }
+}
+
+/// Encode an LZ77 distance as a (symbol, extra_bits) pair using the
+/// given distance-code configuration.
+///
+/// Direct codes (when NDIRECT > 0): distance 1..=NDIRECT maps to
+/// symbols 16..16+NDIRECT-1 with zero extra bits.
+///
+/// Long codes (symbol ≥ 16+NDIRECT): use the standard RFC 7932 §10.4
+/// formula, shifted past the direct-code range.
+fn encode_distance(distance: u32, cfg: &DistanceConfig) -> (u32, u32) {
+    let ndirect = cfg.ndirect();
+
+    // Direct codes: distance 1..=NDIRECT → symbol 16..16+NDIRECT-1
+    if distance <= ndirect {
+        return (NUM_SHORT + distance - 1, 0);
+    }
+
+    // Long codes: shift past short + direct codes
+    let d = distance - 1 - ndirect;
     let mut nbits: u32 = 1;
     while nbits < 24 {
         let limit_even = (4u32 << (nbits - 1)).saturating_sub(4) + (1u32 << nbits);
@@ -492,7 +565,6 @@ fn encode_distance(distance: u32) -> (u32, u32) {
         }
         nbits += 1;
     }
-    // Decide even/odd bucket based on which contains d.
     let even_offset = (4u32 << (nbits - 1)).saturating_sub(4);
     let odd_offset = (6u32 << (nbits - 1)).saturating_sub(4);
     let (postfix_bit, base) = if d >= odd_offset {
@@ -501,17 +573,19 @@ fn encode_distance(distance: u32) -> (u32, u32) {
         (0, even_offset)
     };
     let distval = (nbits - 1) * 2 + postfix_bit;
-    let sym = NUM_SHORT + distval;
+    let sym = cfg.num_direct() + distval;
     let extra = d - base;
     (sym, extra)
 }
 
-/// Number of extra bits for a distance symbol.
-fn distance_extra_bits(sym: u32) -> u32 {
-    if sym < NUM_SHORT {
+/// Number of extra bits for a distance symbol under the given config.
+fn distance_extra_bits(sym: u32, cfg: &DistanceConfig) -> u32 {
+    let num_direct = cfg.num_direct();
+    if sym < num_direct {
+        // Short codes (0-15) and direct codes (16..16+NDIRECT-1): no extra bits.
         return 0;
     }
-    let distval = sym - NUM_SHORT;
+    let distval = sym - num_direct;
     (distval >> 1) + 1
 }
 
@@ -1184,17 +1258,25 @@ mod tests {
     #[test]
     fn distance_round_trips_in_decoder_formula() {
         // For a range of distances, encode_distance + the decoder formula
-        // (decode_distance_from_code with npostfix=0, num_direct=16)
+        // (decode_distance_from_code with npostfix=0, num_direct=16+ndirect)
         // should reproduce the original distance.
+        let cfg = DistanceConfig::new(0, 12);
+        let ndirect = cfg.ndirect();
+        let num_direct = cfg.num_direct();
         for d in [1u32, 2, 3, 4, 5, 10, 17, 100, 1000, 65_536, 1_000_000] {
-            let (sym, extra) = encode_distance(d);
-            // Decoder formula: distval = sym - 16, nbits = (distval >> 1) + 1,
+            let (sym, extra) = encode_distance(d, &cfg);
+            // Direct code: distance = sym - 15
+            if sym < num_direct {
+                assert_eq!(sym - NUM_SHORT + 1, d, "direct dist {d}: sym={sym}");
+                continue;
+            }
+            // Long code formula: distval = sym - num_direct, nbits = (distval >> 1) + 1,
             // offset = ((2 + (distval & 1)) << nbits) - 4,
-            // distance = offset + extra + 1.
-            let distval = i32::from(sym as i32 - 16);
+            // distance = offset + extra + 1 + ndirect.
+            let distval = i32::from(sym as i32 - num_direct as i32);
             let nbits = ((distval as u32) >> 1) + 1;
             let offset = (((distval & 1) + 2) << nbits) - 4;
-            let decoded = (offset + extra as i32 + 1) as u32;
+            let decoded = (offset + extra as i32 + 1) as u32 + ndirect;
             assert_eq!(
                 decoded, d,
                 "distance {} round-trip failed: sym={}, extra={}",
@@ -1270,5 +1352,20 @@ mod tests {
                 assert_eq!(decoded, *input, "round-trip q={q} input {}b", input.len());
             }
         }
+    }
+
+    #[test]
+    fn dictionary_transform_helps_mixed_case() {
+        let input: Vec<u8> = b" The Quick Brown Fox Jumps Over The Lazy Dog. ".repeat(100);
+        let compressed = compress(&input);
+        eprintln!(
+            "mixed-case text: input {} -> compressed {} ({:.1}%)",
+            input.len(),
+            compressed.len(),
+            compressed.len() as f64 / input.len() as f64 * 100.0
+        );
+        let decoded = decoder::decode(&compressed).expect("decode");
+        assert_eq!(decoded, input);
+        assert!(compressed.len() < input.len() / 2);
     }
 }
