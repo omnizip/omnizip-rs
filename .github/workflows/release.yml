@@ -35,3 +35,9 @@ jobs:
 
       - name: Run release-plz
         uses: MarcoIeni/release-plz-action@v0.5.131
+        with:
+          # release_always = true in release-plz.toml means we publish
+          # directly on push to main. Running release-pr too fails with
+          # 403 because GitHub Actions isn't permitted to create PRs here.
+          # Use `release` only.
+          command: release
