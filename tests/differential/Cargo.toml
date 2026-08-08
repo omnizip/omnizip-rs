@@ -23,6 +23,7 @@ omnizip-flac = { path = "../../omnizip-flac", version = "0.15.0" }
 omnizip-libdeflate = { path = "../../omnizip-libdeflate", version = "0.15.0" }
 omnizip-ricepp = { path = "../../omnizip-ricepp", version = "0.15.0" }
 omnizip-snappy = { path = "../../omnizip-snappy", version = "0.15.0" }
+tempfile = "3"
 
 [lints]
 workspace = true
