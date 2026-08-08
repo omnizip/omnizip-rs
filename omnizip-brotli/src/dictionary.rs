@@ -255,10 +255,14 @@ fn to_upper_case(p: &mut [u8]) -> usize {
         return 1;
     }
     if p[0] < 0xE0 {
-        p[1] ^= 32;
+        if p.len() >= 2 {
+            p[1] ^= 32;
+        }
         return 2;
     }
-    p[2] ^= 5;
+    if p.len() >= 3 {
+        p[2] ^= 5;
+    }
     3
 }
 
@@ -422,13 +426,13 @@ pub fn find_dictionary_match(input: &[u8], pos: usize, max_distance: u32) -> Opt
         return None;
     }
 
-    // Transform INDICES into TRANSFORM_DATA (not transform_type constants).
-    // Only try transforms that don't change the output length (no prefix,
-    // no suffix, no OmitFirst/OmitLast):
+    // Transform INDICES into TRANSFORM_DATA (verified against the 121-entry
+    // table). Only try transforms that don't change the output length:
     //   0  = (none, IDENTITY, none)
     //   9  = (none, UPPERCASE_FIRST, none)
-    //   42 = (none, UPPERCASE_ALL, none)
-    const TRANSFORMS_TO_TRY: [usize; 3] = [0, 9, 42];
+    //   44 = (none, UPPERCASE_ALL, none)
+    // NOTE: index 42 is OMIT_LAST_4 (destructive) — do NOT use.
+    const TRANSFORMS_TO_TRY: [usize; 3] = [0, 9, 44];
 
     // Try word lengths 4..=8 (the most common in text).
     for len in 4u32..=8u32 {
