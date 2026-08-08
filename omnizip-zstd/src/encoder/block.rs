@@ -12,8 +12,10 @@
 #![forbid(unsafe_code)]
 
 use crate::constants::{BLOCK_TYPE_COMPRESSED, BLOCK_TYPE_RAW, BLOCK_TYPE_RLE};
+use crate::encoder::ldm::LdmHashTable;
 use crate::encoder::match_finder::{
-    compress_block_lazy, compress_block_lazy2, compress_block_with_min_match, MatchState, SeqStore,
+    compress_block_lazy, compress_block_lazy2, compress_block_lazy2_with_ldm,
+    compress_block_with_min_match, MatchState, SeqStore,
 };
 use crate::encoder::sequences::encode_section;
 use crate::xxhash;
@@ -22,6 +24,25 @@ use crate::ZstdError;
 /// Maximum block content size (128 KiB per ZSTD spec). Use 127 KiB to
 /// avoid edge cases where some decoders reject exactly-128KiB blocks.
 pub(crate) const BLOCK_MAX_SIZE: usize = 127 * 1024;
+
+/// Sparse sampling gap for the LDM hash table (1 entry per 64 bytes).
+/// Controls the memory/coverage trade-off: smaller = denser sampling
+/// (more memory, finds more matches); larger = sparser (less memory,
+/// may miss some matches).
+const LDM_GAP: usize = 64;
+
+/// Determine whether LDM should be enabled for this input.
+///
+/// LDM is enabled at Btultra2 strategy (L19+) when the input exceeds
+/// one block size, so cross-block long-distance matches are possible.
+/// Below L19 or for small inputs, LDM adds overhead with no benefit.
+fn should_enable_ldm(
+    params: &crate::encoder::cparams::CompressionParams,
+    input_len: usize,
+) -> bool {
+    use crate::encoder::cparams::Strategy;
+    input_len > BLOCK_MAX_SIZE && matches!(params.strategy, Strategy::Btultra2)
+}
 
 /// Minimum hash log (matches ZSTD's HASH_LOG_MIN).
 const HASH_LOG_MIN: u32 = 6;
@@ -110,6 +131,35 @@ fn encode_frame_into(
     // Frame header: descriptor + optional window_descriptor + FCS.
     write_frame_header(out, plaintext.len(), None);
 
+    // LDM is enabled at Btultra2 (L19+) for inputs larger than one
+    // block. The LDM hash table is pre-populated over the full input
+    // and queried at every position alongside the normal hash table.
+    let ldm_enabled = should_enable_ldm(params, plaintext.len());
+
+    // Build and pre-populate the LDM hash table.
+    let ldm_table: Option<LdmHashTable> = if ldm_enabled {
+        let mut ldm = LdmHashTable::new(params.window_log, LDM_GAP);
+        for pos in 0..plaintext.len() {
+            ldm.insert(plaintext, pos);
+        }
+        Some(ldm)
+    } else {
+        None
+    };
+
+    // In LDM mode, the hash table is NOT cleared between blocks
+    // (positions are absolute across the full frame). Chain walking
+    // is disabled because the chain table is sized for one block;
+    // LDM provides long-distance coverage instead.
+    if ldm_enabled {
+        match_state.disable_chain();
+    }
+
+    // In LDM mode, the distance cap is the full frame window. For
+    // single-segment frames (input ≤ 4 GiB), the window = FCS =
+    // input length, so any backward reference is valid.
+    let max_distance = if ldm_enabled { plaintext.len() } else { 0 };
+
     // Blocks.
     let mut rep_offsets = [1u32, 4, 8];
     let mut last_huf_weights: Option<Vec<u8>> = None;
@@ -118,17 +168,34 @@ fn encode_frame_into(
         let remaining = plaintext.len() - offset;
         let chunk_size = remaining.min(BLOCK_MAX_SIZE);
         let is_last = offset + chunk_size == plaintext.len();
-        let chunk = &plaintext[offset..offset + chunk_size];
+        let block_end = offset + chunk_size;
+        let chunk = &plaintext[offset..block_end];
 
-        write_block(
-            out,
-            chunk,
-            is_last,
-            match_state,
-            &mut rep_offsets,
-            params,
-            &mut last_huf_weights,
-        )?;
+        if ldm_enabled {
+            write_block_ldm(
+                out,
+                plaintext,
+                offset,
+                block_end,
+                is_last,
+                match_state,
+                &mut rep_offsets,
+                params,
+                &mut last_huf_weights,
+                ldm_table.as_ref().expect("ldm table exists when ldm_enabled"),
+                max_distance,
+            )?;
+        } else {
+            write_block(
+                out,
+                chunk,
+                is_last,
+                match_state,
+                &mut rep_offsets,
+                params,
+                &mut last_huf_weights,
+            )?;
+        }
         offset += chunk_size;
     }
 
@@ -465,6 +532,68 @@ fn write_block(
     Ok(())
 }
 
+/// Write one block using LDM. Like [`write_block`] but:
+/// - Does NOT clear the hash table (positions are absolute across blocks).
+/// - Uses [`compress_block_lazy2_with_ldm`] instead of the normal match finder.
+/// - `src` is the full plaintext truncated to `[..block_end]`, so the
+///   match finder can see all previous blocks' bytes for cross-block matches.
+fn write_block_ldm(
+    out: &mut Vec<u8>,
+    plaintext: &[u8],
+    block_start: usize,
+    block_end: usize,
+    is_last: bool,
+    ms: &mut MatchState,
+    rep_offsets: &mut [u32; 3],
+    params: &crate::encoder::cparams::CompressionParams,
+    last_huf_weights: &mut Option<Vec<u8>>,
+    ldm: &LdmHashTable,
+    max_distance: usize,
+) -> Result<(), ZstdError> {
+    let chunk = &plaintext[block_start..block_end];
+
+    // RLE check: entire chunk is one repeated byte.
+    if chunk.len() >= 2 && chunk.iter().all(|&b| b == chunk[0]) {
+        write_rle_block(out, chunk[0], chunk.len(), is_last);
+        *last_huf_weights = None;
+        return Ok(());
+    }
+
+    // Run the LDM-aware lazy2 match finder over this block.
+    let mut seq_store = SeqStore::new();
+    seq_store.reset(*rep_offsets);
+    let min_match = params.min_match.max(4) as usize;
+
+    let src = &plaintext[..block_end];
+    compress_block_lazy2_with_ldm(
+        src,
+        block_start,
+        &mut seq_store,
+        ms,
+        ldm,
+        min_match,
+        max_distance,
+    );
+    *rep_offsets = seq_store.rep_offsets;
+
+    // Try compressed block, fall back to Raw.
+    let mut compressed_content = Vec::new();
+    let encode_result =
+        encode_compressed_content(&mut compressed_content, &seq_store, last_huf_weights);
+
+    let use_compressed = encode_result.is_ok() && compressed_content.len() < chunk.len();
+
+    if use_compressed {
+        write_compressed_block_header(out, compressed_content.len(), is_last);
+        out.extend_from_slice(&compressed_content);
+    } else {
+        write_raw_block(out, chunk, is_last);
+        *last_huf_weights = None;
+    }
+
+    Ok(())
+}
+
 /// Encode the compressed block content: literals section + sequences
 /// section. Tries Raw, Huffman (Compressed), and Huffman (Treeless)
 /// literals, picks the smallest.
@@ -748,5 +877,64 @@ mod tests {
         let compressed = encode_frame_compressed(&input, 3).expect("encode");
         let decompressed = decompress(&compressed, input.len() as u32).expect("decode");
         assert_eq!(decompressed, input);
+    }
+
+    #[test]
+    fn ldm_round_trips_large_repetitive_input() {
+        // 500 KiB input: larger than BLOCK_MAX_SIZE (127 KiB) so LDM
+        // activates at L19+. The content has a repeating 4 KiB block
+        // that LDM should find across block boundaries.
+        let block: Vec<u8> = (0..4096).map(|i| (i % 251) as u8).collect();
+        let input: Vec<u8> = block.repeat(128); // 512 KiB
+
+        let compressed = encode_frame_compressed(&input, 19).expect("encode L19");
+        let decompressed = decompress(&compressed, input.len() as u32).expect("decode L19");
+        assert_eq!(decompressed, input, "L19 LDM round-trip failed");
+    }
+
+    #[test]
+    fn ldm_improves_ratio_on_cross_block_repetition() {
+        // Same 4 KiB block repeated 64 times = 256 KiB (2 blocks).
+        // LDM should find cross-block matches that the normal
+        // hash-table (cleared per block) would miss.
+        let pattern: Vec<u8> = (0..4096u32)
+            .map(|i| ((i.wrapping_mul(2654435761) >> 16) & 0xFF) as u8)
+            .collect();
+        let input: Vec<u8> = pattern.repeat(64); // 256 KiB
+
+        // L18 doesn't use LDM (window_log < 19 threshold for Btultra2
+        // strategy — L18 is Btultra, not Btultra2). L19+ uses LDM.
+        let l18 = encode_frame_compressed(&input, 18).expect("L18");
+        let l19 = encode_frame_compressed(&input, 19).expect("L19");
+        let l22 = encode_frame_compressed(&input, 22).expect("L22");
+
+        // All must round-trip.
+        let d18 = decompress(&l18, input.len() as u32).expect("decode L18");
+        let d19 = decompress(&l19, input.len() as u32).expect("decode L19");
+        let d22 = decompress(&l22, input.len() as u32).expect("decode L22");
+        assert_eq!(d18, input);
+        assert_eq!(d19, input);
+        assert_eq!(d22, input);
+
+        // L19 should be smaller than L18 on cross-block repetition.
+        // (LDM finds matches spanning block boundaries that L18 misses.)
+        assert!(
+            l19.len() <= l18.len(),
+            "L19 ({}) should be ≤ L18 ({}) with LDM",
+            l19.len(),
+            l18.len()
+        );
+    }
+
+    #[test]
+    fn ldm_is_deterministic() {
+        let pattern: Vec<u8> = (0..4096u32)
+            .map(|i| ((i.wrapping_mul(2654435761) >> 16) & 0xFF) as u8)
+            .collect();
+        let input: Vec<u8> = pattern.repeat(64); // 256 KiB
+
+        let a = encode_frame_compressed(&input, 19).expect("encode A");
+        let b = encode_frame_compressed(&input, 19).expect("encode B");
+        assert_eq!(a, b, "LDM encoder must be deterministic");
     }
 }

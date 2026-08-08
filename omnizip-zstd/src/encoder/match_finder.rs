@@ -20,6 +20,7 @@
 #![forbid(unsafe_code)]
 
 use crate::constants::BLOCK_MAX_SIZE;
+use crate::encoder::ldm::LdmHashTable;
 
 /// Multiplicative hash prime for 4-byte hash (matches C
 /// `prime4bytes`).
@@ -1145,6 +1146,255 @@ fn insert_range_absolute(ms: &mut MatchState, src: &[u8], start: usize, len: usi
         let pos = start + len - 2;
         let h = hash4(src, pos, ms.hash_log);
         ms.hash_table[h as usize] = pos as u32;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// LDM (Long-Distance Matching) parser — for ZSTD levels ≥ 19.
+//
+// Extends the lazy2 parser with queries to a pre-populated sparse LDM
+// hash table, finding matches at distances beyond the normal block
+// window (up to the full frame window size).
+//
+// Key differences from `compress_block_lazy2_with_prefix`:
+//   - Also queries `ldm` at each position for long-distance matches.
+//   - Distance cap is `max_distance` (frame window), not BLOCK_MAX_SIZE.
+//   - Hash table is NOT cleared between blocks (positions are absolute).
+//   - Chain walking is disabled (single-probe + LDM only).
+// ---------------------------------------------------------------------------
+
+/// Maximum LDM chain entries to walk per position.
+const LDM_MAX_CHAIN: u32 = 32;
+
+/// Lazy2 parser with LDM support. Used at levels ≥ 19 (Btultra2
+/// strategy) when the input is larger than one block.
+///
+/// `src` is the full plaintext truncated to `[..block_end]`. The parser
+/// iterates `src[block_start..src.len())` — exactly one block's worth
+/// of data. The normal hash table carries entries from all previous
+/// blocks (not cleared between calls), enabling cross-block
+/// short-distance matches. `ldm` provides cross-block long-distance
+/// matches via sparse sampling.
+pub fn compress_block_lazy2_with_ldm(
+    src: &[u8],
+    block_start: usize,
+    seq_store: &mut SeqStore,
+    ms: &mut MatchState,
+    ldm: &LdmHashTable,
+    min_match: usize,
+    max_distance: usize,
+) -> usize {
+    let mm = min_match.max(4);
+    if src.len() < block_start + mm + 1 {
+        seq_store.literals.extend_from_slice(&src[block_start..]);
+        return src.len() - block_start;
+    }
+
+    let h_bits = ms.hash_log;
+    let mut anchor: usize = block_start;
+    let mut ip: usize = if block_start == 0 { 1 } else { block_start };
+    let limit = src.len().saturating_sub(mm);
+
+    while ip < limit {
+        // Repcode check.
+        let rep0 = seq_store.rep_offsets[0];
+        if rep0 > 0 && ip > rep0 as usize {
+            if ip + MIN_MATCH <= src.len()
+                && src[ip..ip + MIN_MATCH] == src[ip - rep0 as usize..ip - rep0 as usize + MIN_MATCH]
+            {
+                let mut m_len = MIN_MATCH;
+                m_len += count_match(
+                    src,
+                    ip + m_len,
+                    src,
+                    ip + m_len - rep0 as usize,
+                    limit + MIN_MATCH - ip - m_len,
+                );
+
+                let mut back = 0usize;
+                while ip > anchor + back
+                    && ip > rep0 as usize + back
+                    && src[ip - 1 - back] == src[ip - 1 - rep0 as usize - back]
+                {
+                    back += 1;
+                }
+                m_len += back;
+
+                if m_len < min_match {
+                    ip += 1;
+                    continue;
+                }
+
+                ip -= back;
+                let lit_len = (ip - anchor) as u32;
+                seq_store.literals.extend_from_slice(&src[anchor..ip]);
+                seq_store.sequences.push(RawSequence {
+                    literal_length: lit_len,
+                    match_length: m_len as u32,
+                    offset: rep0,
+                });
+                rotate_reps(&mut seq_store.rep_offsets, rep0);
+                insert_range_absolute(ms, src, ip, m_len as usize);
+                ip += m_len as usize;
+                anchor = ip;
+                continue;
+            }
+        }
+
+        // Find best match: normal hash table + LDM.
+        let m1 = find_best_match_ldm(src, ip, h_bits, ms, ldm, min_match, max_distance);
+
+        if let Some((dist1, len1)) = m1 {
+            // Look ahead 2 positions (read-only probes).
+            let m2 = if ip + 1 < limit {
+                probe_match_ldm(src, ip + 1, h_bits, ms, ldm, min_match, max_distance)
+            } else {
+                None
+            };
+            let m3 = if ip + 2 < limit {
+                probe_match_ldm(src, ip + 2, h_bits, ms, ldm, min_match, max_distance)
+            } else {
+                None
+            };
+
+            let defer1 = matches!(m2, Some((_, l)) if l > len1 + 1);
+            let defer2 = matches!(m3, Some((_, l)) if l > len1 + 2);
+
+            if defer1 || defer2 {
+                ip += 1;
+            } else {
+                let lit_len = (ip - anchor) as u32;
+                seq_store.literals.extend_from_slice(&src[anchor..ip]);
+                let offset = dist1 as u32;
+                seq_store.sequences.push(RawSequence {
+                    literal_length: lit_len,
+                    match_length: len1 as u32,
+                    offset,
+                });
+                rotate_reps(&mut seq_store.rep_offsets, offset);
+                insert_range_absolute(ms, src, ip, len1);
+                ip += len1;
+                anchor = ip;
+            }
+        } else {
+            ip += 1;
+        }
+    }
+
+    if anchor < src.len() {
+        seq_store.literals.extend_from_slice(&src[anchor..]);
+    }
+    src.len() - anchor
+}
+
+/// Find the best match at `ip`, checking both the normal hash table
+/// (short distances ≤ `max_distance`) and the LDM table (long
+/// distances). Updates the normal hash table with `ip`.
+fn find_best_match_ldm(
+    src: &[u8],
+    ip: usize,
+    h_bits: u32,
+    ms: &mut MatchState,
+    ldm: &LdmHashTable,
+    min_match: usize,
+    max_distance: usize,
+) -> Option<(usize, usize)> {
+    if ip + MIN_MATCH > src.len() {
+        return None;
+    }
+
+    // Normal hash table lookup (updates hash table).
+    let h = hash4(src, ip, h_bits);
+    let candidate = ms.hash_table[h as usize] as usize;
+    ms.hash_table[h as usize] = ip as u32;
+
+    let mut best_len: usize = 0;
+    let mut best_dist: usize = 0;
+
+    if candidate > 0 && candidate < ip {
+        let dist = ip - candidate;
+        if dist < max_distance
+            && candidate + MIN_MATCH <= src.len()
+            && src[ip..ip + MIN_MATCH] == src[candidate..candidate + MIN_MATCH]
+        {
+            best_len = MIN_MATCH
+                + count_match(
+                    src,
+                    ip + MIN_MATCH,
+                    src,
+                    candidate + MIN_MATCH,
+                    src.len().saturating_sub(ip + MIN_MATCH),
+                );
+            best_dist = dist;
+        }
+    }
+
+    // Check LDM for a potentially longer match.
+    if let Some(lm) = ldm.find_match(src, ip, max_distance as u32, LDM_MAX_CHAIN, min_match as u32) {
+        if lm.length as usize > best_len {
+            best_len = lm.length as usize;
+            best_dist = lm.distance as usize;
+        }
+    }
+
+    if best_len >= min_match && best_dist > 0 {
+        Some((best_dist, best_len))
+    } else {
+        None
+    }
+}
+
+/// Read-only match probe with LDM support. Does NOT update the hash
+/// table. Used for lazy2 look-ahead.
+fn probe_match_ldm(
+    src: &[u8],
+    ip: usize,
+    h_bits: u32,
+    ms: &MatchState,
+    ldm: &LdmHashTable,
+    min_match: usize,
+    max_distance: usize,
+) -> Option<(usize, usize)> {
+    if ip + MIN_MATCH > src.len() {
+        return None;
+    }
+
+    let mut best_len: usize = 0;
+    let mut best_dist: usize = 0;
+
+    // Normal hash table lookup (read-only).
+    let h = hash4(src, ip, h_bits);
+    let candidate = ms.hash_table[h as usize] as usize;
+    if candidate > 0 && candidate < ip {
+        let dist = ip - candidate;
+        if dist < max_distance
+            && candidate + MIN_MATCH <= src.len()
+            && src[ip..ip + MIN_MATCH] == src[candidate..candidate + MIN_MATCH]
+        {
+            best_len = MIN_MATCH
+                + count_match(
+                    src,
+                    ip + MIN_MATCH,
+                    src,
+                    candidate + MIN_MATCH,
+                    src.len().saturating_sub(ip + MIN_MATCH),
+                );
+            best_dist = dist;
+        }
+    }
+
+    // Check LDM (read-only).
+    if let Some(lm) = ldm.find_match(src, ip, max_distance as u32, LDM_MAX_CHAIN, min_match as u32) {
+        if lm.length as usize > best_len {
+            best_len = lm.length as usize;
+            best_dist = lm.distance as usize;
+        }
+    }
+
+    if best_len >= min_match && best_dist > 0 {
+        Some((best_dist, best_len))
+    } else {
+        None
     }
 }
 
