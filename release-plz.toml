@@ -23,13 +23,15 @@ body = """
 {% endfor %}
 """
 
-# omnizip-deflate64 was added at commit 8ba1c91 in a workspace that
-# temporarily listed omnizip-bzip2 as a member before that directory
-# existed. release-plz's changelog generation walks back to that commit
-# to compute the diff, and `cargo metadata` fails there. Skipping
-# changelog generation for this one crate unblocks the workspace release.
-# Re-enable once enough release-plz runs have passed that the baseline
-# moves past 8ba1c91.
+# omnizip-deflate64 was first added at a commit whose workspace manifest
+# referenced omnizip-bzip2/ before that directory existed. release-plz's
+# package-equality walk calls `cargo package` at each historical commit
+# and fails at that one, blocking every other crate's release. The
+# underlying release-plz bug is that `check_package_equality` runs before
+# `is_commit_too_old`, so the ancestor-of-tag early-exit never triggers.
+# Skipping this crate entirely unblocks the workspace. Re-enable once
+# upstream release-plz fixes the ordering, or once the broken commit is
+# far enough back that the walk no longer reaches it.
 [[package]]
 name = "omnizip-deflate64"
-changelog_update = false
+release = false
