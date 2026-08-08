@@ -915,8 +915,9 @@ pub fn decode(compressed: &[u8]) -> Result<Vec<u8>, &'static str> {
             output.extend_from_slice(&compressed[byte_offset..needed]);
             bit_pos = needed * 8;
         } else {
+            let output_base = output.len();
             let (new_pos, bytes_emitted) =
-                decode_compressed_metablock(compressed, bit_pos, mb.mlen as usize)?;
+                decode_compressed_metablock(compressed, bit_pos, mb.mlen as usize, output_base)?;
             bit_pos = new_pos;
             output.extend(bytes_emitted);
         }
@@ -944,6 +945,7 @@ fn decode_compressed_metablock(
     data: &[u8],
     bit_pos: usize,
     mlen: usize,
+    output_base: usize,
 ) -> Result<(usize, Vec<u8>), &'static str> {
     let mut br = BitReader::new(data);
     br.bit_pos = bit_pos;
@@ -961,6 +963,7 @@ fn decode_compressed_metablock(
             nbltypesl,
             nbltypesc,
             nbltypesd,
+            output_base,
         );
     }
 
@@ -1004,6 +1007,7 @@ fn decode_compressed_metablock(
             _context_mode,
             ntreesl,
             None,
+            output_base,
         );
     }
 
@@ -1020,6 +1024,7 @@ fn decode_compressed_metablock(
             _context_mode,
             ntreesl,
             Some(ntreesd),
+            output_base,
         );
     }
 
@@ -1106,7 +1111,9 @@ fn decode_compressed_metablock(
             };
             // Per upstream: max_distance = min(pos, max_backward_distance).
             // Distances > max_distance are static-dictionary references.
-            let pos = output.len() as u32;
+            // pos is the CUMULATIVE output position across all metablocks
+            // (RFC 7932: the distance window spans metablock boundaries).
+            let pos = (output_base + output.len()) as u32;
             let max_distance = if pos < max_backward_distance {
                 pos
             } else {

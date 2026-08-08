@@ -326,6 +326,7 @@ pub(crate) fn decode_compressed_metablock_full(
     nbltypesl: u32,
     nbltypesc: u32,
     nbltypesd: u32,
+    output_base: usize,
 ) -> Result<(usize, Vec<u8>), &'static str> {
     let mut br = BitReader::new(data);
     br.bit_pos = bit_pos;
@@ -379,6 +380,7 @@ pub(crate) fn decode_compressed_metablock_full(
         cmd_bt,
         dist_bt,
         context_modes,
+        output_base,
     )
 }
 
@@ -397,6 +399,7 @@ pub(crate) fn decode_compressed_metablock_full_with_trees(
     context_mode_bits: u32,
     ntreesl: u32,
     ntreesd: Option<u32>,
+    output_base: usize,
 ) -> Result<(usize, Vec<u8>), &'static str> {
     let mut br = BitReader::new(data);
     br.bit_pos = bit_pos;
@@ -428,6 +431,7 @@ pub(crate) fn decode_compressed_metablock_full_with_trees(
         cmd_bt,
         dist_bt,
         context_modes,
+        output_base,
     )
 }
 
@@ -446,6 +450,7 @@ fn finish_metablock_decode(
     mut cmd_bt: BlockTypeState,
     mut dist_bt: BlockTypeState,
     context_modes: Vec<ContextMode>,
+    output_base: usize,
 ) -> Result<(usize, Vec<u8>), &'static str> {
     let ndirect = ndirect_raw << npostfix;
     if npostfix > 3 {
@@ -599,7 +604,8 @@ fn finish_metablock_decode(
         }
 
         // Per upstream: max_distance = min(pos, max_backward_distance).
-        let pos = output.len() as u32;
+        // pos is the CUMULATIVE output position across all metablocks.
+        let pos = (output_base + output.len()) as u32;
         let max_distance = if pos < max_backward_distance {
             pos
         } else {

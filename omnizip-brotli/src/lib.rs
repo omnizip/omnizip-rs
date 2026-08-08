@@ -156,13 +156,11 @@ impl Codec for BrotliCodec {
         "brotli"
     }
     fn compress(&self, plaintext: &[u8], level: CompressionLevel) -> Result<Vec<u8>, OmnizipError> {
-        // Quality is currently ignored: all levels use the from-spec
-        // encoder (Huffman-coded metablocks with LZ77 + static
-        // dictionary references, no vendored code). The vendored
-        // fast_encoder remains available via compress_with_options
-        // for callers that need maximum ratio today.
-        let _ = level;
-        Ok(from_spec_encoder::compress(plaintext))
+        // Map CompressionLevel (0–22 workspace scale) to Brotli quality
+        // (0–11). The from-spec encoder responds to quality via
+        // match-finder effort and dictionary lookup gating.
+        let q = (level.as_u8() / 2).min(11) as i32;
+        Ok(from_spec_encoder::compress_with_quality(plaintext, q))
     }
     fn decompress(&self, compressed: &[u8], expected_len: u32) -> Result<Vec<u8>, OmnizipError> {
         let expected_us = usize::try_from(expected_len).map_err(|_| OmnizipError::Corrupt {

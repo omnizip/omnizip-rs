@@ -141,12 +141,25 @@ fn reverse_bits(mut v: u32, n: u8) -> u32 {
 ///
 /// Produces output accepted by any RFC 7932 conformant decoder. The
 /// encoder tries the Huffman-coded path first and falls back to an
-/// uncompressed metablock if the Huffman output would be larger.
-///
-/// Inputs larger than 64 KiB (the Brotli single-metablock limit) are
-/// split into 64 KiB chunks, each emitted as its own metablock.
+/// Compress at Brotli quality 11 (maximum effort). Equivalent to
+/// [`compress_with_quality`](fn.compress_with_quality.html) with q=11.
 #[must_use]
 pub fn compress(input: &[u8]) -> Vec<u8> {
+    compress_with_quality(input, 11)
+}
+
+/// Compress at a given Brotli quality level (0–11).
+///
+/// Higher quality trades speed for ratio by:
+/// - Increasing hash-chain depth (`max_chain_length`)
+/// - Increasing the "good enough" match length (`nice_match`)
+/// - Enabling static-dictionary lookups (q ≥ 2)
+///
+/// All levels produce RFC 7932-conformant Brotli streams decodable by
+/// any standard Brotli decoder.
+#[must_use]
+pub fn compress_with_quality(input: &[u8], quality: i32) -> Vec<u8> {
+    let q = quality.clamp(0, 11);
     if input.is_empty() {
         return empty_frame();
     }
@@ -154,20 +167,18 @@ pub fn compress(input: &[u8]) -> Vec<u8> {
     // Inputs ≤ 64 KiB: single metablock, Huffman or uncompressed.
     if input.len() < (1 << 16) {
         let uncompressed = encode_uncompressed_frame(input);
-        let huffman = encode_huffman_frame(input);
+        let huffman = encode_huffman_frame_q(input, q);
         if !huffman.is_empty() && huffman.len() < uncompressed.len() {
             return huffman;
         }
         return uncompressed;
     }
 
-    // Large inputs (> 64 KiB) exceed the single-metablock MLEN limit.
-    // The multi-metablock Huffman path has a known issue with bit-position
-    // tracking between chunks (chunk1's last command shifts chunk2's
-    // metablock header by a few bits, causing decoder failure on some
-    // inputs). Until that's fixed, emit a single uncompressed metablock
-    // per 64 KiB chunk. This gives correct output (no expansion beyond
-    // ~5 bytes/chunk header) but no compression for large inputs.
+    // Large inputs (> 64 KiB): split into 64 KiB-1 chunks and emit
+    // each as a Huffman-coded metablock. Each chunk is independently
+    // Huffman-coded with its own LZ77 + dictionary pass; the decoder
+    // threads the cumulative output position so dictionary references
+    // resolve at the correct global offset.
     let chunk_size = (1 << 16) - 1;
     let mut bw = BitWriter::new();
     write_wbits(&mut bw);
@@ -175,17 +186,14 @@ pub fn compress(input: &[u8]) -> Vec<u8> {
     let mut offset = 0usize;
     while offset < input.len() {
         let end = (offset + chunk_size).min(input.len());
-        let chunk = &input[offset..end];
         let is_last = end == input.len();
-        encode_uncompressed_chunk_into(&mut bw, chunk, is_last);
+        encode_huffman_chunk_into(&mut bw, &input[offset..end], offset, is_last, q);
         offset = end;
     }
     bw.flush()
 }
 
-/// Append all bits from `src` (bytes + accumulator) to `dst`. Used by
-/// the multi-metablock Huffman path (currently unused — kept for the
-/// TODO multi-metablock implementation).
+/// Append all bits from `src` (bytes + accumulator) to `dst`.
 #[allow(dead_code)]
 fn append_writer(dst: &mut BitWriter, src: BitWriter) {
     for byte in src.out {
@@ -197,7 +205,13 @@ fn append_writer(dst: &mut BitWriter, src: BitWriter) {
 }
 
 /// Encode one metablock (Huffman-coded) into the shared writer.
-fn encode_huffman_chunk_into(bw: &mut BitWriter, input: &[u8], mlen_offset: usize, is_last: bool) {
+fn encode_huffman_chunk_into(
+    bw: &mut BitWriter,
+    input: &[u8],
+    mlen_offset: usize,
+    is_last: bool,
+    quality: i32,
+) {
     bw.write_bits(if is_last { 1 } else { 0 }, 1); // ISLAST
                                                    // ISLASTEMPTY only present when ISLAST=1; we never emit empty
                                                    // metablocks, so always 0 when present.
@@ -222,7 +236,7 @@ fn encode_huffman_chunk_into(bw: &mut BitWriter, input: &[u8], mlen_offset: usiz
     bw.write_bits(0, 1); // NTREESL = 1
     bw.write_bits(0, 1); // NTREESD = 1
 
-    let commands = parse_input_with_offset(input, mlen_offset);
+    let commands = parse_input_with_offset(input, mlen_offset, quality);
     let Some(stream) = build_symbol_stream(&commands, input) else {
         return;
     };
@@ -352,13 +366,13 @@ fn empty_frame() -> Vec<u8> {
 /// Encode the entire input as a single Huffman-coded metablock (fallback
 /// for inputs ≤ 64 KiB). Calls the chunk encoder with mlen_offset=0 and
 /// is_last=true, then prepends WBITS.
-fn encode_huffman_frame(input: &[u8]) -> Vec<u8> {
+fn encode_huffman_frame_q(input: &[u8], quality: i32) -> Vec<u8> {
     if input.is_empty() || input.len() >= (1 << 16) {
         return Vec::new();
     }
     let mut bw = BitWriter::new();
     write_wbits(&mut bw);
-    encode_huffman_chunk_into(&mut bw, input, 0, true);
+    encode_huffman_chunk_into(&mut bw, input, 0, true, quality);
     bw.flush()
 }
 
@@ -513,7 +527,7 @@ fn distance_extra_bits(sym: u32) -> u32 {
 /// Convenience wrapper for chunks at the start of the input (offset=0).
 #[allow(dead_code)]
 fn parse_input(input: &[u8]) -> Vec<Command> {
-    parse_input_with_offset(input, 0)
+    parse_input_with_offset(input, 0, 11)
 }
 
 /// Parse input into commands using LZ77 + static dictionary, with a
@@ -522,15 +536,30 @@ fn parse_input(input: &[u8]) -> Vec<Command> {
 /// `mlen_offset` is added to local `pos` when computing per-position
 /// `max_distance`, so dictionary references use the same distance
 /// formula the decoder will use.
-fn parse_input_with_offset(input: &[u8], mlen_offset: usize) -> Vec<Command> {
+///
+/// `quality` (0–11) controls match-finder effort and whether the
+/// static dictionary is consulted.
+fn parse_input_with_offset(input: &[u8], mlen_offset: usize, quality: i32) -> Vec<Command> {
     let n = input.len();
     let mut commands = Vec::new();
+
+    // Quality → match-finder effort. Brotli's reference encoder scales
+    // hash-chain depth and nice_match roughly exponentially with q; we
+    // use a simpler piecewise mapping that captures the main tiers.
+    let (max_chain, nice_match, use_dict) = match quality {
+        0..=1 => (4, 8, false),
+        2..=3 => (16, 16, true),
+        4..=5 => (32, 32, true),
+        6..=7 => (64, 64, true),
+        8..=9 => (128, 128, true),
+        _ => (256, 271, true), // q 10–11
+    };
 
     let config = omnizip_codecs::HashChainConfig {
         dict_size: MAX_BACKWARD_DISTANCE,
         min_match: MIN_MATCH,
-        max_chain_length: 64,
-        nice_match: 64,
+        max_chain_length: max_chain,
+        nice_match,
         hash_log: 16,
     };
     let mut mf = omnizip_codecs::HashChainMatchFinder::new(input, config);
@@ -553,7 +582,7 @@ fn parse_input_with_offset(input: &[u8], mlen_offset: usize) -> Vec<Command> {
 
         let best = if lz77_valid {
             let m = lz77.as_ref().unwrap();
-            if m.length >= 8 {
+            if m.length >= 8 || !use_dict {
                 Some((m.distance, m.length, false))
             } else {
                 let dict = find_dictionary_match(input, pos, max_dist);
@@ -562,9 +591,11 @@ fn parse_input_with_offset(input: &[u8], mlen_offset: usize) -> Vec<Command> {
                     _ => Some((m.distance, m.length, false)),
                 }
             }
-        } else {
+        } else if use_dict {
             let dict = find_dictionary_match(input, pos, max_dist);
             dict.map(|(d, l)| (d, l, true))
+        } else {
+            None
         };
 
         if let Some((distance, length, _is_dict)) = best {
@@ -694,6 +725,11 @@ fn write_huffman_table(
     let cl_lengths = omnizip_codecs::HuffmanLengths::build(&cl_freq, 5);
     let cl_codes = cl_lengths.canonical_codes();
 
+    // When the code-length code has exactly one non-zero symbol, the
+    // decoder's single_symbol fast path reads 0 bits per occurrence.
+    // We detect this and write 0 bits below.
+    let cl_single = cl_lengths.lengths.iter().filter(|&&l| l > 0).count() == 1;
+
     // Walk CODE_LENGTH_CODE_ORDER, emitting each code-length value via
     // the fixed K_CL_PREFIX code. Stop early once the code-length prefix
     // code's space is fully consumed (mirrors the decoder's break).
@@ -722,9 +758,14 @@ fn write_huffman_table(
     // break here so the bit position after this table matches.
     let mut main_space: u32 = 32768;
     'outer: for &l in &lengths.lengths[..alphabet] {
-        let (code, len) = cl_codes[usize::from(l)];
-        let wire = reverse_bits(code, len);
-        bw.write_bits(wire, u32::from(len));
+        if cl_single {
+            // Single-symbol cl code: decoder reads 0 bits per occurrence.
+            // Only track main_space; write nothing.
+        } else {
+            let (code, len) = cl_codes[usize::from(l)];
+            let wire = reverse_bits(code, len);
+            bw.write_bits(wire, u32::from(len));
+        }
         if l != 0 {
             main_space = main_space.wrapping_sub(32768u32 >> u32::from(l));
             if main_space == 0 {
@@ -879,6 +920,23 @@ mod tests {
     }
 
     #[test]
+    fn random_single_metablock_huffman_round_trips() {
+        // 4 KiB of pseudo-random data — exercises Huffman table
+        // encoding with many distinct code lengths.
+        let input: Vec<u8> = (0..4_000u32)
+            .map(|i| (i.wrapping_mul(2654435761)) as u8)
+            .collect();
+        let compressed = compress(&input);
+        eprintln!(
+            "random 4KB: input {} -> compressed {}",
+            input.len(),
+            compressed.len()
+        );
+        let decoded = decoder::decode(&compressed).expect("decode");
+        assert_eq!(decoded, input);
+    }
+
+    #[test]
     fn two_chunk_input_round_trips() {
         // Just barely larger than 64 KiB — exercises the uncompressed
         // fallback path (multi-metablock Huffman is TODO).
@@ -927,13 +985,43 @@ mod tests {
         let chunk2 = b"xyzxyz".repeat(20);
         let mut bw = BitWriter::new();
         write_wbits(&mut bw);
-        encode_huffman_chunk_into(&mut bw, &chunk1, 0, false);
-        encode_huffman_chunk_into(&mut bw, &chunk2, chunk1.len(), true);
+        encode_huffman_chunk_into(&mut bw, &chunk1, 0, false, 11);
+        encode_huffman_chunk_into(&mut bw, &chunk2, chunk1.len(), true, 11);
         let compressed = bw.flush();
         eprintln!("compressed: {} bytes", compressed.len());
         let decoded = decoder::decode(&compressed).expect("decode");
         let expected: Vec<u8> = chunk1.iter().chain(chunk2.iter()).copied().collect();
         assert_eq!(decoded, expected);
+    }
+
+    /// Probe: does the multi-metablock Huffman path actually work on
+    /// large (>64 KiB) inputs? If this passes, the "bit-position bug"
+    /// mentioned in the compress() comment is already fixed, and we
+    /// can enable Huffman for large inputs.
+    #[test]
+    fn multi_metablock_huffman_large_input() {
+        let input: Vec<u8> = b"the quick brown fox jumps over the lazy dog. ".repeat(5000);
+        assert!(input.len() > 65_536);
+
+        let chunk_size = (1 << 16) - 1;
+        let mut bw = BitWriter::new();
+        write_wbits(&mut bw);
+        let mut offset = 0usize;
+        while offset < input.len() {
+            let end = (offset + chunk_size).min(input.len());
+            let is_last = end == input.len();
+            encode_huffman_chunk_into(&mut bw, &input[offset..end], offset, is_last, 11);
+            offset = end;
+        }
+        let compressed = bw.flush();
+        eprintln!(
+            "large multi-mb huffman: input {} -> compressed {} ({:.1}%)",
+            input.len(),
+            compressed.len(),
+            compressed.len() as f64 / input.len() as f64 * 100.0
+        );
+        let decoded = decoder::decode(&compressed).expect("decode");
+        assert_eq!(decoded, input);
     }
 
     #[test]
@@ -978,5 +1066,54 @@ mod tests {
         let frame = compress(b"abc");
         let (parsed, _) = decoder::parse_frame_header(&frame, 0).expect("parse header");
         assert_eq!(parsed.window_bits, WINDOW_BITS);
+    }
+
+    #[test]
+    fn quality_distinguishes_output() {
+        // Same input at q=0 vs q=11 should produce different output
+        // (lower quality = lazier match finding = different commands).
+        let input: Vec<u8> = b"the quick brown fox jumps over the lazy dog. ".repeat(50);
+        let lo = compress_with_quality(&input, 0);
+        let hi = compress_with_quality(&input, 11);
+        assert_ne!(
+            lo, hi,
+            "q=0 and q=11 should produce different compressed output"
+        );
+        // Both must round-trip correctly.
+        let dec_lo = decoder::decode(&lo).expect("decode q=0");
+        let dec_hi = decoder::decode(&hi).expect("decode q=11");
+        assert_eq!(dec_lo, input);
+        assert_eq!(dec_hi, input);
+        // Higher quality should compress at least as well as lower.
+        // (They can be equal for trivially compressible input, but q=11
+        // should never be *larger*.)
+        assert!(
+            hi.len() <= lo.len(),
+            "q=11 ({}) should be <= q=0 ({})",
+            hi.len(),
+            lo.len()
+        );
+    }
+
+    #[test]
+    fn all_qualities_round_trip() {
+        let inputs: Vec<Vec<u8>> = vec![
+            b"hello world".to_vec(),
+            b"abcabcabcabc".repeat(20),
+            (0..1000u32).map(|i| (i.wrapping_mul(2654435761)) as u8).collect(),
+            b"the quick brown fox jumps over the lazy dog. ".repeat(100),
+        ];
+        for q in 0..=11 {
+            for input in &inputs {
+                let compressed = compress_with_quality(input, q);
+                let decoded = decoder::decode(&compressed)
+                    .unwrap_or_else(|e| panic!("decode q={q} input {}b: {e}", input.len()));
+                assert_eq!(
+                    decoded, *input,
+                    "round-trip q={q} input {}b",
+                    input.len()
+                );
+            }
+        }
     }
 }
