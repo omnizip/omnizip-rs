@@ -39,6 +39,7 @@
 
 use crate::dictionary::find_dictionary_match;
 use crate::prefix::kCmdLut;
+use crate::static_codes::K_UTF8_CONTEXT_LOOKUP;
 
 /// Brotli window bits for the encoder (22 = 4 MB window).
 const WINDOW_BITS: u8 = 22;
@@ -240,23 +241,24 @@ fn encode_huffman_chunk_into(
     bw.write_bits(dist_cfg.npostfix as u32, 2); // NPOSTFIX
     bw.write_bits(dist_cfg.ndmoem as u32, 4); // NDMOEM
 
-    bw.write_bits(0, 2); // CONTEXT_MODE = LSB6
+    // Context mode selection: UTF8 (2) for text-like input, LSB6 (0) otherwise.
+    // UTF8 gives better context separation for multi-byte chars and ASCII text.
+    let context_mode: u32 = if use_context && is_text_like(input) {
+        2 // UTF8
+    } else {
+        0 // LSB6
+    };
+    bw.write_bits(context_mode, 2);
 
     let ntrees_l: u32 = if use_context { 2 } else { 1 };
 
-    // Build the literal context map (64 entries for LSB6, each → tree 0 or 1).
-    // Strategy: contexts where the previous byte is likely a letter (ASCII
-    // 0x41-0x5A or 0x61-0x7A) use tree 1; all others use tree 0.
+    // Build the literal context map (64 entries, each → tree 0 or 1).
+    // For both LSB6 and UTF8 modes: split based on whether the context
+    // is "letter-like". For LSB6, letter bytes map to specific contexts.
+    // For UTF8, the lookup table assigns different IDs to different
+    // character classes; we use a simple 50/50 split on the context ID.
     let lit_ctx_map: Vec<u8> = if use_context {
-        (0..64u8)
-            .map(|ctx| {
-                // LSB6 context = prev_byte & 0x3F. Reconstruct whether the
-                // prev_byte could be a letter: letter bytes are 0x41-0x5A
-                // (contexts 0x01-0x1A) and 0x61-0x7A (contexts 0x21-0x3A).
-                let is_letter_ctx = (0x01..=0x1A).contains(&ctx) || (0x21..=0x3A).contains(&ctx);
-                u8::from(is_letter_ctx)
-            })
-            .collect()
+        (0..64u8).map(|ctx| u8::from(ctx >= 32)).collect()
     } else {
         Vec::new()
     };
@@ -310,25 +312,28 @@ fn encode_huffman_chunk_into(
     }
 
     // Compute per-tree frequencies using simulated output.
-    let mut prev_byte: u8 = 0;
+    let mut p1: u8 = 0;
+    let mut p2: u8 = 0;
     lit_idx = 0;
     let mut out_pos = 0usize;
     for cmd in &commands {
         for _ in 0..cmd.insert_len {
             let b = output_sim[out_pos];
-            let ctx = (prev_byte & 0x3F) as usize;
+            let ctx = compute_context_id(p1, p2, context_mode) as usize;
             let tree = if ntrees > 1 {
                 lit_ctx_map[ctx] as usize
             } else {
                 0
             };
             lit_freqs[tree][b as usize] += 1;
-            prev_byte = b;
+            p2 = p1;
+            p1 = b;
             out_pos += 1;
         }
         if cmd.copy_len > 0 {
             out_pos += cmd.copy_len as usize;
-            prev_byte = output_sim[out_pos - 1];
+            p2 = p1;
+            p1 = output_sim[out_pos - 1];
         }
     }
 
@@ -365,7 +370,8 @@ fn encode_huffman_chunk_into(
 
     // --- Encode commands + literals with per-context tree selection ---
     let mut dist_iter = stream.dist_symbols.iter().zip(stream.dist_extras.iter());
-    prev_byte = 0;
+    p1 = 0;
+    p2 = 0;
     lit_idx = 0;
     out_pos = 0;
     for (&cmd_sym, cmd) in stream.cmd_symbols.iter().zip(commands.iter()) {
@@ -384,7 +390,7 @@ fn encode_huffman_chunk_into(
 
         for _ in 0..cmd.insert_len {
             let b = stream.literals[lit_idx];
-            let ctx = (prev_byte & 0x3F) as usize;
+            let ctx = compute_context_id(p1, p2, context_mode) as usize;
             let tree = if ntrees > 1 {
                 lit_ctx_map[ctx] as usize
             } else {
@@ -392,7 +398,8 @@ fn encode_huffman_chunk_into(
             };
             let (lc, ll) = lit_codes_per_tree[tree][b as usize];
             bw.write_bits(lc, u32::from(ll));
-            prev_byte = b;
+            p2 = p1;
+            p1 = b;
             lit_idx += 1;
             out_pos += 1;
         }
@@ -406,7 +413,8 @@ fn encode_huffman_chunk_into(
                 bw.write_bits(d_extra, nbits);
             }
             out_pos += cmd.copy_len as usize;
-            prev_byte = output_sim[out_pos - 1];
+            p2 = p1;
+            p1 = output_sim[out_pos - 1];
         }
     }
 }
@@ -736,13 +744,14 @@ fn parse_input_with_offset(
     // hash-chain depth and nice_match roughly exponentially with q; we
     // use a simpler piecewise mapping that captures the main tiers.
     // `lazy` enables lazy matching (try pos+1 before committing) at q ≥ 4.
-    let (max_chain, nice_match, use_dict_base, lazy) = match quality {
-        0..=1 => (4, 8, false, false),
-        2..=3 => (16, 16, true, false),
-        4..=5 => (32, 32, true, true),
-        6..=7 => (64, 64, true, true),
-        8..=9 => (128, 128, true, true),
-        _ => (256, 271, true, true), // q 10–11
+    // `lazy2` enables two-level lazy (try pos+1 AND pos+2) at q ≥ 8.
+    let (max_chain, nice_match, use_dict_base, lazy, lazy2) = match quality {
+        0..=1 => (4, 8, false, false, false),
+        2..=3 => (16, 16, true, false, false),
+        4..=5 => (32, 32, true, true, false),
+        6..=7 => (64, 64, true, true, false),
+        8..=9 => (128, 128, true, true, true),
+        _ => (256, 271, true, true, true), // q 10–11
     };
     let use_dict = use_dict_base && !disable_dict;
 
@@ -826,9 +835,46 @@ fn parse_input_with_offset(
                         None
                     };
 
-                    if let Some((next_dist, next_len)) = next_best {
+                    if let Some((_next_dist, next_len)) = next_best {
                         if next_len > length {
-                            // Next position is better: emit current as literal.
+                            // Lazy2: check pos+2 before committing to pos+1.
+                            if lazy2 && next_len < nice_match as u32 && pos + 2 < n {
+                                let next2_pos = pos + 2;
+                                let next2_global = mlen_offset + next2_pos;
+                                let next2_max = (next2_global as u32).min(MAX_BACKWARD_DISTANCE);
+                                let next2_best = if next2_pos + MIN_MATCH as usize <= n {
+                                    mf.find_match(next2_pos)
+                                        .filter(|m| m.distance <= next2_max)
+                                        .map(|m| {
+                                            if m.length >= 8 || !use_dict {
+                                                (m.distance, m.length)
+                                            } else {
+                                                let d = find_dictionary_match(
+                                                    input, next2_pos, next2_max,
+                                                );
+                                                d.filter(|(_, l)| *l > m.length)
+                                                    .unwrap_or((m.distance, m.length))
+                                            }
+                                        })
+                                        .or_else(|| {
+                                            if use_dict {
+                                                find_dictionary_match(input, next2_pos, next2_max)
+                                            } else {
+                                                None
+                                            }
+                                        })
+                                } else {
+                                    None
+                                };
+                                if let Some((_, n2_len)) = next2_best {
+                                    if n2_len > next_len {
+                                        // pos+2 is best: emit 2 literals.
+                                        pos += 2;
+                                        continue;
+                                    }
+                                }
+                            }
+                            // pos+1 is better than pos: emit 1 literal.
                             pos += 1;
                             continue;
                         }
@@ -1106,6 +1152,40 @@ fn build_rle_sequence(lengths: &[u8]) -> Vec<(u8, u8)> {
         }
     }
     out
+}
+
+/// Check if input looks like text (printable ASCII + whitespace).
+/// Used to select UTF8 context mode over LSB6 for better ratio.
+fn is_text_like(input: &[u8]) -> bool {
+    if input.is_empty() {
+        return false;
+    }
+    let text_bytes = input.iter().filter(|&&b| is_text_byte(b)).count();
+    text_bytes * 10 > input.len() * 9 // > 90% text bytes
+}
+
+/// A byte is "text-like" if it's printable ASCII or common whitespace.
+fn is_text_byte(b: u8) -> bool {
+    matches!(b, 0x09 | 0x0A | 0x0D) || (0x20..=0x7E).contains(&b)
+}
+
+/// Compute a literal context ID (RFC 7932 §10.1) for the given mode.
+///
+/// - `mode == 0` (LSB6): `p1 & 0x3F` (6-bit context from previous byte)
+/// - `mode == 2` (UTF8): lookup-table-based context separating UTF-8
+///   character classes
+///
+/// MSB6 (1) and Signed (3) are not used by the encoder but documented
+/// for completeness.
+fn compute_context_id(p1: u8, p2: u8, mode: u32) -> u8 {
+    match mode {
+        0 => p1 & 0x3F, // LSB6
+        2 => {
+            K_UTF8_CONTEXT_LOOKUP[p1 as usize]              // UTF8
+            | K_UTF8_CONTEXT_LOOKUP[(p2 as usize) | 256]
+        }
+        _ => p1 & 0x3F, // fallback to LSB6
+    }
 }
 
 /// Write a DecodeVarLenUint8-encoded value (RFC 7932 §9.3).
