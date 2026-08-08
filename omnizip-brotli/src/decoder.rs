@@ -229,7 +229,11 @@ pub fn parse_metablock_header(
             ));
         }
         let mnibbles_raw = br.read_bits(2);
-        let mnibbles = if mnibbles_raw == 0 { 4 } else { mnibbles_raw };
+        let mnibbles = if mnibbles_raw == 0 {
+            4
+        } else {
+            mnibbles_raw + 4
+        };
         let mnibbles_u8 = u8::try_from(mnibbles).map_err(|_| "mnibbles overflow")?;
         let mlen = br.read_mlen(mnibbles);
         // RFC 7932 §9.2: ISUNCOMPRESSED is read for any non-empty
