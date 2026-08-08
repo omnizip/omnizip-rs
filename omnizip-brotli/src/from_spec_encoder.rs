@@ -267,13 +267,8 @@ fn encode_huffman_chunk_into(
             let is_dict = (cmd.distance as usize) > output_sim.len();
             if is_dict {
                 let mut dict_bytes = Vec::with_capacity(cmd.copy_len as usize);
-                if dictionary_lookup(
-                    &mut dict_bytes,
-                    cmd.copy_len,
-                    cmd.distance as i32,
-                    max_dist,
-                )
-                .is_some()
+                if dictionary_lookup(&mut dict_bytes, cmd.copy_len, cmd.distance as i32, max_dist)
+                    .is_some()
                 {
                     output_sim.extend_from_slice(&dict_bytes);
                 } else {
@@ -826,13 +821,14 @@ fn parse_input_with_offset(
     // use a simpler piecewise mapping that captures the main tiers.
     // `lazy` enables lazy matching (try pos+1 before committing) at q ≥ 4.
     // `lazy2` enables two-level lazy (try pos+1 AND pos+2) at q ≥ 8.
-    let (max_chain, nice_match, use_dict_base, lazy, lazy2) = match quality {
-        0..=1 => (4, 8, false, false, false),
-        2..=3 => (16, 16, true, false, false),
-        4..=5 => (32, 32, true, true, false),
-        6..=7 => (64, 64, true, true, false),
-        8..=9 => (128, 128, true, true, true),
-        _ => (256, 271, true, true, true), // q 10–11
+    // `hash_log` scales with quality to reduce collisions on larger inputs.
+    let (max_chain, nice_match, use_dict_base, lazy, lazy2, hash_log) = match quality {
+        0..=1 => (4, 8, false, false, false, 15),
+        2..=3 => (16, 16, true, false, false, 16),
+        4..=5 => (32, 32, true, true, false, 17),
+        6..=7 => (64, 64, true, true, false, 17),
+        8..=9 => (128, 128, true, true, true, 17),
+        _ => (512, 271, true, true, true, 18), // q 10–11
     };
     let use_dict = use_dict_base && !disable_dict && crate::encoder::context::is_text_like(input);
 
@@ -841,7 +837,7 @@ fn parse_input_with_offset(
         min_match: MIN_MATCH,
         max_chain_length: max_chain,
         nice_match,
-        hash_log: 16,
+        hash_log,
     };
     let mut mf = omnizip_codecs::HashChainMatchFinder::new(input, config);
 
