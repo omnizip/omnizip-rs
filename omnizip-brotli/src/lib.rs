@@ -16,6 +16,7 @@ pub mod decoder;
 pub mod decoder_full;
 pub mod dict_encoder;
 pub mod dictionary;
+pub mod encoder;
 pub mod fast_encoder;
 pub mod from_spec_encoder;
 pub mod prefix;
