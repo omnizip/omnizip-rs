@@ -24,8 +24,9 @@ body = """
 """
 
 # omnizip-deflate64 was previously held back because release-plz's
-# historical-commit walk reached commit 8ba1c91 (where the workspace
-# referenced omnizip-bzip2/ before it existed) and failed. A one-time
-# manual publish (see .github/workflows/publish-deflate64.yml) created
-# the omnizip-deflate64-v0.15.0 tag. Future release-plz runs now stop
-# at that tag via is_commit_too_old before reaching the broken commit.
+# historical-commit walk reached a broken early commit (where the
+# workspace referenced omnizip-bzip2/ before it existed) and failed.
+# A one-time manual publish (see .github/workflows/publish-deflate64.yml)
+# created the omnizip-deflate64-v0.15.0 tag. Future release-plz runs
+# now stop at that tag via is_commit_too_old before reaching the
+# broken commit.
