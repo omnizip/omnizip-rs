@@ -37,7 +37,7 @@
     clippy::items_after_statements
 )]
 
-use crate::dictionary::find_dictionary_match;
+use crate::dictionary::{dictionary_lookup, find_dictionary_match};
 use crate::encoder::bitwriter::BitWriter;
 use crate::encoder::context::{compute_context_id, is_text_like};
 use crate::encoder::distance_config::{DistanceConfig, NUM_SHORT};
@@ -192,8 +192,7 @@ fn encode_huffman_chunk_into(
         write_block_type_trees(bw, nbltypes_l);
     }
 
-    let commands =
-        parse_input_with_offset(input, mlen_offset, quality, use_context || use_block_switch);
+    let commands = parse_input_with_offset(input, mlen_offset, quality, false);
 
     // Choose distance-code configuration from the parsed commands.
     let dist_cfg = DistanceConfig::choose(&commands);
@@ -263,13 +262,23 @@ fn encode_huffman_chunk_into(
             lit_idx += 1;
         }
         if cmd.copy_len > 0 {
+            let copy_start_global = mlen_offset + output_sim.len();
+            let max_dist = (copy_start_global as u32).min(MAX_BACKWARD_DISTANCE);
             let is_dict = (cmd.distance as usize) > output_sim.len();
             if is_dict {
-                // Dictionary reference: advance length without simulating bytes.
-                // We can't reconstruct the exact dictionary bytes here without
-                // calling dictionary_lookup. Approximate by growing output_sim
-                // with placeholder zeros.
-                output_sim.extend(std::iter::repeat(0u8).take(cmd.copy_len as usize));
+                let mut dict_bytes = Vec::with_capacity(cmd.copy_len as usize);
+                if dictionary_lookup(
+                    &mut dict_bytes,
+                    cmd.copy_len,
+                    cmd.distance as i32,
+                    max_dist,
+                )
+                .is_some()
+                {
+                    output_sim.extend_from_slice(&dict_bytes);
+                } else {
+                    output_sim.extend(std::iter::repeat(0u8).take(cmd.copy_len as usize));
+                }
             } else {
                 let src = output_sim.len() - cmd.distance as usize;
                 for i in 0..cmd.copy_len as usize {
@@ -825,7 +834,7 @@ fn parse_input_with_offset(
         8..=9 => (128, 128, true, true, true),
         _ => (256, 271, true, true, true), // q 10–11
     };
-    let use_dict = use_dict_base && !disable_dict;
+    let use_dict = use_dict_base && !disable_dict && crate::encoder::context::is_text_like(input);
 
     let config = omnizip_codecs::HashChainConfig {
         dict_size: MAX_BACKWARD_DISTANCE,
