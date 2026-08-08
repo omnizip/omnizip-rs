@@ -179,7 +179,7 @@ fn encode_huffman_chunk_into(
     // compatibility debugging (write_block_type_trees + block-switch
     // emission exist but produce wire-format mismatches in the full
     // decoder path). The infrastructure is ready for re-enablement.
-    let use_block_switch = false;
+    let use_block_switch = quality >= 7 && quality <= 9 && input.len() >= 256 && !use_context;
     // Write all three NBLTYPES first (RFC 7932 §9.3: all block-type
     // counts precede any block-type code trees).
     let nbltypes_l: u32 = if use_block_switch { 2 } else { 1 };
@@ -307,11 +307,11 @@ fn encode_huffman_chunk_into(
             p1 = b;
             out_pos += 1;
             if use_block_switch {
-                lit_block_remaining -= 1;
                 if lit_block_remaining == 0 {
                     lit_block_type = 1 - lit_block_type;
                     lit_block_remaining = 128;
                 }
+                lit_block_remaining -= 1;
             }
         }
         if cmd.copy_len > 0 {
@@ -375,18 +375,6 @@ fn encode_huffman_chunk_into(
         }
 
         for _ in 0..cmd.insert_len {
-            // Emit block-switch command at literal block boundary.
-            if use_block_switch && lit_block_remaining == 0 {
-                // Block-type code: symbol 3 for type 0→1, symbol 2 for type 1→0.
-                // Simple tree: symbol 2 → code 0 (1 bit), symbol 3 → code 1 (1 bit).
-                let bt_sym = if lit_block_type == 0 { 1u32 } else { 0u32 }; // 1 bit
-                bw.write_bits(bt_sym, 1);
-                // Block-length extra: 128 - 113 = 15 in 5 bits (code 12).
-                bw.write_bits(15, 5);
-                lit_block_type = 1 - lit_block_type;
-                lit_block_remaining = 128;
-            }
-
             let b = stream.literals[lit_idx];
             let tree = if use_block_switch {
                 lit_block_type
@@ -402,7 +390,18 @@ fn encode_huffman_chunk_into(
             p1 = b;
             lit_idx += 1;
             out_pos += 1;
+
+            // Block-switch AFTER the literal (matches decoder's
+            // read-literal-then-check-block-length order).
             if use_block_switch {
+                if lit_block_remaining == 0 {
+                    // Block-type code: symbol 3 for type 0→1, symbol 2 for 1→0.
+                    let bt_sym = if lit_block_type == 0 { 1u32 } else { 0u32 };
+                    bw.write_bits(bt_sym, 1);
+                    bw.write_bits(15, 5); // block-length extra (128-113=15)
+                    lit_block_type = 1 - lit_block_type;
+                    lit_block_remaining = 128;
+                }
                 lit_block_remaining -= 1;
             }
         }
