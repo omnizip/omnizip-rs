@@ -47,9 +47,7 @@ fn check_roundtrip(name: &str, input: &[u8], level: ZstdLevel) {
             );
         }
         Err(e) => {
-            panic!(
-                "zstd -d rejected our output for {name} at {level}: {e}"
-            );
+            panic!("zstd -d rejected our output for {name} at {level}: {e}");
         }
     }
 }
@@ -59,7 +57,10 @@ fn encoder_output_decodes_via_c_reference() {
     let inputs: Vec<(&str, Vec<u8>)> = vec![
         ("short", b"hello world".to_vec()),
         ("repetitive", b"abcabcabcabc".repeat(50)),
-        ("text", b"The quick brown fox jumps over the lazy dog. ".repeat(100)),
+        (
+            "text",
+            b"The quick brown fox jumps over the lazy dog. ".repeat(100),
+        ),
         ("zeros", vec![0u8; 10_000]),
         ("binary", (0..5000).map(|i| (i % 251) as u8).collect()),
         ("large_text", b"the brown fox ".repeat(10_000)),

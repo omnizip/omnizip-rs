@@ -137,12 +137,9 @@ fn reverse_bits(mut v: u32, n: u8) -> u32 {
     r
 }
 
-/// Compress input into a valid Brotli frame using the from-spec encoder.
+/// Compress input into a valid Brotli frame at quality 11 (maximum effort).
 ///
-/// Produces output accepted by any RFC 7932 conformant decoder. The
-/// encoder tries the Huffman-coded path first and falls back to an
-/// Compress at Brotli quality 11 (maximum effort). Equivalent to
-/// [`compress_with_quality`](fn.compress_with_quality.html) with q=11.
+/// Equivalent to [`compress_with_quality`](fn.compress_with_quality.html) with q=11.
 #[must_use]
 pub fn compress(input: &[u8]) -> Vec<u8> {
     compress_with_quality(input, 11)
@@ -1200,7 +1197,9 @@ mod tests {
         let inputs: Vec<Vec<u8>> = vec![
             b"hello world".to_vec(),
             b"abcabcabcabc".repeat(20),
-            (0..1000u32).map(|i| (i.wrapping_mul(2654435761)) as u8).collect(),
+            (0..1000u32)
+                .map(|i| (i.wrapping_mul(2654435761)) as u8)
+                .collect(),
             b"the quick brown fox jumps over the lazy dog. ".repeat(100),
         ];
         for q in 0..=11 {
@@ -1208,11 +1207,7 @@ mod tests {
                 let compressed = compress_with_quality(input, q);
                 let decoded = decoder::decode(&compressed)
                     .unwrap_or_else(|e| panic!("decode q={q} input {}b: {e}", input.len()));
-                assert_eq!(
-                    decoded, *input,
-                    "round-trip q={q} input {}b",
-                    input.len()
-                );
+                assert_eq!(decoded, *input, "round-trip q={q} input {}b", input.len());
             }
         }
     }
