@@ -1200,7 +1200,8 @@ pub fn compress_block_lazy2_with_ldm(
         let rep0 = seq_store.rep_offsets[0];
         if rep0 > 0 && ip > rep0 as usize {
             if ip + MIN_MATCH <= src.len()
-                && src[ip..ip + MIN_MATCH] == src[ip - rep0 as usize..ip - rep0 as usize + MIN_MATCH]
+                && src[ip..ip + MIN_MATCH]
+                    == src[ip - rep0 as usize..ip - rep0 as usize + MIN_MATCH]
             {
                 let mut m_len = MIN_MATCH;
                 m_len += count_match(
@@ -1330,7 +1331,13 @@ fn find_best_match_ldm(
     }
 
     // Check LDM for a potentially longer match.
-    if let Some(lm) = ldm.find_match(src, ip, max_distance as u32, LDM_MAX_CHAIN, min_match as u32) {
+    if let Some(lm) = ldm.find_match(
+        src,
+        ip,
+        max_distance as u32,
+        LDM_MAX_CHAIN,
+        min_match as u32,
+    ) {
         if lm.length as usize > best_len {
             best_len = lm.length as usize;
             best_dist = lm.distance as usize;
@@ -1384,7 +1391,13 @@ fn probe_match_ldm(
     }
 
     // Check LDM (read-only).
-    if let Some(lm) = ldm.find_match(src, ip, max_distance as u32, LDM_MAX_CHAIN, min_match as u32) {
+    if let Some(lm) = ldm.find_match(
+        src,
+        ip,
+        max_distance as u32,
+        LDM_MAX_CHAIN,
+        min_match as u32,
+    ) {
         if lm.length as usize > best_len {
             best_len = lm.length as usize;
             best_dist = lm.distance as usize;

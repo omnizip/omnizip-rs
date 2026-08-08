@@ -182,7 +182,9 @@ fn encode_frame_into(
                 &mut rep_offsets,
                 params,
                 &mut last_huf_weights,
-                ldm_table.as_ref().expect("ldm table exists when ldm_enabled"),
+                ldm_table
+                    .as_ref()
+                    .expect("ldm table exists when ldm_enabled"),
                 max_distance,
             )?;
         } else {
