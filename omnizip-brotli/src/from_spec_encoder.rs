@@ -301,6 +301,8 @@ fn encode_huffman_chunk_into(
 }
 
 /// Encode one metablock (uncompressed) into the shared writer.
+/// Kept for the `multi_metablock_uncompressed_round_trips` test.
+#[cfg(test)]
 fn encode_uncompressed_chunk_into(bw: &mut BitWriter, input: &[u8], is_last: bool) {
     bw.write_bits(if is_last { 1 } else { 0 }, 1); // ISLAST
     if is_last {
