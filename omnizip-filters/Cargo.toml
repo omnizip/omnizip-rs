@@ -18,7 +18,7 @@ path = "src/lib.rs"
 omnizip-codecs.workspace = true
 
 [dev-dependencies]
-omnizip-lz4 = { path = "../omnizip-lz4", version = "0.16.0" }
+omnizip-lz4 = { path = "../omnizip-lz4", version = "0.16.1" }
 
 [lints]
 workspace = true
