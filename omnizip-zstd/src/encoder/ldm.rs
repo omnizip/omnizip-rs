@@ -29,8 +29,6 @@ pub struct LdmHashTable {
     hash_log: u32,
     /// Sample every N-th position (sparse sampling for memory control).
     gap: usize,
-    /// Mask for hash table indexing.
-    hash_mask: u32,
 }
 
 /// An LDM match result.
@@ -54,7 +52,6 @@ impl LdmHashTable {
             chain: vec![u32::MAX; chain_size.max(1)],
             hash_log,
             gap: gap.max(1),
-            hash_mask: (hash_size - 1) as u32,
         }
     }
 
@@ -105,7 +102,19 @@ impl LdmHashTable {
         while candidate != u32::MAX && chain_count < max_chain {
             let cand = candidate as usize;
             if cand >= pos {
-                break;
+                // Candidate is at or after the current position (can
+                // happen when the table is pre-populated over the full
+                // input). Skip it but keep walking the chain to find
+                // earlier candidates. Don't count this skip against
+                // chain_count so we still search the full budget of
+                // valid backward entries.
+                let chain_idx = cand / self.gap;
+                if chain_idx < self.chain.len() {
+                    candidate = self.chain[chain_idx];
+                } else {
+                    break;
+                }
+                continue;
             }
             let dist = (pos - cand) as u32;
             if dist > max_distance {
