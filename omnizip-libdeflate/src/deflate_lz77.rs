@@ -58,6 +58,7 @@ pub enum Lz77Token {
 /// the resulting token stream. Used by both the fixed-Huffman and
 /// dynamic-Huffman block writers so the match-finder logic stays in
 /// one place.
+#[must_use]
 pub fn collect_tokens(input: &[u8]) -> Vec<Lz77Token> {
     if input.is_empty() {
         return Vec::new();
@@ -367,7 +368,7 @@ fn reverse_bits(v: u32, n: u8) -> u32 {
 
 /// Map a match length (3..=258) to a length symbol (257..=285).
 fn length_to_sym(length: usize) -> Option<u16> {
-    if length < 3 || length > 258 {
+    if !(3..=258).contains(&length) {
         return None;
     }
     let l = length - 3;
@@ -442,8 +443,8 @@ fn distance_to_sym(distance: usize) -> Option<usize> {
     }
     // Distance symbols 4..=29.
     // Each slot covers 2^(extra_bits) values where extra_bits = (slot-2)/2.
-    let bits = 31 - (d as u32).leading_zeros();
-    let slot = (bits as usize) * 2 + ((d >> (bits - 1)) & 1) as usize;
+    let bits = (d as u32).ilog2();
+    let slot = (bits as usize) * 2 + ((d >> (bits - 1)) & 1);
     Some(slot.min(29))
 }
 
@@ -466,7 +467,7 @@ const fn build_fixed_lit_table() -> [(u16, u8); 288] {
     }
     // Symbols 256-279: 7-bit codes 0b0000000..=0b0010111.
     while i < 280 {
-        t[i] = (0b0000000 + (i - 256) as u16, 7);
+        t[i] = (((i - 256) as u16), 7);
         i += 1;
     }
     // Symbols 280-287: 8-bit codes 0b11000000..=0b11000111.
@@ -479,7 +480,7 @@ const fn build_fixed_lit_table() -> [(u16, u8); 288] {
 
 /// Length symbol table per RFC 1951 §3.2.5.
 /// `(base_length, extra_bits_count)` indexed by `length_sym - 257`.
-/// The formula is `length = base + extra_value` where extra_value is
+/// The formula is `length = base + extra_value` where `extra_value` is
 /// `extra_bits_count` bits read from the stream.
 static LENGTH_TABLE: [(u32, u32); 29] = [
     (3, 0),
@@ -514,7 +515,7 @@ static LENGTH_TABLE: [(u32, u32); 29] = [
 ];
 
 /// Distance symbol table per RFC 1951 §3.2.5.
-/// `(base_distance, extra_bits_count)` indexed by distance_sym.
+/// `(base_distance, extra_bits_count)` indexed by `distance_sym`.
 /// Formula: `distance = base + extra_value`.
 static DIST_TABLE: [(u32, u32); 30] = [
     (1, 0),

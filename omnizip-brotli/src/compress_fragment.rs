@@ -12,7 +12,7 @@
 //! 5. Optionally merge consecutive metablocks for better ratio.
 //!
 //! Vendored from upstream brotli (BSD-3-Clause), adapted to use our
-//! `fast_encoder` helpers (BrotliWriteBits, HuffmanTree, etc.).
+//! `fast_encoder` helpers (`BrotliWriteBits`, `HuffmanTree`, etc.).
 
 #![forbid(unsafe_code)]
 #![allow(
@@ -79,7 +79,7 @@ fn BuildAndStoreLiteralPrefixCode(
             histogram[input[i] as usize] += 1;
             i += K_SAMPLE_RATE;
         }
-        histogram_total = ((input_size + K_SAMPLE_RATE - 1) / K_SAMPLE_RATE) as u32;
+        histogram_total = input_size.div_ceil(K_SAMPLE_RATE) as u32;
         for i in 0..256 {
             let adjust = 1 + 2 * histogram[i].min(11);
             histogram[i] += adjust;
@@ -101,11 +101,11 @@ fn BuildAndStoreLiteralPrefixCode(
     let mut literal_ratio: u64 = 0;
     for i in 0..256 {
         if histogram[i] != 0 {
-            literal_ratio += histogram[i] as u64 * lit_depth[i] as u64;
+            literal_ratio += u64::from(histogram[i]) * u64::from(lit_depth[i]);
         }
     }
     // Estimated encoding ratio, millibytes per symbol.
-    (literal_ratio * 125 / histogram_total as u64) as usize
+    (literal_ratio * 125 / u64::from(histogram_total)) as usize
 }
 
 /// Build command prefix code (128 symbols) and store to bitstream.
@@ -175,7 +175,7 @@ fn EmitInsertLen(
         let code = insertlen + 40;
         BrotliWriteBits(
             cmd_depth[code] as usize,
-            cmd_bits[code] as u64,
+            u64::from(cmd_bits[code]),
             storage_ix,
             storage,
         );
@@ -187,7 +187,7 @@ fn EmitInsertLen(
         let inscode = (nbits as usize) * 2 + prefix + 42;
         BrotliWriteBits(
             cmd_depth[inscode] as usize,
-            cmd_bits[inscode] as u64,
+            u64::from(cmd_bits[inscode]),
             storage_ix,
             storage,
         );
@@ -204,7 +204,7 @@ fn EmitInsertLen(
         let code = nbits as usize + 50;
         BrotliWriteBits(
             cmd_depth[code] as usize,
-            cmd_bits[code] as u64,
+            u64::from(cmd_bits[code]),
             storage_ix,
             storage,
         );
@@ -218,7 +218,7 @@ fn EmitInsertLen(
     } else {
         BrotliWriteBits(
             cmd_depth[61] as usize,
-            cmd_bits[61] as u64,
+            u64::from(cmd_bits[61]),
             storage_ix,
             storage,
         );
@@ -238,7 +238,7 @@ fn EmitLongInsertLen(
     if insertlen < 22594 {
         BrotliWriteBits(
             cmd_depth[62] as usize,
-            cmd_bits[62] as u64,
+            u64::from(cmd_bits[62]),
             storage_ix,
             storage,
         );
@@ -247,7 +247,7 @@ fn EmitLongInsertLen(
     } else {
         BrotliWriteBits(
             cmd_depth[63] as usize,
-            cmd_bits[63] as u64,
+            u64::from(cmd_bits[63]),
             storage_ix,
             storage,
         );
@@ -267,7 +267,7 @@ fn EmitCopyLen(
     if copylen < 10 {
         BrotliWriteBits(
             cmd_depth[copylen + 14] as usize,
-            cmd_bits[copylen + 14] as u64,
+            u64::from(cmd_bits[copylen + 14]),
             storage_ix,
             storage,
         );
@@ -279,7 +279,7 @@ fn EmitCopyLen(
         let code = (nbits as usize) * 2 + prefix + 20;
         BrotliWriteBits(
             cmd_depth[code] as usize,
-            cmd_bits[code] as u64,
+            u64::from(cmd_bits[code]),
             storage_ix,
             storage,
         );
@@ -296,7 +296,7 @@ fn EmitCopyLen(
         let code = nbits as usize + 28;
         BrotliWriteBits(
             cmd_depth[code] as usize,
-            cmd_bits[code] as u64,
+            u64::from(cmd_bits[code]),
             storage_ix,
             storage,
         );
@@ -310,7 +310,7 @@ fn EmitCopyLen(
     } else {
         BrotliWriteBits(
             cmd_depth[39] as usize,
-            cmd_bits[39] as u64,
+            u64::from(cmd_bits[39]),
             storage_ix,
             storage,
         );
@@ -330,7 +330,7 @@ fn EmitCopyLenLastDistance(
     if copylen < 12 {
         BrotliWriteBits(
             cmd_depth[copylen - 4] as usize,
-            cmd_bits[copylen - 4] as u64,
+            u64::from(cmd_bits[copylen - 4]),
             storage_ix,
             storage,
         );
@@ -342,7 +342,7 @@ fn EmitCopyLenLastDistance(
         let code = (nbits as usize) * 2 + prefix + 4;
         BrotliWriteBits(
             cmd_depth[code] as usize,
-            cmd_bits[code] as u64,
+            u64::from(cmd_bits[code]),
             storage_ix,
             storage,
         );
@@ -358,14 +358,14 @@ fn EmitCopyLenLastDistance(
         let code = (tail >> 5) + 30;
         BrotliWriteBits(
             cmd_depth[code] as usize,
-            cmd_bits[code] as u64,
+            u64::from(cmd_bits[code]),
             storage_ix,
             storage,
         );
         BrotliWriteBits(5, (tail & 31) as u64, storage_ix, storage);
         BrotliWriteBits(
             cmd_depth[64] as usize,
-            cmd_bits[64] as u64,
+            u64::from(cmd_bits[64]),
             storage_ix,
             storage,
         );
@@ -377,7 +377,7 @@ fn EmitCopyLenLastDistance(
         let code = nbits as usize + 28;
         BrotliWriteBits(
             cmd_depth[code] as usize,
-            cmd_bits[code] as u64,
+            u64::from(cmd_bits[code]),
             storage_ix,
             storage,
         );
@@ -389,7 +389,7 @@ fn EmitCopyLenLastDistance(
         );
         BrotliWriteBits(
             cmd_depth[64] as usize,
-            cmd_bits[64] as u64,
+            u64::from(cmd_bits[64]),
             storage_ix,
             storage,
         );
@@ -398,14 +398,14 @@ fn EmitCopyLenLastDistance(
     } else {
         BrotliWriteBits(
             cmd_depth[39] as usize,
-            cmd_bits[39] as u64,
+            u64::from(cmd_bits[39]),
             storage_ix,
             storage,
         );
         BrotliWriteBits(24, (copylen - 2120) as u64, storage_ix, storage);
         BrotliWriteBits(
             cmd_depth[64] as usize,
-            cmd_bits[64] as u64,
+            u64::from(cmd_bits[64]),
             storage_ix,
             storage,
         );
@@ -429,7 +429,7 @@ fn EmitDistance(
     let distcode = 2 * nbits as usize + prefix as usize + 78;
     BrotliWriteBits(
         cmd_depth[distcode] as usize,
-        cmd_bits[distcode] as u64,
+        u64::from(cmd_bits[distcode]),
         storage_ix,
         storage,
     );
@@ -449,7 +449,7 @@ fn EmitLiterals(
         let lit = input[j] as usize;
         BrotliWriteBits(
             lit_depth[lit] as usize,
-            lit_bits[lit] as u64,
+            u64::from(lit_bits[lit]),
             storage_ix,
             storage,
         );
@@ -473,7 +473,7 @@ fn BrotliStoreMetaBlockHeader(
     }
     BrotliWriteBits(2, (nibbles - 4) as u64, storage_ix, storage);
     BrotliWriteBits(nibbles * 4, (len - 1) as u64, storage_ix, storage);
-    BrotliWriteBits(1, if is_uncompressed { 1 } else { 0 }, storage_ix, storage);
+    BrotliWriteBits(1, u64::from(is_uncompressed), storage_ix, storage);
 }
 
 #[allow(dead_code)] // Used by metablock merge path (not yet active).
@@ -485,8 +485,8 @@ fn UpdateBits(n_bits: usize, mut bits: u32, pos: usize, array: &mut [u8]) {
         let n_unchanged_bits = pos & 7;
         let n_changed_bits = n_bits.min(8 - n_unchanged_bits);
         let total_bits = n_unchanged_bits + n_changed_bits;
-        let mask = (!(((1u32 << total_bits) - 1) as u32)) | ((1u32 << n_unchanged_bits) - 1);
-        let unchanged_bits = array[byte_pos] as u32 & mask;
+        let mask = (!((1u32 << total_bits) - 1)) | ((1u32 << n_unchanged_bits) - 1);
+        let unchanged_bits = u32::from(array[byte_pos]) & mask;
         let changed_bits = bits & ((1u32 << n_changed_bits) - 1);
         array[byte_pos] = ((changed_bits << n_unchanged_bits) | unchanged_bits) as u8;
         n_bits -= n_changed_bits;
@@ -547,6 +547,7 @@ const K_CMD_HISTO_SEED: [u32; 128] = [
 
 /// Main entry point: compress `input` using the q=2..6 algorithm.
 /// Returns a valid brotli stream that any conformant decoder accepts.
+#[must_use]
 pub fn compress(input: &[u8]) -> Vec<u8> {
     let mut tree = vec![HuffmanTree::default(); 2 * 704 + 1];
     let mut storage = vec![0u8; input.len() * 2 + 1024];
@@ -765,7 +766,7 @@ fn compress_fragment_fast(
                     if distance as i32 == last_distance {
                         BrotliWriteBits(
                             cmd_depth[64] as usize,
-                            cmd_bits[64] as u64,
+                            u64::from(cmd_bits[64]),
                             storage_ix,
                             storage,
                         );

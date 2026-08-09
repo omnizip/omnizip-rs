@@ -170,6 +170,7 @@ impl RealFft {
 ///
 /// Bit-identical across platforms per the module-level determinism
 /// note.
+#[must_use]
 pub fn autocorrelate_fft(samples: &[i32], max_lag: usize) -> Vec<f64> {
     let n = samples.len();
     if n == 0 {

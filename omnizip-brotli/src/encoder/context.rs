@@ -2,12 +2,13 @@
 //!
 //! Each literal byte is encoded using a Huffman tree selected by a
 //! context ID derived from the previous 1–2 bytes. The context
-//! function depends on CONTEXT_MODE.
+//! function depends on `CONTEXT_MODE`.
 
 use crate::static_codes::K_UTF8_CONTEXT_LOOKUP;
 
 /// Check if input looks like text (printable ASCII + whitespace).
 /// Used to select UTF8 context mode over LSB6 for better ratio.
+#[must_use]
 pub fn is_text_like(input: &[u8]) -> bool {
     if input.is_empty() {
         return false;
@@ -29,6 +30,7 @@ fn is_text_byte(b: u8) -> bool {
 ///
 /// MSB6 (1) and Signed (3) are not used by the encoder but documented
 /// for completeness.
+#[must_use]
 pub fn compute_context_id(p1: u8, p2: u8, mode: u32) -> u8 {
     match mode {
         0 => p1 & 0x3F, // LSB6

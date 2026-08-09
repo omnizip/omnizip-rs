@@ -5,13 +5,13 @@
 //! English words, phrases, and binary patterns. Words are bucketed by length
 //! (4..=24 bytes); the encoder picks a word, optionally applies one of 121
 //! transforms (case-shift, trim, suffix/prefix), and emits a copy command
-//! that references it via a synthetic distance > max_distance.
+//! that references it via a synthetic distance > `max_distance`.
 //!
 //! ## Status
 //!
 //! Fully implemented: dictionary data is embedded via `include_bytes!`,
 //! all 121 transforms are supported, and `dictionary_lookup` resolves
-//! any (copy_len, distance) pair per upstream semantics.
+//! any (`copy_len`, distance) pair per upstream semantics.
 
 #![forbid(unsafe_code)]
 
@@ -249,7 +249,7 @@ fn transform_suffix(idx: usize) -> &'static [u8] {
 /// applies a fixed XOR (matches upstream's "arbitrary transform").
 fn to_upper_case(p: &mut [u8]) -> usize {
     if p[0] < 0xC0 {
-        if (b'a'..=b'z').contains(&p[0]) {
+        if p[0].is_ascii_lowercase() {
             p[0] ^= 32;
         }
         return 1;
@@ -303,7 +303,7 @@ pub fn transform_dictionary_word(dst: &mut Vec<u8>, word: &[u8], transform_idx: 
             (word[skip..].as_ref(), 0)
         }
     } else {
-        (word.as_ref(), 0)
+        (word, 0)
     };
     let _ = body_offset;
 
@@ -346,18 +346,18 @@ pub fn transform_dictionary_word(dst: &mut Vec<u8>, word: &[u8], transform_idx: 
 /// - `copy_len`: the literal/copy length from the command (word length).
 /// - `distance_code`: the resolved distance value.
 /// - `max_distance`: the current maximum LZ77 distance (= min(pos,
-///   max_backward_distance)).
+///   `max_backward_distance`)).
 ///
 /// Returns `Some(())` on success, `None` if the reference is invalid
 /// (word length out of range, transform index out of range, etc.).
 ///
 /// Per RFC 7932 §10.4:
-///   word_id = distance_code - max_distance - 1
-///   shift = size_bits_by_length[copy_len]
-///   word_idx = word_id & ((1 << shift) - 1)
-///   transform_idx = word_id >> shift
-///   word = dictionary[offsets_by_length[copy_len] + word_idx * copy_len ..]
-///   output += transform(word, transform_idx)
+///   `word_id` = `distance_code` - `max_distance` - 1
+///   shift = `size_bits_by_length`[`copy_len`]
+///   `word_idx` = `word_id` & ((1 << shift) - 1)
+///   `transform_idx` = `word_id` >> shift
+///   word = dictionary[`offsets_by_length`[`copy_len`] + `word_idx` * `copy_len` ..]
+///   output += transform(word, `transform_idx`)
 pub fn dictionary_lookup(
     output: &mut Vec<u8>,
     copy_len: u32,
@@ -374,7 +374,7 @@ pub fn dictionary_lookup(
         return None;
     }
 
-    let address = distance_code as i64 - max_distance as i64 - 1;
+    let address = i64::from(distance_code) - i64::from(max_distance) - 1;
     if address < 0 {
         return None;
     }
@@ -444,7 +444,7 @@ pub fn find_dictionary_match(input: &[u8], pos: usize, max_distance: u32) -> Opt
             if DICTIONARY_DATA[dict_offset] != input[pos] {
                 continue;
             }
-            if &DICTIONARY_DATA[dict_offset..dict_offset + len_us] == &input[pos..pos + len_us] {
+            if DICTIONARY_DATA[dict_offset..dict_offset + len_us] == input[pos..pos + len_us] {
                 let address = word_idx as u32;
                 let distance = max_distance + 1 + address;
                 return Some((distance, len));

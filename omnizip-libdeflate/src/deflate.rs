@@ -55,7 +55,7 @@ pub fn deflate_stored(input: &[u8]) -> Result<Vec<u8>, OmnizipError> {
         let is_final = offset + chunk_size == input.len();
 
         // Header byte: bit 0 = BFINAL, bits 1-2 = BTYPE.
-        let header_byte: u8 = if is_final { 0b001 } else { 0b000 };
+        let header_byte: u8 = u8::from(is_final);
         out.push(header_byte);
 
         // Byte alignment: since BFINAL + BTYPE consumed 3 bits and

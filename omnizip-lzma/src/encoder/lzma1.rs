@@ -51,7 +51,7 @@ pub struct Lzma1Encoder {
     dict_size: u32,
     /// Global position offset (for LZMA2 multi-chunk: the byte offset
     /// of this chunk within the overall input). Zero for standalone
-    /// encoding. Added to chunk-local `pos` in pos_state / lit_state
+    /// encoding. Added to chunk-local `pos` in `pos_state` / `lit_state`
     /// computations so the decoder's `output.len()`-based position
     /// agrees with the encoder.
     base_pos: u32,
@@ -511,7 +511,7 @@ impl Lzma1Encoder {
         self.state.on_literal();
     }
 
-    /// Emit a match packet (is_match=1, is_rep=0, length, distance).
+    /// Emit a match packet (`is_match=1`, `is_rep=0`, length, distance).
     fn encode_match(&mut self, distance: u32, length: u32, pos: usize) {
         let abs_pos = self.base_pos.wrapping_add(pos as u32);
         let pos_state = abs_pos & self.pb_mask;
@@ -569,13 +569,13 @@ impl Lzma1Encoder {
     }
 
     /// Emit a rep0 match (reuse the previous distance). The `length`
-    /// is the actual match length (not length - MATCH_LEN_MIN).
+    /// is the actual match length (not length - `MATCH_LEN_MIN`).
     ///
     /// Bit layout (mirrors the decoder's `decode_rep_match`):
-    /// 1. is_match = 1
-    /// 2. is_rep = 1
-    /// 3. is_rep0 = 0 (select rep0)
-    /// 4. is_rep0_long = 1 (length > 1)
+    /// 1. `is_match` = 1
+    /// 2. `is_rep` = 1
+    /// 3. `is_rep0` = 0 (select rep0)
+    /// 4. `is_rep0_long` = 1 (length > 1)
     /// 5. Length code (via the rep length coder's model set)
     fn encode_rep0_match(&mut self, length: u32, pos: usize) {
         let abs_pos = self.base_pos.wrapping_add(pos as u32);

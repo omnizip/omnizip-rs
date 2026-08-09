@@ -11,7 +11,7 @@
 /// 16-bit samples produced by the closure `f(i)`.
 ///
 /// The resulting WAV uses the given `sample_rate` for both the sample
-/// rate field and the byte-rate field (sample_rate × 2 for 16-bit mono).
+/// rate field and the byte-rate field (`sample_rate` × 2 for 16-bit mono).
 /// It is suitable for piping into a FLAC encoder that consumes WAV
 /// input or for byte-comparison with a libFLAC-decoded WAV.
 #[must_use]

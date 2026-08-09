@@ -11,7 +11,7 @@
 //! ## PCM header parsers
 //!
 //! The [`pcm_header`] module extracts [`PcmParams`] from WAV and AIFF
-//! files. Consumers (e.g. LimniFS) use these to configure a FLAC
+//! files. Consumers (e.g. `LimniFS`) use these to configure a FLAC
 //! encoder without parsing the container format themselves.
 //!
 //! ## Wire format

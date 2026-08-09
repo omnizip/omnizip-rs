@@ -1,6 +1,6 @@
 //! omnizip-ricepp — Pure-Rust Rice++ codec for integer-pixel data.
 //!
-//! Ported from the DwarFS `ricepp` library by Marcus Holland-Moritz
+//! Ported from the `DwarFS` `ricepp` library by Marcus Holland-Moritz
 //! (`~/src/tamatebako/dwarfs-t/ricepp/`). Rice++ is a delta + Rice
 //! entropy coder designed for FITS images, sensor data, and other
 //! integer-pixel workloads.
@@ -46,7 +46,7 @@ use omnizip_codecs::{Codec, CodecId, CompressionLevel, OmnizipError};
 
 /// Ricepp codec id.
 
-/// Maximum block size (pixels per block). DwarFS default.
+/// Maximum block size (pixels per block). `DwarFS` default.
 const DEFAULT_BLOCK_SIZE: usize = 16;
 
 /// Pixel width variants supported by ricepp.
@@ -176,7 +176,7 @@ fn write_pixel(out: &mut [u8], pos: usize, value: u64, bits: PixelBits, order: B
     }
 }
 
-/// Bitstream writer matching DwarFS ricepp's `bitstream_writer`.
+/// Bitstream writer matching `DwarFS` ricepp's `bitstream_writer`.
 /// Accumulates bits at the LOW end of a u64, flushes as LE bytes.
 struct BitstreamWriter {
     out: Vec<u8>,
@@ -251,14 +251,14 @@ impl BitstreamWriter {
 
     fn finish(mut self) -> Vec<u8> {
         if self.bit_pos > 0 {
-            let n_bytes = ((self.bit_pos + 7) / 8) as usize;
+            let n_bytes = self.bit_pos.div_ceil(8) as usize;
             self.flush_packet(n_bytes);
         }
         self.out
     }
 }
 
-/// Bitstream reader matching DwarFS ricepp's `bitstream_reader`.
+/// Bitstream reader matching `DwarFS` ricepp's `bitstream_reader`.
 /// Reads MSB-first from a LE byte stream... actually, reads from the
 /// bit-packed stream in the same order the writer wrote.
 struct BitstreamReader<'a> {
@@ -314,7 +314,7 @@ impl<'a> BitstreamReader<'a> {
                 count += (8 - bit_in_byte as u32) as u64;
                 self.bit_pos += 8 - bit_in_byte;
             } else {
-                let zeros = u8::from(remaining_in_byte).trailing_zeros() as u64;
+                let zeros = remaining_in_byte.trailing_zeros() as u64;
                 count += zeros;
                 self.bit_pos += zeros as usize + 1;
                 return count;

@@ -23,7 +23,7 @@
 //!
 //! Streaming encode MUST produce byte-identical output to the one-shot
 //! `compress` for the same input + level (when all data is written
-//! before `finish`). This is a hard requirement for LimniFS.
+//! before `finish`). This is a hard requirement for `LimniFS`.
 
 #![forbid(unsafe_code)]
 

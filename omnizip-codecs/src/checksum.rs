@@ -1,7 +1,7 @@
 //! Shared checksum implementations.
 //!
 //! Currently exposes [`crc32_iso_hdlc`] — the CRC-32 variant used by
-//! gzip / XZ / BZip2 / Zlib (polynomial `0xEDB88320`, reflected, init
+//! gzip / XZ / `BZip2` / Zlib (polynomial `0xEDB88320`, reflected, init
 //! `0xFFFF_FFFF`, final XOR `0xFFFF_FFFF`).
 //!
 //! ## Implementation

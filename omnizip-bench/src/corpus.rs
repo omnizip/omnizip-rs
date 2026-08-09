@@ -333,7 +333,7 @@ fn extract_zip(bytes: &[u8], dest: &Path, spec: &CorpusSpec) -> Result<(), Corpu
                 .read_to_end(&mut content)
                 .map_err(|e| CorpusError::Download {
                     url: spec.url.to_string(),
-                    reason: format!("read {}: {e}", entry_name),
+                    reason: format!("read {entry_name}: {e}"),
                 })?;
             let mut file = fs::File::create(&out_path)
                 .map_err(|e| CorpusError::CacheIo(format!("create {}: {e}", out_path.display())))?;

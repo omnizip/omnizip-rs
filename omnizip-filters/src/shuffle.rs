@@ -3,12 +3,12 @@
 //! Both filters are transposition transforms that reorder data to expose
 //! redundancy for downstream codecs (LZ4, ZSTD, Brotli, ...):
 //!
-//! - **ByteShuffle** — given `item_size = N`, for a block of `K` items
+//! - **`ByteShuffle`** — given `item_size = N`, for a block of `K` items
 //!   (each `N` bytes), transpose so all byte-0s are adjacent, then all
 //!   byte-1s, etc. Excellent for arrays of struct-of-records where each
 //!   byte lane carries similar values across items (e.g. f32 mantissa
 //!   bytes).
-//! - **BitShuffle** — same idea but transposes at the bit level within
+//! - **`BitShuffle`** — same idea but transposes at the bit level within
 //!   each group of 8 items. Bit-0 of all 8 items becomes contiguous,
 //!   then bit-1, etc. Stronger redundancy exposure than byte shuffle
 //!   for low-entropy scientific data.

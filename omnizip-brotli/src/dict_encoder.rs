@@ -8,7 +8,7 @@
 //!
 //! ## Algorithm
 //!
-//! 1. Run the fast_encoder to get the LZ77-only compressed output.
+//! 1. Run the `fast_encoder` to get the LZ77-only compressed output.
 //! 2. Also run a simple dictionary-enhanced pass that checks both
 //!    LZ77 matches AND the brotli static dictionary at each position.
 //! 3. Return whichever produces smaller output.
@@ -24,7 +24,7 @@ use crate::dictionary::{DICTIONARY_DATA, OFFSETS_BY_LENGTH, SIZE_BITS_BY_LENGTH}
 
 /// Compress input using dictionary-enhanced encoding.
 ///
-/// Runs both the fast_encoder and a dictionary-enhanced encoder,
+/// Runs both the `fast_encoder` and a dictionary-enhanced encoder,
 /// returns the smaller output.
 #[must_use]
 pub fn compress_with_dictionary(input: &[u8]) -> Vec<u8> {
@@ -109,7 +109,7 @@ impl DictHash {
             let offset_base = OFFSETS_BY_LENGTH[4] as usize;
             let dict_offset = offset_base + word_idx * 4;
             if dict_offset + 4 <= DICTIONARY_DATA.len()
-                && &DICTIONARY_DATA[dict_offset..dict_offset + 4] == &data[pos..pos + 4]
+                && DICTIONARY_DATA[dict_offset..dict_offset + 4] == data[pos..pos + 4]
             {
                 return Some(word_idx);
             }
@@ -118,7 +118,7 @@ impl DictHash {
     }
 }
 
-/// Dictionary-enhanced encoding using the fast_encoder as the base,
+/// Dictionary-enhanced encoding using the `fast_encoder` as the base,
 /// with dictionary word references for unmatched sections.
 fn dict_encode(input: &[u8], dict_hash: &DictHash) -> Vec<u8> {
     // For now, just use the fast_encoder. The dictionary-enhanced

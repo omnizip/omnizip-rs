@@ -107,7 +107,7 @@ impl Default for ZstdCompressor {
 
 impl ZstdCompressor {
     /// Construct a new compressor with a default-size match-state
-    /// table (hash_log = 7, suitable for small inputs).
+    /// table (`hash_log` = 7, suitable for small inputs).
     #[must_use]
     pub fn new() -> Self {
         Self {
@@ -142,7 +142,7 @@ impl ZstdCompressor {
         Ok(out)
     }
 
-    /// Current hash_log of the cached match-state table. Useful for
+    /// Current `hash_log` of the cached match-state table. Useful for
     /// diagnostics and for callers that want to pre-warm the
     /// allocation.
     #[must_use]

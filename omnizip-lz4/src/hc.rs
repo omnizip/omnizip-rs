@@ -1,6 +1,6 @@
 //! Pure-Rust LZ4 HC encoder.
 //!
-//! lz4_flex 0.11 ships only the fast encoder; there is no HC variant
+//! `lz4_flex` 0.11 ships only the fast encoder; there is no HC variant
 //! upstream. This module implements LZ4 HC in pure Rust with the same
 //! block wire format so the existing fast decoder
 //! (`lz4_flex::decompress_size_prepended`) decodes our output
@@ -27,7 +27,7 @@ const HASH_LOG: u32 = 16;
 /// Maximum positions to walk in a hash chain per match attempt.
 const MAX_CHAIN_LENGTH: usize = 256;
 /// Window: positions older than this are unreachable (match offset
-/// exceeds u16::MAX).
+/// exceeds `u16::MAX`).
 const WINDOW_MASK: usize = 0xFFFF;
 /// Last 5+ bytes of input must be literals (no match).
 const END_PADDING: usize = 5;
@@ -58,7 +58,7 @@ struct HcEncoder {
 
 /// Sentinel value indicating "no chain entry". `u32::MAX` is an
 /// impossible position (input is bounded by `usize::MAX` in practice
-/// and never exceeds u32::MAX for LZ4 anyway).
+/// and never exceeds `u32::MAX` for LZ4 anyway).
 const SENTINEL: u32 = u32::MAX;
 
 impl HcEncoder {
@@ -122,7 +122,7 @@ impl HcEncoder {
         self.out
     }
 
-    /// Insert a hash entry for `pos`. Reads input[pos..pos+MIN_MATCH].
+    /// Insert a hash entry for `pos`. Reads input[`pos..pos+MIN_MATCH`].
     fn insert_hash(&mut self, input: &[u8], pos: usize) {
         if pos + MIN_MATCH > input.len() {
             return;

@@ -63,7 +63,7 @@ const MAX_SYMBOL_LEN: usize = 8;
 /// A trained FSST symbol table.
 #[derive(Clone, Debug)]
 pub struct SymbolTable {
-    /// `symbols[i]` = the i-th symbol's bytes. Index 0..n_symbols.
+    /// `symbols[i]` = the i-th symbol's bytes. Index `0..n_symbols`.
     symbols: Vec<Vec<u8>>,
 }
 
@@ -148,7 +148,7 @@ impl SymbolTable {
     /// Serialize the table to bytes.
     fn serialize(&self) -> Vec<u8> {
         let mut out = Vec::with_capacity(
-            1 + self.symbols.len() + self.symbols.iter().map(|s| s.len()).sum::<usize>(),
+            1 + self.symbols.len() + self.symbols.iter().map(std::vec::Vec::len).sum::<usize>(),
         );
         out.push(self.symbols.len() as u8);
         for s in &self.symbols {
@@ -169,7 +169,7 @@ impl SymbolTable {
         if data.len() < 1 + n {
             return None;
         }
-        let lens: Vec<usize> = data[1..1 + n].iter().map(|&l| usize::from(l)).collect();
+        let lens: Vec<usize> = data[1..=n].iter().map(|&l| usize::from(l)).collect();
         let total_data: usize = lens.iter().sum();
         if data.len() < 1 + n + total_data {
             return None;
@@ -208,11 +208,12 @@ fn escape_text(input: &[u8], table: &SymbolTable) -> Vec<u8> {
         let mut best: Option<u8> = None;
         let mut best_len = 0;
         for (i, sym) in table.symbols.iter().enumerate() {
-            if pos + sym.len() <= input.len() && sym.len() > best_len {
-                if &input[pos..pos + sym.len()] == sym.as_slice() {
-                    best = Some(i as u8);
-                    best_len = sym.len();
-                }
+            if pos + sym.len() <= input.len()
+                && sym.len() > best_len
+                && &input[pos..pos + sym.len()] == sym.as_slice()
+            {
+                best = Some(i as u8);
+                best_len = sym.len();
             }
         }
         if let Some(sym_idx) = best {

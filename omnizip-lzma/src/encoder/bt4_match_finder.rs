@@ -14,7 +14,7 @@
 //!
 //! ## Determinism
 //!
-//! All tables are pre-allocated. No HashSet, no thread-local state.
+//! All tables are pre-allocated. No `HashSet`, no thread-local state.
 //! Same input → same matches, always.
 //!
 //! ## When to use
@@ -51,11 +51,11 @@ const HASH_3_PRIMES: u32 = 0x402A_B9BD;
 /// Binary-tree match finder (BT4).
 pub struct Bt4MatchFinder<'a> {
     data: &'a [u8],
-    /// Combined hash table: [hash_2 | hash_3 | hash_4].
+    /// Combined hash table: [`hash_2` | `hash_3` | `hash_4`].
     hash: Vec<u32>,
     /// Binary tree: 2 entries per cyclic position (left, right).
     son: Vec<u32>,
-    /// Cyclic buffer size (= dict_size).
+    /// Cyclic buffer size (= `dict_size`).
     cyclic_size: u32,
     /// Current cyclic position.
     cyclic_pos: u32,

@@ -66,6 +66,7 @@ impl<'a> BitReader<'a> {
 
     /// Peek `nbits` bits WITHOUT advancing the bit position.
     /// Used for table-based Huffman symbol lookup.
+    #[must_use]
     pub fn peek_bits(&self, nbits: u32) -> u32 {
         if nbits == 0 || nbits > 32 {
             return 0;
@@ -119,11 +120,11 @@ pub struct FrameHeader {
 /// Returns the parsed header and the bit position past the header.
 ///
 /// The frame header is variable-width (1, 4, or 7 bits) per RFC 7932 §9.1:
-/// - bit 0 = 0 → window_bits = 16
-/// - bit 0 = 1, NBL (3 bits) > 0 → window_bits = 17 + NBL (so 18..24)
-/// - bit 0 = 1, NBL = 0, N2 (3 bits) > 0 → window_bits = 8 + N2 (large-window extension, 9..15)
-/// - bit 0 = 1, NBL = 0, N2 = 0 → window_bits = 17
-/// - bit 0 = 1, NBL = 0, N2 = 1 + large_window flag → future extension
+/// - bit 0 = 0 → `window_bits` = 16
+/// - bit 0 = 1, NBL (3 bits) > 0 → `window_bits` = 17 + NBL (so 18..24)
+/// - bit 0 = 1, NBL = 0, N2 (3 bits) > 0 → `window_bits` = 8 + N2 (large-window extension, 9..15)
+/// - bit 0 = 1, NBL = 0, N2 = 0 → `window_bits` = 17
+/// - bit 0 = 1, NBL = 0, N2 = 1 + `large_window` flag → future extension
 ///
 /// # Errors
 ///
@@ -184,7 +185,7 @@ pub struct MetablockHeader {
     pub mlen: u32,
     /// MNIBBLES field used to encode `mlen` (0, 1, 2, 3, or 4).
     pub mnibbles: u8,
-    /// IS_UNCOMPRESSED flag (RFC 7932 §9.2). When true, the metablock
+    /// `IS_UNCOMPRESSED` flag (RFC 7932 §9.2). When true, the metablock
     /// payload is `mlen` raw bytes (no Huffman coding).
     pub is_uncompressed: bool,
 }
@@ -196,11 +197,11 @@ pub struct MetablockHeader {
 /// Per RFC 7932 §9.2 the layout is:
 /// - ISLAST (1 bit)
 /// - if ISLAST=1: ISLASTEMPTY (1 bit)
-///   - if ISLASTEMPTY=1: end (mlen=0, mnibbles=0, is_uncompressed=false)
+///   - if ISLASTEMPTY=1: end (mlen=0, mnibbles=0, `is_uncompressed=false`)
 ///   - if ISLASTEMPTY=0: fall through
 /// - MNIBBLES (2 bits): if 0 → use 4 nibbles for MLEN; else MNIBBLES itself
 /// - MLEN (4 × MNIBBLES bits): mlen = value + 1
-/// - IS_UNCOMPRESSED (1 bit)
+/// - `IS_UNCOMPRESSED` (1 bit)
 /// - Reserved (1 bit, must be 0)
 ///
 /// # Errors
@@ -417,7 +418,7 @@ pub const MAX_HUFFMAN_CODE_LENGTH: u8 = 15;
 /// Canonical Huffman table with flat 2^15 lookup for O(1) correct decode.
 #[derive(Clone, Debug)]
 pub struct HuffmanTable {
-    /// Flat lookup: for each 15-bit peek value, (symbol, bits_to_consume).
+    /// Flat lookup: for each 15-bit peek value, (symbol, `bits_to_consume`).
     lookup: Vec<(u16, u8)>,
     /// For NSYM=1 simple form: return without consuming bits.
     single_symbol: Option<u32>,
@@ -476,12 +477,12 @@ impl HuffmanTable {
         }
     }
 
-    /// Build a Huffman table for the NSYM=4 tree_select=1 simple form
+    /// Build a Huffman table for the NSYM=4 `tree_select=1` simple form
     /// (RFC 7932 §9.5.1). This layout uses a MIXED code assignment:
-    ///   "0"    → s_a (1-bit code, fills 4 of 8 root entries)
-    ///   "01"   → s_b (2-bit code at odd root positions)
-    ///   "011"  → s_c (3-bit code at root position 3)
-    ///   "111"  → s_d (3-bit code at root position 7)
+    ///   "0"    → `s_a` (1-bit code, fills 4 of 8 root entries)
+    ///   "01"   → `s_b` (2-bit code at odd root positions)
+    ///   "011"  → `s_c` (3-bit code at root position 3)
+    ///   "111"  → `s_d` (3-bit code at root position 7)
     ///
     /// Canonical Huffman CANNOT represent this (2 length-1 codes
     /// saturate the 1-bit space, leaving no room for longer codes).
@@ -489,8 +490,8 @@ impl HuffmanTable {
     /// directly via an 8-entry pattern replicated to the full table.
     ///
     /// `syms` = [s0, s1, s2, s3] in stream order. Per upstream:
-    /// - s_a = s0, s_b = s1 (1-bit pair, unsorted).
-    /// - s_c = min(s2, s3), s_d = max(s2, s3) (2-bit/3-bit pair, sorted).
+    /// - `s_a` = s0, `s_b` = s1 (1-bit pair, unsorted).
+    /// - `s_c` = min(s2, s3), `s_d` = max(s2, s3) (2-bit/3-bit pair, sorted).
     #[must_use]
     pub fn from_simple_4_tree_select(syms: &[u16; 4]) -> Self {
         let (s_c, s_d) = if syms[2] <= syms[3] {
@@ -534,8 +535,8 @@ impl HuffmanTable {
         if len == 0 {
             return None;
         }
-        br.drop_bits(len as u32);
-        Some(sym as u32)
+        br.drop_bits(u32::from(len));
+        Some(u32::from(sym))
     }
 }
 
@@ -709,7 +710,11 @@ fn read_complex_form(
             // symbols with the same target value (`prev_code_len` for 16,
             // 0 for 17) accumulate multiplicatively rather than additively.
             let extra_bits: u32 = if sym == 16 { 2 } else { 3 };
-            let new_len: u32 = if sym == 16 { prev_code_len as u32 } else { 0 };
+            let new_len: u32 = if sym == 16 {
+                u32::from(prev_code_len)
+            } else {
+                0
+            };
             let repeat_delta = br.read_bits(extra_bits);
 
             if repeat_code_len != new_len {
@@ -845,7 +850,7 @@ impl ContextMode {
                     | crate::static_codes::K_UTF8_CONTEXT_LOOKUP[(p2 as usize) | 256]
             }
             Self::Signed => {
-                ((crate::static_codes::K_SIGNED_3BIT_CONTEXT_LOOKUP[p1 as usize] as u8) << 3)
+                (crate::static_codes::K_SIGNED_3BIT_CONTEXT_LOOKUP[p1 as usize] << 3)
                     + crate::static_codes::K_SIGNED_3BIT_CONTEXT_LOOKUP[p2 as usize]
             }
         }
@@ -884,7 +889,7 @@ pub fn parse_context_mode(
 ///
 /// Handles:
 /// - Empty metablocks (ISLASTEMPTY)
-/// - Uncompressed metablocks (IS_UNCOMPRESSED=1)
+/// - Uncompressed metablocks (`IS_UNCOMPRESSED=1`)
 /// - Huffman-coded metablocks in the trivial layout produced by
 ///   `compress_fragment_two_pass` (1 literal/command/distance Huffman
 ///   tree each, no context maps, no block types, NPOSTFIX=0, NDIRECT=0).
@@ -897,7 +902,8 @@ pub fn parse_context_mode(
 ///
 /// Returns `&'static str` on malformed input or unsupported features.
 pub fn decode(compressed: &[u8]) -> Result<Vec<u8>, &'static str> {
-    let (_frame, mut bit_pos) = parse_frame_header(compressed, 0)?;
+    let (frame, mut bit_pos) = parse_frame_header(compressed, 0)?;
+    let max_backward_distance: u32 = (1u32 << frame.window_bits).saturating_sub(0x8000);
     let mut output = Vec::new();
 
     loop {
@@ -909,7 +915,7 @@ pub fn decode(compressed: &[u8]) -> Result<Vec<u8>, &'static str> {
         }
 
         if mb.is_uncompressed {
-            let byte_offset = (bit_pos + 7) / 8;
+            let byte_offset = bit_pos.div_ceil(8);
             let needed = byte_offset
                 .checked_add(mb.mlen as usize)
                 .ok_or("mlen overflow")?;
@@ -920,8 +926,13 @@ pub fn decode(compressed: &[u8]) -> Result<Vec<u8>, &'static str> {
             bit_pos = needed * 8;
         } else {
             let output_base = output.len();
-            let (new_pos, bytes_emitted) =
-                decode_compressed_metablock(compressed, bit_pos, mb.mlen as usize, output_base)?;
+            let (new_pos, bytes_emitted) = decode_compressed_metablock(
+                compressed,
+                bit_pos,
+                mb.mlen as usize,
+                output_base,
+                max_backward_distance,
+            )?;
             bit_pos = new_pos;
             output.extend(bytes_emitted);
         }
@@ -950,6 +961,7 @@ fn decode_compressed_metablock(
     bit_pos: usize,
     mlen: usize,
     output_base: usize,
+    max_backward_distance: u32,
 ) -> Result<(usize, Vec<u8>), &'static str> {
     let mut br = BitReader::new(data);
     br.bit_pos = bit_pos;
@@ -968,6 +980,7 @@ fn decode_compressed_metablock(
             nbltypesc,
             nbltypesd,
             output_base,
+            max_backward_distance,
         );
     }
 
@@ -1012,6 +1025,7 @@ fn decode_compressed_metablock(
             ntreesl,
             None,
             output_base,
+            max_backward_distance,
         );
     }
 
@@ -1029,6 +1043,7 @@ fn decode_compressed_metablock(
             ntreesl,
             Some(ntreesd),
             output_base,
+            max_backward_distance,
         );
     }
 
@@ -1054,10 +1069,7 @@ fn decode_compressed_metablock(
     let mut output = Vec::with_capacity(mlen);
     let mut dist_rb: [u32; 4] = [16, 15, 11, 4];
     let mut dist_rb_idx: i32 = 0;
-    // Per upstream: max_backward_distance = (1 << WBITS) - WINDOW_GAP.
-    // For typical inputs our default WBITS=22 → 4 MB max backward. The
-    // window-gap constant is 0x8000 (32 KB) per RFC 7932 §9.1.
-    let max_backward_distance: u32 = (1u32 << 24).saturating_sub(0x8000);
+    // max_backward_distance is passed from the frame header (WBITS-dependent).
 
     while output.len() < mlen {
         let cmd_code = cmd_table
@@ -1165,11 +1177,11 @@ fn decode_compressed_metablock(
     Ok((br.bit_pos(), output))
 }
 
-/// Decode a distance from a dist_table symbol code (RFC 7932 §9.4 + §10.4).
+/// Decode a distance from a `dist_table` symbol code (RFC 7932 §9.4 + §10.4).
 ///
-/// For codes 0..15 (short codes): compute from dist_rb ring buffer.
+/// For codes 0..15 (short codes): compute from `dist_rb` ring buffer.
 /// For codes 16..num_direct-1 (when NDIRECT > 0): direct distance codes.
-/// For codes >= num_direct: long-distance formula with NPOSTFIX bits.
+/// For codes >= `num_direct`: long-distance formula with NPOSTFIX bits.
 ///
 /// Mirrors upstream `ReadDistanceInternal`. `dist_code` is the raw
 /// symbol from the dist Huffman table.
@@ -1179,14 +1191,14 @@ fn decode_compressed_metablock(
 /// from the metablock header (0..=3).
 ///
 /// General formula (long codes):
-///   postfix_mask = (1 << NPOSTFIX) - 1
-///   distval = dist_code - num_direct
-///   postfix = distval & postfix_mask
+///   `postfix_mask` = (1 << NPOSTFIX) - 1
+///   distval = `dist_code` - `num_direct`
+///   postfix = distval & `postfix_mask`
 ///   distval >>= NPOSTFIX
 ///   nbits  = (distval >> 1) + 1
 ///   offset = ((2 + (distval & 1)) << nbits) - 4
 ///   distance = ((offset + ReadBits(nbits)) << NPOSTFIX) + postfix
-///              + num_direct - (NUM_DISTANCE_SHORT_CODES - 1)
+///              + `num_direct` - (`NUM_DISTANCE_SHORT_CODES` - 1)
 pub(crate) fn decode_distance_from_code(
     dist_code: i32,
     num_direct: u32,
@@ -1212,11 +1224,11 @@ pub(crate) fn decode_distance_from_code(
     let nbits = ((distval as u32) >> 1) + 1;
     let offset = (((distval & 1) + 2) << nbits) - 4;
     let extra = br.read_bits(nbits);
-    let raw = (offset as i32 + extra as i32) << npostfix;
+    let raw = (offset + extra as i32) << npostfix;
     (raw + postfix + num_direct as i32 - NUM_DISTANCE_SHORT_CODES + 1) as u32
 }
 
-/// Read a `DecodeVarLenUint8`-encoded value (RFC 7932 §9.3 MoreBlockLengths).
+/// Read a `DecodeVarLenUint8`-encoded value (RFC 7932 §9.3 `MoreBlockLengths`).
 ///
 /// - 1 bit = 0 → value = 0
 /// - 4 bits = 0000 → value = 1
@@ -1234,7 +1246,7 @@ pub(crate) fn read_varlen_uint8(br: &mut BitReader) -> Result<u32, &'static str>
 }
 
 /// Mirror of upstream `TakeDistanceFromRingBuffer` (decode.c, line ~1348):
-/// computes the actual distance for short codes 0..15 from the dist_rb
+/// computes the actual distance for short codes 0..15 from the `dist_rb`
 /// ring buffer. For codes 0..3 also rolls the ring buffer index; for
 /// codes 4..15 the index is unchanged (the LZ77 copy path writes back).
 ///

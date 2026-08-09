@@ -7,7 +7,7 @@
 //!
 //! ## Algorithm
 //!
-//! 1. Compute autocorrelation at lags 0..=max_order.
+//! 1. Compute autocorrelation at lags `0..=max_order`.
 //! 2. Levinson-Durbin recursion: solve for LPC coefficients (f64).
 //! 3. Quantize coefficients to fixed-point with a chosen precision
 //!    and shift.
@@ -103,7 +103,7 @@ pub fn best_lpc_candidate(samples: &[i32], bps: u8) -> Option<LpcSolution> {
 
     let mut candidates: Vec<Candidate> = Vec::new();
     let mut prev_error = f64::INFINITY;
-    for &order in ORDER_SHORTLIST.iter() {
+    for &order in &ORDER_SHORTLIST {
         if order > max_order {
             continue;
         }
@@ -261,8 +261,8 @@ fn map_to_unsigned(r: i32) -> u32 {
 /// Run Levinson-Durbin once at `max_order` and extract per-order LPC
 /// coefficients + prediction-error energy for every intermediate order.
 ///
-/// Returns `(lpc_per_order, error_per_order)` indexed by order 0..=max_order.
-/// This is O(max_order²) — same as a single recursion at max_order.
+/// Returns `(lpc_per_order, error_per_order)` indexed by order `0..=max_order`.
+/// This is `O(max_order²)` — same as a single recursion at `max_order`.
 fn levinson_durbin_all_orders(samples: &[i32], max_order: usize) -> (Vec<Vec<f64>>, Vec<f64>) {
     let acf = autocorrelate(samples, max_order);
     let mut lpc_per_order: Vec<Vec<f64>> = (0..=max_order).map(|n| vec![0.0; n.max(1)]).collect();
@@ -361,7 +361,7 @@ pub fn encode_from_solution(
     Ok(())
 }
 
-/// Compute autocorrelation coefficients at lags 0..=max_order.
+/// Compute autocorrelation coefficients at lags `0..=max_order`.
 ///
 /// Uses the SIMD-accelerated inner-product in
 /// [`simd::autocorrelation_lag`](crate::encoder::simd::autocorrelation_lag)

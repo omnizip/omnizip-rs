@@ -19,7 +19,7 @@ pub fn decode_stream(input: &[u8]) -> Result<Vec<u8>, String> {
     if input.len() < 4 {
         return Err("input too short for FLAC magic".into());
     }
-    if &input[..4] != crate::FLAC_MAGIC {
+    if input[..4] != crate::FLAC_MAGIC {
         return Err("missing fLaC magic".into());
     }
 
@@ -45,17 +45,14 @@ pub fn decode_stream(input: &[u8]) -> Result<Vec<u8>, String> {
             return Err("truncated metadata block".into());
         }
 
-        match block_type {
-            0 => {
-                // STREAMINFO.
-                info = StreamInfo::parse(&input[pos..pos + block_length as usize]);
-                if info.is_none() {
-                    return Err("invalid STREAMINFO block".into());
-                }
+        if block_type == 0 {
+            // STREAMINFO.
+            info = StreamInfo::parse(&input[pos..pos + block_length as usize]);
+            if info.is_none() {
+                return Err("invalid STREAMINFO block".into());
             }
-            _ => {
-                // Skip other metadata blocks (VORBIS_COMMENT, etc.).
-            }
+        } else {
+            // Skip other metadata blocks (VORBIS_COMMENT, etc.).
         }
 
         pos += block_length as usize;
@@ -66,7 +63,7 @@ pub fn decode_stream(input: &[u8]) -> Result<Vec<u8>, String> {
     // Decode audio frames.
     let bps = info.bps();
     let channels = info.channel_count();
-    let bytes_per_sample = (bps as usize + 7) / 8;
+    let bytes_per_sample = (bps as usize).div_ceil(8);
 
     let mut output: Vec<u8> = Vec::new();
     let mut total_samples_decoded: u64 = 0;

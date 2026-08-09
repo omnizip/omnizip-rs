@@ -2,8 +2,8 @@
 //! relative addresses to a form that compresses better.
 //!
 //! Thumb BL is a 32-bit instruction split across two 16-bit half-words:
-//!   first half:  11110 | offset_high(10)
-//!   second half: 11x11 | offset_low(11)   (x = link bit, usually 1)
+//!   first half:  11110 | `offset_high(10)`
+//!   second half: 11x11 | `offset_low(11)`   (x = link bit, usually 1)
 //!
 //! The filter extracts the 22-bit combined offset, shifts left 1,
 //! normalizes to absolute, and writes back.

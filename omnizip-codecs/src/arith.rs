@@ -6,8 +6,8 @@
 //! as long as the model produces identical bit probabilities on both
 //! sides.
 //!
-//! Used by PPMd7 and PPMd8. Kept here (in the shared codecs crate)
-//! rather than duplicated in each PPMd module.
+//! Used by `PPMd7` and `PPMd8`. Kept here (in the shared codecs crate)
+//! rather than duplicated in each `PPMd` module.
 //!
 //! ## Determinism
 //!
@@ -205,7 +205,7 @@ pub const PROB_SCALE: u64 = 65_536;
 /// Scale a frequency to a probability in `[1, PROB_SCALE-1]`.
 ///
 /// Returns `count / total` scaled to `PROB_SCALE`, with rounding.
-/// Used by PPMd7 and PPMd8 to compute per-symbol probabilities for
+/// Used by `PPMd7` and `PPMd8` to compute per-symbol probabilities for
 /// the arithmetic coder. Extracted here to avoid duplication.
 #[must_use]
 pub fn scaled_prob(count: u32, total: u32) -> u16 {

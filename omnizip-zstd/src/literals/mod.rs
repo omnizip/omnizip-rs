@@ -352,7 +352,7 @@ fn decode_four_stream(table: &HuffmanTable, src: &[u8], out: &mut [u8]) -> Resul
     let mut bs4 = BitStream::new(seg4);
 
     // C reference: segmentSize = (dstSize+3)/4.
-    let segment_size = (out.len() + 3) / 4;
+    let segment_size = out.len().div_ceil(4);
     let mut boundaries = [0usize; 5];
     for i in 1..4 {
         boundaries[i] = segment_size * i;

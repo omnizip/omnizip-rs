@@ -96,7 +96,7 @@ pub fn deflate_dynamic_huffman(input: &[u8]) -> Result<Option<Vec<u8>>, OmnizipE
 
     // Build the code-length Huffman table.
     let mut cl_freqs = [0u32; 19];
-    for s in cl_symbols.iter() {
+    for s in &cl_symbols {
         cl_freqs[usize::from(s.symbol)] += 1;
     }
     let mut cl_lengths = [0u8; 19];
@@ -125,7 +125,7 @@ pub fn deflate_dynamic_huffman(input: &[u8]) -> Result<Option<Vec<u8>>, OmnizipE
 
     // Emit the run-length-encoded code lengths.
     let mut prev: u8 = 0;
-    for s in cl_symbols.iter() {
+    for s in &cl_symbols {
         match s.symbol {
             0..=15 => {
                 writer
@@ -236,7 +236,7 @@ fn build_huffman_lengths(freqs: &[u32], max_len: u8, lengths: &mut [u8]) {
 
     // Extract lengths.
     for (sym, depth) in &nodes[0].leaves {
-        lengths[*sym] = (*depth).min(255);
+        lengths[*sym] = (*depth);
     }
 
     // Length limiting: zlib CPI approach.
@@ -499,7 +499,7 @@ fn length_to_symbol(length: u16) -> usize {
 
 fn length_to_symbol_full(length: u16) -> (usize, u32, u16) {
     let table = length_table();
-    for (sym, extra, base) in table.iter() {
+    for (sym, extra, base) in table {
         let next_base = if usize::from(*sym) - 257 + 1 < table.len() {
             table[usize::from(*sym) - 257 + 1].2
         } else {
@@ -529,7 +529,7 @@ fn distance_to_symbol(distance: u16) -> usize {
 
 fn distance_to_symbol_full(distance: u16) -> (usize, u32, u16) {
     let table = distance_table();
-    for (sym, extra, base) in table.iter() {
+    for (sym, extra, base) in table {
         let next_base = if usize::from(*sym) + 1 < table.len() {
             table[usize::from(*sym) + 1].2
         } else {
@@ -578,7 +578,7 @@ impl BitWriter {
         }
         // Reverse bits: Huffman codes are MSB-first, but DEFLATE
         // bitstream is LSB-first within each byte.
-        let reversed = reverse_bits(u32::from(code), len) as u64;
+        let reversed = u64::from(reverse_bits(u32::from(code), len));
         self.write_bits(reversed, u32::from(len));
     }
 

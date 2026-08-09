@@ -46,7 +46,7 @@ pub fn decode_residual(
     // Samples per partition (based on block_size, not residual_count).
     // Partition 0 has `samples_per_partition - predictor_order`
     // residuals; later partitions each have `samples_per_partition`.
-    let samples_per_partition = (block_size + num_partitions - 1) / num_partitions;
+    let samples_per_partition = block_size.div_ceil(num_partitions);
     let mut residual = Vec::with_capacity(block_size);
 
     for part_idx in 0..num_partitions {

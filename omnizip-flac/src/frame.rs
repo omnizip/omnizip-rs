@@ -70,7 +70,7 @@ pub fn decode_frame(
         9 => Some(44.1e3 as u32),
         10 => Some(48e3 as u32),
         11 => Some(96e3 as u32),
-        12 | 13 | 14 => None, // Read from end of header
+        12..=14 => None, // Read from end of header
         15 => return Err("invalid sample rate 15".into()),
         _ => return Err("unreachable".into()),
     };
@@ -133,7 +133,7 @@ pub fn decode_frame(
     }
 
     // Reconstruct left/right from decorrelated representations.
-    if channel_assign >= 8 && channel_assign <= 10 {
+    if (8..=10).contains(&channel_assign) {
         channels_data = reconstruct_stereo(channels_data, channel_assign);
     }
 
@@ -211,7 +211,7 @@ fn read_utf8_coded(reader: &mut BitReader) -> Result<u64, String> {
     }
     // Count leading 1-bits via the inverted byte's leading zeros.
     let num_leading_ones = (!first).leading_zeros() as usize;
-    if num_leading_ones < 2 || num_leading_ones > 7 {
+    if !(2..=7).contains(&num_leading_ones) {
         return Err(format!("invalid UTF-8 coded number: 0x{first:02X}"));
     }
     let num_continuation = num_leading_ones - 1;

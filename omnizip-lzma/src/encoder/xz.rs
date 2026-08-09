@@ -39,7 +39,7 @@ pub fn xz_compress(input: &[u8]) -> Result<Vec<u8>, LzmaError> {
 }
 
 /// Compress `input` into an XZ container with explicit LZMA
-/// parameters (lc, lp, pb, dict_size, parser choice).
+/// parameters (lc, lp, pb, `dict_size`, parser choice).
 ///
 /// The `dict_size` field of `options` is used to select the LZMA2
 /// dictionary size code in the XZ block header. Other parameters
@@ -132,7 +132,7 @@ pub fn xz_compress_with_options(input: &[u8], options: &LzmaOptions) -> Result<V
     Ok(out)
 }
 
-/// Map a dict_size in bytes to the LZMA2 1-byte dictionary code.
+/// Map a `dict_size` in bytes to the LZMA2 1-byte dictionary code.
 ///
 /// Per the LZMA2 spec: the code is `ceil(log2(dict_size)) - 16` for
 /// dicts >= 4 KB, with code 40 reserved for "4 GiB - 1". Codes 41+ are

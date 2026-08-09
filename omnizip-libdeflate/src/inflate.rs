@@ -1,6 +1,6 @@
 //! Pure-Rust RFC 1951 DEFLATE inflate.
 //!
-//! Phase 2 of TODO 104: in-house decoder that replaces the miniz_oxide
+//! Phase 2 of TODO 104: in-house decoder that replaces the `miniz_oxide`
 //! delegation. Wire format is RFC 1951 (raw DEFLATE); callers that
 //! have zlib or gzip framing around it must strip the wrapper first.
 //!
@@ -56,7 +56,7 @@ pub fn inflate(input: &[u8], expected_len: usize) -> Result<Vec<u8>, Error> {
             1 => {
                 let lit = fixed_lit_table();
                 let dist = fixed_dist_table();
-                inflate_block(&mut reader, &mut out, &lit, &dist, max_out)?;
+                inflate_block(&mut reader, &mut out, lit, dist, max_out)?;
             }
             2 => {
                 let (lit, dist) = read_dynamic_tables(&mut reader)?;
@@ -194,7 +194,7 @@ fn inflate_block(
                 "DEFLATE: output exceeds safety cap ({max_out} bytes) — likely corrupt stream"
             )));
         }
-        let sym = lit_table.decode(reader)? as u32;
+        let sym = u32::from(lit_table.decode(reader)?);
         match sym {
             0..=255 => out.push(sym as u8),
             256 => return Ok(()),

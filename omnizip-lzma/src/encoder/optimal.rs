@@ -97,7 +97,7 @@ fn find_all_matches_tuned(
 // actual encoder state.
 
 /// Run the forward DP pass. Returns the optimal parse as a sequence
-/// of (start_pos, action) pairs.
+/// of (`start_pos`, action) pairs.
 ///
 /// Prices come from the [`prob_state`](crate::encoder::prob_state)
 /// module — state-conditioned estimates that mirror the C reference's
@@ -261,7 +261,7 @@ fn optimal_parse_with_matches(input: &[u8], matches: &[Vec<Match>]) -> Vec<(usiz
     actions
 }
 
-/// Wrapper for the prob_state literal price that falls back to a
+/// Wrapper for the `prob_state` literal price that falls back to a
 /// simple constant when the state has no recent match (Phase 2 stub
 /// matches the original heuristic).
 fn prob_state_literal_price(state: LzmaProbState, byte: u8) -> Price {
@@ -269,13 +269,13 @@ fn prob_state_literal_price(state: LzmaProbState, byte: u8) -> Price {
     ps_lit(state, byte) as Price
 }
 
-/// Wrapper for the prob_state match price.
+/// Wrapper for the `prob_state` match price.
 fn prob_state_match_price(state: LzmaProbState, distance: u32, length: u32) -> Price {
     use crate::encoder::prob_state::match_price as ps_match;
     ps_match(state, distance, length) as Price
 }
 
-/// Wrapper for the prob_state rep0 price.
+/// Wrapper for the `prob_state` rep0 price.
 fn prob_state_rep0_price(state: LzmaProbState, length: u32) -> Price {
     use crate::encoder::prob_state::rep0_price as ps_rep0;
     ps_rep0(state, length) as Price
@@ -287,6 +287,7 @@ fn prob_state_rep0_price(state: LzmaProbState, length: u32) -> Price {
 /// This is a price-based planner — it computes the optimal parse and
 /// then drives the encoder's `encode_literal_byte` / `encode_match`
 /// methods to emit the bits.
+#[must_use]
 pub fn optimal_parse_actions(input: &[u8], dict_size: u32) -> Vec<(usize, ParseAction)> {
     optimal_parse(input, dict_size)
 }

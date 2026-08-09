@@ -10,7 +10,7 @@
 //! - e.g. L=1 → RUNA; L=2 → RUNB; L=3 → RUNA,RUNA; L=4 → RUNA,RUNB;
 //!   L=5 → RUNB,RUNA; L=6 → RUNB,RUNB; L=7 → RUNA,RUNA,RUNA.
 //!
-//! Non-zero MTF values `v` (1..=mtf_count) are emitted as symbol
+//! Non-zero MTF values `v` (`1..=mtf_count`) are emitted as symbol
 //! `v + 1` (skipping the two RUN slots). End-of-block is symbol
 //! `mtf_count + 2`.
 //!

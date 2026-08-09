@@ -64,14 +64,14 @@ pub struct HuffmanTable {
 impl HuffmanTable {
     /// Build a ZSTD Huffman decode table from a per-symbol weight array.
     ///
-    /// ZSTD uses a weight-based DTable layout (NOT standard canonical
+    /// ZSTD uses a weight-based `DTable` layout (NOT standard canonical
     /// Huffman). Symbols are grouped by weight: all weight-1 symbols
-    /// occupy consecutive DTable entries first, then weight-2 symbols,
+    /// occupy consecutive `DTable` entries first, then weight-2 symbols,
     /// etc. Within each weight group, symbols appear in ascending
     /// symbol-value order.
     ///
     /// Each symbol of weight `w` occupies `(1 << w) >> 1` consecutive
-    /// entries, and its code length is `tableLog + 1 - w`. The DTable
+    /// entries, and its code length is `tableLog + 1 - w`. The `DTable`
     /// has `1 << tableLog` entries, indexed by the top `tableLog` bits
     /// of the bitstream peek.
     ///
@@ -312,7 +312,7 @@ impl<'t, 'b> HuffmanDecoder<'t, 'b> {
 }
 
 /// Build a per-symbol `(code, length)` table using the ZSTD weight-
-/// grouped layout. `code` is the DTable entry index (the Huffman code
+/// grouped layout. `code` is the `DTable` entry index (the Huffman code
 /// MSB-aligned within `length` bits). Used by the encoder.
 fn build_zstd_code_table(weights: &[u8], table_log: u8) -> Vec<(u32, u8)> {
     let mut codes = vec![(0u32, 0u8); weights.len()];
@@ -381,7 +381,7 @@ fn compute_table_log(weights: &[u8]) -> Result<u8, ZstdError> {
 }
 
 /// Build the ZSTD single-level lookup table (`1 << MAX_BITS` entries)
-/// from per-symbol weights, using the ZSTD weight-grouped DTable layout.
+/// from per-symbol weights, using the ZSTD weight-grouped `DTable` layout.
 ///
 /// Layout (matching C's `HUF_readDTableX1_wksp`):
 /// 1. Group symbols by weight. Within each weight group, preserve
@@ -389,8 +389,8 @@ fn compute_table_log(weights: &[u8]) -> Result<u8, ZstdError> {
 /// 2. Walk weight groups from 1 to `table_log`. For weight `w`:
 ///    - code length = `table_log + 1 - w`
 ///    - entries per symbol = `(1 << w) >> 1`
-///    - Assign consecutive DTable entries to each symbol.
-/// 3. The DTable has `1 << table_log` entries. Expand each to fill the
+///    - Assign consecutive `DTable` entries to each symbol.
+/// 3. The `DTable` has `1 << table_log` entries. Expand each to fill the
 ///    `1 << MAX_BITS` lookup (replicate each entry `1 << (MAX_BITS -
 ///    table_log)` times).
 fn build_zstd_lookup(weights: &[u8], table_log: u8) -> Vec<DecodeEntry> {

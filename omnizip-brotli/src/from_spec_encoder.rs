@@ -55,7 +55,7 @@ const WINDOW_BITS: u8 = 24;
 const WINDOW_GAP: u32 = 0x8000;
 
 /// Maximum backward distance for LZ77 matches.
-/// Per RFC 7932 §9.1: max_backward_distance = (1 << WBITS) - WINDOW_GAP.
+/// Per RFC 7932 §9.1: `max_backward_distance` = (1 << WBITS) - `WINDOW_GAP`.
 const MAX_BACKWARD_DISTANCE: u32 = (1 << WINDOW_BITS) - WINDOW_GAP;
 
 /// Minimum match length for LZ77.
@@ -164,9 +164,9 @@ fn encode_huffman_chunk_into(
     is_last: bool,
     quality: i32,
 ) {
-    bw.write_bits(if is_last { 1 } else { 0 }, 1); // ISLAST
-                                                   // ISLASTEMPTY only present when ISLAST=1; we never emit empty
-                                                   // metablocks, so always 0 when present.
+    bw.write_bits(u32::from(is_last), 1); // ISLAST
+                                          // ISLASTEMPTY only present when ISLAST=1; we never emit empty
+                                          // metablocks, so always 0 when present.
     if is_last {
         bw.write_bits(0, 1); // ISLASTEMPTY = 0
     }
@@ -196,7 +196,7 @@ fn encode_huffman_chunk_into(
     // compatibility debugging (write_block_type_trees + block-switch
     // emission exist but produce wire-format mismatches in the full
     // decoder path). The infrastructure is ready for re-enablement.
-    let use_block_switch = quality >= 7 && quality <= 9 && input.len() >= 256 && !use_context;
+    let use_block_switch = (7..=9).contains(&quality) && input.len() >= 256 && !use_context;
     // Write all three NBLTYPES first (RFC 7932 §9.3: all block-type
     // counts precede any block-type code trees).
     let nbltypes_l: u32 = if use_block_switch { 2 } else { 1 };
@@ -423,7 +423,7 @@ fn encode_huffman_chunk_into(
             if use_block_switch {
                 if lit_block_remaining == 0 {
                     // Block-type code: symbol 3 for type 0→1, symbol 2 for 1→0.
-                    let bt_sym = if lit_block_type == 0 { 1u32 } else { 0u32 };
+                    let bt_sym = u32::from(lit_block_type == 0);
                     bw.write_bits(bt_sym, 1);
                     bw.write_bits(15, 5); // block-length extra (128-113=15)
                     lit_block_type = 1 - lit_block_type;
@@ -514,8 +514,8 @@ fn empty_frame() -> Vec<u8> {
 // ---------------------------------------------------------------------------
 
 /// Encode the entire input as a single Huffman-coded metablock (fallback
-/// for inputs ≤ 64 KiB). Calls the chunk encoder with mlen_offset=0 and
-/// is_last=true, then prepends WBITS.
+/// for inputs ≤ 64 KiB). Calls the chunk encoder with `mlen_offset=0` and
+/// `is_last=true`, then prepends WBITS.
 fn encode_huffman_frame_q(input: &[u8], quality: i32) -> Vec<u8> {
     if input.is_empty() || input.len() >= (1 << 20) {
         return Vec::new();
@@ -532,7 +532,7 @@ struct SymbolStream {
     literals: Vec<u8>,
     /// Command symbols (indices into kCmdLut, 0..704).
     cmd_symbols: Vec<usize>,
-    /// Distance symbols (0..63) — one per command with copy_len > 0.
+    /// Distance symbols (0..63) — one per command with `copy_len` > 0.
     dist_symbols: Vec<u32>,
     /// Distance extra-bit values, parallel to `dist_symbols`.
     dist_extras: Vec<u32>,
@@ -541,7 +541,7 @@ struct SymbolStream {
 /// Build the entropy-coded symbol stream from commands.
 ///
 /// For each command:
-/// - Look up the matching entry in `kCmdLut` (cell_idx ≥ 2 for explicit
+/// - Look up the matching entry in `kCmdLut` (`cell_idx` ≥ 2 for explicit
 ///   distance; we never emit implicit-distance commands).
 /// - Compute the distance symbol + extra bits via the long-code formula
 ///   (RFC 7932 §10.4).
@@ -609,15 +609,15 @@ fn build_symbol_stream(
     })
 }
 
-/// Find the kCmdLut symbol matching (insert_len, copy_len).
+/// Find the kCmdLut symbol matching (`insert_len`, `copy_len`).
 ///
 /// For `copy_len > 0`: matches entries with `distance_code == -1`
-/// (cell_idx ≥ 2) so an explicit distance code is read by the decoder.
+/// (`cell_idx` ≥ 2) so an explicit distance code is read by the decoder.
 ///
 /// For `copy_len == 0` (insert-only trailing command): matches any
 /// entry whose `insert_len_offset` is in range and whose
 /// `copy_len_offset == 2` (smallest). The decoder short-circuits at
-/// metablock end without executing the copy, so the phantom copy_len
+/// metablock end without executing the copy, so the phantom `copy_len`
 /// is harmless.
 fn find_cmd_symbol(insert_len: u32, copy_len: u32) -> Option<usize> {
     let phantom = copy_len == 0;
@@ -637,7 +637,7 @@ fn find_cmd_symbol(insert_len: u32, copy_len: u32) -> Option<usize> {
     None
 }
 
-/// Encode an LZ77 distance as a (symbol, extra_bits) pair using the
+/// Encode an LZ77 distance as a (symbol, `extra_bits`) pair using the
 /// given distance-code configuration.
 ///
 /// Direct codes (when NDIRECT > 0): distance 1..=NDIRECT maps to
@@ -905,7 +905,7 @@ fn parse_input_with_offset(
             None
         };
 
-        let lz77_valid = lz77.as_ref().map_or(false, |m| m.distance <= max_dist);
+        let lz77_valid = lz77.as_ref().is_some_and(|m| m.distance <= max_dist);
 
         let best: Option<(u32, u32, u32)> = if lz77_valid {
             let m = lz77.as_ref().unwrap();
@@ -928,7 +928,7 @@ fn parse_input_with_offset(
             if advance_len >= MIN_MATCH && distance > 0 {
                 // Lazy matching: if the current match is short, check if
                 // deferring by one position yields a longer match.
-                if lazy && advance_len < nice_match as u32 && pos + 1 < n {
+                if lazy && advance_len < nice_match && pos + 1 < n {
                     let next_pos = pos + 1;
                     let next_global = mlen_offset + next_pos;
                     let next_max = (next_global as u32).min(MAX_BACKWARD_DISTANCE);
@@ -939,7 +939,7 @@ fn parse_input_with_offset(
                         None
                     };
 
-                    let next_valid = next_lz77.as_ref().map_or(false, |m| m.distance <= next_max);
+                    let next_valid = next_lz77.as_ref().is_some_and(|m| m.distance <= next_max);
                     let next_best_len: Option<u32> = if next_valid {
                         let nm = next_lz77.as_ref().unwrap();
                         if nm.length >= 8 || !use_dict {
@@ -959,7 +959,7 @@ fn parse_input_with_offset(
                     if let Some(next_len) = next_best_len {
                         if next_len > advance_len {
                             // Lazy2: check pos+2 before committing to pos+1.
-                            if lazy2 && next_len < nice_match as u32 && pos + 2 < n {
+                            if lazy2 && next_len < nice_match && pos + 2 < n {
                                 let next2_pos = pos + 2;
                                 let next2_global = mlen_offset + next2_pos;
                                 let next2_max = (next2_global as u32).min(MAX_BACKWARD_DISTANCE);
@@ -1074,9 +1074,9 @@ fn canonical_with_reverse(lengths: &omnizip_codecs::HuffmanLengths) -> Vec<(u32,
 // ---------------------------------------------------------------------------
 
 /// Code-length code prefix: maps each code-length value (0-5) to its
-/// (wire_value, bits) encoding via the fixed K_CL_PREFIX code.
+/// (`wire_value`, bits) encoding via the fixed `K_CL_PREFIX` code.
 ///
-/// Derived from the decoder's K_CL_PREFIX_VALUE / K_CL_PREFIX_LENGTH
+/// Derived from the decoder's `K_CL_PREFIX_VALUE` / `K_CL_PREFIX_LENGTH`
 /// tables (decoder.rs:645-646). Each entry is the LSB-first stream
 /// representation of the prefix code for that value.
 const CL_CODE_TO_WIRE: [(u32, u8); 6] = [
@@ -1088,7 +1088,7 @@ const CL_CODE_TO_WIRE: [(u32, u8); 6] = [
     (0b1111, 4), // value 5
 ];
 
-/// CODE_LENGTH_CODE_ORDER per RFC 7932 §9.5.2.
+/// `CODE_LENGTH_CODE_ORDER` per RFC 7932 §9.5.2.
 const CODE_LENGTH_CODE_ORDER: [u8; 18] =
     [1, 2, 3, 4, 0, 5, 17, 6, 16, 7, 8, 9, 10, 11, 12, 13, 14, 15];
 

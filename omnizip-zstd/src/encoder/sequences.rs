@@ -1,5 +1,5 @@
 //! ZSTD sequences section encoder — converts match-finder output
-//! (literal_length, match_length, offset) into the FSE-coded wire
+//! (`literal_length`, `match_length`, offset) into the FSE-coded wire
 //! format that `sequences::read_section` decodes.
 //!
 //! Ported from `~/src/external/zstd/lib/compress/zstd_compress_sequences.c`
@@ -14,7 +14,7 @@
 //! - **Repeat** (3): reuse the previous block's table (not used for
 //!   the first block).
 //!
-//! This module evaluates Predefined vs FSE_Compressed for each table
+//! This module evaluates Predefined vs `FSE_Compressed` for each table
 //! and picks the option with the lower estimated bit cost.
 
 #![forbid(unsafe_code)]
@@ -74,7 +74,7 @@ const ML_BASE: [u32; 53] = [
     2051, 4099, 8195, 16387, 32771, 65539,
 ];
 
-/// Find the LL code for a given literal length. Returns (code, extra_bits_value).
+/// Find the LL code for a given literal length. Returns (code, `extra_bits_value`).
 fn ll_code(lit_len: u32) -> (u8, u32) {
     for code in (0..36).rev() {
         if LL_BASE[code] <= lit_len {
@@ -84,7 +84,7 @@ fn ll_code(lit_len: u32) -> (u8, u32) {
     (0, lit_len)
 }
 
-/// Find the ML code for a given match length. Returns (code, extra_bits_value).
+/// Find the ML code for a given match length. Returns (code, `extra_bits_value`).
 fn ml_code(match_len: u32) -> (u8, u32) {
     for code in (0..53).rev() {
         if ML_BASE[code] <= match_len {
@@ -95,14 +95,14 @@ fn ml_code(match_len: u32) -> (u8, u32) {
 }
 
 /// Compute the offset base value for a given byte distance.
-/// ZSTD offset coding: offBase = offset + REPEAT_SLOTS (3).
+/// ZSTD offset coding: offBase = offset + `REPEAT_SLOTS` (3).
 /// Repeat offsets 1 and 2 use offBase 1 and 2 respectively.
 const fn off_base(offset: u32) -> u32 {
     offset + 3
 }
 
 /// Encode the sequences section from a [`SeqStore`] into `out`.
-/// Evaluates Predefined vs FSE_Compressed for each table (LL, OF, ML)
+/// Evaluates Predefined vs `FSE_Compressed` for each table (LL, OF, ML)
 /// and picks the option with lower estimated bit cost.
 ///
 /// # Errors
@@ -203,7 +203,7 @@ fn count_symbols(codes: &[u8], count: &mut [u32]) -> u8 {
     max_sym
 }
 
-/// Result of table mode selection: either Predefined or FSE_Compressed.
+/// Result of table mode selection: either Predefined or `FSE_Compressed`.
 struct TableChoice {
     mode: u8,
     norm: Vec<i16>,
@@ -217,9 +217,10 @@ impl TableChoice {
     }
 }
 
-/// Choose between Predefined and FSE_Compressed for a table.
+/// Choose between Predefined and `FSE_Compressed` for a table.
 ///
-/// Returns (mode, norm, table_log) for the chosen option.
+/// Uses Predefined whenever viable (zero overhead). Falls back to
+/// `FSE_Compressed` only when Predefined cannot encode all symbols.
 fn choose_table_mode(
     count: &[u32],
     max_sym: u8,
@@ -232,7 +233,6 @@ fn choose_table_mode(
     let predefined_viable = (0..=max_sym as usize)
         .all(|s| count[s] == 0 || (s < default_norm.len() && default_norm[s] != 0));
 
-    // Use Predefined whenever viable — zero overhead, well-tested.
     if predefined_viable {
         return TableChoice {
             mode: MODE_PREDEFINED,
@@ -290,7 +290,7 @@ fn estimate_cost(count: &[u32], norm: &[i16], table_log: u8, max_sym: u8) -> u64
     total_bits
 }
 
-/// Estimate the byte size of write_ncount output without actually writing.
+/// Estimate the byte size of `write_ncount` output without actually writing.
 fn estimate_ncount_size(norm: &[i16], max_sym: u8, table_log: u8) -> usize {
     let mut tmp = Vec::new();
     let _ = write_ncount(&mut tmp, norm, max_sym, table_log);
@@ -317,7 +317,7 @@ fn write_sequence_count(out: &mut Vec<u8>, nb_seq: usize) {
         out.push(nb_seq as u8);
     } else if nb_seq < 0x7F00 {
         // 2-byte: byte0 = 128 + (nbSeq >> 8), byte1 = nbSeq & 0xFF.
-        out.push((128 + (nb_seq >> 8) as u8) as u8);
+        out.push((128 + (nb_seq >> 8) as u8));
         out.push((nb_seq & 0xFF) as u8);
     } else {
         // 3-byte: 0xFF marker + LE16(nbSeq - 0x7F00).
@@ -329,7 +329,7 @@ fn write_sequence_count(out: &mut Vec<u8>, nb_seq: usize) {
 }
 
 /// Rough upper bound on bitstream size: each sequence needs at most
-/// LL_bits(35)=16 + ML_bits(52)=16 + OF_bits(31)=31 + 3*tableLog bits
+/// `LL_bits(35)=16` + `ML_bits(52)=16` + `OF_bits(31)=31` + 3*tableLog bits
 /// for FSE state updates. Plus init/flush states.
 fn estimated_bitstream_size(nb_seq: usize) -> usize {
     let per_seq_bits = 16 + 16 + 31 + 6 + 6 + 5; // ~80 bits
