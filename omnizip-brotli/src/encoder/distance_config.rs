@@ -26,142 +26,46 @@ pub struct DistanceConfig {
 
 impl DistanceConfig {
     /// Create a new config with the given parameters.
-    #[must_use]
     pub const fn new(npostfix: u8, ndmoem: u8) -> Self {
         Self { npostfix, ndmoem }
     }
 
     /// NDIRECT = NDMOEM << NPOSTFIX (RFC 7932 §9.4).
-    #[must_use]
     pub const fn ndirect(&self) -> u32 {
         (self.ndmoem as u32) << self.npostfix
     }
 
     /// Total direct + short codes in the alphabet.
-    #[must_use]
     pub const fn num_direct(&self) -> u32 {
         NUM_SHORT + self.ndirect()
     }
 
     /// Full distance alphabet size.
-    #[must_use]
     pub fn alphabet_size(&self) -> usize {
         self.num_direct() as usize + (48usize << self.npostfix)
     }
 
-    /// Choose NPOSTFIX/NDMOEM by evaluating multiple configurations and
-    /// picking the one with the lowest estimated encoded size.
+    /// Choose NPOSTFIX/NDMOEM heuristically from the distance distribution.
     ///
-    /// For each candidate config, computes the distance symbol
-    /// distribution and estimates the Huffman cost as Shannon entropy
-    /// plus alphabet description overhead.
+    /// Fast O(N) scan: counts distances <= 15 and picks NDIRECT=12 if
+    /// >=20% of distances are short (beneficial for direct codes).
     #[must_use]
     pub fn choose(commands: &[super::super::from_spec_encoder::Command]) -> Self {
-        let distances: Vec<u32> = commands
-            .iter()
-            .filter(|c| c.copy_len > 0 && c.distance > 0)
-            .map(|c| c.distance)
-            .collect();
-
-        if distances.is_empty() {
-            return Self::new(0, 0);
-        }
-
-        let candidates = [
-            Self::new(0, 0),
-            Self::new(0, 6),
-            Self::new(0, 12),
-            Self::new(0, 15),
-            Self::new(1, 0),
-            Self::new(1, 4),
-            Self::new(2, 0),
-        ];
-
-        let mut best_config = Self::new(0, 0);
-        let mut best_cost = u64::MAX;
-
-        for cfg in &candidates {
-            let cost = estimate_cost(cfg, &distances);
-            if cost < best_cost {
-                best_cost = cost;
-                best_config = *cfg;
+        let mut short_count = 0u32;
+        let mut total = 0u32;
+        for cmd in commands {
+            if cmd.copy_len > 0 && cmd.distance > 0 {
+                total += 1;
+                if cmd.distance <= 15 {
+                    short_count += 1;
+                }
             }
         }
-
-        best_config
+        let ndmoem = if total > 0 && short_count * 5 >= total * 4 {
+            12
+        } else {
+            0
+        };
+        Self::new(0, ndmoem)
     }
-}
-
-/// Estimate the encoded size (in bits) for a given config and distance
-/// distribution.
-///
-/// Cost model:
-/// - Per distance: Huffman symbol cost (Shannon entropy) + extra bits
-/// - Alphabet overhead: ~3 bits per non-zero symbol for table description
-fn estimate_cost(cfg: &DistanceConfig, distances: &[u32]) -> u64 {
-    let alphabet = cfg.alphabet_size();
-    let _ndirect = cfg.ndirect() as usize;
-    let _num_direct = cfg.num_direct() as usize;
-
-    let mut freq = vec![0u32; alphabet];
-    let mut total_extra_bits: u64 = 0;
-
-    for &dist in distances {
-        let (sym, extra_bits) = encode_distance_symbol(dist, cfg);
-        if (sym as usize) < alphabet {
-            freq[sym as usize] += 1;
-        }
-        total_extra_bits += u64::from(extra_bits);
-    }
-
-    let total: u64 = distances.len() as u64;
-
-    let mut entropy_cost: u64 = 0;
-    let mut nonzero_symbols: u64 = 0;
-    for &count in &freq {
-        if count > 0 {
-            nonzero_symbols += 1;
-            let p = f64::from(count) / total as f64;
-            let bits = (-p.log2()).ceil() as u64;
-            entropy_cost += bits * u64::from(count);
-        }
-    }
-
-    let alphabet_overhead = nonzero_symbols * 5;
-    let table_overhead = (alphabet as u64).div_ceil(8);
-
-    entropy_cost + total_extra_bits + alphabet_overhead + table_overhead
-}
-
-/// Compute the distance symbol and extra bits for a given distance.
-/// Mirrors `encode_distance` in `from_spec_encoder.rs` but standalone.
-fn encode_distance_symbol(distance: u32, cfg: &DistanceConfig) -> (u32, u32) {
-    let ndirect = cfg.ndirect();
-
-    if distance <= ndirect {
-        return (NUM_SHORT + distance - 1, 0);
-    }
-
-    let d = distance - 1 - ndirect;
-    let mut nbits: u32 = 1;
-    while nbits < 24 {
-        let limit_even = (4u32 << (nbits - 1)).saturating_sub(4) + (1u32 << nbits);
-        let limit_odd = (6u32 << (nbits - 1)).saturating_sub(4) + (1u32 << nbits);
-        let limit = limit_even.max(limit_odd);
-        if d < limit {
-            break;
-        }
-        nbits += 1;
-    }
-    let even_offset = (4u32 << (nbits - 1)).saturating_sub(4);
-    let odd_offset = (6u32 << (nbits - 1)).saturating_sub(4);
-    let (postfix_bit, base) = if d >= odd_offset {
-        (1, odd_offset)
-    } else {
-        (0, even_offset)
-    };
-    let distval = (nbits - 1) * 2 + postfix_bit;
-    let sym = cfg.num_direct() + distval;
-    let extra = d - base;
-    (sym, extra)
 }
