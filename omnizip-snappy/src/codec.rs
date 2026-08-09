@@ -12,9 +12,9 @@
 //!
 //! Tag byte low 2 bits select the element type:
 //! - `00` = LITERAL: high 6 bits encode literal length (with extension).
-//! - `01` = COPY_1: 1-byte offset (12-bit offset, 3-bit length-4).
-//! - `10` = COPY_2: 2-byte offset (16-bit offset, 6-bit length-1).
-//! - `11` = COPY_4: 4-byte offset (32-bit offset, 6-bit length-1).
+//! - `01` = `COPY_1`: 1-byte offset (12-bit offset, 3-bit length-4).
+//! - `10` = `COPY_2`: 2-byte offset (16-bit offset, 6-bit length-1).
+//! - `11` = `COPY_4`: 4-byte offset (32-bit offset, 6-bit length-1).
 //!
 //! ## Match finder
 //!

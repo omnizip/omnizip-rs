@@ -17,6 +17,7 @@ pub struct BitWriter {
 
 impl BitWriter {
     /// Create an empty writer.
+    #[must_use]
     pub fn new() -> Self {
         Self {
             out: Vec::new(),
@@ -32,7 +33,7 @@ impl BitWriter {
         }
         debug_assert!(n <= 32);
         let mask: u64 = if n >= 32 {
-            u32::MAX as u64
+            u64::from(u32::MAX)
         } else {
             (1u64 << n) - 1
         };
@@ -53,6 +54,7 @@ impl BitWriter {
     }
 
     /// Flush remaining bits and return the output bytes.
+    #[must_use]
     pub fn flush(mut self) -> Vec<u8> {
         if self.nbits > 0 {
             self.out.push((self.acc & 0xFF) as u8);

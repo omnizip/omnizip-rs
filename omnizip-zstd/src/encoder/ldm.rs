@@ -23,7 +23,7 @@
 pub struct LdmHashTable {
     /// Hash table: head[hash] = most recent position with this hash.
     head: Vec<u32>,
-    /// Chain: prev[pos / ldm_gap] = previous position with same hash.
+    /// Chain: prev[pos / `ldm_gap`] = previous position with same hash.
     chain: Vec<u32>,
     /// Number of hash bits.
     hash_log: u32,
@@ -43,6 +43,7 @@ impl LdmHashTable {
     ///
     /// - `window_log`: the ZSTD window size (controls hash table coverage).
     /// - `gap`: sample every N-th position (default 64 for sparse coverage).
+    #[must_use]
     pub fn new(window_log: u32, gap: usize) -> Self {
         let hash_log = window_log.min(21); // cap at 2M entries
         let hash_size = 1usize << hash_log;
@@ -82,6 +83,7 @@ impl LdmHashTable {
     ///
     /// Walks the hash chain up to `max_chain` entries. Returns the
     /// longest match with distance ≤ `max_distance`.
+    #[must_use]
     pub fn find_match(
         &self,
         data: &[u8],

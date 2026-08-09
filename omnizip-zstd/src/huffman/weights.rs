@@ -151,7 +151,7 @@ fn read_fse_compressed_weights(src: &[u8]) -> Result<(Vec<u8>, usize), ZstdError
             reason: format!("FSE weights: need {} bytes, got {}", 1 + i_size, src.len()),
         });
     }
-    let ts = &src[1..1 + i_size];
+    let ts = &src[1..=i_size];
     let (table, tb) = crate::fse::read_fse_table(ts)?;
     let bs = &ts[tb..];
     let mut weights = crate::fse::decode_stream(&table, bs, HUF_SYMBOLVALUE_MAX)?;

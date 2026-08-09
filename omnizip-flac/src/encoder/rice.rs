@@ -42,7 +42,7 @@ pub const MAX_PARTITION_ORDER: u8 = 6;
 /// `block_size` is the subframe's block size in samples
 /// (= `residuals.len() + predictor_order`); `predictor_order` is the
 /// predictor order (FIXED or LPC). The cost estimation uses the libFLAC
-/// partition layout (predictor_order subtraction in partition 0).
+/// partition layout (`predictor_order` subtraction in partition 0).
 ///
 /// Returns `(order, total_bits_including_header)`.
 #[must_use]
@@ -62,7 +62,7 @@ pub fn best_partition_order(
         if n_parts > block_size {
             break;
         }
-        let samples_per_partition = (block_size + n_parts - 1) / n_parts;
+        let samples_per_partition = block_size.div_ceil(n_parts);
         // libFLAC rejects layouts where partition 0 would have zero
         // or negative residuals (samples_per_partition <
         // predictor_order). Skip those orders entirely.
@@ -93,7 +93,7 @@ fn encoded_bits_for_order(
     predictor_order: u32,
 ) -> u64 {
     let n_parts = 1usize << partition_order;
-    let samples_per_partition = (block_size + n_parts - 1) / n_parts;
+    let samples_per_partition = block_size.div_ceil(n_parts);
 
     let mut total: u64 = 10; // method (2) + partition_order (4) + reserved
     let mut offset = 0usize;
@@ -166,7 +166,7 @@ pub fn encode_residuals(
     // NOT `residuals.len() >> partition_order`. The libFLAC spec subtracts
     // `predictor_order` from partition 0's residual count separately,
     // so the partition sizing is based on the full block size.
-    let samples_per_partition = (block_size + n_parts - 1) / n_parts;
+    let samples_per_partition = block_size.div_ceil(n_parts);
     let mut offset = 0usize;
     for part_idx in 0..n_parts {
         let part_size = if part_idx == 0 {

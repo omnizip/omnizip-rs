@@ -106,7 +106,7 @@ fn build_table() -> DictHashTable {
 /// table. Returns `(distance, word_length, transformed_len)` or `None`.
 ///
 /// - `distance`: the encoded dictionary distance for the command
-/// - `word_length`: the original word length (= copy_len for the command)
+/// - `word_length`: the original word length (= `copy_len` for the command)
 /// - `transformed_len`: the actual match length (parser advances by this)
 ///
 /// For identity/uppercase: `word_length == transformed_len`.
@@ -133,15 +133,16 @@ pub fn find_match(input: &[u8], pos: usize, max_distance: u32) -> Option<(u32, u
         let pool_start = entry.pool_offset as usize;
         let transformed = &table.byte_pool[pool_start..pool_start + tlen];
 
-        if pos + tlen <= input.len() && transformed == &input[pos..pos + tlen] {
-            if tlen as u32 > best_len {
-                best_len = tlen as u32;
-                let len = entry.word_length as usize;
-                let shift = SIZE_BITS_BY_LENGTH[len];
-                let address = (entry.word_idx as u32) | ((entry.transform_idx as u32) << shift);
-                best_distance = max_distance + 1 + address;
-                best_word_len = entry.word_length as u32;
-            }
+        if pos + tlen <= input.len()
+            && transformed == &input[pos..pos + tlen]
+            && tlen as u32 > best_len
+        {
+            best_len = tlen as u32;
+            let len = entry.word_length as usize;
+            let shift = SIZE_BITS_BY_LENGTH[len];
+            let address = u32::from(entry.word_idx) | (u32::from(entry.transform_idx) << shift);
+            best_distance = max_distance + 1 + address;
+            best_word_len = u32::from(entry.word_length);
         }
 
         idx = table.chain[idx as usize];

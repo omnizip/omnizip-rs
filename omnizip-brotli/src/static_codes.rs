@@ -104,7 +104,7 @@ pub static K_COPY_EXTRA: [u32; 24] = [
 ///
 /// Indexed by `(byte, half)` where `half ∈ {0, 1}` selects the low
 /// or high half (the second half is `kUTF8ContextLookup[byte | 256]`).
-/// Returns the context contribution for this byte under CONTEXT_UTF8
+/// Returns the context contribution for this byte under `CONTEXT_UTF8`
 /// mode. Used by `ContextMode::Utf8.context_id(p1, p2)`.
 ///
 /// Ported verbatim from `brotli/src/enc/constants.rs` (BSD-3-Clause).
@@ -128,7 +128,7 @@ pub static K_UTF8_CONTEXT_LOOKUP: [u8; 512] = [
     2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2,
 ];
 
-/// Signed-byte context lookup table (RFC 7932 §10.1, CONTEXT_SIGNED).
+/// Signed-byte context lookup table (RFC 7932 §10.1, `CONTEXT_SIGNED`).
 ///
 /// Indexed by byte value (0..256). Returns the 3-bit context ID
 /// contribution. Used by `ContextMode::Signed.context_id(p1, p2)`.

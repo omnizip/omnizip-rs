@@ -47,7 +47,7 @@ pub fn code_lengths(freqs: &[u32]) -> Vec<u8> {
         let mut scaled = false;
         for (w, _) in freqs.iter_mut() {
             if *w > 1 {
-                *w = (*w + 1) / 2;
+                *w = (*w).div_ceil(2);
                 scaled = true;
             }
         }
@@ -71,7 +71,7 @@ pub fn code_lengths(freqs: &[u32]) -> Vec<u8> {
 }
 
 /// Build standard Huffman code lengths via binary-heap merging.
-/// Returns lengths indexed by original symbol index (0..alphabet_size).
+/// Returns lengths indexed by original symbol index (`0..alphabet_size`).
 fn build_huffman_lengths(active: &[(u32, usize)], alphabet_size: usize) -> Vec<u8> {
     use std::cmp::Reverse;
     use std::collections::BinaryHeap;

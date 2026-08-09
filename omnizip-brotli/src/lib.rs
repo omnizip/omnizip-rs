@@ -132,7 +132,7 @@ impl BrotliCodec {
     /// # Errors
     ///
     /// Returns [`OmnizipError::EncodeFailed`] on internal encoder error
-    /// or [`OmnizipError::LevelOutOfRange`] if window_size is out of range.
+    /// or [`OmnizipError::LevelOutOfRange`] if `window_size` is out of range.
     pub fn compress_with_options(
         &self,
         plaintext: &[u8],
@@ -157,7 +157,7 @@ impl Codec for BrotliCodec {
         "brotli"
     }
     fn compress(&self, plaintext: &[u8], level: CompressionLevel) -> Result<Vec<u8>, OmnizipError> {
-        let q = level.as_u8().min(11) as i32;
+        let q = i32::from(level.as_u8().min(11));
         Ok(from_spec_encoder::compress_with_quality(plaintext, q))
     }
     fn decompress(&self, compressed: &[u8], expected_len: u32) -> Result<Vec<u8>, OmnizipError> {

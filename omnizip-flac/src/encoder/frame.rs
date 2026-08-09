@@ -102,7 +102,7 @@ pub fn encode_frame(
 
     // Optional block size extra bytes.
     if let Some(extra) = bs_extra {
-        if extra <= u8::MAX as u32 {
+        if u8::try_from(extra).is_ok() {
             writer.write_bits(u64::from(extra), 8);
         } else {
             writer.write_bits(u64::from(extra), 16);
@@ -141,7 +141,7 @@ pub fn encode_frame(
 }
 
 /// Channel assignment codes (from the FLAC frame header spec).
-/// For independent stereo, assign = 1 (num_channels - 1).
+/// For independent stereo, assign = 1 (`num_channels` - 1).
 const CH_INDEPENDENT_STEREO: u64 = 1;
 const CH_LEFT_SIDE: u64 = 8;
 const CH_RIGHT_SIDE: u64 = 9;
@@ -261,9 +261,9 @@ fn pick_sample_rate_code(sample_rate: u32) -> (u64, Option<u32>) {
         // 12: get 8 bit sample rate (in kHz) from end of header
         _ if sample_rate % 1000 == 0 && sample_rate / 1000 <= 255 => (12, Some(sample_rate / 1000)),
         // 13: get 16 bit sample rate (in Hz) from end of header
-        _ if sample_rate <= u16::MAX as u32 => (13, Some(sample_rate)),
+        _ if u16::try_from(sample_rate).is_ok() => (13, Some(sample_rate)),
         // 14: get 16 bit sample rate (in tens of Hz) from end of header
-        _ if sample_rate % 10 == 0 && sample_rate / 10 <= u16::MAX as u32 => {
+        _ if sample_rate % 10 == 0 && u16::try_from(sample_rate / 10).is_ok() => {
             (14, Some(sample_rate / 10))
         }
         // 0: unspecified, get from STREAMINFO metadata block. We avoid this

@@ -19,7 +19,7 @@ pub fn count_frequencies(literals: &[u8]) -> [u32; 256] {
 }
 
 /// Build a Huffman code from frequencies. Returns 256 weights (0 for
-/// absent symbols). Limits code lengths to HUF_TABLELOG_MAX (11) to
+/// absent symbols). Limits code lengths to `HUF_TABLELOG_MAX` (11) to
 /// ensure compatibility with the ZSTD wire format.
 #[must_use]
 pub fn build_weights(literals: &[u8]) -> Vec<u8> {
@@ -131,7 +131,7 @@ fn huffman_lengths(symbols: &[(u8, u32)]) -> Vec<u8> {
 /// # Errors
 ///
 /// Returns [`ZstdError::Corrupt`] when the alphabet is too large for
-/// direct weight encoding (max_symbol > 128) or when the compressed
+/// direct weight encoding (`max_symbol` > 128) or when the compressed
 /// size doesn't fit any of the supported header formats. The block
 /// encoder falls back to Raw literals in those cases.
 pub fn encode_literals(literals: &[u8]) -> Result<Vec<u8>, ZstdError> {
@@ -143,7 +143,7 @@ pub fn encode_literals(literals: &[u8]) -> Result<Vec<u8>, ZstdError> {
 ///
 /// The weight wire bytes allow the caller to detect when consecutive
 /// blocks would produce identical Huffman tables, enabling Treeless
-/// (block_type = 3) emission.
+/// (`block_type` = 3) emission.
 ///
 /// Set `treeless` to true to emit a Treeless section (omit the weights
 /// table). The caller MUST ensure a previous block in the same frame
@@ -321,20 +321,17 @@ fn limit_lengths(lengths: &mut [u8], max_len: u8, freqs: &[u32]) {
             .max_by_key(|&(i, _)| freqs.get(i).copied().unwrap_or(0))
             .map(|(i, _)| i);
 
-        match (longest, shortest) {
-            (Some(long_idx), Some(short_idx)) => {
-                lengths[long_idx] -= 1;
-                lengths[short_idx] += 1;
-            }
-            _ => {
-                // Can't redistribute further — just clamp.
-                for l in lengths.iter_mut() {
-                    if *l > max_len {
-                        *l = max_len;
-                    }
+        if let (Some(long_idx), Some(short_idx)) = (longest, shortest) {
+            lengths[long_idx] -= 1;
+            lengths[short_idx] += 1;
+        } else {
+            // Can't redistribute further — just clamp.
+            for l in lengths.iter_mut() {
+                if *l > max_len {
+                    *l = max_len;
                 }
-                break;
             }
+            break;
         }
     }
 
@@ -422,7 +419,7 @@ fn encode_weights_direct(weights: &[u8], max_symbol: usize) -> Result<Vec<u8>, Z
 
 /// Encode weights using FSE compression (iSize < 128 path).
 ///
-/// Required when the alphabet has more than 129 symbols (max_symbol >
+/// Required when the alphabet has more than 129 symbols (`max_symbol` >
 /// 128). The weights are treated as a sequence of symbols in 0..=11
 /// and FSE-compressed. The output layout matches `weights::
 /// read_fse_compressed_weights`:
@@ -505,8 +502,8 @@ fn encode_weights_fse(weights: &[u8], max_symbol: usize) -> Result<Vec<u8>, Zstd
 }
 
 /// Encode `literals` as a single-stream Huffman bitstream using
-/// BIT_CStream (reverse-direction writer). Matches the decoder's
-/// `HUF_decompress1X_usingDTable` which reads via BIT_DStream.
+/// `BIT_CStream` (reverse-direction writer). Matches the decoder's
+/// `HUF_decompress1X_usingDTable` which reads via `BIT_DStream`.
 ///
 /// ## Performance
 ///

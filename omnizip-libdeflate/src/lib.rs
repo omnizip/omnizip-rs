@@ -44,7 +44,7 @@
 //! because:
 //!
 //! 1. **Different codec id.** `DeflateCodec = 0x0005`,
-//!    `LibdeflateCodec = 0x000B`. LimniFS uses the id to route
+//!    `LibdeflateCodec = 0x000B`. `LimniFS` uses the id to route
 //!    decode traffic to the fastest available implementation.
 //! 2. **Different optimisation target.** `miniz_oxide` prioritises
 //!    small binary size; libdeflate prioritises decode speed. The

@@ -509,7 +509,7 @@ const RUN_CONFIDENCE: u16 = 54_000; // ~0.82
 ///
 /// The model is **gated** by a warmup counter — before
 /// [`WORD_WARMUP_BYTES`] bytes have been processed it returns the
-/// neutral 50/50 probability so the mixer's stretch() contributes
+/// neutral 50/50 probability so the mixer's `stretch()` contributes
 /// nothing. After warmup the model emits a biased probability based
 /// on the frequency table. This avoids regressing on short inputs
 /// where adaptation hasn't converged.
@@ -526,13 +526,13 @@ const RUN_CONFIDENCE: u16 = 54_000; // ~0.82
 /// current word hash changes or its frequency table is updated.
 /// Without incremental aggregation this would be O(N) per refresh
 /// (where N is the total number of `(hash, byte)` entries — up to
-/// 65_536). To make it O(8) instead, we maintain a parallel
+/// `65_536`). To make it O(8) instead, we maintain a parallel
 /// `bit_aggregate` table that tracks `(n0, n1)` counts per bit
 /// position **per hash**. Updates cost O(8) on every insertion;
 /// refresh costs O(8) per call.
 pub struct WordModel {
     /// Frequency of (current word prefix hash, byte) → count.
-    /// Key = (word_hash, next_byte).
+    /// Key = (`word_hash`, `next_byte`).
     next_byte_freq: HashMap<(u32, u8), u16>,
     /// Per-hash, per-bit-position aggregate counts.
     /// `bit_aggregate[h]` = 8 `(n0, n1)` pairs summarising all
@@ -557,7 +557,7 @@ pub struct WordModel {
     cache_valid: bool,
 }
 
-/// Warmup: number of bytes to process before the WordModel starts
+/// Warmup: number of bytes to process before the `WordModel` starts
 /// emitting non-uniform probabilities. Picked empirically — small
 /// enough that the model engages within a typical text paragraph,
 /// large enough that the mixer has converged on the dominant
@@ -566,7 +566,7 @@ const WORD_WARMUP_BYTES: u64 = 16_384;
 
 /// Maximum entries in each frequency table. Beyond this, the table
 /// is cleared (a "flush" — adaptation restarts). This bounds memory
-/// at ~16 MiB worst case (2 × 65_536 × ~64 B/entry).
+/// at ~16 MiB worst case (2 × `65_536` × ~64 B/entry).
 const WORD_TABLE_CAP: usize = 65_536;
 
 impl Default for WordModel {
@@ -654,7 +654,7 @@ impl WordModel {
             .entry(hash)
             .or_insert_with(|| [(0u64, 0u64); 8]);
         for bit_pos in 0..8usize {
-            if ((byte as u16) >> (7 - bit_pos)) & 1 == 1 {
+            if (u16::from(byte) >> (7 - bit_pos)) & 1 == 1 {
                 agg[bit_pos].1 = agg[bit_pos].1.saturating_add(delta);
             } else {
                 agg[bit_pos].0 = agg[bit_pos].0.saturating_add(delta);

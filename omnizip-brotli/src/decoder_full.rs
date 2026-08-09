@@ -160,8 +160,8 @@ fn read_block_length(tree: &HuffmanTable, br: &mut BitReader) -> Result<u32, &'s
         return Err("block-length code out of range");
     }
     let entry = &kBlockLengthPrefixCode[code];
-    let extra = br.read_bits(entry.nbits as u32);
-    Ok(entry.offset as u32 + extra)
+    let extra = br.read_bits(u32::from(entry.nbits));
+    Ok(u32::from(entry.offset) + extra)
 }
 
 /// Read a context map (RFC 7932 §9.6).
@@ -327,6 +327,7 @@ pub(crate) fn decode_compressed_metablock_full(
     nbltypesc: u32,
     nbltypesd: u32,
     output_base: usize,
+    max_backward_distance: u32,
 ) -> Result<(usize, Vec<u8>), &'static str> {
     let mut br = BitReader::new(data);
     br.bit_pos = bit_pos;
@@ -381,6 +382,7 @@ pub(crate) fn decode_compressed_metablock_full(
         dist_bt,
         context_modes,
         output_base,
+        max_backward_distance,
     )
 }
 
@@ -388,7 +390,7 @@ pub(crate) fn decode_compressed_metablock_full(
 /// groups with context maps) but NBLTYPES = 1 for all categories.
 ///
 /// Caller has already consumed NBLTYPES (all = 1), NPOSTFIX, NDMOEM,
-/// CONTEXT_MODE, NTREESL, NTREESD. `bit_pos` points to the literal
+/// `CONTEXT_MODE`, NTREESL, NTREESD. `bit_pos` points to the literal
 /// context map.
 pub(crate) fn decode_compressed_metablock_full_with_trees(
     data: &[u8],
@@ -400,6 +402,7 @@ pub(crate) fn decode_compressed_metablock_full_with_trees(
     ntreesl: u32,
     ntreesd: Option<u32>,
     output_base: usize,
+    max_backward_distance: u32,
 ) -> Result<(usize, Vec<u8>), &'static str> {
     let mut br = BitReader::new(data);
     br.bit_pos = bit_pos;
@@ -432,6 +435,7 @@ pub(crate) fn decode_compressed_metablock_full_with_trees(
         dist_bt,
         context_modes,
         output_base,
+        max_backward_distance,
     )
 }
 
@@ -451,21 +455,19 @@ fn finish_metablock_decode(
     mut dist_bt: BlockTypeState,
     context_modes: Vec<ContextMode>,
     output_base: usize,
+    max_backward_distance: u32,
 ) -> Result<(usize, Vec<u8>), &'static str> {
     let ndirect = ndirect_raw << npostfix;
     if npostfix > 3 {
         return Err("invalid metablock: NPOSTFIX > 3");
     }
     let num_direct_distance_codes = 16u32 + ndirect as u32;
-    // Per RFC 7932 §9.1: max_backward_distance = (1 << WBITS) - WINDOW_GAP.
-    // WBITS=22 default; WINDOW_GAP = 0x8000 (32 KB).
-    let max_backward_distance: u32 = (1u32 << 24).saturating_sub(0x8000);
 
     // ----- Literal context map (RFC 7932 §9.6) -----
     let lit_cm_size = (lit_bt.num_block_types as usize) << K_LITERAL_CONTEXT_BITS;
     let ntreesl = match ntreesl_opt {
         Some(v) => v,
-        None => read_varlen_uint8(&mut br)? + 1,
+        None => read_varlen_uint8(br)? + 1,
     };
     let (lit_context_map, p) = read_context_map(data, br.bit_pos(), lit_cm_size, ntreesl, 0)?;
     br.bit_pos = p;
@@ -474,7 +476,7 @@ fn finish_metablock_decode(
     let dist_cm_size = (dist_bt.num_block_types as usize) << K_DISTANCE_CONTEXT_BITS;
     let ntreesd = match ntreesd_opt {
         Some(v) => v,
-        None => read_varlen_uint8(&mut br)? + 1,
+        None => read_varlen_uint8(br)? + 1,
     };
     let (dist_context_map, p) = read_context_map(data, br.bit_pos(), dist_cm_size, ntreesd, 0)?;
     br.bit_pos = p;
@@ -515,16 +517,14 @@ fn finish_metablock_decode(
         // Block-switch handling for insert-copy category.
         if cmd_bt.num_block_types > 1 {
             if cmd_bt.block_length == 0 {
-                cmd_block_type = cmd_bt.decode_switch(&mut br)? as usize;
+                cmd_block_type = cmd_bt.decode_switch(br)? as usize;
             }
             cmd_bt.block_length -= 1;
         }
 
         // Read command symbol from the current command tree.
         let cmd_tree = &cmd_trees[cmd_block_type];
-        let cmd_code = cmd_tree
-            .read_symbol(&mut br)
-            .ok_or("invalid command symbol")? as usize;
+        let cmd_code = cmd_tree.read_symbol(br).ok_or("invalid command symbol")? as usize;
         let v = &crate::prefix::kCmdLut[cmd_code];
 
         let insert_len_extra = if v.insert_len_extra_bits > 0 {
@@ -545,10 +545,10 @@ fn finish_metablock_decode(
             // Compute literal context.
             let context_id = context_modes[lit_block_type].context_id_2(p1, p2);
             let lit_tree_idx = lit_context_map
-                [(lit_block_type << K_LITERAL_CONTEXT_BITS) as usize + context_id as usize]
+                [(lit_block_type << K_LITERAL_CONTEXT_BITS) + context_id as usize]
                 as usize;
             let lit_tree = &lit_trees[lit_tree_idx];
-            let lit = lit_tree.read_symbol(&mut br).ok_or("invalid literal")?;
+            let lit = lit_tree.read_symbol(br).ok_or("invalid literal")?;
             output.push(lit as u8);
             p2 = p1;
             p1 = lit as u8;
@@ -556,7 +556,7 @@ fn finish_metablock_decode(
             // Block-switch on literal block length.
             if lit_bt.num_block_types > 1 {
                 if lit_bt.block_length == 0 {
-                    lit_block_type = lit_bt.decode_switch(&mut br)? as usize;
+                    lit_block_type = lit_bt.decode_switch(br)? as usize;
                 }
                 lit_bt.block_length -= 1;
             }
@@ -579,17 +579,15 @@ fn finish_metablock_decode(
             // distance_context = v.context (per upstream ReadCommandInternal).
             let dist_context = v.context as usize;
             let dist_tree_idx = dist_context_map
-                [(dist_block_type << K_DISTANCE_CONTEXT_BITS) as usize + dist_context]
+                [(dist_block_type << K_DISTANCE_CONTEXT_BITS) + dist_context]
                 as usize;
             let dist_tree = &dist_trees[dist_tree_idx];
-            let dist_code = dist_tree
-                .read_symbol(&mut br)
-                .ok_or("invalid distance symbol")? as i32;
+            let dist_code = dist_tree.read_symbol(br).ok_or("invalid distance symbol")? as i32;
             crate::decoder::decode_distance_from_code(
                 dist_code,
                 num_direct_distance_codes,
                 npostfix as i32,
-                &mut br,
+                br,
                 &mut dist_rb,
                 &mut dist_rb_idx,
             )
@@ -598,7 +596,7 @@ fn finish_metablock_decode(
         // Block-switch on distance block length (after each distance code).
         if dist_bt.num_block_types > 1 {
             if dist_bt.block_length == 0 {
-                dist_block_type = dist_bt.decode_switch(&mut br)? as usize;
+                dist_block_type = dist_bt.decode_switch(br)? as usize;
             }
             dist_bt.block_length -= 1;
         }

@@ -1,9 +1,9 @@
 //! ZSTD compressed-block encoder. Orchestrates the match finder,
-//! literals encoder, and sequences encoder into a Compressed_Block
-//! (block_type = 2).
+//! literals encoder, and sequences encoder into a `Compressed_Block`
+//! (`block_type` = 2).
 //!
 //! For each 128 KiB chunk of input:
-//! 1. Run `match_finder::compress_block_fast` → SeqStore.
+//! 1. Run `match_finder::compress_block_fast` → `SeqStore`.
 //! 2. Encode literals section (Raw, RLE, or Huffman).
 //! 3. Encode sequences section (Predefined FSE tables).
 //! 4. Choose Raw / RLE / Compressed, whichever produces the smallest
@@ -44,27 +44,28 @@ fn should_enable_ldm(
     input_len > BLOCK_MAX_SIZE && matches!(params.strategy, Strategy::Btultra2)
 }
 
-/// Minimum hash log (matches ZSTD's HASH_LOG_MIN).
+/// Minimum hash log (matches ZSTD's `HASH_LOG_MIN`).
 const HASH_LOG_MIN: u32 = 6;
-/// Maximum hash log (matches ZSTD's HASH_LOG_MAX_32).
+/// Maximum hash log (matches ZSTD's `HASH_LOG_MAX_32`).
 const HASH_LOG_MAX: u32 = 25;
 
-/// Cap the requested hash_log based on input size, mirroring
+/// Cap the requested `hash_log` based on input size, mirroring
 /// `ZSTD_adjustCParams_internal` in the C reference. The "default"
 /// table assumes input ≥ 256 KB; for smaller inputs we shrink the
 /// hash table so allocation cost (and zero-init cost) doesn't dominate.
 ///
 /// Rule of thumb: hash table size never exceeds the input size. For a
-/// 4 KB input, this caps hash_log at 12 (4 KB table) instead of 25
+/// 4 KB input, this caps `hash_log` at 12 (4 KB table) instead of 25
 /// (128 MB table).
-/// Cap the requested hash_log based on input size, mirroring
+/// Cap the requested `hash_log` based on input size, mirroring
 /// `ZSTD_adjustCParams_internal` in the C reference. The "default"
 /// table assumes input ≥ 256 KB; for smaller inputs we shrink the
 /// hash table so allocation cost (and zero-init cost) doesn't dominate.
 ///
 /// Rule of thumb: hash table size never exceeds the input size. For a
-/// 4 KB input, this caps hash_log at 12 (4 KB table) instead of 25
+/// 4 KB input, this caps `hash_log` at 12 (4 KB table) instead of 25
 /// (128 MB table).
+#[must_use]
 pub fn cap_hash_log_for_input(hash_log: u32, input_len: usize) -> u32 {
     if input_len == 0 {
         return HASH_LOG_MIN;
@@ -403,21 +404,21 @@ pub fn encode_frame_with_dict(
 /// matching the C reference's priority order.
 ///
 /// Descriptor byte layout:
-/// - bits 0-1: Dictionary_ID_flag (0 = no Dict_ID, 1/2/3 = 1/2/4-byte ID).
-/// - bit 2: Content_Checksum_flag (always 1 — we always emit the checksum).
-/// - bit 5: Single_Segment_flag.
-/// - bits 6-7: Frame_Content_Size_flag (0/1/2/3 → 0/2/4/8-byte FCS).
+/// - bits 0-1: `Dictionary_ID_flag` (0 = no `Dict_ID`, 1/2/3 = 1/2/4-byte ID).
+/// - bit 2: `Content_Checksum_flag` (always 1 — we always emit the checksum).
+/// - bit 5: `Single_Segment_flag`.
+/// - bits 6-7: `Frame_Content_Size_flag` (0/1/2/3 → 0/2/4/8-byte FCS).
 ///
 /// Encoding choice:
-/// - size ≤ 255: FCS_flag=0 (1 byte), single_segment=1 → 2-byte header.
-/// - size ≤ 65535: FCS_flag=1 (2 bytes), single_segment=1 → 3-byte header.
-/// - size ≤ 2³²-1: FCS_flag=2 (4 bytes), single_segment=1 → 5-byte header.
-/// - larger: FCS_flag=3 (8 bytes), window_descriptor → 10-byte header.
+/// - size ≤ 255: `FCS_flag=0` (1 byte), `single_segment=1` → 2-byte header.
+/// - size ≤ 65535: `FCS_flag=1` (2 bytes), `single_segment=1` → 3-byte header.
+/// - size ≤ 2³²-1: `FCS_flag=2` (4 bytes), `single_segment=1` → 5-byte header.
+/// - larger: `FCS_flag=3` (8 bytes), `window_descriptor` → 10-byte header.
 ///
-/// When single_segment=1, no window_descriptor is emitted (the window
+/// When `single_segment=1`, no `window_descriptor` is emitted (the window
 /// size is implied to equal the frame content size).
 ///
-/// When `dict_id` is `Some(id)`, the smallest Dictionary_ID encoding
+/// When `dict_id` is `Some(id)`, the smallest `Dictionary_ID` encoding
 /// that fits is emitted (1 byte for id ≤ 255, 2 bytes for id ≤ 65535,
 /// 4 bytes otherwise). The ID value 0 is treated as "no dict id".
 fn write_frame_header(out: &mut Vec<u8>, uncompressed_size: usize, dict_id: Option<u32>) {
@@ -430,7 +431,7 @@ fn write_frame_header(out: &mut Vec<u8>, uncompressed_size: usize, dict_id: Opti
         // FCS_Type=1: 2-byte field. Decoder adds 256, so subtract here.
         let stored = size_u64 - 256;
         (1, stored.to_le_bytes(), true)
-    } else if size_u64 <= u32::MAX as u64 {
+    } else if u32::try_from(size_u64).is_ok() {
         (2, size_u64.to_le_bytes(), true)
     } else {
         // Need window_descriptor + 8-byte FCS for > 4 GiB inputs.
@@ -464,7 +465,7 @@ fn write_frame_header(out: &mut Vec<u8>, uncompressed_size: usize, dict_id: Opti
     out.extend_from_slice(fcs_bytes);
 }
 
-/// Pick the smallest Dictionary_ID encoding for the given id.
+/// Pick the smallest `Dictionary_ID` encoding for the given id.
 /// Returns `(flag_bits, id_bytes)` where `flag_bits` goes into the
 /// descriptor's bits 0-1 and `id_bytes` is the little-endian ID
 /// payload (0/1/2/4 bytes).
@@ -704,15 +705,15 @@ fn encode_compressed_content(
 
     // Pick the smallest literals representation.
     let raw_len = raw_literals.len();
-    let huf_len = if !huf_literals.is_empty() {
+    let huf_len = if huf_literals.is_empty() {
+        None
+    } else {
         Some(huf_literals.len())
-    } else {
-        None
     };
-    let treeless_len = if !treeless_literals.is_empty() {
-        Some(treeless_literals.len())
-    } else {
+    let treeless_len = if treeless_literals.is_empty() {
         None
+    } else {
+        Some(treeless_literals.len())
     };
 
     // Prefer Treeless → Compressed → Raw (smallest wins).
@@ -754,7 +755,7 @@ fn encode_compressed_content(
     Ok(())
 }
 
-/// Write a Raw literals section (block_type=0). Minimal header for
+/// Write a Raw literals section (`block_type=0`). Minimal header for
 /// small literal counts.
 fn write_raw_literals(out: &mut Vec<u8>, literals: &[u8]) {
     let lit_size = literals.len();

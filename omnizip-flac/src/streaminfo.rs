@@ -62,7 +62,7 @@ impl StreamInfo {
         // BE value from bytes 10-12.
         let raw24 = u32::from_be_bytes([0, data[10], data[11], data[12]]);
         let sample_rate = (raw24 >> 4) & 0xFFFFF;
-        let channels = ((data[12] >> 1) & 0x07) as u8;
+        let channels = ((data[12] >> 1) & 0x07);
         let bps_high = data[12] & 0x01;
         let bps_low = data[13] >> 4;
         let bits_per_sample = (bps_high << 4) | bps_low;

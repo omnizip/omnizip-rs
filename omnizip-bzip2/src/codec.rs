@@ -56,13 +56,14 @@ impl Bzip2Codec {
     }
 
     /// Map a level in `1..=9` to a block size in bytes.
+    #[must_use]
     pub fn block_size_for(level: u8) -> usize {
         // Level 1 -> 100_000, level 9 -> 900_000. Step is 100_000 per level.
         let scaled = usize::from(level).clamp(1, 9);
         scaled * 100_000
     }
 
-    /// Compress with an explicit block size in bytes (100_000..=900_000,
+    /// Compress with an explicit block size in bytes (`100_000..=900_000`,
     /// in 100 KB increments matching the upstream `bzip2 -1`..`-9` flags).
     ///
     /// Smaller blocks encode faster but compress worse; larger blocks
@@ -72,13 +73,13 @@ impl Bzip2Codec {
     /// # Errors
     ///
     /// Returns [`OmnizipError::LevelOutOfRange`] if `block_size` is not
-    /// a valid BZip2 block size (multiple of 100_000 in 100_000..=900_000).
+    /// a valid `BZip2` block size (multiple of `100_000` in `100_000..=900_000`).
     pub fn compress_with_block_size(
         &self,
         plaintext: &[u8],
         block_size: usize,
     ) -> Result<Vec<u8>, OmnizipError> {
-        if block_size < MIN_BLOCK_SIZE || block_size > MAX_BLOCK_SIZE || block_size % 100_000 != 0 {
+        if !(MIN_BLOCK_SIZE..=MAX_BLOCK_SIZE).contains(&block_size) || block_size % 100_000 != 0 {
             return Err(OmnizipError::LevelOutOfRange {
                 codec: CodecId::BZIP2,
                 level: 0,
@@ -166,9 +167,9 @@ impl Codec for Bzip2Codec {
     }
 }
 
-/// Reusable BZip2 compressor that caches the output Vec across calls.
+/// Reusable `BZip2` compressor that caches the output Vec across calls.
 ///
-/// BZip2's `bwt_encode` allocates suffix-array buffers internally
+/// `BZip2`'s `bwt_encode` allocates suffix-array buffers internally
 /// per call; the only externally-poolable allocation is the output
 /// `Vec<u8>` and the per-block MTF/RLE scratch. This struct pools
 /// the output buffer (most relevant for batch workloads with many
@@ -200,7 +201,7 @@ impl Default for Bzip2Compressor {
 }
 
 impl Bzip2Compressor {
-    /// Construct a reusable BZip2 compressor with empty buffers.
+    /// Construct a reusable `BZip2` compressor with empty buffers.
     #[must_use]
     pub const fn new() -> Self {
         Self { out: Vec::new() }

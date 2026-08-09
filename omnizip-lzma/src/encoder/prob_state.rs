@@ -42,9 +42,9 @@
 /// LZMA encoder state index (0..=11).
 ///
 /// Transitions:
-/// - On literal: state = STATE_LIT_NEXT[state]
-/// - On match (non-rep): state = STATE_MATCH_NEXT[state]
-/// - On rep (0/1/2/3): state = STATE_REP_NEXT[state]
+/// - On literal: state = `STATE_LIT_NEXT`[state]
+/// - On match (non-rep): state = `STATE_MATCH_NEXT`[state]
+/// - On rep (0/1/2/3): state = `STATE_REP_NEXT`[state]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
 pub struct LzmaState(pub u8);
 
@@ -162,7 +162,7 @@ impl LzmaProbState {
 
 /// Length-slot table (per LZMA spec §3.5).
 ///
-/// Maps a match length (3..=273) to a (slot, extra_bits) pair.
+/// Maps a match length (3..=273) to a (slot, `extra_bits`) pair.
 /// Used by `match_price` to compute the length-coder cost.
 #[must_use]
 pub fn length_slot(length: u32) -> (u8, u8) {
@@ -186,7 +186,7 @@ pub fn length_slot(length: u32) -> (u8, u8) {
 
 /// Distance-slot table (per LZMA spec §3.5).
 ///
-/// Maps a distance (1..=2^32-1) to a (slot, extra_bits) pair.
+/// Maps a distance (1..=2^32-1) to a (slot, `extra_bits`) pair.
 #[must_use]
 pub fn distance_slot(distance: u32) -> (u8, u8) {
     if distance <= 4 {
@@ -207,9 +207,9 @@ pub fn distance_slot(distance: u32) -> (u8, u8) {
 /// - len 10..15: 2 choice bits + 3 symbol bits ≈ 48 price units
 /// - len 16..271: 2 choice bits + 8 symbol bits ≈ 80 price units
 ///
-/// Choice bits use a single `BitModel` (8 price units at INIT_PROBS).
+/// Choice bits use a single `BitModel` (8 price units at `INIT_PROBS`).
 /// Symbol bits use the position-keyed tree (~8 price units per bit at
-/// INIT_PROBS = 0.5). This more accurately represents the true cost
+/// `INIT_PROBS` = 0.5). This more accurately represents the true cost
 /// than the previous flat `slot*4 + extra*8` heuristic.
 #[must_use]
 pub fn length_price(len: u32) -> u32 {

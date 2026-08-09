@@ -122,7 +122,7 @@ fn parse_header(data: &[u8]) -> Result<(u32, &[u8], u8, u8), ContainerError> {
     }
     let config = data[6];
     // Accept any known config id; the model selection happens at decode time.
-    let is_known = matches!(config, 1 | 2 | 3 | 4 | 5);
+    let is_known = matches!(config, 1..=5);
     if !is_known {
         return Err(ContainerError::UnknownConfig(config));
     }

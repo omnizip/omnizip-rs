@@ -109,7 +109,7 @@ pub struct RawSequence {
 pub struct SeqStore {
     /// All literal bytes, concatenated.
     pub literals: Vec<u8>,
-    /// Sequences (literal_length, match_length, offset) in order.
+    /// Sequences (`literal_length`, `match_length`, offset) in order.
     pub sequences: Vec<RawSequence>,
     /// Repeat offsets, initialized to [1, 4, 8] per ZSTD spec. Updated
     /// by the match finder as matches are emitted.
@@ -117,7 +117,7 @@ pub struct SeqStore {
 }
 
 impl SeqStore {
-    /// Create a SeqStore with default repeat offsets [1, 4, 8].
+    /// Create a `SeqStore` with default repeat offsets [1, 4, 8].
     #[must_use]
     pub fn new() -> Self {
         Self {
@@ -281,64 +281,65 @@ pub fn compress_block_with_min_match(
     while ip < limit {
         // Check for repcode match at current position.
         let rep0 = seq_store.rep_offsets[0];
-        if ip > rep0 as usize && rep0 > 0 {
-            if src[ip..ip + MIN_MATCH] == src[ip - rep0 as usize..ip - rep0 as usize + MIN_MATCH] {
-                // Found a repcode match. Extend forward.
-                let mut m_len = MIN_MATCH;
-                m_len += count_match(
-                    src,
-                    ip + m_len,
-                    src,
-                    ip + m_len - rep0 as usize,
-                    limit + MIN_MATCH - ip - m_len,
-                );
+        if ip > rep0 as usize
+            && rep0 > 0
+            && src[ip..ip + MIN_MATCH] == src[ip - rep0 as usize..ip - rep0 as usize + MIN_MATCH]
+        {
+            // Found a repcode match. Extend forward.
+            let mut m_len = MIN_MATCH;
+            m_len += count_match(
+                src,
+                ip + m_len,
+                src,
+                ip + m_len - rep0 as usize,
+                limit + MIN_MATCH - ip - m_len,
+            );
 
-                // Backward extension: count how many preceding bytes
-                // also match, without mutating ip. We track the
-                // extension as a count and apply it once at the end.
-                // This avoids the "backward-extend then advance" bug
-                // where the acceptance check could fire with ip
-                // already decremented, leaving us at the original ip
-                // after `ip += 1`.
-                let mut back = 0usize;
-                while ip > anchor + back
-                    && ip > rep0 as usize + back
-                    && src[ip - 1 - back] == src[ip - 1 - rep0 as usize - back]
-                {
-                    back += 1;
-                }
-                m_len += back;
+            // Backward extension: count how many preceding bytes
+            // also match, without mutating ip. We track the
+            // extension as a count and apply it once at the end.
+            // This avoids the "backward-extend then advance" bug
+            // where the acceptance check could fire with ip
+            // already decremented, leaving us at the original ip
+            // after `ip += 1`.
+            let mut back = 0usize;
+            while ip > anchor + back
+                && ip > rep0 as usize + back
+                && src[ip - 1 - back] == src[ip - 1 - rep0 as usize - back]
+            {
+                back += 1;
+            }
+            m_len += back;
 
-                // Acceptance check: only use matches that meet the
-                // configured minimum match length.
-                if m_len < min_match {
-                    // Too short; treat as literal. ip is NOT modified
-                    // here (no backward extension was applied).
-                    ip += 1;
-                    continue;
-                }
-
-                // Apply the backward extension by shifting the match
-                // start left by `back` positions. The literal length
-                // is correspondingly shorter.
-                ip -= back;
-                let lit_len = (ip - anchor) as u32;
-                seq_store.literals.extend_from_slice(&src[anchor..ip]);
-                seq_store.sequences.push(RawSequence {
-                    literal_length: lit_len,
-                    match_length: m_len as u32,
-                    offset: rep0,
-                });
-
-                // Rotate repeat offsets.
-                rotate_reps(&mut seq_store.rep_offsets, rep0);
-
-                // Insert positions into hash table, advance.
-                insert_range(ms, src, ip, m_len as usize);
-                ip += m_len as usize;
-                anchor = ip;
+            // Acceptance check: only use matches that meet the
+            // configured minimum match length.
+            if m_len < min_match {
+                // Too short; treat as literal. ip is NOT modified
+                // here (no backward extension was applied).
+                ip += 1;
                 continue;
             }
+
+            // Apply the backward extension by shifting the match
+            // start left by `back` positions. The literal length
+            // is correspondingly shorter.
+            ip -= back;
+            let lit_len = (ip - anchor) as u32;
+            seq_store.literals.extend_from_slice(&src[anchor..ip]);
+            seq_store.sequences.push(RawSequence {
+                literal_length: lit_len,
+                match_length: m_len as u32,
+                offset: rep0,
+            });
+
+            // Rotate repeat offsets.
+            rotate_reps(&mut seq_store.rep_offsets, rep0);
+
+            // Insert positions into hash table, advance.
+            insert_range(ms, src, ip, m_len);
+            ip += m_len;
+            anchor = ip;
+            continue;
         }
 
         // Hash current position.
@@ -394,8 +395,8 @@ pub fn compress_block_with_min_match(
                     rotate_reps(&mut seq_store.rep_offsets, offset);
 
                     // Insert positions into hash table, advance.
-                    insert_range(ms, src, ip, m_len as usize);
-                    ip += m_len as usize;
+                    insert_range(ms, src, ip, m_len);
+                    ip += m_len;
                     anchor = ip;
                     continue;
                 }
@@ -815,47 +816,48 @@ pub fn compress_block_fast_with_prefix(
     while ip < limit {
         // Check repcode.
         let rep0 = seq_store.rep_offsets[0];
-        if rep0 > 0 && ip > rep0 as usize {
-            if src[ip..ip + MIN_MATCH] == src[ip - rep0 as usize..ip - rep0 as usize + MIN_MATCH] {
-                let mut m_len = MIN_MATCH;
-                m_len += count_match(
-                    src,
-                    ip + m_len,
-                    src,
-                    ip + m_len - rep0 as usize,
-                    limit + MIN_MATCH - ip - m_len,
-                );
+        if rep0 > 0
+            && ip > rep0 as usize
+            && src[ip..ip + MIN_MATCH] == src[ip - rep0 as usize..ip - rep0 as usize + MIN_MATCH]
+        {
+            let mut m_len = MIN_MATCH;
+            m_len += count_match(
+                src,
+                ip + m_len,
+                src,
+                ip + m_len - rep0 as usize,
+                limit + MIN_MATCH - ip - m_len,
+            );
 
-                // Backward extension as a count (see
-                // compress_block_with_min_match for the rationale).
-                let mut back = 0usize;
-                while ip > anchor + back
-                    && ip > rep0 as usize + back
-                    && src[ip - 1 - back] == src[ip - 1 - rep0 as usize - back]
-                {
-                    back += 1;
-                }
-                m_len += back;
+            // Backward extension as a count (see
+            // compress_block_with_min_match for the rationale).
+            let mut back = 0usize;
+            while ip > anchor + back
+                && ip > rep0 as usize + back
+                && src[ip - 1 - back] == src[ip - 1 - rep0 as usize - back]
+            {
+                back += 1;
+            }
+            m_len += back;
 
-                if m_len < min_match {
-                    ip += 1;
-                    continue;
-                }
-
-                ip -= back;
-                let lit_len = (ip - anchor) as u32;
-                seq_store.literals.extend_from_slice(&src[anchor..ip]);
-                seq_store.sequences.push(RawSequence {
-                    literal_length: lit_len,
-                    match_length: m_len as u32,
-                    offset: rep0,
-                });
-                rotate_reps(&mut seq_store.rep_offsets, rep0);
-                insert_range_absolute(ms, src, ip, m_len as usize);
-                ip += m_len as usize;
-                anchor = ip;
+            if m_len < min_match {
+                ip += 1;
                 continue;
             }
+
+            ip -= back;
+            let lit_len = (ip - anchor) as u32;
+            seq_store.literals.extend_from_slice(&src[anchor..ip]);
+            seq_store.sequences.push(RawSequence {
+                literal_length: lit_len,
+                match_length: m_len as u32,
+                offset: rep0,
+            });
+            rotate_reps(&mut seq_store.rep_offsets, rep0);
+            insert_range_absolute(ms, src, ip, m_len);
+            ip += m_len;
+            anchor = ip;
+            continue;
         }
 
         // Hash + candidate lookup.
@@ -902,8 +904,8 @@ pub fn compress_block_fast_with_prefix(
                     offset,
                 });
                 rotate_reps(&mut seq_store.rep_offsets, offset);
-                insert_range_absolute(ms, src, ip, m_len as usize);
-                ip += m_len as usize;
+                insert_range_absolute(ms, src, ip, m_len);
+                ip += m_len;
                 anchor = ip;
                 continue;
             }
@@ -1198,48 +1200,47 @@ pub fn compress_block_lazy2_with_ldm(
     while ip < limit {
         // Repcode check.
         let rep0 = seq_store.rep_offsets[0];
-        if rep0 > 0 && ip > rep0 as usize {
-            if ip + MIN_MATCH <= src.len()
-                && src[ip..ip + MIN_MATCH]
-                    == src[ip - rep0 as usize..ip - rep0 as usize + MIN_MATCH]
+        if rep0 > 0
+            && ip > rep0 as usize
+            && ip + MIN_MATCH <= src.len()
+            && src[ip..ip + MIN_MATCH] == src[ip - rep0 as usize..ip - rep0 as usize + MIN_MATCH]
+        {
+            let mut m_len = MIN_MATCH;
+            m_len += count_match(
+                src,
+                ip + m_len,
+                src,
+                ip + m_len - rep0 as usize,
+                limit + MIN_MATCH - ip - m_len,
+            );
+
+            let mut back = 0usize;
+            while ip > anchor + back
+                && ip > rep0 as usize + back
+                && src[ip - 1 - back] == src[ip - 1 - rep0 as usize - back]
             {
-                let mut m_len = MIN_MATCH;
-                m_len += count_match(
-                    src,
-                    ip + m_len,
-                    src,
-                    ip + m_len - rep0 as usize,
-                    limit + MIN_MATCH - ip - m_len,
-                );
+                back += 1;
+            }
+            m_len += back;
 
-                let mut back = 0usize;
-                while ip > anchor + back
-                    && ip > rep0 as usize + back
-                    && src[ip - 1 - back] == src[ip - 1 - rep0 as usize - back]
-                {
-                    back += 1;
-                }
-                m_len += back;
-
-                if m_len < min_match {
-                    ip += 1;
-                    continue;
-                }
-
-                ip -= back;
-                let lit_len = (ip - anchor) as u32;
-                seq_store.literals.extend_from_slice(&src[anchor..ip]);
-                seq_store.sequences.push(RawSequence {
-                    literal_length: lit_len,
-                    match_length: m_len as u32,
-                    offset: rep0,
-                });
-                rotate_reps(&mut seq_store.rep_offsets, rep0);
-                insert_range_absolute(ms, src, ip, m_len as usize);
-                ip += m_len as usize;
-                anchor = ip;
+            if m_len < min_match {
+                ip += 1;
                 continue;
             }
+
+            ip -= back;
+            let lit_len = (ip - anchor) as u32;
+            seq_store.literals.extend_from_slice(&src[anchor..ip]);
+            seq_store.sequences.push(RawSequence {
+                literal_length: lit_len,
+                match_length: m_len as u32,
+                offset: rep0,
+            });
+            rotate_reps(&mut seq_store.rep_offsets, rep0);
+            insert_range_absolute(ms, src, ip, m_len);
+            ip += m_len;
+            anchor = ip;
+            continue;
         }
 
         // Find best match: normal hash table + LDM.

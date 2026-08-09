@@ -7,7 +7,7 @@
 //! ## Pipeline
 //!
 //! 1. [`normalize_count`] — scale raw histogram to `1 << tableLog`.
-//! 2. [`build_ctable`] — build the encoding table (CTable).
+//! 2. [`build_ctable`] — build the encoding table (`CTable`).
 //! 3. [`write_ncount`] — emit the probability-table header.
 //! 4. [`compress_using_ctable`] — emit the interleaved bitstream.
 //!
@@ -52,7 +52,7 @@ pub struct CTable {
 }
 
 impl CTable {
-    /// Build an RLE CTable for a single-symbol stream. The encoded
+    /// Build an RLE `CTable` for a single-symbol stream. The encoded
     /// bitstream is empty; the decoder reproduces the symbol from the
     /// table header. Matches C's `FSE_buildCTable_rle`.
     #[must_use]
@@ -399,7 +399,7 @@ pub fn build_ctable(
     })
 }
 
-/// Write the probability-table header (NCount) to `out`. Ported from
+/// Write the probability-table header (`NCount`) to `out`. Ported from
 /// C's `FSE_writeNCount_generic`.
 ///
 /// Returns the number of bytes written.
@@ -505,7 +505,7 @@ pub fn write_ncount(
     // Flush remaining bits — C writes 2 bytes then advances by
     // ceil(bitCount/8); with a Vec we must push exactly that many.
     if bit_count > 0 {
-        let n_bytes = ((bit_count + 7) / 8) as usize;
+        let n_bytes = bit_count.div_ceil(8) as usize;
         let bytes = bit_stream.to_le_bytes();
         out.extend_from_slice(&bytes[..n_bytes]);
     }
@@ -566,6 +566,7 @@ impl<'a> BitCStream<'a> {
     /// Finalize: add the 1-bit end mark, flush, and return the total
     /// bytes written. Returns 0 on overflow (impossible for our callers
     /// since we grow `out` dynamically).
+    #[must_use]
     pub fn close(mut self) -> usize {
         self.add_bits(1, 1); // end mark
         self.flush();
@@ -590,6 +591,7 @@ pub struct CState {
 impl CState {
     /// Initialize state to the baseline for `symbol` (the first symbol
     /// to encode = the last to decode). Matches C's `FSE_initCState2`.
+    #[must_use]
     pub fn init2(table: &CTable, symbol: u8) -> Self {
         let s_tt = table.symbol_tt[usize::from(symbol)];
         let nb_bits_out = (s_tt.delta_nb_bits + (1 << 15)) >> 16;
@@ -675,7 +677,7 @@ pub fn compress_using_ctable(out: &mut Vec<u8>, symbols: &[u8], table: &CTable) 
     bitc.close()
 }
 
-/// Top-level convenience: normalize, build CTable, write NCount +
+/// Top-level convenience: normalize, build `CTable`, write `NCount` +
 /// bitstream into `out`. Returns total bytes written.
 ///
 /// # Errors

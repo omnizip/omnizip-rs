@@ -5,7 +5,7 @@
 //! - [`FrequencyTrainer`] — top-K substrings by frequency × length.
 //!   Cheap, deterministic, captures obvious common substrings. This is
 //!   the original omnizip-rs trainer; retained as the default.
-//! - [`FastCoverTrainer`] — dmer-frequency scoring per the FastCover
+//! - [`FastCoverTrainer`] — dmer-frequency scoring per the `FastCover`
 //!   algorithm (Facebook 2018). Each K-byte segment is scored by the
 //!   sum of D-byte dmer frequencies inside it; the top segments are
 //!   concatenated to form the dictionary body. Better ratio than
@@ -17,7 +17,7 @@
 //!
 //! ## Determinism
 //!
-//! Both trainers are deterministic: same samples + same target_size +
+//! Both trainers are deterministic: same samples + same `target_size` +
 //! same options ⇒ byte-identical dictionary. Hash iteration is replaced
 //! with sorted passes; ties in scoring are broken by `(sample_index,
 //! offset)` ordering.
@@ -174,11 +174,11 @@ const LOG_TABLE: u32 = 16;
 const TABLE_SIZE: usize = 1 << LOG_TABLE;
 const TABLE_MASK: usize = TABLE_SIZE - 1;
 
-/// FastCover trainer: scores each K-byte segment by the sum of its
+/// `FastCover` trainer: scores each K-byte segment by the sum of its
 /// D-byte dmer frequencies, then concatenates the highest-scoring
 /// segments.
 ///
-/// This is a faithful but simplified FastCover: it omits the inner
+/// This is a faithful but simplified `FastCover`: it omits the inner
 /// optimisation loop that tries several `(K, D)` combinations and
 /// picks the best by validation-set ratio. Callers wanting that should
 /// shell out to `zstd --train` and feed the result via

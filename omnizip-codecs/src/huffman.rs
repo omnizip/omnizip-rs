@@ -2,7 +2,7 @@
 //!
 //! Provides canonical Huffman tree building (with optional length
 //! limit via package-merge), encoding, and decoding. Used by ZSTD,
-//! Brotli, BZip2, and DEFLATE — eliminating ~400 LOC of duplicated
+//! Brotli, `BZip2`, and DEFLATE — eliminating ~400 LOC of duplicated
 //! Huffman implementations across the workspace.
 //!
 //! ## Determinism
@@ -65,7 +65,7 @@ impl HuffmanLengths {
 
         Self {
             lengths,
-            max_length: max_length,
+            max_length,
         }
     }
 
@@ -129,7 +129,7 @@ fn package_merge(symbols: &[(usize, u32)], max_length: usize, n_symbols: usize) 
     let mut prev_list: Vec<Coin> = sorted
         .iter()
         .map(|&(sym, freq)| Coin {
-            freq: freq as u64,
+            freq: u64::from(freq),
             symbols: vec![sym],
         })
         .collect();
@@ -156,7 +156,7 @@ fn package_merge(symbols: &[(usize, u32)], max_length: usize, n_symbols: usize) 
         let orig: Vec<Coin> = sorted
             .iter()
             .map(|&(sym, freq)| Coin {
-                freq: freq as u64,
+                freq: u64::from(freq),
                 symbols: vec![sym],
             })
             .collect();

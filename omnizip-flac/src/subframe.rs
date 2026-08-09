@@ -56,7 +56,7 @@ pub fn decode_subframe(
     let mut samples = match type_byte {
         SUBFRAME_CONSTANT => decode_constant(reader, block_size, effective_bps)?,
         SUBFRAME_VERBATIM => decode_verbatim(reader, block_size, effective_bps)?,
-        t if t >= SUBFRAME_FIXED && t < SUBFRAME_FIXED + 8 => {
+        t if (SUBFRAME_FIXED..SUBFRAME_FIXED + 8).contains(&t) => {
             let order = (t - SUBFRAME_FIXED) as usize;
             decode_fixed(reader, block_size, effective_bps, order)?
         }

@@ -1,4 +1,4 @@
-//! BCJ ARM64 (AArch64) filter — converts ARM64 BL and ADRP relative
+//! BCJ ARM64 (`AArch64`) filter — converts ARM64 BL and ADRP relative
 //! addresses to absolute values for better compression.
 //!
 //! - **BL instruction** (bits 31-26 = `100101`): 26-bit immediate,
@@ -13,7 +13,7 @@
 
 use crate::Filter;
 
-/// ARM64 / AArch64 (little-endian) BCJ filter.
+/// ARM64 / `AArch64` (little-endian) BCJ filter.
 pub struct BcjArm64Filter;
 
 impl Filter for BcjArm64Filter {

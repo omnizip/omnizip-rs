@@ -1,9 +1,9 @@
 //! Hash helpers shared across omnizip-rs codecs.
 //!
-//! Several codecs (PPMd, ZPAQ, ZSTD, LZMA match finder) need a fast
+//! Several codecs (`PPMd`, ZPAQ, ZSTD, LZMA match finder) need a fast
 //! hash of a byte slice or a sequence of bytes. Centralising the
-//! implementations here avoids subtle divergence (e.g. PPMd7 used
-//! FNV-1a while PPMd8 used DJB2; both are valid but the duplication
+//! implementations here avoids subtle divergence (e.g. `PPMd7` used
+//! FNV-1a while `PPMd8` used DJB2; both are valid but the duplication
 //! was a maintenance smell).
 //!
 //! All hashes here are **deterministic**: same input → same output
@@ -12,7 +12,7 @@
 #![forbid(unsafe_code)]
 #![warn(clippy::pedantic)]
 
-/// FNV-1a 32-bit hash. Used by PPMd7 context hashing.
+/// FNV-1a 32-bit hash. Used by `PPMd7` context hashing.
 #[must_use]
 pub fn fnv1a_32(bytes: &[u8]) -> u32 {
     let mut h: u32 = 2_166_136_261;
@@ -23,7 +23,7 @@ pub fn fnv1a_32(bytes: &[u8]) -> u32 {
     h
 }
 
-/// FNV-1a 32-bit with an order tag mixed in (PPMd context hash).
+/// FNV-1a 32-bit with an order tag mixed in (`PPMd` context hash).
 #[must_use]
 pub fn fnv1a_32_tagged(order: u8, bytes: &[u8]) -> u32 {
     let mut h = fnv1a_32(bytes);
@@ -32,7 +32,7 @@ pub fn fnv1a_32_tagged(order: u8, bytes: &[u8]) -> u32 {
     h
 }
 
-/// DJB2 32-bit hash. Used by PPMd8 context hashing.
+/// DJB2 32-bit hash. Used by `PPMd8` context hashing.
 #[must_use]
 pub fn djb2_32(bytes: &[u8]) -> u32 {
     let mut h: u32 = 5381;

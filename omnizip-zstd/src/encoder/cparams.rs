@@ -30,7 +30,7 @@ pub struct CompressionParams {
     pub window_log: u32,
     /// Chain log (hash chain depth).
     pub chain_log: u32,
-    /// Hash log (hash table size = 1 << hash_log).
+    /// Hash log (hash table size = 1 << `hash_log`).
     pub hash_log: u32,
     /// Search log (number of search iterations).
     pub search_log: u32,
@@ -50,7 +50,7 @@ pub struct CompressionParams {
 /// Panics if `level` is 0 or > 22.
 #[must_use]
 pub fn get_params(level: u8) -> CompressionParams {
-    assert!(level >= 1 && level <= 22, "ZSTD level must be 1..=22");
+    assert!((1..=22).contains(&level), "ZSTD level must be 1..=22");
     // Table: [windowLog, chainLog, hashLog, searchLog, minMatch, targetLength, strategy]
     // Ported verbatim from ZSTD_defaultCParameters[0] in clevels.h.
     const TABLE: [(u32, u32, u32, u32, u32, u32, Strategy); 22] = [

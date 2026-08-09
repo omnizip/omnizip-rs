@@ -1,6 +1,6 @@
-//! `XXHash` — shared XXHash implementation.
+//! `XXHash` — shared `XXHash` implementation.
 //!
-//! Canonical home for the XXHash functions used by ZSTD frame
+//! Canonical home for the `XXHash` functions used by ZSTD frame
 //! checksums and available to any codec that needs a content-defined
 //! non-cryptographic hash.
 //!

@@ -144,9 +144,9 @@ pub fn chat_response(xs: &mut XorShift, size: usize) -> Vec<u8> {
             let arg1 = ARG_POOL[xs.next_usize(ARG_POOL.len())];
             let arg2 = ARG_POOL[xs.next_usize(ARG_POOL.len())];
             let body = if xs.next_bool() {
-                format!("{} + {}", name, arg1)
+                format!("{name} + {arg1}")
             } else {
-                format!("return {};", name)
+                format!("return {name};")
             };
             let filled = tpl
                 .replace("{name}", name)
@@ -177,7 +177,7 @@ pub fn code_gen(xs: &mut XorShift, size: usize) -> Vec<u8> {
         };
         let filled = tpl
             .replace("{name}", name)
-            .replace("{args}", &arg)
+            .replace("{args}", arg)
             .replace("{ret}", "()")
             .replace("{docstring}", "Helper.")
             .replace("{body}", &body);

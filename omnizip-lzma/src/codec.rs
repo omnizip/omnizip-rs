@@ -173,7 +173,7 @@ impl LzmaCompressor {
     /// **Note**: non-default modes produce different output bytes per call
     /// (the LZMA2 chunk header's reset bits change). Use only when output
     /// determinism across calls isn't required — e.g., within a single
-    /// LimniFS batch where each call's output is independently stored.
+    /// `LimniFS` batch where each call's output is independently stored.
     #[must_use]
     pub const fn with_reset_mode(mut self, mode: ResetMode) -> Self {
         self.opts.reset_mode = mode;

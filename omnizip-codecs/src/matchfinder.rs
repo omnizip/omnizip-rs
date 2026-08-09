@@ -237,7 +237,7 @@ impl<'a> HashChainMatchFinder<'a> {
     }
 
     /// Re-bind to new data, reusing the existing hash/chain allocations
-    /// if the dict_size is unchanged. Grows them if the new dict is
+    /// if the `dict_size` is unchanged. Grows them if the new dict is
     /// larger. Equivalent to `drop` + `new` but avoids reallocation.
     pub fn reuse(&mut self, data: &'a [u8], dict_size: u32) {
         let dict_size = dict_size.max(4096);

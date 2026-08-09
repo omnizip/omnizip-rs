@@ -32,7 +32,7 @@ const HASH_SIZE: usize = 1 << HASH_LOG;
 /// Includes an incompressibility detector: if the first 1024 positions
 /// yield fewer than 2 matches, switches to literal-only mode for the
 /// remainder. This avoids wasting time on hash lookups for random data
-/// (the main cause of the 5.6× slowdown vs lz4_flex on random input).
+/// (the main cause of the 5.6× slowdown vs `lz4_flex` on random input).
 #[must_use]
 pub fn compress_block(input: &[u8]) -> Vec<u8> {
     if input.is_empty() {

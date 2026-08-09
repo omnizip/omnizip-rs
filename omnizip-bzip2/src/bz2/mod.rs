@@ -35,7 +35,7 @@ const N_GROUPS: u8 = 2;
 const GROUP_SIZE: usize = 50;
 
 /// Compress `input` into a standard `.bz2` stream compatible with
-/// `bzip2 -d`. `level` selects the block size 100_000..=900_000 in
+/// `bzip2 -d`. `level` selects the block size `100_000..=900_000` in
 /// 100 KB steps.
 ///
 /// # Errors

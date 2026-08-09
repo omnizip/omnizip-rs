@@ -92,7 +92,7 @@ pub fn package_merge(freqs: &[u32], max_len: u8, lengths: &mut [u8]) {
         // (which preserves sorted order), we can merge in linear time.
         // For simplicity, merge + sort.
         let mut merged: Vec<(u64, Vec<usize>)> = Vec::with_capacity(list.len() + packaged.len());
-        for (f, i) in present.iter() {
+        for (f, i) in &present {
             merged.push((u64::from(*f), vec![*i]));
         }
         for pkg in packaged {

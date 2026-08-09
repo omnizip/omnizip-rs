@@ -113,7 +113,7 @@ impl<'a> BitReader<'a> {
     /// Current position in bytes (after alignment).
     #[must_use]
     pub fn byte_position(&self) -> usize {
-        self.byte_pos + if self.bit_pos > 0 { 1 } else { 0 }
+        self.byte_pos + usize::from(self.bit_pos > 0)
     }
 
     /// Remaining bytes from the current byte position.

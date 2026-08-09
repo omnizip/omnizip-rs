@@ -166,14 +166,14 @@ fn encode_stream_inner(
     channels_data: &mut [Vec<i32>],
 ) -> Result<Vec<u8>, String> {
     let bps = params.bits_per_sample;
-    if bps < 4 || bps > 32 {
+    if !(4..=32).contains(&bps) {
         return Err(format!("unsupported bits_per_sample: {bps}"));
     }
     let channels = params.channels;
     if channels == 0 || channels > 8 {
         return Err(format!("unsupported channels: {channels}"));
     }
-    let bytes_per_sample = usize::from(bps) / 8 + if usize::from(bps) % 8 > 0 { 1 } else { 0 };
+    let bytes_per_sample = usize::from(bps) / 8 + usize::from(usize::from(bps) % 8 > 0);
     let frame_bytes = usize::from(channels) * bytes_per_sample;
     if input.len() % frame_bytes != 0 {
         return Err(format!(
@@ -238,21 +238,21 @@ fn encode_stream_inner(
         frame_number += 1;
     }
 
-    out.extend_from_slice(&writer.as_bytes());
+    out.extend_from_slice(writer.as_bytes());
     Ok(out)
 }
 
 /// Validate input dimensions and return the total frame count.
 fn validate_input(input: &[u8], params: &PcmParams) -> Result<usize, String> {
     let bps = params.bits_per_sample;
-    if bps < 4 || bps > 32 {
+    if !(4..=32).contains(&bps) {
         return Err(format!("unsupported bits_per_sample: {bps}"));
     }
     let channels = params.channels;
     if channels == 0 || channels > 8 {
         return Err(format!("unsupported channels: {channels}"));
     }
-    let bytes_per_sample = usize::from(bps) / 8 + if usize::from(bps) % 8 > 0 { 1 } else { 0 };
+    let bytes_per_sample = usize::from(bps) / 8 + usize::from(usize::from(bps) % 8 > 0);
     let frame_bytes = usize::from(channels) * bytes_per_sample;
     if input.len() % frame_bytes != 0 {
         return Err(format!(
