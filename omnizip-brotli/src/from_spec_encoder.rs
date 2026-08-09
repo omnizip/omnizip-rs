@@ -44,8 +44,11 @@ use crate::encoder::dict_hash;
 use crate::encoder::distance_config::{DistanceConfig, NUM_SHORT};
 use crate::prefix::kCmdLut;
 
-/// Brotli window bits for the encoder (22 = 4 MB window).
-const WINDOW_BITS: u8 = 22;
+/// Brotli window bits for the encoder (24 = 16 MB window).
+/// The C reference uses WBITS=22 (4 MB) for quality < 10 and
+/// WBITS=24 (16 MB) for quality >= 10. We use 24 for all qualities
+/// to maximize match distance.
+const WINDOW_BITS: u8 = 24;
 
 /// Window gap per RFC 7932 §9.1: 32 KiB reserved to disambiguate
 /// dictionary references from LZ77 back-references.
@@ -1316,22 +1319,20 @@ fn write_context_map(bw: &mut BitWriter, ctx_map: &[u8], ntrees: u32) {
     bw.write_bits(0, 1);
 
     // Context-map code tree: simple form with NTREES symbols.
-    // For NTREES=2: symbols 0 and 1, each 1-bit code.
     write_context_map_tree(bw, ntrees);
 
-    // Write each context-map entry using the tree.
-    // The tree assigns: symbol S → canonical code of length 1.
-    // For simple NSYM=2: symbol 0 → code 0, symbol 1 → code 1.
-    // For simple NSYM=3: symbols get 2-bit codes (00, 01, 10).
-    // For simple NSYM=4 with tree_select: mixed 1/2/3-bit codes.
-    // We handle the common NTREES=2 case explicitly.
-    debug_assert!(
-        ntrees == 2,
-        "write_context_map currently supports NTREES=2 only"
-    );
+    // Write each context-map entry using the context-map code tree.
+    // The decoder's HuffmanTable stores bit-reversed canonical codes
+    // (LSB-first bitstream convention). We must write the REVERSED
+    // code for each symbol, not the raw symbol value.
+    //
+    // For NSYM=2 (1-bit codes): reversal is identity (0→0, 1→1).
+    // For NSYM=4 (2-bit codes): reversal swaps codes 1↔2
+    //   (canonical 01→reversed 10, canonical 10→reversed 01).
+    let bits_per_entry = if ntrees <= 2 { 1u8 } else { 2u8 };
     for &entry in ctx_map {
-        // NTREES=2: entry is 0 or 1, encoded as 1 bit.
-        bw.write_bits(entry as u32, 1);
+        let code = reverse_bits(entry as u32, bits_per_entry);
+        bw.write_bits(code, u32::from(bits_per_entry));
     }
 
     // Inverse-MTF flag = 0.
@@ -1349,6 +1350,11 @@ fn write_context_map_tree(bw: &mut BitWriter, ntrees: u32) {
     let bits_per_sym = ceil_log2(ntrees);
     for sym in 0..ntrees {
         bw.write_bits(sym, bits_per_sym);
+    }
+    // For NSYM=4: decoder reads tree_select bit. Write 0 for uniform
+    // 2-bit codes.
+    if ntrees == 4 {
+        bw.write_bits(0, 1);
     }
 }
 
