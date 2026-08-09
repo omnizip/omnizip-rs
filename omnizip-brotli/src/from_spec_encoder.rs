@@ -196,7 +196,7 @@ fn encode_huffman_chunk_into(
     // compatibility debugging (write_block_type_trees + block-switch
     // emission exist but produce wire-format mismatches in the full
     // decoder path). The infrastructure is ready for re-enablement.
-    let use_block_switch = (7..=9).contains(&quality) && input.len() >= 256 && !use_context;
+    let use_block_switch = false;
     // Write all three NBLTYPES first (RFC 7932 §9.3: all block-type
     // counts precede any block-type code trees).
     let nbltypes_l: u32 = if use_block_switch { 2 } else { 1 };
@@ -407,6 +407,17 @@ fn encode_huffman_chunk_into(
         }
 
         for _ in 0..cmd.insert_len {
+            // Block switch BEFORE the literal (matches decoder's
+            // check-block-length-then-read-literal order). The decoder
+            // checks block_length == 0 at the START of each iteration.
+            if use_block_switch && lit_block_remaining == 0 {
+                let bt_sym = u32::from(lit_block_type == 0);
+                bw.write_bits(bt_sym, 1);
+                bw.write_bits(15, 5); // block-length extra (128-113=15)
+                lit_block_type = 1 - lit_block_type;
+                lit_block_remaining = 128;
+            }
+
             let b = stream.literals[lit_idx];
             let tree = if use_block_switch {
                 lit_block_type
@@ -423,17 +434,7 @@ fn encode_huffman_chunk_into(
             lit_idx += 1;
             out_pos += 1;
 
-            // Block-switch AFTER the literal (matches decoder's
-            // read-literal-then-check-block-length order).
             if use_block_switch {
-                if lit_block_remaining == 0 {
-                    // Block-type code: symbol 3 for type 0→1, symbol 2 for 1→0.
-                    let bt_sym = u32::from(lit_block_type == 0);
-                    bw.write_bits(bt_sym, 1);
-                    bw.write_bits(15, 5); // block-length extra (128-113=15)
-                    lit_block_type = 1 - lit_block_type;
-                    lit_block_remaining = 128;
-                }
                 lit_block_remaining -= 1;
             }
         }
