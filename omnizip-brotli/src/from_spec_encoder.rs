@@ -508,7 +508,7 @@ fn empty_frame() -> Vec<u8> {
 /// for inputs ≤ 64 KiB). Calls the chunk encoder with mlen_offset=0 and
 /// is_last=true, then prepends WBITS.
 fn encode_huffman_frame_q(input: &[u8], quality: i32) -> Vec<u8> {
-    if input.is_empty() || input.len() >= (1 << 16) {
+    if input.is_empty() || input.len() >= (1 << 20) {
         return Vec::new();
     }
     let mut bw = BitWriter::new();
@@ -855,8 +855,10 @@ fn parse_input_with_offset(
     };
     let mut mf = omnizip_codecs::HashChainMatchFinder::new(input, config);
 
-    // Quality >= 10: use cost-aware DP optimal parser.
-    if quality >= 10 {
+    // Quality >= 10: use cost-aware DP optimal parser, but only for
+    // inputs small enough that the O(N²) DP is tractable (≤ 64 KiB).
+    // For larger inputs, fall back to lazy2 (the DP would take minutes).
+    if quality >= 10 && input.len() <= 64 * 1024 {
         return optimal_parse(input, &mut mf, mlen_offset, use_dict);
     }
 
