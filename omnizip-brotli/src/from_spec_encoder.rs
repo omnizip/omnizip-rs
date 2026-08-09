@@ -253,7 +253,7 @@ fn encode_huffman_chunk_into(
     }
     write_varlen_uint8(bw, 0); // NTREESD = 1
 
-    let Some(stream) = build_symbol_stream(&commands, input, &dist_cfg) else {
+    let Some(stream) = build_symbol_stream(&commands, input, mlen_offset, &dist_cfg) else {
         return;
     };
 
@@ -269,16 +269,20 @@ fn encode_huffman_chunk_into(
     // Simulate output to get correct per-position context.
     // For dictionary references (distance > output.len()), the copy
     // produces bytes from the static dictionary, not the output buffer.
-    // We track output length but don't simulate dictionary bytes —
-    // prev_byte after a dictionary copy is approximated as 0.
+    // For transforms that change word length (prefix/suffix/omit), the
+    // actual copy output length differs from cmd.copy_len (= word_length).
+    // We precompute the actual copy advance for each command so subsequent
+    // loops (frequency counting, encoding) advance correctly.
     let mut output_sim: Vec<u8> = Vec::with_capacity(input.len());
+    let mut cmd_copy_advances: Vec<usize> = Vec::with_capacity(commands.len());
     let mut lit_idx = 0usize;
     for cmd in &commands {
         for _ in 0..cmd.insert_len {
             output_sim.push(stream.literals[lit_idx]);
             lit_idx += 1;
         }
-        if cmd.copy_len > 0 {
+        let copy_advance = if cmd.copy_len > 0 {
+            let before = output_sim.len();
             let copy_start_global = mlen_offset + output_sim.len();
             let max_dist = (copy_start_global as u32).min(MAX_BACKWARD_DISTANCE);
             let is_dict = (cmd.distance as usize) > output_sim.len();
@@ -297,7 +301,11 @@ fn encode_huffman_chunk_into(
                     output_sim.push(output_sim[src + i]);
                 }
             }
-        }
+            output_sim.len() - before
+        } else {
+            0
+        };
+        cmd_copy_advances.push(copy_advance);
     }
 
     // Compute per-tree frequencies using simulated output.
@@ -307,12 +315,10 @@ fn encode_huffman_chunk_into(
     let mut out_pos = 0usize;
     let mut lit_block_type: usize = 0;
     let mut lit_block_remaining: usize = if use_block_switch { 128 } else { usize::MAX };
-    for cmd in &commands {
+    for (cmd_idx, cmd) in commands.iter().enumerate() {
         for _ in 0..cmd.insert_len {
             let b = output_sim[out_pos];
             let ctx = if use_block_switch {
-                // Block switching: tree = block_type (simplified since
-                // context map maps each block to a distinct tree).
                 let cm_idx = (lit_block_type << 6) + (compute_context_id(p1, p2, 0) as usize);
                 lit_ctx_map[cm_idx] as usize
             } else {
@@ -336,7 +342,7 @@ fn encode_huffman_chunk_into(
             }
         }
         if cmd.copy_len > 0 {
-            out_pos += cmd.copy_len as usize;
+            out_pos += cmd_copy_advances[cmd_idx];
             p2 = p1;
             p1 = output_sim[out_pos - 1];
         }
@@ -381,7 +387,7 @@ fn encode_huffman_chunk_into(
     out_pos = 0;
     lit_block_type = 0;
     lit_block_remaining = if use_block_switch { 128 } else { usize::MAX };
-    for (&cmd_sym, cmd) in stream.cmd_symbols.iter().zip(commands.iter()) {
+    for (cmd_idx, (&cmd_sym, cmd)) in stream.cmd_symbols.iter().zip(commands.iter()).enumerate() {
         let (code, len) = cmd_codes[cmd_sym];
         bw.write_bits(code, u32::from(len));
 
@@ -435,7 +441,7 @@ fn encode_huffman_chunk_into(
             if nbits > 0 {
                 bw.write_bits(d_extra, nbits);
             }
-            out_pos += cmd.copy_len as usize;
+            out_pos += cmd_copy_advances[cmd_idx];
             p2 = p1;
             p1 = output_sim[out_pos - 1];
         }
@@ -542,6 +548,7 @@ struct SymbolStream {
 fn build_symbol_stream(
     commands: &[Command],
     input: &[u8],
+    mlen_offset: usize,
     dist_cfg: &DistanceConfig,
 ) -> Option<SymbolStream> {
     let mut literals = Vec::new();
@@ -571,12 +578,27 @@ fn build_symbol_stream(
     let mut cur = 0usize;
     for cmd in commands {
         let end = cur + cmd.insert_len as usize;
-        // We don't have direct access to input here in this signature, but
-        // literals were already pushed by parse_input via the commands'
-        // insert ranges. Push them now from `input` to keep this function
-        // total.
         literals.extend_from_slice(&input[cur..end]);
-        cur = end + cmd.copy_len as usize;
+        // Advance by the actual input consumed. For dictionary references
+        // with length-changing transforms (prefix/suffix/omit), the
+        // transformed length may differ from copy_len (= word_length).
+        let advance = if cmd.copy_len > 0 {
+            let is_dict = (cmd.distance as usize) > cur;
+            if is_dict {
+                let global_pos = mlen_offset + end;
+                let max_dist = (global_pos as u32).min(MAX_BACKWARD_DISTANCE);
+                let mut tmp = Vec::with_capacity(cmd.copy_len as usize + 8);
+                match dictionary_lookup(&mut tmp, cmd.copy_len, cmd.distance as i32, max_dist) {
+                    Some(()) => tmp.len(),
+                    None => cmd.copy_len as usize,
+                }
+            } else {
+                cmd.copy_len as usize
+            }
+        } else {
+            0
+        };
+        cur = end + advance;
     }
 
     Some(SymbolStream {
@@ -716,9 +738,13 @@ fn optimal_parse(
         }
 
         if matches_at[pos].is_none() && use_dict {
-            if let Some((d, l)) = dict_hash::find_match(input, pos, max_dist) {
-                if l >= MIN_MATCH {
-                    matches_at[pos] = Some((d, l));
+            if let Some((d, wl, tl)) = dict_hash::find_match(input, pos, max_dist) {
+                // Only use length-preserving transforms in the optimal
+                // parser (where copy_len == advance_len). Length-changing
+                // transforms (prefix/suffix/omit) are handled by the
+                // lazy/lazy2 parser for larger inputs.
+                if tl >= MIN_MATCH && tl == wl {
+                    matches_at[pos] = Some((d, wl));
                 }
             }
         }
@@ -881,85 +907,83 @@ fn parse_input_with_offset(
 
         let lz77_valid = lz77.as_ref().map_or(false, |m| m.distance <= max_dist);
 
-        let best = if lz77_valid {
+        let best: Option<(u32, u32, u32)> = if lz77_valid {
             let m = lz77.as_ref().unwrap();
             if m.length >= 8 || !use_dict {
-                Some((m.distance, m.length, false))
+                Some((m.distance, m.length, m.length))
             } else {
                 let dict = dict_hash::find_match(input, pos, max_dist);
                 match dict {
-                    Some((d, l)) if l > m.length => Some((d, l, true)),
-                    _ => Some((m.distance, m.length, false)),
+                    Some((d, wl, tl)) if tl > m.length => Some((d, wl, tl)),
+                    _ => Some((m.distance, m.length, m.length)),
                 }
             }
         } else if use_dict {
-            let dict = dict_hash::find_match(input, pos, max_dist);
-            dict.map(|(d, l)| (d, l, true))
+            dict_hash::find_match(input, pos, max_dist).map(|(d, wl, tl)| (d, wl, tl))
         } else {
             None
         };
 
-        if let Some((distance, length, _is_dict)) = best {
-            if length >= MIN_MATCH && distance > 0 {
+        if let Some((distance, copy_len, advance_len)) = best {
+            if advance_len >= MIN_MATCH && distance > 0 {
                 // Lazy matching: if the current match is short, check if
                 // deferring by one position yields a longer match.
-                if lazy && length < nice_match as u32 && pos + 1 < n {
+                if lazy && advance_len < nice_match as u32 && pos + 1 < n {
                     let next_pos = pos + 1;
                     let next_global = mlen_offset + next_pos;
                     let next_max = (next_global as u32).min(MAX_BACKWARD_DISTANCE);
 
                     let next_lz77 = if next_pos + MIN_MATCH as usize <= n {
-                        // Don't advance the match finder here — find_match
-                        // only needs the already-inserted chains to find
-                        // matches before next_pos. Advancing would corrupt
-                        // the cursor when we don't defer.
                         mf.find_match(next_pos)
                     } else {
                         None
                     };
 
                     let next_valid = next_lz77.as_ref().map_or(false, |m| m.distance <= next_max);
-                    let next_best = if next_valid {
+                    let next_best_len: Option<u32> = if next_valid {
                         let nm = next_lz77.as_ref().unwrap();
                         if nm.length >= 8 || !use_dict {
-                            Some((nm.distance, nm.length))
+                            Some(nm.length)
                         } else {
-                            let dict = dict_hash::find_match(input, next_pos, next_max);
-                            match dict {
-                                Some((d, l)) if l > nm.length => Some((d, l)),
-                                _ => Some((nm.distance, nm.length)),
+                            match dict_hash::find_match(input, next_pos, next_max) {
+                                Some((_, _, tl)) if tl > nm.length => Some(tl),
+                                _ => Some(nm.length),
                             }
                         }
                     } else if use_dict {
-                        dict_hash::find_match(input, next_pos, next_max)
+                        dict_hash::find_match(input, next_pos, next_max).map(|(_, _, tl)| tl)
                     } else {
                         None
                     };
 
-                    if let Some((_next_dist, next_len)) = next_best {
-                        if next_len > length {
+                    if let Some(next_len) = next_best_len {
+                        if next_len > advance_len {
                             // Lazy2: check pos+2 before committing to pos+1.
                             if lazy2 && next_len < nice_match as u32 && pos + 2 < n {
                                 let next2_pos = pos + 2;
                                 let next2_global = mlen_offset + next2_pos;
                                 let next2_max = (next2_global as u32).min(MAX_BACKWARD_DISTANCE);
-                                let next2_best = if next2_pos + MIN_MATCH as usize <= n {
+                                let next2_best_len: Option<u32> = if next2_pos + MIN_MATCH as usize
+                                    <= n
+                                {
                                     mf.find_match(next2_pos)
                                         .filter(|m| m.distance <= next2_max)
                                         .map(|m| {
                                             if m.length >= 8 || !use_dict {
-                                                (m.distance, m.length)
+                                                m.length
                                             } else {
-                                                let d = dict_hash::find_match(
+                                                match dict_hash::find_match(
                                                     input, next2_pos, next2_max,
-                                                );
-                                                d.filter(|(_, l)| *l > m.length)
-                                                    .unwrap_or((m.distance, m.length))
+                                                ) {
+                                                    Some((_, _, tl)) if tl > m.length => tl,
+                                                    _ => m.length,
+                                                }
                                             }
                                         })
                                         .or_else(|| {
                                             if use_dict {
                                                 dict_hash::find_match(input, next2_pos, next2_max)
+                                                    .map(|(_, _, tl)| tl)
                                             } else {
                                                 None
                                             }
@@ -967,29 +991,35 @@ fn parse_input_with_offset(
                                 } else {
                                     None
                                 };
-                                if let Some((_, n2_len)) = next2_best {
+                                if let Some(n2_len) = next2_best_len {
                                     if n2_len > next_len {
-                                        // pos+2 is best: emit 2 literals.
                                         pos += 2;
                                         continue;
                                     }
                                 }
                             }
-                            // pos+1 is better than pos: emit 1 literal.
                             pos += 1;
                             continue;
                         }
                     }
                 }
 
-                let copy_len = length.min(MAX_COPY).max(MIN_MATCH);
+                let clamped_copy = copy_len.min(MAX_COPY).max(MIN_MATCH);
                 let insert_len = (pos - insert_start) as u32;
                 commands.push(Command {
                     insert_len,
-                    copy_len,
+                    copy_len: clamped_copy,
                     distance,
                 });
-                let advance = copy_len as usize;
+                // Advance: for LZ77, use clamped copy_len (matches
+                // decoder output). For dictionary, use transformed_len
+                // (may differ from copy_len when transforms add/remove
+                // bytes).
+                let advance = if advance_len > MAX_COPY {
+                    clamped_copy as usize
+                } else {
+                    (advance_len as usize).min(n - pos)
+                };
                 for _ in 1..advance {
                     if pos + 1 < n {
                         pos += 1;

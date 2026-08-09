@@ -459,7 +459,7 @@ fn finish_metablock_decode(
     let num_direct_distance_codes = 16u32 + ndirect as u32;
     // Per RFC 7932 §9.1: max_backward_distance = (1 << WBITS) - WINDOW_GAP.
     // WBITS=22 default; WINDOW_GAP = 0x8000 (32 KB).
-    let max_backward_distance: u32 = (1u32 << 22).saturating_sub(0x8000);
+    let max_backward_distance: u32 = (1u32 << 24).saturating_sub(0x8000);
 
     // ----- Literal context map (RFC 7932 §9.6) -----
     let lit_cm_size = (lit_bt.num_block_types as usize) << K_LITERAL_CONTEXT_BITS;

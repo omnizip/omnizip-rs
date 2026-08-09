@@ -1057,7 +1057,7 @@ fn decode_compressed_metablock(
     // Per upstream: max_backward_distance = (1 << WBITS) - WINDOW_GAP.
     // For typical inputs our default WBITS=22 → 4 MB max backward. The
     // window-gap constant is 0x8000 (32 KB) per RFC 7932 §9.1.
-    let max_backward_distance: u32 = (1u32 << 22).saturating_sub(0x8000);
+    let max_backward_distance: u32 = (1u32 << 24).saturating_sub(0x8000);
 
     while output.len() < mlen {
         let cmd_code = cmd_table
