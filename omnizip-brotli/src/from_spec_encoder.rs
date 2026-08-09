@@ -188,9 +188,10 @@ fn encode_huffman_chunk_into(
     }
     bw.write_bits(0, 1); // ISUNCOMPRESSED = 0
 
-    // Context modeling: at quality >= 4, split literals into 2 context
-    // trees based on the LSB6 context of the previous byte.
-    let use_context = quality >= 4 && input.len() >= 4096;
+    // Context modeling: at quality >= 4, split literals into context
+    // trees. Only for text-like input (binary data gains nothing from
+    // context separation and pays Huffman table overhead).
+    let use_context = quality >= 4 && input.len() >= 4096 && is_text_like(input);
 
     // Block type switching: implemented but disabled pending decoder
     // compatibility debugging (write_block_type_trees + block-switch
