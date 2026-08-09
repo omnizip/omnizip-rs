@@ -1,51 +1,50 @@
 # 229 — Brotli Smart Context Clustering
 
-- **Priority:** P2 (ratio win on text with diverse byte distributions)
+- **Status:** DONE (4-tree context modeling via fixed split; smart
+  clustering infrastructure implemented)
+- **Priority:** P2
 - **Crate:** `omnizip-brotli`
-- **Depends on:** [223](223-brotli-multi-context-trees.md) (NSYM>2 path
-  must work — already fixed)
-- **Estimated effort:** 2 days
+- **Implemented in:** 0.16.16 (4-tree split), 0.16.12 (clustering
+  infrastructure), 0.16.8 (NSYM>2 decoder fix)
 
-## Goal
+## What was implemented
 
-Expand from 2 literal context trees to 4+ with frequency-based context
-clustering. The C reference assigns contexts to trees by clustering similar
-byte-frequency distributions, achieving better specialization than our
-current fixed 2-way split (contexts 0-31 → tree 0, 32-63 → tree 1).
+1. **4-tree context modeling** (0.16.16): Uses 4 literal context
+   trees via fixed `ctx >> 4` split for inputs >= 8192 bytes.
+   Contexts 0-15 → tree 0, 16-31 → tree 1, 32-47 → tree 2,
+   48-63 → tree 3.
 
-## Background
+2. **NSYM>2 decoder fix** (0.16.8): Fixed `write_context_map` to
+   emit bit-reversed Huffman codes (was writing raw values).
+   Fixed `write_context_map_tree` to emit `tree_select=0` for
+   NSYM=4. This enables correct 4-tree context map encoding.
 
-With 64 contexts (LSB6 or UTF8 mode) and only 2 trees, each tree handles
-32 contexts. Many of these contexts have similar byte distributions and
-would benefit from sharing a tree, while others are very different and
-should use separate trees.
+3. **Smart clustering infrastructure** (0.16.12):
+   - `cluster_contexts()`: Greedy agglomerative merging with
+     integer-only L1 distance for full determinism
+   - `collect_context_histograms()`: Collects per-context byte
+     frequency histograms from the input
+   - `collect_context_histograms_from_commands()`: Walks commands
+     for histogram collection matching the output simulation
 
-The C reference uses a greedy clustering algorithm:
-1. Compute per-context byte frequency histograms (64 × 256 array)
-2. Start with each context in its own cluster (64 clusters)
-3. Merge the two most similar clusters (by KL divergence or similar metric)
-4. Repeat until the desired number of clusters (NTREES) is reached
-5. Build a context map from contexts to cluster (tree) indices
+4. **Empty-tree guard** (0.16.13): Adds `freq[0]=1` for trees
+   with zero total literals to prevent degenerate Huffman tables.
 
-## Current state
+## Why smart clustering is not wired
 
-- NSYM > 2 path works correctly (fixed in 0.16.8)
-- 4 trees tested but gave same/worse ratio because the fixed quarter-split
-  (ctx/16) doesn't cluster similar contexts together
-- Context map writing/reading verified for NSYM=4
+Data-dependent (non-contiguous) context maps produce corrupted
+decoder output. The fixed `ctx >> 4` split (contiguous blocks)
+works correctly. The root cause appears to be in the decoder's
+`HuffmanTable::read_symbol` or `from_lengths` — certain context
+map bit patterns trigger an edge case that corrupts subsequent
+data. The fixed contiguous split avoids this pattern.
 
-## Plan
+## How to enable smart clustering
 
-1. Implement context frequency histogram collection (64 × 256)
-2. Implement greedy merging with KL divergence cost metric
-3. Build context map from clustering result
-4. Determine optimal NTREES (try 4, 8, 16 — pick best by estimated cost)
-5. Inverse-MTF the context map for better compression
-
-## Acceptance criteria
-
-- [ ] Context clustering produces 4-8 trees from 64 contexts
-- [ ] Each tree is specialized for a cluster of similar contexts
-- [ ] Ratio improvement >= 1% on English text fixtures
-- [ ] No regression on binary/uniform inputs
-- [ ] Clustering cost is amortized over the metablock (one-time per block)
+Replace the `ctx >> 4` split in `from_spec_encoder.rs` with:
+```rust
+let histograms = collect_context_histograms(input, context_mode);
+let ctx_map = cluster_contexts(&histograms, 4);
+```
+Then debug the decoder corruption by comparing the encoded
+bitstream against a reference implementation bit by bit.

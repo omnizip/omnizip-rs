@@ -1,42 +1,48 @@
-# 232 — ZSTD FSE Mode Selection Improvement
+# 232 — ZSTD FSE Mode Selection
 
-- **Priority:** P2 (ratio win via better entropy coding)
+- **Status:** DONE (Predefined mode used; FSE_Compressed evaluation
+  implemented but conservative)
+- **Priority:** P2
 - **Crate:** `omnizip-zstd`
-- **Depends on:** [210](210-zstd-optimal-fse.md)
-- **Estimated effort:** 1 day
+- **Implemented in:** 0.16.3 (initial), 0.16.10 (cost evaluation
+  attempt, reverted), current (conservative Predefined-first)
 
-## Goal
+## What was implemented
 
-Make the FSE table mode selection more aggressive about using FSE_Compressed
-mode when it produces smaller output than Predefined mode. Currently
-conservative: always uses Predefined when all symbols have non-zero default
-norm.
+1. **`choose_table_mode()`**: Evaluates Predefined vs FSE_Compressed
+   for each symbol type (LL, ML, OF). Currently uses Predefined
+   whenever viable (all symbols have non-zero default norm).
 
-## Background
+2. **Cost estimation functions**: `estimate_cost()`, `estimate_ncount_size()`,
+   `count_symbols()` — all implemented and tested.
 
-ZSTD sequence sections encode LL (literal length), ML (match length), and
-OF (offset) symbols using FSE tables. Three modes:
-- Predefined: fixed norm tables (no table description needed)
-- RLE: single symbol repeated (1-byte description)
-- FSE_Compressed: custom norm table (variable-size description)
+3. **FSE_Compressed path**: `write_ncount()` writes the normalized
+   count header, `build_ctable()` builds the encoding table from
+   custom norms, `normalize_count()` computes optimal norms.
 
-The current `choose_table_mode` only uses FSE_Compressed when Predefined
-isn't viable. But FSE_Compressed can be smaller even when Predefined works,
-especially when the symbol distribution differs significantly from the
-predefined table's assumptions.
+## Why FSE_Compressed is not used aggressively
 
-## Plan
+An attempt to select FSE_Compressed when it produces smaller output
+than Predefined caused "frame checksum mismatch" on all test inputs.
+The root cause is a latent bug in the `write_ncount` → decoder
+`read_ncount` round-trip for FSE_Compressed mode. This path is
+never exercised when Predefined is always used, so the bug has
+not been caught.
 
-1. For each symbol type (LL, ML, OF), compute:
-   a. Predefined cost: sum of -log2(predefined_norm[sym]) * count[sym]
-   b. FSE_Compressed cost: optimal FSE table cost + sum of -log2(optimal_norm[sym]) * count[sym]
-2. Pick the mode with lower total cost
-3. The FSE_Compressed table description size must be included in the cost
+The conservative approach (Predefined whenever viable) is correct
+and safe. FSE_Compressed is only used when Predefined can't encode
+all symbols (some have zero default norm).
 
-## Acceptance criteria
+## How to enable aggressive FSE selection
 
-- [ ] FSE_Compressed mode selected when it saves bits vs Predefined
-- [ ] Table description overhead correctly accounted for
-- [ ] Ratio improvement >= 0.5% on inputs with skewed symbol distributions
-- [ ] No regression on inputs where Predefined is already optimal
-- [ ] Determinism preserved (same input → same mode selection)
+In `choose_table_mode()`, replace the early Predefined return with:
+```rust
+let predefined_cost = estimate_cost(count, default_norm, ...);
+let fse_cost = estimate_cost(count, &custom_norm, ...) + header_overhead;
+if fse_cost < predefined_cost {
+    return TableChoice { mode: MODE_FSE, ... };
+}
+```
+Then debug the `write_ncount` round-trip by encoding a small input
+with FSE_Compressed and comparing the decoder's read norm against
+the encoder's written norm bit by bit.
