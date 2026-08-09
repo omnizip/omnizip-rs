@@ -228,23 +228,12 @@ fn encode_huffman_chunk_into(
         bw.write_bits(context_mode, 2);
     }
 
-    let ntrees_l: u32 = if use_context || use_block_switch {
-        2
-    } else {
-        1
-    };
-
-    // Build the literal context map.
-    // For context modeling: 64 entries mapping contexts to trees.
-    // For block switching: 128 entries (2 blocks × 64 contexts) mapping
-    // block 0 → tree 0, block 1 → tree 1.
-    let lit_ctx_map: Vec<u8> = if use_block_switch {
-        // NBLTYPESL=2: 128 entries. Block 0 (0-63) → 0, block 1 (64-127) → 1.
-        (0..128u8).map(|i| i >> 6).collect()
+    let (ntrees_l, lit_ctx_map): (u32, Vec<u8>) = if use_block_switch {
+        (2, (0..128u8).map(|i| i >> 6).collect())
     } else if use_context {
-        (0..64u8).map(|ctx| u8::from(ctx >= 32)).collect()
+        (2, (0..64u8).map(|ctx| u8::from(ctx >= 32)).collect())
     } else {
-        Vec::new()
+        (1, Vec::new())
     };
 
     write_varlen_uint8(bw, ntrees_l - 1); // NTREESL
