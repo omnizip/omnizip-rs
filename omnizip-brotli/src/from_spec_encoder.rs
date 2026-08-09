@@ -339,6 +339,20 @@ fn encode_huffman_chunk_into(
 
     let mut cmd_freq = vec![0u32; 704];
     let mut dist_freq = vec![0u32; dist_alphabet];
+
+    // Ensure every literal tree has at least one symbol. Smart context
+    // clustering can produce trees with zero literals if no contexts map
+    // to them. A zero-frequency tree would produce a degenerate Huffman
+    // table that the decoder reads as "symbol 0, 0 bits per occurrence" —
+    // corrupting output if that tree is ever selected during decoding.
+    // Adding a dummy frequency for byte 0 prevents this.
+    for freq in &mut lit_freqs {
+        let total: u32 = freq.iter().sum();
+        if total == 0 {
+            freq[0] = 1;
+        }
+    }
+
     for &sym in &stream.cmd_symbols {
         cmd_freq[sym] += 1;
     }
