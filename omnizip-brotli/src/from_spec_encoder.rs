@@ -230,6 +230,8 @@ fn encode_huffman_chunk_into(
 
     let (ntrees_l, lit_ctx_map): (u32, Vec<u8>) = if use_block_switch {
         (2, (0..128u8).map(|i| i >> 6).collect())
+    } else if use_context && input.len() >= 8192 {
+        (4u32, (0..64u8).map(|ctx| ctx >> 4).collect())
     } else if use_context {
         (2, (0..64u8).map(|ctx| u8::from(ctx >= 32)).collect())
     } else {
