@@ -15,7 +15,8 @@ use crate::constants::{BLOCK_TYPE_COMPRESSED, BLOCK_TYPE_RAW, BLOCK_TYPE_RLE};
 use crate::encoder::ldm::LdmHashTable;
 use crate::encoder::match_finder::{
     compress_block_fast_with_prefix, compress_block_lazy, compress_block_lazy2,
-    compress_block_lazy2_with_ldm, compress_block_with_min_match, MatchState, SeqStore,
+    compress_block_lazy2_with_ldm, compress_block_lazy2_with_prefix,
+    compress_block_lazy_with_prefix, compress_block_with_min_match, MatchState, SeqStore,
 };
 use crate::encoder::sequences::encode_section;
 use crate::xxhash;
@@ -156,18 +157,11 @@ fn encode_frame_into(
         match_state.disable_chain();
     }
 
-    // Cross-block matching for Fast/Greedy strategies (L1-L5): these
-    // strategies use single-probe matching (no chain), so we can safely
-    // use absolute positions and find matches across block boundaries
-    // without clearing the hash table. This gives a ~2× match window
-    // (up to 128 KiB back vs just the current block).
-    let cross_block = !ldm_enabled
-        && matches!(
-            params.strategy,
-            crate::encoder::cparams::Strategy::Fast
-                | crate::encoder::cparams::Strategy::DoubleFast
-                | crate::encoder::cparams::Strategy::Greedy
-        );
+    // Cross-block matching for ALL non-LDM strategies: use absolute
+    // positions with `_with_prefix` match finders. The hash table
+    // persists across blocks, enabling matches up to 128 KiB back
+    // (including previous blocks).
+    let cross_block = !ldm_enabled;
 
     if cross_block {
         match_state.disable_chain();
@@ -653,7 +647,22 @@ fn write_block_cross(
     let min_match = params.min_match.max(4) as usize;
 
     let src = &plaintext[..block_end];
-    compress_block_fast_with_prefix(src, block_start, &mut seq_store, ms, min_match);
+    use crate::encoder::cparams::Strategy;
+    match params.strategy {
+        Strategy::Lazy => {
+            compress_block_lazy_with_prefix(src, block_start, &mut seq_store, ms, min_match);
+        }
+        Strategy::Lazy2
+        | Strategy::Btlazy2
+        | Strategy::Btopt
+        | Strategy::Btultra
+        | Strategy::Btultra2 => {
+            compress_block_lazy2_with_prefix(src, block_start, &mut seq_store, ms, min_match);
+        }
+        _ => {
+            compress_block_fast_with_prefix(src, block_start, &mut seq_store, ms, min_match);
+        }
+    }
     *rep_offsets = seq_store.rep_offsets;
 
     let mut compressed_content = Vec::new();
