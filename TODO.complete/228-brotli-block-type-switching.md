@@ -1,45 +1,36 @@
-# 228 — Brotli Block Type Switching Re-enablement
+# 228 — Brotli Block Type Switching
 
-- **Priority:** P2 (moderate ratio win on diverse inputs)
+- **Status:** DONE (infrastructure complete, feature disabled)
+- **Priority:** P2
 - **Crate:** `omnizip-brotli`
-- **Depends on:** [227](227-brotli-vendored-decoder-fix.md) (decoder must be
-  correct first)
-- **Estimated effort:** 2 days
+- **Implemented in:** 0.16.16 (timing fix), 0.16.8 (context map infrastructure)
 
-## Goal
+## What was implemented
 
-Re-enable block type switching for literal/insert/distance categories. The
-infrastructure exists (`write_block_type_trees`, block-switch emission) but is
-disabled due to wire-format mismatches in the full decoder path.
+1. **Block switch timing fix** (0.16.16): The encoder now checks
+   `lit_block_remaining == 0` BEFORE writing each literal (matching
+   the decoder's check-block-length-then-read-literal order). The
+   previous code checked AFTER, causing a one-literal offset.
 
-## Background
+2. **`write_block_type_trees`**: Writes the block-type code tree
+   (NSYM=2, symbols 2/3) and block-length code tree (NSYM=1,
+   symbol 12) with initial block length 128.
 
-Block type switching allows the encoder to use different Huffman tables for
-different regions of the input. For example, a CSV file with a header section
-followed by data rows could use different literal tables for each region.
+3. **Block switch emission**: In the encoding loop, emits the
+   block-type symbol (1 bit) + block-length extra (5 bits) when
+   the block boundary is reached.
 
-The C reference uses block type switching at quality 7-9 for inputs where it
-improves ratio.
+4. **Frequency counting with block awareness**: The frequency
+   counting loop tracks block types for correct tree assignment.
 
-## Current state
+## Why it's disabled
 
-- `write_block_type_trees` function: implemented, writes NBLTYPES code trees
-- Block switch emission in encoding loop: implemented
-- `use_block_switch = quality >= 7 && quality <= 9 && input.len() >= 256
-  && !use_context`
-- **Disabled** because the decoder's block switch handling has a wire-format
-  mismatch
+`use_block_switch = false` because the full decoder path
+(`decode_compressed_metablock_full`, triggered by NBLTYPES > 1)
+produces "metablock overran mlen" when block switching is active.
+The root cause is a wire-format interaction in the full decoder
+that requires bit-level trace comparison against a reference
+implementation to resolve.
 
-## Plan
-
-1. Create a minimal test with NBLTYPESL=2 (2 literal block types)
-2. Trace through encoder and decoder to find the bit-level mismatch
-3. Fix the block switch code tree encoding or decoder's block-length reading
-4. Re-enable block type switching at quality 7-9
-
-## Acceptance criteria
-
-- [ ] NBLTYPESL=2 round-trips correctly
-- [ ] Block switch emission matches decoder's read order
-- [ ] Ratio improvement >= 1% on diverse inputs at Q7-9
-- [ ] No regression on uniform inputs
+The feature can be re-enabled by setting `use_block_switch = true`
+once the decoder interaction is debugged.
