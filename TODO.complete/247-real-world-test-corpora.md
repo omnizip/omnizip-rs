@@ -1,5 +1,8 @@
 # 247 — Real-World Test Corpora Acquisition
 
+- **Status:** PARTIAL — `tests/fixtures/corpora/setup.sh` downloads
+  Silesia, Enwik8, Calgary, Canterbury on demand. Corpora are
+  gitignored. LimniFS csv-synthetic still pending user-provided copy.
 - **Priority:** P1 (blocks meaningful ratio claims)
 - **Crate:** workspace (`tests/fixtures/corpora/`)
 - **Depends on:** none

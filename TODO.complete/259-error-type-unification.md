@@ -1,5 +1,9 @@
 # 259 — Error Type Unification
 
+- **Status:** PARTIAL — `OmnizipError` gets helper constructors
+  (`encode_failed`, `decode_failed`, etc.) and `codec_id()` accessor.
+  Per-codec structured sub-errors (BrotliError, LzmaError, ZstdError)
+  still pending.
 - **Priority:** P3 (DX: caller ergonomics)
 - **Crate:** `omnizip-codecs` (OmnizipError)
 - **Depends on:** none

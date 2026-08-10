@@ -1,5 +1,7 @@
 # 246 — Iterative Optimal Parser Refinement
 
+- **Status:** DONE (2-pass parser at Q8+: pass 1 Shannon from input,
+  pass 2 Shannon from actual parsed literals. Picks smaller output.)
 - **Priority:** P2 (additional 2-5% ratio win)
 - **Crate:** `omnizip-brotli`
 - **Depends on:** [240](240-optimal-parser-expansion.md) ✅

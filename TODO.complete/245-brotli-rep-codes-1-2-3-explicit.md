@@ -1,5 +1,8 @@
 # 245 — Brotli Rep Codes 1/2/3 via Explicit Distance Codes
 
+- **Status:** DONE (RepBuffer struct mirrors decoder ring buffer exactly;
+  every LZ77 back-reference whose distance matches rep0/1/2/3 emits
+  explicit distance code 0/1/2/3 with 0 extra bits)
 - **Priority:** P2 (moderate ratio win on structured data)
 - **Crate:** `omnizip-brotli`
 - **Depends on:** none (builds on TODO 239 which added rep0 implicit)
