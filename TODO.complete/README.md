@@ -203,13 +203,18 @@ correctness, and feature work needed to call the workspace "done".
 | 246 | [Iterative optimal parser refinement](246-iterative-optimal-parser-refinement.md) | ✅ (2-pass at Q8+ landed in 0.16.24) |
 | 248 | [Codec profile enum](248-codec-profile-enum.md) | ✅ (Profile + ProfileKind landed in 0.16.23) |
 | 249 | [Shared Huffman module unification](249-shared-huffman-module.md) | ⏳ (P2 — DRY ~2K LOC) |
-| 251 | [Codec streaming API](251-codec-streaming-api.md) | ⏳ (P2 — scalability) |
+| 251 | [Codec streaming API](251-codec-streaming-api.md) | 🔄 (P2 — shared trait exists; LZ4 impl landed in 0.16.25) |
 | 254 | [Architecture decision records](254-architecture-decision-records.md) | ✅ (10 ADRs landed in 0.16.23) |
 | 255 | [Code review sweep OCP/MECE/DRY](255-code-review-sweep-ocp-mece-dry.md) | ✅ (audit doc + 3 quick refactors landed in 0.16.24) |
 | 256 | [Encoder profile auto-detection](256-encoder-profile-auto-detection.md) | ✅ (ContentType::detect() landed in 0.16.23) |
-| 258 | [Shared bitstream module](258-shared-bitstream-module.md) | ⏳ (P3 — DRY) |
-| 259 | [Error type unification](259-error-type-unification.md) | 🔄 (P3 — helpers landed; per-codec sub-errors pending) |
+| 258 | [Shared bitstream module](258-shared-bitstream-module.md) | 🔄 (P3 — shared BitReaderBE/LE exists; per-codec migration pending) |
+| 259 | [Error type unification](259-error-type-unification.md) | 🔄 (P3 — helpers + per-codec sub-errors landed in 0.16.25) |
 | 260 | [Codec parallel batch API](260-codec-parallel-batch-api.md) | ✅ (ParallelBatch trait landed in 0.16.23) |
+| 261 | [Codec capability metadata](261-codec-capability-metadata.md) | ⏳ (P3 — DX) |
+| 262 | [Unified codec options builder](262-unified-codec-options-builder.md) | ⏳ (P3 — DX) |
+| 263 | [Brotli cross-decoder wire-format fix](263-brotli-cross-decoder-fix.md) | ⏳ (P0 — vendored C rejects our output) |
+| 264 | [Per-codec memory budget API](264-per-codec-memory-budget.md) | ⏳ (P2 — embedded/constrained) |
+| 265 | [Workspace bench CLI](265-workspace-bench-cli.md) | ⏳ (P3 — DX) |
 
 ## How to claim a TODO
 
