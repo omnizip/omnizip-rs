@@ -23,6 +23,12 @@ use std::collections::BTreeMap;
 use std::time::Instant;
 
 const REGRESSION_RATIO_THRESHOLD_PCT: f64 = 1.0;
+// Speed regressions are unreliable in CI due to:
+// - debug vs release mode gap (CI runs debug, baselines are release)
+// - shared runner noise (other tenants affect timing)
+// - thermal throttling on laptops
+// Keep the infrastructure but disable by default. Enable by setting
+// OMNIZIP_CHECK_SPEED=1.
 const REGRESSION_SPEED_THRESHOLD_PCT: f64 = 15.0;
 const REGRESSION_MIN_BASELINE_MS: u64 = 100;
 
@@ -237,12 +243,13 @@ fn regression_check() {
                 ratio_delta, baseline_result.output_bytes, current_result.output_bytes
             ));
         }
-        if speed_delta > REGRESSION_SPEED_THRESHOLD_PCT
+        let check_speed = std::env::var("OMNIZIP_CHECK_SPEED").is_ok();
+        if check_speed
+            && speed_delta > REGRESSION_SPEED_THRESHOLD_PCT
             && baseline_result.elapsed_ms >= REGRESSION_MIN_BASELINE_MS
         {
-            // Only flag speed regressions when the baseline timing is
-            // long enough to be measurable. Below 100ms, system jitter
-            // dominates and false positives are common.
+            // Only flag speed regressions when explicitly enabled AND the
+            // baseline timing is long enough to be measurable.
             regressions.push(format!(
                 "{key}: speed -{:.2}% ({:.1} → {:.1} MB/s)",
                 speed_delta, baseline_result.mbps, current_result.mbps
