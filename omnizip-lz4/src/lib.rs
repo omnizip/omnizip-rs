@@ -18,6 +18,7 @@
 pub mod block;
 pub mod frame;
 mod hc;
+pub mod streaming;
 
 use omnizip_codecs::{Codec, CodecId, CompressionLevel, OmnizipError};
 
