@@ -937,9 +937,9 @@ fn parse_input_with_offset(
     let (max_chain, nice_match, use_dict_base, lazy, lazy2, hash_log) = if is_text {
         match quality {
             0..=1 => (4, 8, false, false, false, 15),
-            2..=3 => (16, 16, true, false, false, 16),
-            4..=5 => (32, 32, true, true, false, 17),
-            6..=7 => (64, 64, true, true, false, 17),
+            2..=3 => (16, 16, true, true, false, 16),
+            4..=5 => (48, 48, true, true, true, 17),
+            6..=7 => (64, 64, true, true, true, 17),
             8..=9 => (128, 128, true, true, true, 17),
             _ => (512, 271, true, true, true, 18),
         }
