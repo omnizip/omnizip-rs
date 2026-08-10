@@ -1,5 +1,8 @@
 # 256 — Encoder Profile Auto-Detection
 
+- **Status:** DONE (ContentType::detect() in omnizip-codecs; brotli's
+  is_text_like() now delegates to it. Per-codec profile_to_level
+  mapping via the Codec trait.)
 - **Priority:** P2 (UX: lets callers say "I don't know")
 - **Crate:** `omnizip-codecs` (auto-detect), per-codec tuning
 - **Depends on:** [248](248-codec-profile-enum.md) (ContentType)
