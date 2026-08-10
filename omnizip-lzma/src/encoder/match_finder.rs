@@ -30,6 +30,7 @@ pub fn new_lzma_match_finder(data: &[u8], dict_size: u32) -> MatchFinder<'_> {
         max_chain_length: 256,
         nice_match: 0,
         hash_log: 16,
+        max_match_length: 273, // MATCH_LEN_MAX: cap to avoid O(N²) on repetitive data
     };
     HashChainMatchFinder::new(data, config)
 }
