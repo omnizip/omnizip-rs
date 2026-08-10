@@ -792,10 +792,13 @@ fn optimal_parse(
     }
 
     // --- Step 1: Collect matches at each position ---
-    // Each match is (distance, length, is_dict). For dictionary matches,
-    // copy_len must equal the word length exactly (the dictionary is
-    // indexed by word length), so the DP must not choose shorter lengths.
-    let mut matches_at: Vec<Option<(u32, u32, bool)>> = vec![None; n];
+    // Each match is (distance, copy_len, advance_len, is_dict).
+    // - Hash match: copy_len == advance_len == m.length
+    // - Dict match (length-preserving): copy_len == advance_len == wl == tl
+    // - Dict match (length-changing): copy_len = wl, advance_len = tl
+    //   The decoder copies wl bytes from the dict reference but the input
+    //   cursor advances by tl bytes.
+    let mut matches_at: Vec<Option<(u32, u32, u32, bool)>> = vec![None; n];
     for pos in 0..n {
         let global_pos = mlen_offset + pos;
         let max_dist = (global_pos as u32).min(MAX_BACKWARD_DISTANCE);
@@ -805,19 +808,16 @@ fn optimal_parse(
             if let Some(m) = mf.find_match(pos) {
                 if m.distance <= max_dist && m.length >= MIN_MATCH {
                     let copy_len = m.length.min(MAX_COPY).max(MIN_MATCH);
-                    matches_at[pos] = Some((m.distance, copy_len, false));
+                    matches_at[pos] = Some((m.distance, copy_len, copy_len, false));
                 }
             }
         }
 
         if matches_at[pos].is_none() && use_dict {
             if let Some((d, wl, tl)) = dict_hash::find_match(input, pos, max_dist) {
-                // Only use length-preserving transforms in the optimal
-                // parser (where copy_len == advance_len). Length-changing
-                // transforms (prefix/suffix/omit) are handled by the
-                // lazy/lazy2 parser for larger inputs.
-                if tl >= MIN_MATCH && tl == wl {
-                    matches_at[pos] = Some((d, wl, true));
+                if tl >= MIN_MATCH && pos + tl as usize <= n {
+                    let copy_len = wl.min(MAX_COPY).max(MIN_MATCH);
+                    matches_at[pos] = Some((d, copy_len, tl, true));
                 }
             }
         }
@@ -877,6 +877,7 @@ fn optimal_parse(
     ];
     let mut cost = vec![f32::INFINITY; n + 1];
     let mut back_len: Vec<u32> = vec![0; n]; // 0 = literal, else = copy_len
+    let mut back_advance: Vec<u32> = vec![0; n]; // parallel: cursor advance
     cost[n] = 0.0;
 
     for i in (0..n).rev() {
@@ -884,28 +885,42 @@ fn optimal_parse(
         let lit_cost_total = lit_cost[input[i] as usize] + cost[i + 1];
         let mut best = lit_cost_total;
         let mut best_action = 0u32;
+        let mut best_advance = 0u32;
 
         // Option B: Match of length L at copy-code boundaries.
-        if let Some((dist, max_l, is_dict)) = matches_at[i] {
-            if dist > 0 && max_l >= MIN_MATCH {
+        if let Some((dist, copy_len, advance_len, is_dict)) = matches_at[i] {
+            if dist > 0 && copy_len >= MIN_MATCH {
                 let m_cost = 7.0 + dist_cost(dist);
-                if is_dict {
-                    // Dictionary match: copy_len must equal word_length
-                    // exactly (the dictionary is indexed by word length).
-                    // No sub-length selection allowed.
-                    let l = i + max_l as usize;
+                if is_dict && advance_len != copy_len {
+                    // Length-changing dict transform: must take the full
+                    // match (the decoder produces tl bytes for copy_len
+                    // = wl). Cursor advances by advance_len.
+                    let l = i + advance_len as usize;
                     if l <= n {
                         let total = m_cost + cost[l];
                         if total < best {
                             best = total;
-                            best_action = max_l;
+                            best_action = copy_len;
+                            best_advance = advance_len;
+                        }
+                    }
+                } else if is_dict {
+                    // Length-preserving dict match: copy_len must equal
+                    // word_length exactly. No sub-length selection.
+                    let l = i + copy_len as usize;
+                    if l <= n {
+                        let total = m_cost + cost[l];
+                        if total < best {
+                            best = total;
+                            best_action = copy_len;
+                            best_advance = copy_len;
                         }
                     }
                 } else {
-                    // Hash match: any sub-length in [MIN_MATCH, max_l]
+                    // Hash match: any sub-length in [MIN_MATCH, copy_len]
                     // works. Sample at copy-code boundaries.
                     for &boundary in &COPY_BOUNDARIES {
-                        if boundary < MIN_MATCH || boundary > max_l {
+                        if boundary < MIN_MATCH || boundary > copy_len {
                             continue;
                         }
                         let l = i + boundary as usize;
@@ -916,6 +931,7 @@ fn optimal_parse(
                         if total < best {
                             best = total;
                             best_action = boundary;
+                            best_advance = boundary;
                         }
                     }
                 }
@@ -924,6 +940,7 @@ fn optimal_parse(
 
         cost[i] = best;
         back_len[i] = best_action;
+        back_advance[i] = best_advance;
     }
 
     // --- Step 4: Forward reconstruction ---
@@ -934,14 +951,15 @@ fn optimal_parse(
     while pos < n {
         if back_len[pos] > 0 {
             let copy_len = back_len[pos];
-            let (dist, _, _) = matches_at[pos].unwrap();
+            let advance = back_advance[pos];
+            let (dist, _, _, _) = matches_at[pos].unwrap();
             let insert_len = (pos - insert_start) as u32;
             commands.push(Command {
                 insert_len,
                 copy_len,
                 distance: dist,
             });
-            pos += copy_len as usize;
+            pos += advance as usize;
             insert_start = pos;
         } else {
             pos += 1;
