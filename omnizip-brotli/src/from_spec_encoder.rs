@@ -1125,6 +1125,7 @@ fn parse_input_with_offset(
         max_chain_length: max_chain,
         nice_match,
         hash_log,
+        max_match_length: MAX_COPY,
     };
     let mut mf = omnizip_codecs::HashChainMatchFinder::new(input, config);
 

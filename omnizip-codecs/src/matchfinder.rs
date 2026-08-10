@@ -63,6 +63,12 @@ pub struct HashChainConfig {
     /// Hash table size = `1 << hash_log`. Larger = fewer collisions
     /// but more memory and zero-init cost.
     pub hash_log: u32,
+    /// Upper bound on `match_length` scan per candidate. 0 disables
+    /// the cap (scans up to end-of-input). Set to the codec's max
+    /// useful match length (e.g., brotli's MAX_COPY=271) to avoid
+    /// O(N²) blowup on highly repetitive inputs where match_length
+    /// would otherwise walk O(N) bytes per call.
+    pub max_match_length: u32,
 }
 
 impl Default for HashChainConfig {
@@ -73,6 +79,7 @@ impl Default for HashChainConfig {
             max_chain_length: 128,
             nice_match: 32,
             hash_log: 16,
+            max_match_length: 0,
         }
     }
 }
@@ -103,6 +110,7 @@ pub struct HashChainMatchFinder<'a> {
     max_chain_length: u32,
     min_match: u32,
     nice_match: u32,
+    max_match_length: u32,
 }
 
 const SENTINEL: u32 = u32::MAX;
@@ -125,6 +133,7 @@ impl<'a> HashChainMatchFinder<'a> {
             max_chain_length: config.max_chain_length,
             min_match: config.min_match,
             nice_match: config.nice_match,
+            max_match_length: config.max_match_length,
         }
     }
 
@@ -179,7 +188,11 @@ impl<'a> HashChainMatchFinder<'a> {
         let mut best_len = 0u32;
         let mut best_dist = 0u32;
         let mut chain = 0u32;
-        let max_len = (self.data.len() - pos) as u32;
+        let max_len = if self.max_match_length > 0 {
+            ((self.data.len() - pos) as u32).min(self.max_match_length)
+        } else {
+            (self.data.len() - pos) as u32
+        };
 
         while candidate != SENTINEL && chain < self.max_chain_length {
             let cand_us = candidate as usize;
