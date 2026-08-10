@@ -931,6 +931,44 @@ fn optimal_parse(
     mlen_offset: usize,
     use_dict: bool,
 ) -> Vec<Command> {
+    optimal_parse_with_costs(input, mf, mlen_offset, use_dict, None)
+}
+
+/// Compute per-byte Shannon entropy as a literal cost model.
+///
+/// Bytes that don't appear in `data` get cost 8.0 (worst case). Bytes
+/// that appear get `-log2(p)` where p is their frequency, clamped to a
+/// minimum of 1.0 bit (Huffman codes shorter than 1 bit don't exist).
+fn compute_shannon_lit_cost(data: &[u8]) -> [f32; 256] {
+    let mut freq = [0u32; 256];
+    for &b in data {
+        freq[b as usize] += 1;
+    }
+    let mut arr = [8.0f32; 256];
+    if data.is_empty() {
+        return arr;
+    }
+    let total = data.len() as f32;
+    for i in 0..256 {
+        if freq[i] > 0 {
+            let p = freq[i] as f32 / total;
+            let bits = -p.log2();
+            arr[i] = bits.max(1.0);
+        }
+    }
+    arr
+}
+
+/// Like [`optimal_parse`] but accepts an optional literal cost override.
+/// Used by the iterative parser refinement (TODO 246) to feed back
+/// actual Huffman-derived code lengths into a second DP pass.
+fn optimal_parse_with_costs(
+    input: &[u8],
+    mf: &mut omnizip_codecs::HashChainMatchFinder,
+    mlen_offset: usize,
+    use_dict: bool,
+    lit_cost_override: Option<[f32; 256]>,
+) -> Vec<Command> {
     let n = input.len();
     if n == 0 {
         return Vec::new();
@@ -968,23 +1006,14 @@ fn optimal_parse(
         }
     }
 
-    // --- Step 2: Build literal cost model (Shannon entropy) ---
-    let mut freq = [0u32; 256];
-    for &b in input {
-        freq[b as usize] += 1;
-    }
-    let lit_cost: [f32; 256] = {
-        let mut arr = [0.0f32; 256];
-        for i in 0..256 {
-            if freq[i] > 0 {
-                let p = freq[i] as f32 / n as f32;
-                let bits = -p.log2();
-                arr[i] = bits.max(1.0);
-            } else {
-                arr[i] = 8.0;
-            }
-        }
-        arr
+    // --- Step 2: Build literal cost model ---
+    // For the first iteration, use Shannon entropy from input bytes.
+    // For iterative refinement (TODO 246), the caller can pass a
+    // refined lit_cost derived from iteration N's parsed literals.
+    let lit_cost = if let Some(provided) = lit_cost_override {
+        provided
+    } else {
+        compute_shannon_lit_cost(input)
     };
 
     // --- Distance cost approximation ---
@@ -1121,6 +1150,175 @@ fn optimal_parse(
     }
 
     commands
+}
+
+/// Iterative refinement of [`optimal_parse`] (TODO 246).
+///
+/// Runs two passes:
+/// 1. Pass 1 uses Shannon entropy over all input bytes as the literal
+///    cost model. This is what [`optimal_parse`] does today.
+/// 2. Build literal stream from pass 1's commands. Compute Shannon
+///    entropy over THOSE literals (which often excludes bytes that
+///    ended up in copy matches, sharpening the distribution).
+/// 3. Pass 2 re-parses with the refined literal cost.
+///
+/// Returns whichever pass produced the smaller Huffman stream
+/// (measured by total symbol bits, not literal count — passes can
+/// trade literals for matches).
+///
+/// ## Why this helps
+///
+/// Pass 1's lit_cost treats every byte uniformly. But after parsing,
+/// many bytes are inside copied matches and don't go through the
+/// literal Huffman tree. The actual literal byte distribution is
+/// often sharper (more skew toward common ASCII letters), so the
+/// Huffman tree built from those literals is cheaper for the bytes
+/// that actually appear as literals.
+///
+/// ## Why two passes is enough
+///
+/// Standard convergence: pass 2's literal stream ≈ pass 1's, so a
+/// third pass reproduces pass 2's output. Cap at 2 for predictable
+/// runtime.
+fn iterative_optimal_parse(
+    input: &[u8],
+    mf: &mut omnizip_codecs::HashChainMatchFinder,
+    mlen_offset: usize,
+    use_dict: bool,
+) -> Vec<Command> {
+    // Pass 1: Shannon cost from input.
+    let commands_v1 = optimal_parse(input, mf, mlen_offset, use_dict);
+
+    // Extract literals that pass 1 actually emitted.
+    let literals_v1 = extract_literals(&commands_v1, input, mlen_offset);
+    if literals_v1.is_empty() {
+        return commands_v1;
+    }
+
+    // Compute refined lit_cost from actual literals.
+    let lit_cost_v2 = compute_shannon_lit_cost(&literals_v1);
+
+    // Pass 2: refined cost. Reset match finder for the second pass.
+    let config = omnizip_codecs::HashChainConfig {
+        dict_size: MAX_BACKWARD_DISTANCE,
+        min_match: MIN_MATCH,
+        max_chain_length: mf_max_chain(mf),
+        nice_match: mf_nice_match(mf),
+        hash_log: mf_hash_log(mf),
+        max_match_length: MAX_COPY,
+    };
+    let mut mf2 = omnizip_codecs::HashChainMatchFinder::new(input, config);
+    let commands_v2 =
+        optimal_parse_with_costs(input, &mut mf2, mlen_offset, use_dict, Some(lit_cost_v2));
+
+    // Pick the smaller output. Use literal-stream total bits as a proxy
+    // for actual Huffman cost; this is approximate but cheap.
+    let score_v1 = score_commands(&commands_v1, input, mlen_offset);
+    let score_v2 = score_commands(&commands_v2, input, mlen_offset);
+    if score_v2 < score_v1 {
+        commands_v2
+    } else {
+        commands_v1
+    }
+}
+
+/// Extract just the literal bytes from a command list (in stream order).
+fn extract_literals(commands: &[Command], input: &[u8], mlen_offset: usize) -> Vec<u8> {
+    let mut out = Vec::new();
+    let mut cur = 0usize;
+    for cmd in commands {
+        let end = cur + cmd.insert_len as usize;
+        out.extend_from_slice(&input[cur..end]);
+        let advance = if cmd.copy_len > 0 {
+            let is_dict = (cmd.distance as usize) > cur;
+            if is_dict {
+                let global_pos = mlen_offset + end;
+                let max_dist = (global_pos as u32).min(MAX_BACKWARD_DISTANCE);
+                let mut tmp = Vec::with_capacity(cmd.copy_len as usize + 8);
+                match dictionary_lookup(&mut tmp, cmd.copy_len, cmd.distance as i32, max_dist) {
+                    Some(()) => tmp.len(),
+                    None => cmd.copy_len as usize,
+                }
+            } else {
+                cmd.copy_len as usize
+            }
+        } else {
+            0
+        };
+        cur = end + advance;
+    }
+    out
+}
+
+/// Rough score: total bits the command stream would cost in the
+/// Huffman-coded wire format. Lower is better.
+///
+/// This is an approximation — it doesn't build actual Huffman trees
+/// — but it's a sufficient signal for "is iteration 2 better?".
+fn score_commands(commands: &[Command], input: &[u8], mlen_offset: usize) -> u64 {
+    let mut literal_count = 0u64;
+    let mut cmd_count = 0u64;
+    let mut dist_count = 0u64;
+    let mut literals_freq = [0u32; 256];
+
+    let mut cur = 0usize;
+    for cmd in commands {
+        let end = cur + cmd.insert_len as usize;
+        for &b in &input[cur..end] {
+            literals_freq[b as usize] += 1;
+            literal_count += 1;
+        }
+        if cmd.copy_len > 0 {
+            cmd_count += 1;
+            let is_dict = (cmd.distance as usize) > cur;
+            let advance = if is_dict {
+                let global_pos = mlen_offset + end;
+                let max_dist = (global_pos as u32).min(MAX_BACKWARD_DISTANCE);
+                let mut tmp = Vec::with_capacity(cmd.copy_len as usize + 8);
+                match dictionary_lookup(&mut tmp, cmd.copy_len, cmd.distance as i32, max_dist) {
+                    Some(()) => tmp.len(),
+                    None => cmd.copy_len as usize,
+                }
+            } else {
+                cmd.copy_len as usize
+            };
+            // Heuristic: count as a distance symbol only if not a rep.
+            // We don't track rep state here; assume worst case (all
+            // explicit distances). This biases toward fewer commands
+            // which is fine for ranking.
+            dist_count += 1;
+            cur = end + advance;
+        } else {
+            cur = end;
+        }
+    }
+
+    // Shannon bound on literal stream.
+    let total = literal_count.max(1) as f32;
+    let mut lit_bits = 0.0f32;
+    for &f in &literals_freq {
+        if f > 0 {
+            let p = f as f32 / total;
+            lit_bits += -p.log2() * f as f32;
+        }
+    }
+
+    // Command + distance overhead: ~8 bits per command, ~10 per distance.
+    (lit_bits as u64) + cmd_count * 8 + dist_count * 10
+}
+
+// Read-only accessors for HashChainConfig fields (it's private inside
+// HashChainMatchFinder; we mirror via the config struct that the caller
+// built). Since we can't read them back from mf itself, default to
+// reasonable values for the iterative refinement pass.
+fn mf_max_chain(_mf: &omnizip_codecs::HashChainMatchFinder) -> u32 {
+    128
+}
+fn mf_nice_match(_mf: &omnizip_codecs::HashChainMatchFinder) -> u32 {
+    128
+}
+fn mf_hash_log(_mf: &omnizip_codecs::HashChainMatchFinder) -> u32 {
+    17
 }
 
 /// Two-pass backward reference collection (TODO 241).
@@ -1297,6 +1495,12 @@ fn parse_input_with_offset(
     // that, fall back to two-pass greedy (DP memory ~16 MiB at 1 MiB
     // input — past this we risk cache thrashing and diminishing returns).
     if is_text && quality >= 4 && input.len() <= 1024 * 1024 {
+        // Q8+: use iterative refinement (TODO 246) — 2-pass with
+        // Huffman-derived literal costs. Below Q8 the cost model is
+        // approximate enough that a second pass rarely helps.
+        if quality >= 8 {
+            return iterative_optimal_parse(input, &mut mf, mlen_offset, use_dict);
+        }
         return optimal_parse(input, &mut mf, mlen_offset, use_dict);
     }
 

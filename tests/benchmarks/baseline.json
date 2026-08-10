@@ -1,0 +1,84 @@
+{
+  "version": "0.16.23",
+  "commit": "unknown",
+  "timestamp": "unix:1786360615",
+  "results": {
+    "brotli/q11/csv_100k": {
+      "input_bytes": 78760,
+      "output_bytes": 16022,
+      "ratio": 0.20342813610970037,
+      "elapsed_ms": 147,
+      "mbps": 0.5328337559087482
+    },
+    "brotli/q5/binary_100k": {
+      "input_bytes": 25600,
+      "output_bytes": 900,
+      "ratio": 0.03515625,
+      "elapsed_ms": 7,
+      "mbps": 3.4530046738306623
+    },
+    "brotli/q5/csv_100k": {
+      "input_bytes": 78760,
+      "output_bytes": 15901,
+      "ratio": 0.20189182326053834,
+      "elapsed_ms": 127,
+      "mbps": 0.6161667478025902
+    },
+    "brotli/q5/text_100k": {
+      "input_bytes": 102400,
+      "output_bytes": 616,
+      "ratio": 0.006015625,
+      "elapsed_ms": 30,
+      "mbps": 3.316849820587253
+    },
+    "lz4_hc/l9/binary_100k": {
+      "input_bytes": 25600,
+      "output_bytes": 1347,
+      "ratio": 0.0526171875,
+      "elapsed_ms": 0,
+      "mbps": 123.1752263825938
+    },
+    "lz4_hc/l9/csv_100k": {
+      "input_bytes": 78760,
+      "output_bytes": 35533,
+      "ratio": 0.4511554088369731,
+      "elapsed_ms": 3,
+      "mbps": 23.506062301809365
+    },
+    "lzma/l6/csv_100k": {
+      "input_bytes": 78760,
+      "output_bytes": 18228,
+      "ratio": 0.23143727780599288,
+      "elapsed_ms": 51,
+      "mbps": 1.5386355869571446
+    },
+    "lzma/l6/text_100k": {
+      "input_bytes": 102400,
+      "output_bytes": 320,
+      "ratio": 0.003125,
+      "elapsed_ms": 43,
+      "mbps": 2.3644273930643265
+    },
+    "zstd/l9/binary_100k": {
+      "input_bytes": 25600,
+      "output_bytes": 1792,
+      "ratio": 0.07,
+      "elapsed_ms": 0,
+      "mbps": 62.186184464627964
+    },
+    "zstd/l9/csv_100k": {
+      "input_bytes": 78760,
+      "output_bytes": 31332,
+      "ratio": 0.3978161503301168,
+      "elapsed_ms": 1,
+      "mbps": 76.18863361547763
+    },
+    "zstd/l9/text_100k": {
+      "input_bytes": 102400,
+      "output_bytes": 211,
+      "ratio": 0.002060546875,
+      "elapsed_ms": 0,
+      "mbps": 419.527703577457
+    }
+  }
+}

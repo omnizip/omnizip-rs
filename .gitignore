@@ -3,3 +3,19 @@
 **/*.rs.bk
 **/*.rs.bak
 Cargo.lock
+
+# Real-world test corpora (downloaded by tests/fixtures/corpora/setup.sh)
+tests/fixtures/corpora/*/
+!tests/fixtures/corpora/README.md
+!tests/fixtures/corpora/setup.sh
+
+# Benchmark baselines (per-machine; commit only when updating CI)
+tests/benchmarks/baseline.local.json
+
+# Cargo-fuzz artifacts
+tests/fuzz/artifacts/
+tests/fuzz/corpus/
+tests/fuzz/target/
+
+# Local-only notes / scratch
+BUGREPORT-local-*.md
