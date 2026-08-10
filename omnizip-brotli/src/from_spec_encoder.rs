@@ -73,6 +73,102 @@ pub struct Command {
     pub distance: u32,
 }
 
+/// Four-slot repeat-distance ring buffer matching the decoder's state
+/// (decoder_full.rs ~495). Used by `build_symbol_stream` to emit
+/// explicit distance codes 0-3 for `rep0`/`rep1`/`rep2`/`rep3` matches
+/// (TODO 245).
+///
+/// ## Decoder semantics (mirrored here)
+///
+/// For distance code `c` (0-3) with LZ77 back-reference:
+/// - Read slot `(idx - (c-3)) & 3`.
+/// - Decrement `idx` by `1 >> c` (only `c == 0` decrements).
+/// - LZ77 copy: write the read value to slot `idx & 3`, then `idx += 1`.
+///
+/// For long-form distance with LZ77 back-reference:
+/// - Write the new distance to slot `idx & 3`, then `idx += 1`.
+///
+/// For dictionary references: no write-back. Only implicit commands
+/// (`distance_code >= 0`) get `idx += 1` compensation.
+///
+/// Initial state matches the C reference: `dist_rb = [16, 15, 11, 4]`,
+/// `idx = 0`.
+#[derive(Clone, Debug)]
+struct RepBuffer {
+    dist_rb: [u32; 4],
+    idx: i32,
+}
+
+impl RepBuffer {
+    fn new() -> Self {
+        Self {
+            dist_rb: [16, 15, 11, 4],
+            idx: 0,
+        }
+    }
+
+    /// Returns the distance currently at rep code `code` (0-3).
+    /// Code 0 is the most recent; code 3 is the oldest.
+    fn rep_at(&self, code: u32) -> u32 {
+        debug_assert!(code <= 3);
+        let offset = code as i32 - 3;
+        let idx = (self.idx - offset) & 3;
+        self.dist_rb[idx as usize]
+    }
+
+    /// If `distance` matches any rep code, returns the smallest matching
+    /// code (prefers lower codes on ties — they save the same bits).
+    fn find_rep_code(&self, distance: u32) -> Option<u32> {
+        for code in 0..4u32 {
+            if self.rep_at(code) == distance {
+                return Some(code);
+            }
+        }
+        None
+    }
+
+    /// Update state after an LZ77 back-reference that used rep code `code`
+    /// (0-3) or implicit (= code 0). Mirrors decoder behavior exactly.
+    fn on_rep_lz77(&mut self, code: u32) {
+        let offset = code as i32 - 3;
+        let distance_context = 1i32 >> code;
+        // Read (capture the distance before modifying idx).
+        let read_idx = ((self.idx - offset) & 3) as usize;
+        let distance = self.dist_rb[read_idx];
+        // Modify idx (only code 0 decrements).
+        self.idx -= distance_context;
+        // LZ77 write-back: write the read value at the new idx, then idx += 1.
+        let write_idx = (self.idx & 3) as usize;
+        self.dist_rb[write_idx] = distance;
+        self.idx = self.idx.wrapping_add(1);
+    }
+
+    /// Update state after an LZ77 back-reference with a new long-form distance.
+    fn on_new_distance_lz77(&mut self, distance: u32) {
+        let write_idx = (self.idx & 3) as usize;
+        self.dist_rb[write_idx] = distance;
+        self.idx = self.idx.wrapping_add(1);
+    }
+
+    /// Update state after a dictionary reference. Only implicit commands
+    /// (was_implicit = true) get idx compensation; explicit code 0-3 used
+    /// for dict references would corrupt the buffer (encoder avoids this).
+    fn on_dict_reference(&mut self, was_implicit: bool) {
+        if was_implicit {
+            self.idx = self.idx.wrapping_add(1);
+        }
+    }
+}
+
+#[cfg(test)]
+#[allow(dead_code)]
+impl RepBuffer {
+    /// Snapshot the current rep0 (most recent distance).
+    fn rep0(&self) -> u32 {
+        self.rep_at(0)
+    }
+}
+
 /// Encode the WBITS field for `WINDOW_BITS` (RFC 7932 §9.1).
 fn write_wbits(bw: &mut BitWriter) {
     bw.write_bits(1, 1);
@@ -568,29 +664,34 @@ fn build_symbol_stream(
     let mut dist_symbols = Vec::new();
     let mut dist_extras = Vec::new();
 
-    // Track repeat offset for rep-code optimization (TODO 239).
-    // The decoder's ring buffer has: implicit → idx--, explicit → idx++.
-    // Consecutive implicit commands corrupt the ring buffer, so we
-    // track whether the previous command was implicit and skip rep
-    // codes after one.
-    let mut rep0: u32 = 0;
+    // Track the 4-distance ring buffer (TODO 245). Lets us emit
+    // explicit distance codes 0-3 for rep0/1/2/3 matches, saving
+    // the distance extra bits (typically 5-15 bits per match).
+    let mut rep = RepBuffer::new();
     let mut prev_was_implicit = false;
+
+    // Output-position cursor — needed to detect dictionary references
+    // (distance > current output) which can't use rep codes (would
+    // corrupt the decoder's ring buffer state).
+    let mut output_pos = 0usize;
 
     for cmd in commands {
         let _ = input;
+        output_pos += cmd.insert_len as usize;
+        let is_dict_ref = cmd.copy_len > 0 && (cmd.distance as usize) > output_pos;
 
-        // Try rep code (implicit distance) when:
-        // - Distance matches rep0 (most recent)
-        // - Copy length fits implicit range (2-9)
-        // - Insert length fits implicit range (0-9)
-        // - Previous command wasn't implicit (avoid ring buffer corruption)
-        let can_use_rep = !prev_was_implicit
+        // Try implicit rep0 command (saves the entire distance Huffman
+        // symbol — ~5 bits — only viable for small copy_len/insert_len).
+        // Disabled for dictionary references (decoder doesn't compensate
+        // explicit code 0 for dicts, only implicit).
+        let can_use_implicit = !prev_was_implicit
             && cmd.copy_len > 0
-            && cmd.distance == rep0
+            && !is_dict_ref
+            && cmd.distance == rep.rep_at(0)
             && (2..=9).contains(&cmd.copy_len)
             && cmd.insert_len <= 9;
 
-        let cmd_sym = if can_use_rep {
+        let cmd_sym = if can_use_implicit {
             find_cmd_symbol_with_rep(cmd.insert_len, cmd.copy_len, Some(0))
         } else {
             find_cmd_symbol(cmd.insert_len, cmd.copy_len)
@@ -599,16 +700,60 @@ fn build_symbol_stream(
         cmd_symbols.push(cmd_sym);
 
         let entry = &kCmdLut[cmd_sym];
-        prev_was_implicit = entry.distance_code >= 0;
+        let this_was_implicit = entry.distance_code >= 0;
 
         if entry.distance_code < 0 && cmd.copy_len > 0 {
-            let (sym, extra) = encode_distance(cmd.distance, dist_cfg);
+            // Explicit distance symbol needed. For LZ77 back-references,
+            // try rep codes 0-3 first (each saves the distance extra bits
+            // — typically 5-15 bits — vs. the long-form encoding).
+            let (sym, extra) = if is_dict_ref {
+                // Dictionary references can't use rep codes (the decoder
+                // doesn't compensate explicit code 0-3 for dicts).
+                encode_distance(cmd.distance, dist_cfg)
+            } else if let Some(code) = rep.find_rep_code(cmd.distance) {
+                (code, 0)
+            } else {
+                encode_distance(cmd.distance, dist_cfg)
+            };
             dist_symbols.push(sym);
             dist_extras.push(extra);
         }
 
+        // Update RepBuffer to mirror decoder state.
         if cmd.copy_len > 0 {
-            rep0 = cmd.distance;
+            if is_dict_ref {
+                rep.on_dict_reference(this_was_implicit);
+            } else if this_was_implicit {
+                // Implicit == explicit code 0 for LZ77
+                rep.on_rep_lz77(0);
+            } else {
+                // Explicit distance code: check which rep was used (if any)
+                // vs. long-form. We re-derive this here rather than thread
+                // it from the encoding decision above, because the cost is
+                // trivial and it keeps the logic readable.
+                match rep.find_rep_code(cmd.distance) {
+                    Some(code) => rep.on_rep_lz77(code),
+                    None => rep.on_new_distance_lz77(cmd.distance),
+                }
+            }
+        }
+
+        prev_was_implicit = this_was_implicit;
+
+        // Advance output_pos by the copy advance.
+        if cmd.copy_len > 0 {
+            output_pos += if is_dict_ref {
+                // Dict transforms can change length; query the actual length.
+                let global_pos = mlen_offset + output_pos;
+                let max_dist = (global_pos as u32).min(MAX_BACKWARD_DISTANCE);
+                let mut tmp = Vec::with_capacity(cmd.copy_len as usize + 8);
+                match dictionary_lookup(&mut tmp, cmd.copy_len, cmd.distance as i32, max_dist) {
+                    Some(()) => tmp.len(),
+                    None => cmd.copy_len as usize,
+                }
+            } else {
+                cmd.copy_len as usize
+            };
         }
     }
 
