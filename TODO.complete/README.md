@@ -189,26 +189,26 @@ correctness, and feature work needed to call the workspace "done".
 | # | Title | Status |
 |---|-------|--------|
 | 244 | [Brotli decoder wire-format bugs](244-brotli-decoder-wire-format-bugs.md) | ⏳ (P0 — unblocks 228, 229, 232, 242) |
-| 247 | [Real-world test corpora](247-real-world-test-corpora.md) | ⏳ (P1 — without these, ratio claims are speculative) |
+| 247 | [Real-world test corpora](247-real-world-test-corpora.md) | 🔄 (P1 — setup.sh landed; LimniFS csv-synthetic pending) |
 | 250 | [Property-based tests for all encoders](250-property-tests-encoders.md) | 🔄 (P1 — scaffold landed; full proptest migration pending) |
-| 252 | [Encoder regression benchmark suite](252-encoder-regression-benchmark-suite.md) | ⏳ (P1 — catch perf regressions) |
-| 253 | [Wire-format differential fuzzer](253-wire-format-differential-fuzzer.md) | ⏳ (P1 — wire-format bugs) |
+| 252 | [Encoder regression benchmark suite](252-encoder-regression-benchmark-suite.md) | ✅ (regression.rs + baseline.json landed in 0.16.24) |
+| 253 | [Wire-format differential fuzzer](253-wire-format-differential-fuzzer.md) | 🔄 (P1 — 6 cargo-fuzz targets landed; cross-decoder pending) |
 | 257 | [LZMA BT4 match finder](257-lzma-bt4-match-finder.md) | ⏳ (P1 — 5-15% LZMA ratio gap) |
 
 ### Architectural quality (P2/P3)
 
 | # | Title | Status |
 |---|-------|--------|
-| 245 | [Brotli rep codes 1/2/3 via explicit distance codes](245-brotli-rep-codes-1-2-3-explicit.md) | ⏳ (P2 — structured data ratio) |
-| 246 | [Iterative optimal parser refinement](246-iterative-optimal-parser-refinement.md) | ⏳ (P2 — 2-5% ratio) |
+| 245 | [Brotli rep codes 1/2/3 via explicit distance codes](245-brotli-rep-codes-1-2-3-explicit.md) | ✅ (RepBuffer landed in 0.16.24; 3-7 pp CSV win) |
+| 246 | [Iterative optimal parser refinement](246-iterative-optimal-parser-refinement.md) | ✅ (2-pass at Q8+ landed in 0.16.24) |
 | 248 | [Codec profile enum](248-codec-profile-enum.md) | ✅ (Profile + ProfileKind landed in 0.16.23) |
 | 249 | [Shared Huffman module unification](249-shared-huffman-module.md) | ⏳ (P2 — DRY ~2K LOC) |
 | 251 | [Codec streaming API](251-codec-streaming-api.md) | ⏳ (P2 — scalability) |
 | 254 | [Architecture decision records](254-architecture-decision-records.md) | ✅ (10 ADRs landed in 0.16.23) |
-| 255 | [Code review sweep OCP/MECE/DRY](255-code-review-sweep-ocp-mece-dry.md) | ⏳ (P2 — quality) |
+| 255 | [Code review sweep OCP/MECE/DRY](255-code-review-sweep-ocp-mece-dry.md) | ✅ (audit doc + 3 quick refactors landed in 0.16.24) |
 | 256 | [Encoder profile auto-detection](256-encoder-profile-auto-detection.md) | ✅ (ContentType::detect() landed in 0.16.23) |
 | 258 | [Shared bitstream module](258-shared-bitstream-module.md) | ⏳ (P3 — DRY) |
-| 259 | [Error type unification](259-error-type-unification.md) | ⏳ (P3 — DX) |
+| 259 | [Error type unification](259-error-type-unification.md) | 🔄 (P3 — helpers landed; per-codec sub-errors pending) |
 | 260 | [Codec parallel batch API](260-codec-parallel-batch-api.md) | ✅ (ParallelBatch trait landed in 0.16.23) |
 
 ## How to claim a TODO

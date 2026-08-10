@@ -1,8 +1,12 @@
 # 252 — Encoder Regression Benchmark Suite
 
+- **Status:** DONE (`tests/benchmarks/regression.rs` with baseline.json
+  comparison; ratio threshold 1%, speed threshold 15% gated on
+  OMNIZIP_CHECK_SPEED env var to avoid debug/release CI gap)
 - **Priority:** P1 (catch perf regressions before merge)
 - **Crate:** workspace (`tests/benchmarks/`)
-- **Depends on:** [247](247-real-world-test-corpora.md)
+- **Depends on:** [247](247-real-world-test-corpora.md) (partial — uses
+  synthetic data until corpora download is wired into the harness)
 - **Estimated effort:** 2 days
 
 ## Problem

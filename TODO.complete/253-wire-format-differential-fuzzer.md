@@ -1,5 +1,9 @@
 # 253 — Wire-Format Differential Fuzzer
 
+- **Status:** PARTIAL — `tests/fuzz/` with cargo-fuzz targets for
+  brotli/zstd/lzma/lz4/deflate round-trip + brotli decode-no-panic.
+  Nightly GHA workflow at `.github/workflows/fuzz.yml`. Cross-decoder
+  targets (Rust encode → C reference decode) still pending.
 - **Priority:** P1 (catches wire-format bugs tests miss)
 - **Crate:** workspace (`tests/fuzz/`)
 - **Depends on:** [247](247-real-world-test-corpora.md) for seed corpus
