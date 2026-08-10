@@ -866,21 +866,29 @@ fn parse_input_with_offset(
     let n = input.len();
     let mut commands = Vec::new();
 
-    // Quality → match-finder effort. Brotli's reference encoder scales
-    // hash-chain depth and nice_match roughly exponentially with q; we
-    // use a simpler piecewise mapping that captures the main tiers.
-    // `lazy` enables lazy matching (try pos+1 before committing) at q ≥ 4.
-    // `lazy2` enables two-level lazy (try pos+1 AND pos+2) at q ≥ 8.
-    // `hash_log` scales with quality to reduce collisions on larger inputs.
-    let (max_chain, nice_match, use_dict_base, lazy, lazy2, hash_log) = match quality {
-        0..=1 => (4, 8, false, false, false, 15),
-        2..=3 => (16, 16, true, false, false, 16),
-        4..=5 => (32, 32, true, true, false, 17),
-        6..=7 => (64, 64, true, true, false, 17),
-        8..=9 => (128, 128, true, true, true, 17),
-        _ => (512, 271, true, true, true, 18), // q 10–11
+    // Quality → match-finder effort. For text-like input, scale effort
+    // with quality (lazy, lazy2, deep chains). For binary input, use
+    // minimal effort (greedy, shallow chain, no lazy look-ahead) since
+    // binary data rarely benefits from deeper search.
+    let is_text = is_text_like(input);
+    let (max_chain, nice_match, use_dict_base, lazy, lazy2, hash_log) = if is_text {
+        match quality {
+            0..=1 => (4, 8, false, false, false, 15),
+            2..=3 => (16, 16, true, false, false, 16),
+            4..=5 => (32, 32, true, true, false, 17),
+            6..=7 => (64, 64, true, true, false, 17),
+            8..=9 => (128, 128, true, true, true, 17),
+            _ => (512, 271, true, true, true, 18),
+        }
+    } else {
+        // Binary fast path: greedy, no lazy, no dictionary.
+        // Binary data rarely benefits from deeper search.
+        match quality {
+            0..=1 => (4, 8, false, false, false, 15),
+            _ => (8, 16, false, false, false, 16),
+        }
     };
-    let use_dict = use_dict_base && !disable_dict && crate::encoder::context::is_text_like(input);
+    let use_dict = use_dict_base && !disable_dict && is_text;
 
     let config = omnizip_codecs::HashChainConfig {
         dict_size: MAX_BACKWARD_DISTANCE,
