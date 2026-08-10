@@ -792,7 +792,10 @@ fn optimal_parse(
     }
 
     // --- Step 1: Collect matches at each position ---
-    let mut matches_at: Vec<Option<(u32, u32)>> = vec![None; n];
+    // Each match is (distance, length, is_dict). For dictionary matches,
+    // copy_len must equal the word length exactly (the dictionary is
+    // indexed by word length), so the DP must not choose shorter lengths.
+    let mut matches_at: Vec<Option<(u32, u32, bool)>> = vec![None; n];
     for pos in 0..n {
         let global_pos = mlen_offset + pos;
         let max_dist = (global_pos as u32).min(MAX_BACKWARD_DISTANCE);
@@ -802,7 +805,7 @@ fn optimal_parse(
             if let Some(m) = mf.find_match(pos) {
                 if m.distance <= max_dist && m.length >= MIN_MATCH {
                     let copy_len = m.length.min(MAX_COPY).max(MIN_MATCH);
-                    matches_at[pos] = Some((m.distance, copy_len));
+                    matches_at[pos] = Some((m.distance, copy_len, false));
                 }
             }
         }
@@ -814,7 +817,7 @@ fn optimal_parse(
                 // transforms (prefix/suffix/omit) are handled by the
                 // lazy/lazy2 parser for larger inputs.
                 if tl >= MIN_MATCH && tl == wl {
-                    matches_at[pos] = Some((d, wl));
+                    matches_at[pos] = Some((d, wl, true));
                 }
             }
         }
@@ -839,9 +842,42 @@ fn optimal_parse(
         arr
     };
 
-    // --- Step 3: Backward DP ---
-    let mut cost = vec![0.0f32; n + 1];
+    // --- Distance cost approximation ---
+    // Brotli distance alphabet: ~5 base bits + log2(dist) extra bits.
+    // Returns bits required to encode a given distance.
+    let dist_cost = |dist: u32| -> f32 {
+        if dist == 0 {
+            return 0.0;
+        }
+        let d = dist as f32;
+        if dist <= 4 {
+            2.0 + 0.5 * d
+        } else {
+            let log_d = d.ln() / core::f32::consts::LN_2;
+            (5.0 + log_d).min(22.0)
+        }
+    };
+
+    // --- Step 3: Backward DP considering all sub-match lengths ---
+    // For each position i with a longest match of length max_L at distance D:
+    //   cost[i] = min over L in [MIN_MATCH, max_L] of:
+    //              match_cost(D) + cost[i+L]
+    //            OR  lit_cost(input[i]) + cost[i+1]
+    // Within a single copy-length code, match_cost is constant, so the
+    // search prefers longer L (which amortizes the fixed cost better)
+    // unless a better alignment appears at i+L.
+    //
+    // To keep this tractable, sample L at copy-code group boundaries
+    // (the highest L in each group wins ties). 35 samples per position
+    // keeps the DP at O(35 * N).
+    const COPY_BOUNDARIES: [u32; 45] = [
+        4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 22, 24, 26, 28, 30, 32, 34,
+        36, 40, 44, 48, 52, 60, 68, 76, 84, 100, 116, 132, 148, 164, 180, 196, 212, 228, 244, 260,
+        271,
+    ];
+    let mut cost = vec![f32::INFINITY; n + 1];
     let mut back_len: Vec<u32> = vec![0; n]; // 0 = literal, else = copy_len
+    cost[n] = 0.0;
 
     for i in (0..n).rev() {
         // Option A: Insert 1 literal.
@@ -849,20 +885,40 @@ fn optimal_parse(
         let mut best = lit_cost_total;
         let mut best_action = 0u32;
 
-        // Option B: Take match at position i.
-        if let Some((_, match_len)) = matches_at[i] {
-            let end = (i + match_len as usize).min(n);
-            let actual_len = (end - i) as u32;
-
-            // Match cost: command symbol (~5 bits) + distance symbol
-            // (~5 bits) + extra bits for copy_len/distance (~8 bits).
-            // The per-byte cost decreases with longer matches.
-            let match_overhead = 18.0_f32;
-            let total = match_overhead + cost[end];
-
-            if total < best {
-                best = total;
-                best_action = actual_len;
+        // Option B: Match of length L at copy-code boundaries.
+        if let Some((dist, max_l, is_dict)) = matches_at[i] {
+            if dist > 0 && max_l >= MIN_MATCH {
+                let m_cost = 7.0 + dist_cost(dist);
+                if is_dict {
+                    // Dictionary match: copy_len must equal word_length
+                    // exactly (the dictionary is indexed by word length).
+                    // No sub-length selection allowed.
+                    let l = i + max_l as usize;
+                    if l <= n {
+                        let total = m_cost + cost[l];
+                        if total < best {
+                            best = total;
+                            best_action = max_l;
+                        }
+                    }
+                } else {
+                    // Hash match: any sub-length in [MIN_MATCH, max_l]
+                    // works. Sample at copy-code boundaries.
+                    for &boundary in &COPY_BOUNDARIES {
+                        if boundary < MIN_MATCH || boundary > max_l {
+                            continue;
+                        }
+                        let l = i + boundary as usize;
+                        if l > n {
+                            break;
+                        }
+                        let total = m_cost + cost[l];
+                        if total < best {
+                            best = total;
+                            best_action = boundary;
+                        }
+                    }
+                }
             }
         }
 
@@ -878,7 +934,7 @@ fn optimal_parse(
     while pos < n {
         if back_len[pos] > 0 {
             let copy_len = back_len[pos];
-            let (dist, _) = matches_at[pos].unwrap();
+            let (dist, _, _) = matches_at[pos].unwrap();
             let insert_len = (pos - insert_start) as u32;
             commands.push(Command {
                 insert_len,
@@ -1072,16 +1128,16 @@ fn parse_input_with_offset(
     };
     let mut mf = omnizip_codecs::HashChainMatchFinder::new(input, config);
 
-    // Quality >= 10: use cost-aware DP optimal parser, but only for
-    // inputs small enough that the O(N^2) DP is tractable (<= 64 KiB).
-    // For larger inputs, fall back to lazy2 (the DP would take minutes).
-    if quality >= 10 && input.len() <= 64 * 1024 {
+    // For text at Q4+: use cost-aware optimal parser (TODO 240).
+    // The O(N * 35) DP is tractable for inputs up to ~1 MiB. Beyond
+    // that, fall back to two-pass greedy (DP memory ~16 MiB at 1 MiB
+    // input — past this we risk cache thrashing and diminishing returns).
+    if is_text && quality >= 4 && input.len() <= 1024 * 1024 {
         return optimal_parse(input, &mut mf, mlen_offset, use_dict);
     }
 
     // For text at Q4+: use two-pass backward reference collection
-    // (TODO 241). Collects ALL matches in pass 1, then makes globally
-    // informed decisions in pass 2 with extended look-ahead.
+    // (TODO 241) for inputs too large for the optimal DP.
     if is_text && quality >= 4 {
         return two_pass_parse(input, mlen_offset, &mut mf, use_dict);
     }
