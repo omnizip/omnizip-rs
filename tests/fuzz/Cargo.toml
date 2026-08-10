@@ -1,0 +1,46 @@
+[package]
+name = "omnizip-fuzz"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+# cargo-fuzz requires this layout
+[[bin]]
+name = "brotli_round_trip"
+path = "targets/brotli_round_trip.rs"
+
+[[bin]]
+name = "zstd_round_trip"
+path = "targets/zstd_round_trip.rs"
+
+[[bin]]
+name = "lzma_round_trip"
+path = "targets/lzma_round_trip.rs"
+
+[[bin]]
+name = "lz4_round_trip"
+path = "targets/lz4_round_trip.rs"
+
+[[bin]]
+name = "deflate_round_trip"
+path = "targets/deflate_round_trip.rs"
+
+[[bin]]
+name = "brotli_decode_no_panic"
+path = "targets/brotli_decode_no_panic.rs"
+
+[dependencies]
+omnizip-codecs = { path = "../../omnizip-codecs" }
+omnizip-brotli = { path = "../../omnizip-brotli" }
+omnizip-zstd = { path = "../../omnizip-zstd" }
+omnizip-lzma = { path = "../../omnizip-lzma" }
+omnizip-lz4 = { path = "../../omnizip-lz4" }
+omnizip-deflate = { path = "../../omnizip-deflate" }
+
+# cargo-fuzz / libfuzzer integration. The fuzz! macro requires this.
+# libfuzzer-sys brings in `unsafe` internally but our code stays safe.
+[target.'cfg(fuzzing)'.dependencies]
+libfuzzer-sys = "0.4"
