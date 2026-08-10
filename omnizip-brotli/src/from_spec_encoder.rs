@@ -904,6 +904,116 @@ fn optimal_parse(
     commands
 }
 
+/// Two-pass backward reference collection (TODO 241).
+///
+/// Pass 1: Walk all positions, find ALL matches via hash chain +
+/// dictionary. Store in a pre-allocated array.
+///
+/// Pass 2: Walk the matches array with extended look-ahead (4
+/// positions). Pick the longest match, deferring when a longer
+/// match is available at a nearby position. This finds better
+/// match combinations than single-pass lazy parsing because
+/// ALL matches are visible before any decisions are made.
+fn two_pass_parse(
+    input: &[u8],
+    mlen_offset: usize,
+    mf: &mut omnizip_codecs::HashChainMatchFinder,
+    use_dict: bool,
+) -> Vec<Command> {
+    let n = input.len();
+    if n < MIN_MATCH as usize + 1 {
+        return vec![Command {
+            insert_len: n as u32,
+            copy_len: 0,
+            distance: 0,
+        }];
+    }
+
+    // --- Pass 1: Collect all matches ---
+    // Each entry: (distance, copy_len=word_length, advance_len=transformed_len)
+    let limit = n.saturating_sub(MIN_MATCH as usize);
+    let mut matches: Vec<Option<(u32, u32, u32)>> = vec![None; n];
+
+    for pos in 0..limit {
+        mf.advance();
+        let global_pos = mlen_offset + pos;
+        let max_dist = (global_pos as u32).min(MAX_BACKWARD_DISTANCE);
+
+        if let Some(m) = mf.find_match(pos) {
+            if m.distance > 0 && m.distance <= max_dist && m.length >= MIN_MATCH {
+                let copy_len = m.length.min(MAX_COPY).max(MIN_MATCH);
+                matches[pos] = Some((m.distance, copy_len, copy_len));
+            }
+        }
+
+        if matches[pos].is_none() && use_dict {
+            if let Some((d, wl, tl)) = dict_hash::find_match(input, pos, max_dist) {
+                if tl >= MIN_MATCH && pos + tl as usize <= n {
+                    let copy_len = wl.min(MAX_COPY).max(MIN_MATCH);
+                    matches[pos] = Some((d, copy_len, tl));
+                }
+            }
+        }
+    }
+
+    // --- Pass 2: Greedy with extended look-ahead ---
+    // At each position with a match, check the next 4 positions.
+    // If any has a significantly longer match, defer.
+    let mut commands = Vec::new();
+    let mut pos = 0usize;
+    let mut insert_start = 0usize;
+
+    while pos < n {
+        if let Some((dist, copy_len, advance_len)) = matches[pos] {
+            if copy_len >= MIN_MATCH && dist > 0 {
+                // Extended look-ahead: check next 4 positions for free
+                let mut best_pos = pos;
+                let mut best_copy = copy_len;
+                let mut best_dist = dist;
+                let mut best_advance = advance_len;
+
+                for offset in 1..=4u32 {
+                    let next = pos + offset as usize;
+                    if next >= n {
+                        break;
+                    }
+                    if let Some((d2, c2, a2)) = matches[next] {
+                        if a2 > best_advance + offset {
+                            best_pos = next;
+                            best_copy = c2;
+                            best_dist = d2;
+                            best_advance = a2;
+                        }
+                    }
+                }
+
+                let insert_len = (best_pos - insert_start) as u32;
+                commands.push(Command {
+                    insert_len,
+                    copy_len: best_copy,
+                    distance: best_dist,
+                });
+
+                pos = best_pos + best_advance as usize;
+                insert_start = pos;
+                continue;
+            }
+        }
+        pos += 1;
+    }
+
+    // Trailing literals
+    if insert_start < n {
+        commands.push(Command {
+            insert_len: (n - insert_start) as u32,
+            copy_len: 0,
+            distance: 0,
+        });
+    }
+
+    commands
+}
+
 fn parse_input(input: &[u8]) -> Vec<Command> {
     parse_input_with_offset(input, 0, 11, false)
 }
@@ -963,10 +1073,17 @@ fn parse_input_with_offset(
     let mut mf = omnizip_codecs::HashChainMatchFinder::new(input, config);
 
     // Quality >= 10: use cost-aware DP optimal parser, but only for
-    // inputs small enough that the O(N²) DP is tractable (≤ 64 KiB).
+    // inputs small enough that the O(N^2) DP is tractable (<= 64 KiB).
     // For larger inputs, fall back to lazy2 (the DP would take minutes).
     if quality >= 10 && input.len() <= 64 * 1024 {
         return optimal_parse(input, &mut mf, mlen_offset, use_dict);
+    }
+
+    // For text at Q4+: use two-pass backward reference collection
+    // (TODO 241). Collects ALL matches in pass 1, then makes globally
+    // informed decisions in pass 2 with extended look-ahead.
+    if is_text && quality >= 4 {
+        return two_pass_parse(input, mlen_offset, &mut mf, use_dict);
     }
 
     let mut pos = 0usize;
