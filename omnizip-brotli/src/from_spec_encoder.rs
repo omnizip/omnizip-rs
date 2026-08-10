@@ -1186,19 +1186,25 @@ fn iterative_optimal_parse(
     mlen_offset: usize,
     use_dict: bool,
 ) -> Vec<Command> {
+    iterative_optimal_parse_with_iters(input, mf, mlen_offset, use_dict, 2)
+}
+
+/// Multi-pass iterative optimal parser (TODO 272). Each iteration
+/// refines the literal cost model based on the previous iteration's
+/// actual parsed literals. 2 iterations is the default; Q11 uses 4
+/// for additional refinement.
+#[allow(clippy::too_many_lines)]
+fn iterative_optimal_parse_with_iters(
+    input: &[u8],
+    mf: &mut omnizip_codecs::HashChainMatchFinder,
+    mlen_offset: usize,
+    use_dict: bool,
+    iterations: usize,
+) -> Vec<Command> {
     // Pass 1: Shannon cost from input.
-    let commands_v1 = optimal_parse(input, mf, mlen_offset, use_dict);
+    let mut best_commands = optimal_parse(input, mf, mlen_offset, use_dict);
+    let mut best_score = score_commands(&best_commands, input, mlen_offset);
 
-    // Extract literals that pass 1 actually emitted.
-    let literals_v1 = extract_literals(&commands_v1, input, mlen_offset);
-    if literals_v1.is_empty() {
-        return commands_v1;
-    }
-
-    // Compute refined lit_cost from actual literals.
-    let lit_cost_v2 = compute_shannon_lit_cost(&literals_v1);
-
-    // Pass 2: refined cost. Reset match finder for the second pass.
     let config = omnizip_codecs::HashChainConfig {
         dict_size: MAX_BACKWARD_DISTANCE,
         min_match: MIN_MATCH,
@@ -1207,19 +1213,31 @@ fn iterative_optimal_parse(
         hash_log: mf_hash_log(mf),
         max_match_length: MAX_COPY,
     };
-    let mut mf2 = omnizip_codecs::HashChainMatchFinder::new(input, config);
-    let commands_v2 =
-        optimal_parse_with_costs(input, &mut mf2, mlen_offset, use_dict, Some(lit_cost_v2));
 
-    // Pick the smaller output. Use literal-stream total bits as a proxy
-    // for actual Huffman cost; this is approximate but cheap.
-    let score_v1 = score_commands(&commands_v1, input, mlen_offset);
-    let score_v2 = score_commands(&commands_v2, input, mlen_offset);
-    if score_v2 < score_v1 {
-        commands_v2
-    } else {
-        commands_v1
+    // Subsequent passes: refine lit_cost from the previous pass's
+    // actual literals. Stop if no improvement.
+    for _ in 1..iterations {
+        let literals_prev = extract_literals(&best_commands, input, mlen_offset);
+        if literals_prev.is_empty() {
+            break;
+        }
+        let lit_cost_refined = compute_shannon_lit_cost(&literals_prev);
+        let mut mf_iter = omnizip_codecs::HashChainMatchFinder::new(input, config);
+        let commands_iter = optimal_parse_with_costs(
+            input,
+            &mut mf_iter,
+            mlen_offset,
+            use_dict,
+            Some(lit_cost_refined),
+        );
+        let score_iter = score_commands(&commands_iter, input, mlen_offset);
+        if score_iter < best_score {
+            best_score = score_iter;
+            best_commands = commands_iter;
+        }
     }
+
+    best_commands
 }
 
 /// Extract just the literal bytes from a command list (in stream order).
@@ -1495,9 +1513,10 @@ fn parse_input_with_offset(
     // that, fall back to two-pass greedy (DP memory ~16 MiB at 1 MiB
     // input — past this we risk cache thrashing and diminishing returns).
     if is_text && quality >= 4 && input.len() <= 1024 * 1024 {
-        // Q8+: use iterative refinement (TODO 246) — 2-pass with
-        // Huffman-derived literal costs. Below Q8 the cost model is
-        // approximate enough that a second pass rarely helps.
+        // Q11: 4-iteration refinement (TODO 272); Q8-Q10: 2-iteration.
+        if quality >= 11 {
+            return iterative_optimal_parse_with_iters(input, &mut mf, mlen_offset, use_dict, 4);
+        }
         if quality >= 8 {
             return iterative_optimal_parse(input, &mut mf, mlen_offset, use_dict);
         }

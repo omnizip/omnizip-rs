@@ -7,6 +7,7 @@ members = [
     "tests/determinism",
     "tests/property",
     "tests/benchmarks",
+    "tests/conformance",
 ]
 exclude = [
     # Fuzz targets use cargo-fuzz's own build pipeline (no_main, libfuzzer-sys).
@@ -16,7 +17,7 @@ exclude = [
 resolver = "2"
 
 [workspace.package]
-version = "0.16.27"
+version = "0.16.28"
 edition = "2021"
 rust-version = "1.75"
 license = "MIT OR Apache-2.0"

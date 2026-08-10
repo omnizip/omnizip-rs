@@ -216,10 +216,16 @@ correctness, and feature work needed to call the workspace "done".
 | 264 | [Per-codec memory budget API](264-per-codec-memory-budget.md) | ✅ (MemoryBudget trait + per-codec overrides for Brotli/ZSTD/LZMA/LZ4 landed in 0.16.27) |
 | 265 | [Workspace bench CLI](265-workspace-bench-cli.md) | 🔄 (omnizip-bench CLI exists with --codec/--corpus/--format; --diff subcommand landed in 0.16.26) |
 | 266 | [Multi-codec ensemble auto-selection](266-multi-codec-ensemble-autoselect.md) | ✅ (Ensemble + Goal + heuristic picker landed in 0.16.27) |
-| 267 | [WebAssembly build target](267-wasm-build-target.md) | ⏳ (P3 — browser/Edge) |
+| 267 | [WebAssembly build target](267-wasm-build-target.md) | 🔄 (P3 — wasm.yml workflow landed in 0.16.28; per-codec fixes pending) |
 | 268 | [Compression ratio predictor](268-compression-ratio-predictor.md) | ⏳ (P3 — UX) |
-| 269 | [Per-codec README files](269-per-codec-readmes.md) | ⏳ (P3 — docs) |
-| 270 | [Profile-Guided Optimization (PGO)](270-profile-guided-optimization.md) | ⏳ (P3 — perf) |
+| 269 | [Per-codec README files](269-per-codec-readmes.md) | 🔄 (P3 — brotli README updated; others pending) |
+| 270 | [Profile-Guided Optimization (PGO)](270-profile-guided-optimization.md) | 🔄 (P3 — scripts/build-pgo.sh landed in 0.16.28) |
+| 271 | [Codec conformance test suite](271-codec-conformance-suite.md) | 🔄 (P1 — tests/conformance/ scaffold landed in 0.16.28; corpora pending) |
+| 272 | [Brotli Q11 tuning (4-iteration parser)](272-brotli-q11-tuning.md) | 🔄 (P2 — Q11 now uses 4 iterations landed in 0.16.28) |
+| 273 | [LimniFS workload integration tests](273-limnifs-workload-integration-tests.md) | ⏳ (P1 — real-world validation) |
+| 274 | [Brotli static dictionary decode audit](274-brotli-static-dict-decode-audit.md) | ⏳ (P1 — decoder rejects vendored output) |
+| 275 | [Wire-format property tests with reference decoders](275-wire-format-property-tests.md) | ⏳ (P1 — cross-decoder proptest) |
+| 276 | [Codec determinism audit across platforms](276-cross-platform-determinism-audit.md) | ⏳ (P1 — LimniFS requirement) |
 
 ## How to claim a TODO
 
