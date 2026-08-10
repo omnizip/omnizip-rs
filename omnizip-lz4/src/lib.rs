@@ -62,6 +62,18 @@ impl Codec for Lz4FastCodec {
     fn default_max_ratio_level(&self) -> u8 {
         1
     }
+
+    fn capabilities(&self) -> omnizip_codecs::Capabilities {
+        omnizip_codecs::Capabilities {
+            min_level: 1,
+            max_level: 1,
+            streaming: true, // Lz4StreamingEncoder/Decoder landed
+            parallel_batch: true,
+            has_static_dictionary: false,
+            content_type_aware: false,
+            approx_throughput_mbps: 500,
+        }
+    }
 }
 
 impl Codec for Lz4HcCodec {
@@ -94,6 +106,18 @@ impl Codec for Lz4HcCodec {
     }
     fn default_max_ratio_level(&self) -> u8 {
         12
+    }
+
+    fn capabilities(&self) -> omnizip_codecs::Capabilities {
+        omnizip_codecs::Capabilities {
+            min_level: 1,
+            max_level: 12,
+            streaming: false, // HC mode is one-shot
+            parallel_batch: true,
+            has_static_dictionary: false,
+            content_type_aware: false,
+            approx_throughput_mbps: 200,
+        }
     }
 }
 

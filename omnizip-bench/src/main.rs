@@ -53,10 +53,122 @@ struct Args {
     /// List known codecs and exit.
     #[arg(long)]
     list_codecs: bool,
+
+    /// Diff two benchmark JSON outputs (positional args after `--`).
+    /// Usage: omnizip-bench --diff -- baseline.json current.json
+    #[arg(long)]
+    diff: bool,
+}
+
+fn run_diff(files: &[String]) -> i32 {
+    if files.len() != 2 {
+        eprintln!("usage: omnizip-bench --diff -- <baseline.json> <current.json>");
+        return 1;
+    }
+    let baseline_text = match std::fs::read_to_string(&files[0]) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("read {}: {e}", files[0]);
+            return 2;
+        }
+    };
+    let current_text = match std::fs::read_to_string(&files[1]) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("read {}: {e}", files[1]);
+            return 2;
+        }
+    };
+    let baseline: serde_json::Value = match serde_json::from_str(&baseline_text) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("parse {}: {e}", files[0]);
+            return 3;
+        }
+    };
+    let current: serde_json::Value = match serde_json::from_str(&current_text) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("parse {}: {e}", files[1]);
+            return 3;
+        }
+    };
+
+    let baseline_results = baseline.get("results").and_then(|v| v.as_array());
+    let current_results = current.get("results").and_then(|v| v.as_array());
+    let (Some(baseline_results), Some(current_results)) = (baseline_results, current_results)
+    else {
+        eprintln!("missing 'results' array in one of the files");
+        return 4;
+    };
+
+    // Build a map: case_key -> compressed_bytes from baseline.
+    let mut baseline_map: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
+    for entry in baseline_results {
+        let key = format!(
+            "{}/{}/{}",
+            entry.get("codec").and_then(|v| v.as_str()).unwrap_or("?"),
+            entry.get("level").and_then(|v| v.as_i64()).unwrap_or(0),
+            entry.get("file").and_then(|v| v.as_str()).unwrap_or("?"),
+        );
+        if let Some(b) = entry.get("compressed_bytes").and_then(|v| v.as_u64()) {
+            baseline_map.insert(key, b);
+        }
+    }
+
+    let mut regressions = 0;
+    let mut improvements = 0;
+    println!(
+        "{:<50} {:>15} {:>15} {:>10}",
+        "case", "baseline", "current", "delta%"
+    );
+    println!("{}", "-".repeat(95));
+    for entry in current_results {
+        let key = format!(
+            "{}/{}/{}",
+            entry.get("codec").and_then(|v| v.as_str()).unwrap_or("?"),
+            entry.get("level").and_then(|v| v.as_i64()).unwrap_or(0),
+            entry.get("file").and_then(|v| v.as_str()).unwrap_or("?"),
+        );
+        let Some(current_bytes) = entry.get("compressed_bytes").and_then(|v| v.as_u64()) else {
+            continue;
+        };
+        let baseline_bytes = match baseline_map.get(&key) {
+            Some(&b) => b,
+            None => {
+                println!("{key:<50}     unknown     {current_bytes:>13} NEW");
+                continue;
+            }
+        };
+        let delta_pct =
+            (current_bytes as f64 - baseline_bytes as f64) / baseline_bytes as f64 * 100.0;
+        let marker = if delta_pct > 1.0 {
+            regressions += 1;
+            "REGRESSION"
+        } else if delta_pct < -1.0 {
+            improvements += 1;
+            "improved"
+        } else {
+            ""
+        };
+        println!("{key:<50} {baseline_bytes:>15} {current_bytes:>15} {delta_pct:>+8.2}% {marker}");
+    }
+
+    eprintln!("\n{improvements} improvement(s), {regressions} regression(s)");
+    if regressions > 0 {
+        5
+    } else {
+        0
+    }
 }
 
 fn main() {
     let args = Args::parse();
+
+    if args.diff {
+        let files: Vec<String> = std::env::args().skip(2).collect();
+        std::process::exit(run_diff(&files));
+    }
 
     if args.list_corpora {
         for c in known_corpora() {

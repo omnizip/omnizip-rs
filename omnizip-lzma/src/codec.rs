@@ -132,6 +132,18 @@ impl Codec for LzmaCodec {
     fn default_max_ratio_level(&self) -> u8 {
         9
     }
+
+    fn capabilities(&self) -> omnizip_codecs::Capabilities {
+        omnizip_codecs::Capabilities {
+            min_level: 0,
+            max_level: 9,
+            streaming: false,
+            parallel_batch: true,
+            has_static_dictionary: false,
+            content_type_aware: false,
+            approx_throughput_mbps: 10,
+        }
+    }
 }
 
 /// Reusable LZMA compressor that caches the match-finder hash table
