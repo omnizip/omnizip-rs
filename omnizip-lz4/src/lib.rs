@@ -76,6 +76,14 @@ impl Codec for Lz4FastCodec {
     }
 }
 
+/// LZ4 Fast: minimal memory — just input + output + 16 KB hash table.
+impl omnizip_codecs::MemoryBudget for Lz4FastCodec {
+    fn estimated_compress_memory(&self, input_len: usize, _level: CompressionLevel) -> usize {
+        let hash_table = 16 * 1024; // 4 KB hash buckets
+        input_len + input_len / 2 + hash_table
+    }
+}
+
 impl Codec for Lz4HcCodec {
     fn id(&self) -> CodecId {
         CodecId::LZ4_HC
@@ -118,6 +126,18 @@ impl Codec for Lz4HcCodec {
             content_type_aware: false,
             approx_throughput_mbps: 200,
         }
+    }
+}
+
+/// LZ4 HC: larger hash table + chain for deeper search.
+impl omnizip_codecs::MemoryBudget for Lz4HcCodec {
+    fn estimated_compress_memory(&self, input_len: usize, level: CompressionLevel) -> usize {
+        let table_size = if level.as_u8() >= 9 {
+            64 * 1024 // larger hash + chain for high levels
+        } else {
+            16 * 1024
+        };
+        input_len + input_len / 2 + table_size
     }
 }
 

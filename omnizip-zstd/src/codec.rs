@@ -99,6 +99,31 @@ impl Codec for ZstdCodec {
     }
 }
 
+/// ZSTD memory budget: input + output + window + hash tables.
+/// Window scales with `window_log` (10..23 depending on level).
+impl omnizip_codecs::MemoryBudget for ZstdCodec {
+    fn estimated_compress_memory(
+        &self,
+        input_len: usize,
+        level: omnizip_codecs::CompressionLevel,
+    ) -> usize {
+        let lv = level.as_u8().min(22);
+        // window_log scales 10..23; hash_log similarly.
+        let window_log: u32 = if lv <= 5 {
+            10
+        } else if lv <= 12 {
+            18
+        } else if lv <= 19 {
+            21
+        } else {
+            23
+        };
+        let window = 1usize << window_log;
+        let hash_table = (1usize << window_log) * 4;
+        input_len + input_len / 2 + window + hash_table
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
