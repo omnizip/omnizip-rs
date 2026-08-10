@@ -1,5 +1,7 @@
 # 230 — Brotli NPOSTFIX/NDIRECT Distance Code Optimization
 
+- **Status:** DONE (`DistanceConfig` in `encoder/distance_config.rs`;
+  per-metablock NDIRECT/NDMOEM selection)
 - **Priority:** P2 (ratio win on inputs with clustered short distances)
 - **Crate:** `omnizip-brotli`
 - **Depends on:** none

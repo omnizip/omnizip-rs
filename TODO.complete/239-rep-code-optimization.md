@@ -1,5 +1,7 @@
 # 239 — Repeat Offset (Rep Code) Optimization for Brotli
 
+- **Status:** DONE (rep0 implicit codes in `build_symbol_stream`;
+  ring-buffer tracking; guard against consecutive implicit commands)
 - **Priority:** P1 (significant ratio win on structured data)
 - **Crate:** `omnizip-brotli`
 - **Depends on:** none

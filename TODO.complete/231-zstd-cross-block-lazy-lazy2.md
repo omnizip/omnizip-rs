@@ -1,5 +1,7 @@
 # 231 — ZSTD Cross-Block Matching for Lazy/Lazy2 (L6-L18)
 
+- **Status:** DONE (cross-block matching wired for all strategies;
+  LDM integration for L19+)
 - **Priority:** P2 (ratio win at mid-range levels on large inputs)
 - **Crate:** `omnizip-zstd`
 - **Depends on:** [208](208-zstd-cross-block-matching) (Fast/Greedy already

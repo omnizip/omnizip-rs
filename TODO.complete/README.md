@@ -171,6 +171,46 @@ the new items document the path forward.
 | 168 | [Brotli Huffman-coded encoder — static tree path](168-brotli-huffman-static-tree.md) | 🔄 (foundation landed: static_codes + commands + huffman modules; wire-format bugs being traced) |
 | 169 | [Brotli Huffman wire-format debugging](169-brotli-huffman-wire-format-debug.md) | ⏳ (P0 — TODO 168 continuation; isolates the remaining bit-level bugs) |
 
+## 2026-08-10 update — Post-CSV-ratio-closure wave (items 244+)
+
+After closing the synthetic-test CSV ratio gap (we now beat vendored C
+on CSV 100KB and 500KB), this wave captures the remaining architectural,
+correctness, and feature work needed to call the workspace "done".
+
+### Status legend (for items 244+)
+
+- ⏳ **Pending** — not started
+- 🔄 **In progress** — actively being worked
+- ✅ **Done** — landed and tested
+- 🚫 **Superseded** — newer approach replaced this
+
+### Highest priority (P0/P1)
+
+| # | Title | Status |
+|---|-------|--------|
+| 244 | [Brotli decoder wire-format bugs](244-brotli-decoder-wire-format-bugs.md) | ⏳ (P0 — unblocks 228, 229, 232, 242) |
+| 247 | [Real-world test corpora](247-real-world-test-corpora.md) | ⏳ (P1 — without these, ratio claims are speculative) |
+| 250 | [Property-based tests for all encoders](250-property-tests-encoders.md) | ⏳ (P1 — correctness) |
+| 252 | [Encoder regression benchmark suite](252-encoder-regression-benchmark-suite.md) | ⏳ (P1 — catch perf regressions) |
+| 253 | [Wire-format differential fuzzer](253-wire-format-differential-fuzzer.md) | ⏳ (P1 — wire-format bugs) |
+| 257 | [LZMA BT4 match finder](257-lzma-bt4-match-finder.md) | ⏳ (P1 — 5-15% LZMA ratio gap) |
+
+### Architectural quality (P2/P3)
+
+| # | Title | Status |
+|---|-------|--------|
+| 245 | [Brotli rep codes 1/2/3 via explicit distance codes](245-brotli-rep-codes-1-2-3-explicit.md) | ⏳ (P2 — structured data ratio) |
+| 246 | [Iterative optimal parser refinement](246-iterative-optimal-parser-refinement.md) | ⏳ (P2 — 2-5% ratio) |
+| 248 | [Codec profile enum](248-codec-profile-enum.md) | ⏳ (P2 — OCP) |
+| 249 | [Shared Huffman module unification](249-shared-huffman-module.md) | ⏳ (P2 — DRY ~2K LOC) |
+| 251 | [Codec streaming API](251-codec-streaming-api.md) | ⏳ (P2 — scalability) |
+| 254 | [Architecture decision records](254-architecture-decision-records.md) | ⏳ (P3 — docs) |
+| 255 | [Code review sweep OCP/MECE/DRY](255-code-review-sweep-ocp-mece-dry.md) | ⏳ (P2 — quality) |
+| 256 | [Encoder profile auto-detection](256-encoder-profile-auto-detection.md) | ⏳ (P2 — UX) |
+| 258 | [Shared bitstream module](258-shared-bitstream-module.md) | ⏳ (P3 — DRY) |
+| 259 | [Error type unification](259-error-type-unification.md) | ⏳ (P3 — DX) |
+| 260 | [Codec parallel batch API](260-codec-parallel-batch-api.md) | ⏳ (P2 — throughput) |
+
 ## How to claim a TODO
 
 1. Pick an item from the tables above.
