@@ -202,6 +202,34 @@ impl Codec for BrotliCodec {
     }
 }
 
+/// Brotli memory budget: input + output + match-finder hash tables.
+/// Match finder uses `dict_size` (~16 MB at WBITS=24) + chain of
+/// 4 bytes per position + 1<<hash_log hash table.
+impl omnizip_codecs::MemoryBudget for BrotliCodec {
+    fn estimated_compress_memory(
+        &self,
+        input_len: usize,
+        level: omnizip_codecs::CompressionLevel,
+    ) -> usize {
+        let q = level.as_u8().min(11);
+        // hash_log scales with quality.
+        let hash_log: u32 = if q <= 1 {
+            15
+        } else if q <= 5 {
+            17
+        } else {
+            18
+        };
+        let hash_table = (1usize << hash_log) * 4;
+        // Match-finder prev array: dict_size u32 entries.
+        let prev_array = 16 * 1024 * 1024;
+        // Dictionary hash table (one-time init, ~3 MB shared via OnceLock).
+        // We count it once per call conservatively.
+        let dict_hash = 3 * 1024 * 1024;
+        input_len + input_len / 2 + hash_table + prev_array + dict_hash
+    }
+}
+
 /// The default quality used when callers don't specify one.
 #[must_use]
 pub fn default_quality() -> i32 {

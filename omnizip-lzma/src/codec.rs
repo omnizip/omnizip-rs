@@ -146,6 +146,22 @@ impl Codec for LzmaCodec {
     }
 }
 
+/// LZMA memory budget: input + output + window + match-finder.
+/// Window = 1 << (level + 16) for levels 0..9.
+impl omnizip_codecs::MemoryBudget for LzmaCodec {
+    fn estimated_compress_memory(
+        &self,
+        input_len: usize,
+        level: omnizip_codecs::CompressionLevel,
+    ) -> usize {
+        let lv = level.as_u8().min(9);
+        let window_log: u32 = 16 + lv as u32;
+        let window = 1usize << window_log;
+        let chain = 256 * 4; // max_chain * sizeof(u32)
+        input_len + input_len / 2 + window + chain
+    }
+}
+
 /// Reusable LZMA compressor that caches the match-finder hash table
 /// across calls. Mirrors `omnizip_zstd::ZstdCompressor` and
 /// `omnizip_ppmd::PpmdCompressor`.
