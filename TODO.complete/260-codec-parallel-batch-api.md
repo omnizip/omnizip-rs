@@ -1,8 +1,12 @@
 # 260 — Codec Parallel Batch API
 
+- **Status:** DONE (ParallelBatch trait with default impl in
+  omnizip-codecs; uses std::thread::scope, no rayon, no unsafe;
+  blanket impl gives every Codec parallelism for free)
 - **Priority:** P2 (throughput — LimniFS multi-file workloads)
 - **Crate:** `omnizip-codecs`
-- **Depends on:** [251](251-codec-streaming-api.md)
+- **Depends on:** [251](251-codec-streaming-api.md) (streaming API,
+  not actually required for batch — kept as related work)
 - **Estimated effort:** 2 days
 
 ## Problem

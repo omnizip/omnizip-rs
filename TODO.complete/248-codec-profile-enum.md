@@ -1,5 +1,7 @@
 # 248 — Codec Profile Enum (Architectural: OCP)
 
+- **Status:** DONE (Profile + ProfileKind in omnizip-codecs; default
+  level hooks overridden in Brotli, ZSTD, LZMA, LZ4 Fast + HC)
 - **Priority:** P2 (architectural quality — replaces ad-hoc u8 levels)
 - **Crate:** `omnizip-codecs` (trait) + per-codec mappings
 - **Depends on:** none

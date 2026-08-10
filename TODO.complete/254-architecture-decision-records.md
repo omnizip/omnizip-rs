@@ -1,5 +1,7 @@
 # 254 — Architecture Decision Records (ADRs)
 
+- **Status:** DONE (10 initial ADRs in docs/adr/0001-0010 + template
+  + README explaining format and workflow)
 - **Priority:** P3 (documentation — onboarding, alignment)
 - **Crate:** workspace (`docs/adr/`)
 - **Depends on:** none

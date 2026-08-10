@@ -1,5 +1,11 @@
 # 250 — Property-Based Testing for All Encoders
 
+- **Status:** PARTIAL — scaffold in `tests/property/` with deterministic
+  SplitMix64-based generators covering 13 input shapes (empty, single
+  byte, text, CSV, JSON, repetitive, binary, large text, all-same,
+  alternating). Round-trip + determinism invariants verified for
+  brotli, zstd, lzma, lz4, deflate. Full proptest migration and
+  cross-decoder fuzzing still pending.
 - **Priority:** P1 (correctness — exceeds hand-written test coverage)
 - **Crate:** workspace (`tests/proptest/`)
 - **Depends on:** [247](247-real-world-test-corpora.md) (uses real data shapes)
