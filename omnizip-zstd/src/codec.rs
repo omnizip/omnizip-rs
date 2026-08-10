@@ -75,6 +75,16 @@ impl Codec for ZstdCodec {
         }
         Ok(out)
     }
+
+    fn default_fast_level(&self) -> u8 {
+        1
+    }
+    fn default_balanced_level(&self) -> u8 {
+        9
+    }
+    fn default_max_ratio_level(&self) -> u8 {
+        19
+    }
 }
 
 #[cfg(test)]

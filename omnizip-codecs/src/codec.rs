@@ -7,6 +7,7 @@
 
 use crate::error::OmnizipError;
 use crate::level::CompressionLevel;
+use crate::profile::{Profile, ProfileKind};
 
 /// Strongly-typed codec identifier. The inner u16 is opaque; construct
 /// via the `CODEC_*` constants on this struct.
@@ -112,4 +113,55 @@ pub trait Codec: Send + Sync {
     /// [`OmnizipError::LengthMismatch`] if the output length differs from
     /// `expected_len`.
     fn decompress(&self, compressed: &[u8], expected_len: u32) -> Result<Vec<u8>, OmnizipError>;
+
+    /// Default level for [`ProfileKind::Fast`].
+    /// Codecs SHOULD override; default is `1`.
+    fn default_fast_level(&self) -> u8 {
+        1
+    }
+
+    /// Default level for [`ProfileKind::Balanced`].
+    /// Codecs SHOULD override; default is `6`.
+    fn default_balanced_level(&self) -> u8 {
+        6
+    }
+
+    /// Default level for [`ProfileKind::MaxRatio`].
+    /// Codecs SHOULD override; default is `9`.
+    fn default_max_ratio_level(&self) -> u8 {
+        9
+    }
+
+    /// Translate a [`ProfileKind`] to a raw level using this codec's
+    /// default mappings.
+    fn profile_kind_to_level(&self, kind: ProfileKind) -> u8 {
+        match kind {
+            ProfileKind::Fast => self.default_fast_level(),
+            ProfileKind::Balanced => self.default_balanced_level(),
+            ProfileKind::MaxRatio => self.default_max_ratio_level(),
+        }
+    }
+
+    /// Translate a [`Profile`] to a raw level using this codec's
+    /// default mappings. Used by [`compress_with_profile`](Self::compress_with_profile).
+    fn profile_to_level(&self, profile: Profile) -> CompressionLevel {
+        let level = profile.to_level(|kind| self.profile_kind_to_level(kind));
+        CompressionLevel::new(level)
+    }
+
+    /// Compress using a semantic [`Profile`] instead of a raw level.
+    /// Recommended for callers that don't have codec-specific
+    /// knowledge.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`compress`](Self::compress).
+    fn compress_with_profile(
+        &self,
+        plaintext: &[u8],
+        profile: Profile,
+    ) -> Result<Vec<u8>, OmnizipError> {
+        let level = self.profile_to_level(profile);
+        self.compress(plaintext, level)
+    }
 }

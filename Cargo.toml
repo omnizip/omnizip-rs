@@ -5,11 +5,12 @@ members = [
     "omnizip-*",
     "tests/differential",
     "tests/determinism",
+    "tests/property",
 ]
 resolver = "2"
 
 [workspace.package]
-version = "0.16.22"
+version = "0.16.23"
 edition = "2021"
 rust-version = "1.75"
 license = "MIT OR Apache-2.0"

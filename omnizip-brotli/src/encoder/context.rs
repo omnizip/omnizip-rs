@@ -5,21 +5,17 @@
 //! function depends on `CONTEXT_MODE`.
 
 use crate::static_codes::K_UTF8_CONTEXT_LOOKUP;
+use omnizip_codecs::ContentType;
 
 /// Check if input looks like text (printable ASCII + whitespace).
 /// Used to select UTF8 context mode over LSB6 for better ratio.
+///
+/// Thin wrapper around `ContentType::detect().is_text_like()`
+/// (TODO 256). Kept as a Brotli-local function for the existing
+/// call sites that read it as a boolean.
 #[must_use]
 pub fn is_text_like(input: &[u8]) -> bool {
-    if input.is_empty() {
-        return false;
-    }
-    let text_bytes = input.iter().filter(|&&b| is_text_byte(b)).count();
-    text_bytes * 10 > input.len() * 9 // > 90% text bytes
-}
-
-/// A byte is "text-like" if it's printable ASCII or common whitespace.
-fn is_text_byte(b: u8) -> bool {
-    matches!(b, 0x09 | 0x0A | 0x0D) || (0x20..=0x7E).contains(&b)
+    ContentType::detect(input).is_text_like()
 }
 
 /// Compute a literal context ID (RFC 7932 §10.1) for the given mode.

@@ -51,6 +51,16 @@ impl Codec for Lz4FastCodec {
     fn decompress(&self, compressed: &[u8], expected_len: u32) -> Result<Vec<u8>, OmnizipError> {
         decompress_lz4(compressed, expected_len, CodecId::LZ4)
     }
+
+    fn default_fast_level(&self) -> u8 {
+        1
+    }
+    fn default_balanced_level(&self) -> u8 {
+        1
+    }
+    fn default_max_ratio_level(&self) -> u8 {
+        1
+    }
 }
 
 impl Codec for Lz4HcCodec {
@@ -73,6 +83,16 @@ impl Codec for Lz4HcCodec {
     }
     fn decompress(&self, compressed: &[u8], expected_len: u32) -> Result<Vec<u8>, OmnizipError> {
         decompress_lz4(compressed, expected_len, CodecId::LZ4_HC)
+    }
+
+    fn default_fast_level(&self) -> u8 {
+        4
+    }
+    fn default_balanced_level(&self) -> u8 {
+        9
+    }
+    fn default_max_ratio_level(&self) -> u8 {
+        12
     }
 }
 
