@@ -178,6 +178,16 @@ impl Codec for BrotliCodec {
         }
         Ok(decoded)
     }
+
+    fn default_fast_level(&self) -> u8 {
+        1
+    }
+    fn default_balanced_level(&self) -> u8 {
+        5
+    }
+    fn default_max_ratio_level(&self) -> u8 {
+        11
+    }
 }
 
 /// The default quality used when callers don't specify one.

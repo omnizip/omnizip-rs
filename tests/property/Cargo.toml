@@ -1,0 +1,24 @@
+[package]
+name = "omnizip-property"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[[test]]
+name = "property_round_trip"
+path = "property_round_trip.rs"
+
+[[test]]
+name = "property_determinism"
+path = "property_determinism.rs"
+
+[dev-dependencies]
+omnizip-codecs = { path = "../../omnizip-codecs", version = "0.16.2" }
+omnizip-lzma = { path = "../../omnizip-lzma", version = "0.16.2" }
+omnizip-zstd = { path = "../../omnizip-zstd", version = "0.16.2" }
+omnizip-brotli = { path = "../../omnizip-brotli", version = "0.16.2" }
+omnizip-lz4 = { path = "../../omnizip-lz4", version = "0.16.2" }
+omnizip-deflate = { path = "../../omnizip-deflate", version = "0.16.2" }

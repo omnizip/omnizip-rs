@@ -122,6 +122,16 @@ impl Codec for LzmaCodec {
         }
         Ok(decoded)
     }
+
+    fn default_fast_level(&self) -> u8 {
+        1
+    }
+    fn default_balanced_level(&self) -> u8 {
+        5
+    }
+    fn default_max_ratio_level(&self) -> u8 {
+        9
+    }
 }
 
 /// Reusable LZMA compressor that caches the match-finder hash table
