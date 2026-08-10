@@ -5,8 +5,10 @@
 //! `LimniFS`'s wire-format u8 codec byte maps to a [`CodecId`] at the
 //! integration boundary.
 
+use crate::capabilities::Capabilities;
 use crate::error::OmnizipError;
 use crate::level::CompressionLevel;
+use crate::options::Options;
 use crate::profile::{Profile, ProfileKind};
 
 /// Strongly-typed codec identifier. The inner u16 is opaque; construct
@@ -162,6 +164,35 @@ pub trait Codec: Send + Sync {
         profile: Profile,
     ) -> Result<Vec<u8>, OmnizipError> {
         let level = self.profile_to_level(profile);
+        self.compress(plaintext, level)
+    }
+
+    /// Static capability metadata describing what this codec supports.
+    /// Default returns conservative values; codecs SHOULD override
+    /// with accurate numbers.
+    fn capabilities(&self) -> Capabilities {
+        Capabilities::default()
+    }
+
+    /// Compress using structured [`Options`]. Default delegates to
+    /// `compress` after extracting the level. Codecs MAY override
+    /// to honor per-codec fields (window_log, dictionary, etc.).
+    ///
+    /// # Errors
+    ///
+    /// Same as [`compress`](Self::compress).
+    fn compress_with_options(
+        &self,
+        plaintext: &[u8],
+        options: &Options,
+    ) -> Result<Vec<u8>, OmnizipError> {
+        let level = if let Some(l) = options.level {
+            l
+        } else if let Some(p) = options.profile {
+            self.profile_to_level(p)
+        } else {
+            self.profile_to_level(Profile::Balanced)
+        };
         self.compress(plaintext, level)
     }
 }

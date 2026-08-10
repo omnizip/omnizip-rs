@@ -85,6 +85,18 @@ impl Codec for ZstdCodec {
     fn default_max_ratio_level(&self) -> u8 {
         19
     }
+
+    fn capabilities(&self) -> omnizip_codecs::Capabilities {
+        omnizip_codecs::Capabilities {
+            min_level: 1,
+            max_level: 22,
+            streaming: false, // TODO 251: streaming impl pending
+            parallel_batch: true,
+            has_static_dictionary: false, // dictionaries are user-supplied
+            content_type_aware: true,
+            approx_throughput_mbps: 100,
+        }
+    }
 }
 
 #[cfg(test)]

@@ -29,7 +29,7 @@ pub mod static_codes;
 // The files are retained as reference but not compiled.
 // To re-enable: add `pub mod encoder;` etc.
 
-use omnizip_codecs::{Codec, CodecId, CompressionLevel, OmnizipError};
+use omnizip_codecs::{Capabilities, Codec, CodecId, CompressionLevel, OmnizipError};
 
 /// Brotli quality 11 (the reference encoder's maximum).
 const DEFAULT_QUALITY: i32 = 11;
@@ -187,6 +187,18 @@ impl Codec for BrotliCodec {
     }
     fn default_max_ratio_level(&self) -> u8 {
         11
+    }
+
+    fn capabilities(&self) -> Capabilities {
+        Capabilities {
+            min_level: 0,
+            max_level: 11,
+            streaming: false, // TODO 251: streaming impl pending
+            parallel_batch: true,
+            has_static_dictionary: true,
+            content_type_aware: true,
+            approx_throughput_mbps: 50,
+        }
     }
 }
 

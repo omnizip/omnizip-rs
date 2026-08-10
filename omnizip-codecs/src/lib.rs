@@ -20,6 +20,7 @@
 
 pub mod arith;
 pub mod bitstream;
+pub mod capabilities;
 pub mod checksum;
 mod codec;
 mod codec_errors;
@@ -29,6 +30,8 @@ pub mod hash;
 pub mod huffman;
 pub mod level;
 pub mod matchfinder;
+pub mod memory_budget;
+mod options;
 mod parallel_batch;
 mod profile;
 mod registry;
@@ -37,6 +40,7 @@ pub mod xxhash;
 
 pub use arith::{scaled_prob, ArithDecoder, ArithEncoder, PROB_SCALE as ARITH_PROB_SCALE};
 pub use bitstream::{BitReaderBE, BitReaderLE, BitWriterBE, BitWriterLE};
+pub use capabilities::Capabilities;
 pub use checksum::{crc32_iso_hdlc, crc32_iso_hdlc_raw, crc32_iso_hdlc_update};
 pub use codec::{Codec, CodecId};
 pub use codec_errors::{BrotliError, LzmaError, ZstdError};
@@ -46,6 +50,8 @@ pub use hash::{djb2_32, djb2_32_tagged, fnv1a_32, fnv1a_32_tagged};
 pub use huffman::HuffmanLengths;
 pub use level::CompressionLevel;
 pub use matchfinder::{HashChainConfig, HashChainMatchFinder, Lz77Match};
+pub use memory_budget::MemoryBudget;
+pub use options::Options;
 pub use parallel_batch::ParallelBatch;
 pub use profile::{Profile, ProfileKind};
 pub use registry::CodecRegistry;

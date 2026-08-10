@@ -210,11 +210,16 @@ correctness, and feature work needed to call the workspace "done".
 | 258 | [Shared bitstream module](258-shared-bitstream-module.md) | 🔄 (P3 — shared BitReaderBE/LE exists; per-codec migration pending) |
 | 259 | [Error type unification](259-error-type-unification.md) | 🔄 (P3 — helpers + per-codec sub-errors landed in 0.16.25) |
 | 260 | [Codec parallel batch API](260-codec-parallel-batch-api.md) | ✅ (ParallelBatch trait landed in 0.16.23) |
-| 261 | [Codec capability metadata](261-codec-capability-metadata.md) | ⏳ (P3 — DX) |
-| 262 | [Unified codec options builder](262-unified-codec-options-builder.md) | ⏳ (P3 — DX) |
+| 261 | [Codec capability metadata](261-codec-capability-metadata.md) | ✅ (Capabilities struct + per-codec overrides landed in 0.16.26) |
+| 262 | [Unified codec options builder](262-unified-codec-options-builder.md) | ✅ (Options builder + compress_with_options landed in 0.16.26) |
 | 263 | [Brotli cross-decoder wire-format fix](263-brotli-cross-decoder-fix.md) | ⏳ (P0 — vendored C rejects our output) |
-| 264 | [Per-codec memory budget API](264-per-codec-memory-budget.md) | ⏳ (P2 — embedded/constrained) |
-| 265 | [Workspace bench CLI](265-workspace-bench-cli.md) | ⏳ (P3 — DX) |
+| 264 | [Per-codec memory budget API](264-per-codec-memory-budget.md) | ✅ (MemoryBudget trait landed in 0.16.26) |
+| 265 | [Workspace bench CLI](265-workspace-bench-cli.md) | 🔄 (omnizip-bench CLI exists with --codec/--corpus/--format; --diff subcommand landed in 0.16.26) |
+| 266 | [Multi-codec ensemble auto-selection](266-multi-codec-ensemble-autoselect.md) | ⏳ (P3 — UX) |
+| 267 | [WebAssembly build target](267-wasm-build-target.md) | ⏳ (P3 — browser/Edge) |
+| 268 | [Compression ratio predictor](268-compression-ratio-predictor.md) | ⏳ (P3 — UX) |
+| 269 | [Per-codec README files](269-per-codec-readmes.md) | ⏳ (P3 — docs) |
+| 270 | [Profile-Guided Optimization (PGO)](270-profile-guided-optimization.md) | ⏳ (P3 — perf) |
 
 ## How to claim a TODO
 
