@@ -53,7 +53,7 @@ fn csv_data(size_kb: usize) -> Vec<u8> {
                 "{i},user_{i},city_{},cc,{},{},{}.{},{i}\n",
                 i % 1000,
                 i % 1000000,
-                i % 360 - 180,
+                (i % 360) as i32 - 180,
                 i / 1000,
                 i % 1000,
             )
