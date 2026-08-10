@@ -1,5 +1,6 @@
 # 221 — Brotli Quality-Dependent Match Finder Tuning
 
+- **Status:** DONE (max_chain, nice_match, hash_log scaled per quality)
 - **Priority:** P2 (moderate ratio win across all quality levels)
 - **Crate:** `omnizip-brotli`
 - **Depends on:** none

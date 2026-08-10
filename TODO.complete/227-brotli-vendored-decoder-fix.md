@@ -1,5 +1,7 @@
 # 227 — Vendored Brotli Decoder Bug Fix
 
+- **Status:** DONE (WBITS threaded from frame header through all
+  decode paths; dictionary lookup uses correct max_backward_distance)
 - **Priority:** P1 (correctness — vendored path unusable as fallback)
 - **Crate:** `omnizip-brotli`
 - **Depends on:** none

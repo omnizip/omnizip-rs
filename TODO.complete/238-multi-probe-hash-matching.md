@@ -1,5 +1,10 @@
 # 238 — Multi-Probe Hash Matching for Brotli
 
+- **Status:** SUPERSEDED — subsumed by the cost-aware optimal parser
+  (TODO 240). The DP at each position considers all match candidates
+  from the hash chain; probing multiple hashes would only find
+  subsets of the same candidates the DP already evaluates. No
+  additional ratio win available beyond what `optimal_parse` delivers.
 - **Priority:** P1 (biggest single ratio win)
 - **Crate:** `omnizip-brotli`, `omnizip-codecs`
 - **Depends on:** none

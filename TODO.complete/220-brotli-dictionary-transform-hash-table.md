@@ -1,5 +1,7 @@
 # 220 — Brotli Dictionary Transform Hash Table
 
+- **Status:** DONE (all 121 RFC 7932 transforms; hash table in
+  `encoder/dict_hash.rs`)
 - **Priority:** P1 (biggest remaining ratio win for text data)
 - **Crate:** `omnizip-brotli`
 - **Depends on:** [202](202-brotli-dictionary-transforms.md) (identity-only), this extends it

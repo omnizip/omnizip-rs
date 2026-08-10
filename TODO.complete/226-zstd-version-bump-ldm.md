@@ -1,5 +1,6 @@
 # 226 — ZSTD Version Bump for LDM Integration
 
+- **Status:** DONE (omnizip-zstd 0.16.2+ published with LDM)
 - **Priority:** P1 (blocking release)
 - **Crate:** `omnizip-zstd`
 - **Depends on:** [213](213-zstd-ldm.md)
