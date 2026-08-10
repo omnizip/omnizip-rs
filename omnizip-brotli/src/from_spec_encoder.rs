@@ -441,12 +441,17 @@ fn encode_huffman_chunk_into(
         }
 
         if cmd.copy_len > 0 {
-            let (&d_sym, &d_extra) = dist_iter.next().expect("distance stream exhausted");
-            let (dc, dl) = dist_codes[d_sym as usize];
-            bw.write_bits(dc, u32::from(dl));
-            let nbits = distance_extra_bits(d_sym, &dist_cfg);
-            if nbits > 0 {
-                bw.write_bits(d_extra, nbits);
+            // Check if this command uses implicit distance (rep code).
+            // Implicit commands don't have a distance symbol in the stream.
+            let cmd_entry = &kCmdLut[cmd_sym];
+            if cmd_entry.distance_code < 0 {
+                let (&d_sym, &d_extra) = dist_iter.next().expect("distance stream exhausted");
+                let (dc, dl) = dist_codes[d_sym as usize];
+                bw.write_bits(dc, u32::from(dl));
+                let nbits = distance_extra_bits(d_sym, &dist_cfg);
+                if nbits > 0 {
+                    bw.write_bits(d_extra, nbits);
+                }
             }
             out_pos += cmd_copy_advances[cmd_idx];
             p2 = p1;
@@ -563,19 +568,47 @@ fn build_symbol_stream(
     let mut dist_symbols = Vec::new();
     let mut dist_extras = Vec::new();
 
+    // Track repeat offset for rep-code optimization (TODO 239).
+    // The decoder's ring buffer has: implicit → idx--, explicit → idx++.
+    // Consecutive implicit commands corrupt the ring buffer, so we
+    // track whether the previous command was implicit and skip rep
+    // codes after one.
+    let mut rep0: u32 = 0;
+    let mut prev_was_implicit = false;
+
     for cmd in commands {
-        // Pull literals from the input by insert_len.
-        // (The encoder guarantees insert_len + copy_len consumes the
-        // input sequentially — we just trust the parser here.)
         let _ = input;
 
-        let cmd_sym = find_cmd_symbol(cmd.insert_len, cmd.copy_len)?;
+        // Try rep code (implicit distance) when:
+        // - Distance matches rep0 (most recent)
+        // - Copy length fits implicit range (2-9)
+        // - Insert length fits implicit range (0-9)
+        // - Previous command wasn't implicit (avoid ring buffer corruption)
+        let can_use_rep = !prev_was_implicit
+            && cmd.copy_len > 0
+            && cmd.distance == rep0
+            && (2..=9).contains(&cmd.copy_len)
+            && cmd.insert_len <= 9;
+
+        let cmd_sym = if can_use_rep {
+            find_cmd_symbol_with_rep(cmd.insert_len, cmd.copy_len, Some(0))
+        } else {
+            find_cmd_symbol(cmd.insert_len, cmd.copy_len)
+        }?;
+
         cmd_symbols.push(cmd_sym);
 
-        if cmd.copy_len > 0 {
+        let entry = &kCmdLut[cmd_sym];
+        prev_was_implicit = entry.distance_code >= 0;
+
+        if entry.distance_code < 0 && cmd.copy_len > 0 {
             let (sym, extra) = encode_distance(cmd.distance, dist_cfg);
             dist_symbols.push(sym);
             dist_extras.push(extra);
+        }
+
+        if cmd.copy_len > 0 {
+            rep0 = cmd.distance;
         }
     }
 
@@ -619,7 +652,7 @@ fn build_symbol_stream(
 /// Find the kCmdLut symbol matching (`insert_len`, `copy_len`).
 ///
 /// For `copy_len > 0`: matches entries with `distance_code == -1`
-/// (`cell_idx` ≥ 2) so an explicit distance code is read by the decoder.
+/// (`cell_idx` >= 2) so an explicit distance code is read by the decoder.
 ///
 /// For `copy_len == 0` (insert-only trailing command): matches any
 /// entry whose `insert_len_offset` is in range and whose
@@ -627,11 +660,37 @@ fn build_symbol_stream(
 /// metablock end without executing the copy, so the phantom `copy_len`
 /// is harmless.
 fn find_cmd_symbol(insert_len: u32, copy_len: u32) -> Option<usize> {
+    find_cmd_symbol_impl(insert_len, copy_len, None)
+}
+
+/// Like [`find_cmd_symbol`] but optionally searches for implicit-distance
+/// entries (rep codes). When `rep_code` is `Some(dc)`, searches for
+/// entries with `distance_code == dc` instead of `distance_code == -1`.
+/// This enables cheaper encoding for repeat-offset matches.
+fn find_cmd_symbol_with_rep(
+    insert_len: u32,
+    copy_len: u32,
+    rep_code: Option<i32>,
+) -> Option<usize> {
+    find_cmd_symbol_impl(insert_len, copy_len, rep_code)
+}
+
+fn find_cmd_symbol_impl(insert_len: u32, copy_len: u32, rep_code: Option<i32>) -> Option<usize> {
     let phantom = copy_len == 0;
     let effective_copy = if phantom { 2 } else { copy_len };
     for (i, entry) in kCmdLut.iter().enumerate() {
-        if !phantom && entry.distance_code >= 0 {
-            continue;
+        if phantom {
+            // Trailing insert-only: any distance_code is fine
+        } else if let Some(rc) = rep_code {
+            // Rep code: match specific distance_code
+            if entry.distance_code != rc as i8 {
+                continue;
+            }
+        } else {
+            // Explicit: skip implicit entries
+            if entry.distance_code >= 0 {
+                continue;
+            }
         }
         let ins_lo = u32::from(entry.insert_len_offset);
         let ins_hi = ins_lo + ((1u32) << u32::from(entry.insert_len_extra_bits)) - 1;
@@ -640,6 +699,10 @@ fn find_cmd_symbol(insert_len: u32, copy_len: u32) -> Option<usize> {
         if (ins_lo..=ins_hi).contains(&insert_len) && (cpy_lo..=cpy_hi).contains(&effective_copy) {
             return Some(i);
         }
+    }
+    // Fallback: if rep_code search fails, try explicit
+    if rep_code.is_some() {
+        return find_cmd_symbol_impl(insert_len, copy_len, None);
     }
     None
 }
