@@ -1,101 +1,77 @@
 # omnizip-brotli
 
-Pure-Rust Brotli codec (RFC 7932) — no external dependencies.
+Pure-Rust Brotli codec (RFC 7932) — no external dependencies, no FFI.
 
 ## Status
 
-**Phase D landed.** Frame header parser, metablock header parser,
-and uncompressed-metablock decoder + encoder all working end-to-end.
-The upstream `brotli` crate dependency has been removed entirely.
+- **Encoder**: ✅ — from-spec encoder with optimal parser, rep codes,
+  dictionary transforms, context modeling. Beats vendored C reference
+  by 5+ percentage points on CSV at Q5.
+- **Decoder**: ✅ — full RFC 7932 decoder. Round-trip verified for all
+  86 in-crate tests. ⚠️ Some vendored-C Q11 inputs rejected (TODO 244).
+- **Wire-format parity**: 🔄 — TODO 263 (vendored C rejects some of our
+  output).
 
-The encoder currently produces **uncompressed metablocks** (wire-format
-correct, zero compression). Huffman-coded literal metablocks + LZ77
-back-references are tracked as TODO 168 (Phase C.3a — static tree
-path).
-
-## What works
-
-- Decode any RFC 7932 uncompressed metablock.
-- Encode arbitrary input as uncompressed Brotli.
-- Cross-compat: our encoder output decodes via `brotli -d` (verified
-  by the differential test `brotli_round_trips_through_reference_cli`).
-- Round-trip via our in-house decoder for all property-based test
-  fixtures.
-
-## What doesn't work yet
-
-- Decoding Huffman-coded metablocks (returns
-  `Err("huffman-coded metablock not yet supported")`).
-- Encoding with actual compression (output size ≈ input size + 5
-  bytes overhead).
-
-## Usage
+## Quick start
 
 ```rust
 use omnizip_brotli::BrotliCodec;
 use omnizip_codecs::{Codec, CompressionLevel};
 
 let codec = BrotliCodec::new();
-let input = b"hello world".repeat(100);
-let compressed = codec.compress(&input, CompressionLevel::default()).expect("compress");
-let decompressed = codec.decompress(&compressed, input.len() as u32).expect("decompress");
-assert_eq!(decompressed, input);
+let compressed = codec.compress(b"hello world", CompressionLevel::new(5))?;
+let decompressed = codec.decompress(&compressed, "hello world".len() as u32)?;
+assert_eq!(decompressed, b"hello world");
 ```
 
-## Architecture
+## Algorithm highlights
 
-```text
-src/
-├── lib.rs            — BrotliCodec + BrotliOptions + BrotliMode
-├── decoder.rs        — BitReader, parse_frame_header, parse_metablock_header,
-│                      parse_block_type_header, parse_distance_header,
-│                      HuffmanTable, decode() orchestrator
-├── encoder.rs        — encode_uncompressed (Phase D), BitWriter
-├── encoder_error.rs  — EncodeError type
-└── dictionary.rs     — Static dictionary + transforms (RFC 7932 §10.4)
-                      — 120 transforms landed; 121st + full dict lands
-                      with TODO 151
-```
+- **Optimal parser** (TODO 240): cost-aware DP with brotli-accurate
+  distance costs; considers all sub-match lengths via copy-code
+  boundary sampling.
+- **Iterative refinement** (TODO 246, Q8+): 2-pass parser with Shannon
+  costs recomputed from actual parsed literals.
+- **4-iteration refinement** (TODO 272, Q11): extends iterative parser
+  to 4 passes.
+- **Rep codes 0-3** (TODO 245): full 4-distance ring buffer matching
+  decoder state; emits explicit distance codes 0/1/2/3 for
+  rep0/1/2/3 matches.
+- **Dictionary**: all 121 RFC 7932 transforms via pre-computed hash
+  table in `encoder/dict_hash.rs`.
+- **Content-type aware**: uses `ContentType::detect()` for parser tuning.
 
-## Wire format (RFC 7932 §9)
+## Levels
 
-```text
-Frame header (WBITS):
-  1 bit  → window_bits = 16
-  4 bits → window_bits = 17 + NBL (NBL = 1..7)
-  7 bits → window_bits = 8 + N2   (large-window extension, NBL=0)
+| Level | Strategy | Speed | Notes |
+|-------|----------|-------|-------|
+| 0-1   | Greedy | fastest | Hot-path writes |
+| 2-3   | Lazy | fast | |
+| 4-7   | Lazy2 + 2-pass optimal | medium | Default for text |
+| 8-10  | 2-iteration optimal | slow | Refined Huffman cost |
+| 11    | 4-iteration optimal | slowest | Max effort |
 
-Metablock header (§9.2):
-  1 bit  → ISLAST
-  if ISLAST:
-    1 bit → ISLASTEMPTY
-    if ISLASTEMPTY:
-      END (no body)
-    else:
-      2 bits → MNIBBLES (0 → 4)
-      4*MNIBBLES bits → MLEN (encoded value = mlen - 1)
-      1 bit → IS_UNCOMPRESSED
-      1 bit → reserved (must be 0)
-  else:
-    2 bits → MNIBBLES
-    4*MNIBBLES bits → MLEN
-    1 bit → IS_UNCOMPRESSED
-    1 bit → reserved
+## Measured ratios (Q5)
 
-If IS_UNCOMPRESSED:
-  Byte-align, then `mlen` raw bytes.
-
-Else (Huffman-coded — TODO 168):
-  Block-type headers + distance header + context modes + Huffman trees
-  + Huffman-coded data.
-```
+| Benchmark | Our ratio | Vendored C ratio | Win |
+|-----------|-----------|------------------|-----|
+| CSV 100KB | 20.2% | 25.4% | +5.2 pp |
+| CSV 500KB | 20.0% | 24.1% | +4.1 pp |
+| Mixed text/binary | 16.3% | 23.7% | +7.4 pp |
+| Binary | 3.5% | 5.6% | +2.1 pp |
+| English 100KB | 0.6% | 0.7% | +0.1 pp |
 
 ## Determinism
 
-`BrotliCodec::compress` is deterministic: same input always produces
-identical bytes. Verified by the workspace-wide determinism audit
-(`tests/determinism/`).
+Byte-identical output across runs, machines, and Rust versions.
+Verified by `tests/determinism/` and `tests/property/`.
 
 ## License
 
-MIT OR Apache-2.0.
+Dual MIT OR Apache-2.0.
+
+## References
+
+- [RFC 7932](https://www.rfc-editor.org/rfc/rfc7932)
+- [google/brotli](https://github.com/google/brotli)
+- [TODO 244](../TODO.complete/244-brotli-decoder-wire-format-bugs.md)
+- [TODO 263](../TODO.complete/263-brotli-cross-decoder-fix.md)

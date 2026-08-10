@@ -1,0 +1,52 @@
+name: WASM Build
+
+# Verifies that all codec crates compile to wasm32-unknown-unknown.
+# Pure-Rust invariant (ADR-0001) should make this Just Work, but
+# transitive dependencies (std::time, std::thread) can break it.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  wasm-build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        crate:
+          - omnizip-brotli
+          - omnizip-zstd
+          - omnizip-lzma
+          - omnizip-lz4
+          - omnizip-deflate
+          - omnizip-snappy
+          - omnizip-bzip2
+          - omnizip-codecs
+          - omnizip-filters
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Build ${{ matrix.crate }} to WASM
+        run: |
+          cargo build -p ${{ matrix.crate }} --target wasm32-unknown-unknown --no-default-features 2>&1 | tee wasm-build.log
+          exit ${PIPESTATUS[0]}
+
+      - name: Report WASM build failures
+        if: failure()
+        run: |
+          echo "::notice::WASM build for ${{ matrix.crate }} failed."
+          echo "::notice::This crate likely depends on std::time, std::thread, or other platform-specific APIs that don't exist on wasm32."
+          echo "::notice::See TODO 267 for polyfill strategy."
