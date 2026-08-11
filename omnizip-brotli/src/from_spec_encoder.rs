@@ -1072,11 +1072,26 @@ fn optimal_parse_with_costs(
             }
         }
 
-        if matches_at[pos].is_none() && use_dict {
-            if let Some((d, wl, tl)) = dict_hash::find_match(input, pos, max_dist) {
-                if tl >= MIN_MATCH && pos + tl as usize <= n {
-                    let copy_len = wl.min(MAX_COPY).max(MIN_MATCH);
-                    matches_at[pos] = Some((d, copy_len, tl, true));
+        // Check dictionary when hash found no match OR found a short
+        // match (< 16 bytes). Long hash matches are almost never beaten
+        // by the dictionary, and the dict lookup adds ~3μs per position
+        // which is expensive on repetitive text (1M positions × 3μs = 3s).
+        // FSST-transformed data typically has short hash matches (4-8
+        // bytes) where the dictionary's word transforms can win.
+        if use_dict {
+            let hash_len = matches_at[pos].map(|(_, l, _, _)| l).unwrap_or(0);
+            if hash_len < 16 {
+                if let Some((d, wl, tl)) = dict_hash::find_match(input, pos, max_dist) {
+                    if tl >= MIN_MATCH && pos + tl as usize <= n {
+                        let copy_len = wl.min(MAX_COPY).max(MIN_MATCH);
+                        let is_better = match matches_at[pos] {
+                            None => true,
+                            Some((_, existing_len, _, _)) => tl > existing_len,
+                        };
+                        if is_better {
+                            matches_at[pos] = Some((d, copy_len, tl, true));
+                        }
+                    }
                 }
             }
         }
@@ -1550,10 +1565,15 @@ fn brotli_quality_config(quality: i32, is_text: bool) -> (u32, u32, bool, bool, 
         match quality {
             0..=1 => (4, 8, false, false, false, 15),
             2..=3 => (8, 16, true, true, false, 16),
-            4..=5 => (8, 24, true, true, true, 17),
-            6..=7 => (16, 32, true, true, true, 17),
-            8..=9 => (32, 48, true, true, true, 17),
-            _ => (64, 64, true, true, true, 18),
+            // hash_log=17 (512 KB head[]) keeps hash table within L2 cache.
+            // hash_log=18 (1 MB head[]) was tested — 85x slower on
+            // repetitive text due to cache thrashing. Keep 17 for Q4-9.
+            // nice_match bumped to 32/48/64 for better match quality
+            // on structured/FSST data.
+            4..=5 => (8, 32, true, true, true, 17),
+            6..=7 => (16, 48, true, true, true, 17),
+            8..=9 => (32, 64, true, true, true, 17),
+            _ => (64, 128, true, true, true, 18),
         }
     } else {
         match quality {
