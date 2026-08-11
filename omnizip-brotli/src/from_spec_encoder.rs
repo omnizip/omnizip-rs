@@ -234,11 +234,10 @@ pub fn compress_with_quality(input: &[u8], quality: i32) -> Vec<u8> {
     // Build quality-dependent config for the shared match finder.
     let is_text = is_text_like(input);
     let (max_chain, nice_match, _, _, _, hash_log) = brotli_quality_config(q, is_text);
-    // Cross-chunk MF reuse is only beneficial for Q4+ (optimal parser).
-    // The lazy parser (Q0-Q3) has no cost model and takes matches at
-    // any distance, which can inflate output when cross-chunk distances
-    // cost more bits than the literals they replace.
-    if q >= 4 && is_text {
+    // Cross-chunk MF reuse for Q4+ (any content type). The optimal
+    // parser has a cost model that correctly evaluates cross-chunk
+    // distances, so this is safe for all data types.
+    if q >= 4 {
         // Shared MF path: one match finder over the full input.
         let mf_config = omnizip_codecs::HashChainConfig {
             dict_size: MAX_BACKWARD_DISTANCE,
@@ -347,9 +346,10 @@ fn encode_huffman_chunk_body(
     bw.write_bits(0, 1); // ISUNCOMPRESSED = 0
 
     // Context modeling: at quality >= 4, split literals into context
-    // trees. Only for text-like input (binary data gains nothing from
-    // context separation and pays Huffman table overhead).
-    let use_context = quality >= 4 && input.len() >= 4096 && is_text_like(input);
+    // trees. Active for Q4+ inputs ≥ 4 KiB (any content type — FSST-
+    // transformed data benefits from context separation just as much
+    // as natural text).
+    let use_context = quality >= 4 && input.len() >= 4096;
 
     // Block type switching: implemented but disabled pending decoder
     // compatibility debugging (write_block_type_trees + block-switch
@@ -1586,9 +1586,13 @@ fn parse_input_with_offset(
     let mut commands = Vec::new();
 
     let is_text = is_text_like(input);
+    // At Q4+, always use the text config (deeper chains, dict, lazy2)
+    // regardless of content type. FSST-transformed data and other
+    // semi-structured binary benefits from the same parser effort as
+    // natural text. The optimal parser compensates for any mismatch.
     let (max_chain, nice_match, use_dict_base, lazy, lazy2, hash_log) =
-        brotli_quality_config(quality, is_text);
-    let use_dict = use_dict_base && !disable_dict && is_text;
+        brotli_quality_config(quality, true);
+    let use_dict = use_dict_base && !disable_dict;
 
     let _config = omnizip_codecs::HashChainConfig {
         dict_size: MAX_BACKWARD_DISTANCE,
@@ -1600,22 +1604,16 @@ fn parse_input_with_offset(
     };
     // MF is provided by the caller — no creation here.
 
-    // For text at Q4+: use cost-aware optimal parser (TODO 240).
-    // The O(N * 35) DP is tractable for inputs up to ~1 MiB. Beyond
-    // that, fall through to single-pass lazy (below) which is O(1)
-    // memory and fast for large inputs.
-    if is_text && quality >= 4 && input.len() <= 1024 * 1024 {
-        // Q8+ AND small input: use iterative refinement (TODO 246).
+    // Q4+: cost-aware optimal parser for any content type (TODO 240).
+    if quality >= 4 && input.len() <= 1024 * 1024 {
         if quality >= 8 && input.len() <= 256 * 1024 {
             return iterative_optimal_parse(input, &mut mf, mlen_offset, use_dict);
         }
         return optimal_parse(input, &mut mf, mlen_offset, use_dict);
     }
 
-    // For text Q4+ with input > 1 MiB (not chunked): use two_pass_parse.
-    // In practice this is rare since compress_with_quality chunks at
-    // 1 MiB boundaries. Kept for callers that bypass chunking.
-    if is_text && quality >= 4 {
+    // Q4+ with input > 1 MiB (not chunked): two_pass_parse.
+    if quality >= 4 {
         return two_pass_parse(input, mlen_offset, &mut mf, use_dict);
     }
 
