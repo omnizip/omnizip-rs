@@ -223,20 +223,70 @@ pub fn compress_with_quality(input: &[u8], quality: i32) -> Vec<u8> {
     }
 
     // Large inputs (> 1 MiB): split into 1 MiB-1 chunks and emit
-    // each as a Huffman-coded metablock. Each chunk runs optimal_parse
-    // independently — the DP gives good ratio per chunk. Larger chunks
-    // (4 MiB+) were tested but either hurt ratio (lazy parser) or were
-    // too slow (optimal_parse at 4 MiB). 1 MiB is the sweet spot.
+    // each as a Huffman-coded metablock. Uses a SINGLE match finder
+    // over the full input so chunk N+1 can find matches referencing
+    // data from chunks 0..N (cross-chunk matching). This gives
+    // significantly better ratio on inputs with long-range patterns.
     let chunk_size = (1 << 20) - 1; // 1 MiB - 1
     let mut bw = BitWriter::new();
     write_wbits(&mut bw);
 
-    let mut offset = 0usize;
-    while offset < input.len() {
-        let end = (offset + chunk_size).min(input.len());
-        let is_last = end == input.len();
-        encode_huffman_chunk_into(&mut bw, &input[offset..end], offset, is_last, q);
-        offset = end;
+    // Build quality-dependent config for the shared match finder.
+    let is_text = is_text_like(input);
+    let (max_chain, _nice_match, _use_dict_base, _lazy, _lazy2, hash_log) = if is_text {
+        match q {
+            0..=1 => (4, 8, false, false, false, 15),
+            2..=3 => (8, 16, true, true, false, 16),
+            4..=5 => (8, 24, true, true, true, 17),
+            6..=7 => (16, 32, true, true, true, 17),
+            8..=9 => (32, 48, true, true, true, 17),
+            _ => (64, 64, true, true, true, 18),
+        }
+    } else {
+        match q {
+            0..=1 => (4, 8, false, false, false, 15),
+            _ => (8, 16, false, false, false, 16),
+        }
+    };
+    // Cross-chunk MF reuse is only beneficial for Q4+ (optimal parser).
+    // The lazy parser (Q0-Q3) has no cost model and takes matches at
+    // any distance, which can inflate output when cross-chunk distances
+    // cost more bits than the literals they replace.
+    if q >= 4 && is_text {
+        // Shared MF path: one match finder over the full input.
+        let mf_config = omnizip_codecs::HashChainConfig {
+            dict_size: MAX_BACKWARD_DISTANCE,
+            min_match: MIN_MATCH,
+            max_chain_length: max_chain,
+            nice_match: _nice_match,
+            hash_log,
+            max_match_length: MAX_COPY,
+        };
+        let mut shared_mf = omnizip_codecs::HashChainMatchFinder::new(input, mf_config);
+        let mut offset = 0usize;
+        while offset < input.len() {
+            let end = (offset + chunk_size).min(input.len());
+            let is_last = end == input.len();
+            encode_huffman_chunk_with_shared_mf(
+                &mut bw,
+                input,
+                offset,
+                end,
+                is_last,
+                q,
+                &mut shared_mf,
+            );
+            offset = end;
+        }
+    } else {
+        // Per-chunk MF path (Q0-Q3 or binary).
+        let mut offset = 0usize;
+        while offset < input.len() {
+            let end = (offset + chunk_size).min(input.len());
+            let is_last = end == input.len();
+            encode_huffman_chunk_into(&mut bw, &input[offset..end], offset, is_last, q);
+            offset = end;
+        }
     }
     bw.flush()
 }
@@ -256,6 +306,32 @@ fn append_writer(dst: &mut BitWriter, src: BitWriter) {
 fn encode_huffman_chunk_into(
     bw: &mut BitWriter,
     input: &[u8],
+    mlen_offset: usize,
+    is_last: bool,
+    quality: i32,
+) {
+    // Standard path: MF created over the chunk slice itself.
+    let is_text = is_text_like(input);
+    let (max_chain, nice_match, _, _, _, hash_log) = brotli_quality_config(quality, is_text);
+    let config = omnizip_codecs::HashChainConfig {
+        dict_size: MAX_BACKWARD_DISTANCE,
+        min_match: MIN_MATCH,
+        max_chain_length: max_chain,
+        nice_match,
+        hash_log,
+        max_match_length: MAX_COPY,
+    };
+    let mut mf = omnizip_codecs::HashChainMatchFinder::new(input, config);
+    encode_huffman_chunk_body(bw, input, &mut mf, mlen_offset, is_last, quality);
+}
+
+/// Internal: encode one metablock with an external match finder.
+/// The MF may reference the full input (cross-chunk) or just the
+/// chunk slice (per-chunk), depending on the caller.
+fn encode_huffman_chunk_body(
+    bw: &mut BitWriter,
+    input: &[u8],
+    mut mf: &mut omnizip_codecs::HashChainMatchFinder,
     mlen_offset: usize,
     is_last: bool,
     quality: i32,
@@ -306,7 +382,7 @@ fn encode_huffman_chunk_into(
         write_block_type_trees(bw, nbltypes_l);
     }
 
-    let commands = parse_input_with_offset(input, mlen_offset, quality, false);
+    let commands = parse_input_with_offset(input, mf, mlen_offset, quality, false);
 
     // Choose distance-code configuration from the parsed commands.
     let dist_cfg = DistanceConfig::choose(&commands);
@@ -319,8 +395,7 @@ fn encode_huffman_chunk_into(
         2 // UTF8
     } else {
         0 // LSB6
-    };
-    // Context mode: one field PER literal block type (RFC 7932 §9.3).
+    }; // Context mode: one field PER literal block type (RFC 7932 §9.3).
     for _ in 0..nbltypes_l {
         bw.write_bits(context_mode, 2);
     }
@@ -634,6 +709,22 @@ fn encode_huffman_frame_q(input: &[u8], quality: i32) -> Vec<u8> {
     bw.flush()
 }
 
+/// Like [`encode_huffman_chunk_into`] but uses `full_input` as the
+/// match-finder data source, enabling cross-chunk match references.
+/// Used by [`compress_with_quality`] for multi-metablock inputs.
+fn encode_huffman_chunk_with_shared_mf(
+    bw: &mut BitWriter,
+    full_input: &[u8],
+    chunk_start: usize,
+    chunk_end: usize,
+    is_last: bool,
+    quality: i32,
+    mut mf: &mut omnizip_codecs::HashChainMatchFinder,
+) {
+    let chunk = &full_input[chunk_start..chunk_end];
+    encode_huffman_chunk_body(bw, chunk, mf, chunk_start, is_last, quality);
+}
+
 /// A parsed symbol stream ready for entropy coding.
 struct SymbolStream {
     /// Literal bytes in insertion order.
@@ -927,7 +1018,7 @@ fn distance_extra_bits(sym: u32, cfg: &DistanceConfig) -> u32 {
 /// 4. Forward reconstruction: walk the DP table to emit commands.
 fn optimal_parse(
     input: &[u8],
-    mf: &mut omnizip_codecs::HashChainMatchFinder,
+    mut mf: &mut omnizip_codecs::HashChainMatchFinder,
     mlen_offset: usize,
     use_dict: bool,
 ) -> Vec<Command> {
@@ -964,7 +1055,7 @@ fn compute_shannon_lit_cost(data: &[u8]) -> [f32; 256] {
 /// actual Huffman-derived code lengths into a second DP pass.
 fn optimal_parse_with_costs(
     input: &[u8],
-    mf: &mut omnizip_codecs::HashChainMatchFinder,
+    mut mf: &mut omnizip_codecs::HashChainMatchFinder,
     mlen_offset: usize,
     use_dict: bool,
     lit_cost_override: Option<[f32; 256]>,
@@ -988,7 +1079,7 @@ fn optimal_parse_with_costs(
 
         if pos + MIN_MATCH as usize <= n {
             mf.advance();
-            if let Some(m) = mf.find_match(pos) {
+            if let Some(m) = mf.find_match(mlen_offset + pos) {
                 if m.distance <= max_dist && m.length >= MIN_MATCH {
                     let copy_len = m.length.min(MAX_COPY).max(MIN_MATCH);
                     matches_at[pos] = Some((m.distance, copy_len, copy_len, false));
@@ -1184,7 +1275,7 @@ fn optimal_parse_with_costs(
 /// runtime.
 fn iterative_optimal_parse(
     input: &[u8],
-    mf: &mut omnizip_codecs::HashChainMatchFinder,
+    mut mf: &mut omnizip_codecs::HashChainMatchFinder,
     mlen_offset: usize,
     use_dict: bool,
 ) -> Vec<Command> {
@@ -1198,7 +1289,7 @@ fn iterative_optimal_parse(
 #[allow(clippy::too_many_lines)]
 fn iterative_optimal_parse_with_iters(
     input: &[u8],
-    mf: &mut omnizip_codecs::HashChainMatchFinder,
+    mut mf: &mut omnizip_codecs::HashChainMatchFinder,
     mlen_offset: usize,
     use_dict: bool,
     iterations: usize,
@@ -1354,7 +1445,7 @@ fn mf_hash_log(_mf: &omnizip_codecs::HashChainMatchFinder) -> u32 {
 fn two_pass_parse(
     input: &[u8],
     mlen_offset: usize,
-    mf: &mut omnizip_codecs::HashChainMatchFinder,
+    mut mf: &mut omnizip_codecs::HashChainMatchFinder,
     use_dict: bool,
 ) -> Vec<Command> {
     let n = input.len();
@@ -1451,8 +1542,40 @@ fn two_pass_parse(
     commands
 }
 
+#[allow(dead_code)]
 fn parse_input(input: &[u8]) -> Vec<Command> {
-    parse_input_with_offset(input, 0, 11, false)
+    let is_text = is_text_like(input);
+    let (max_chain, nice_match, _, _, _, hash_log) = brotli_quality_config(11, is_text);
+    let config = omnizip_codecs::HashChainConfig {
+        dict_size: MAX_BACKWARD_DISTANCE,
+        min_match: MIN_MATCH,
+        max_chain_length: max_chain,
+        nice_match,
+        hash_log,
+        max_match_length: MAX_COPY,
+    };
+    let mut mf = omnizip_codecs::HashChainMatchFinder::new(input, config);
+    parse_input_with_offset(input, &mut mf, 0, 11, false)
+}
+
+/// Quality → (max_chain, nice_match, use_dict_base, lazy, lazy2, hash_log).
+/// DRY helper so callers don't duplicate the match table.
+fn brotli_quality_config(quality: i32, is_text: bool) -> (u32, u32, bool, bool, bool, u32) {
+    if is_text {
+        match quality {
+            0..=1 => (4, 8, false, false, false, 15),
+            2..=3 => (8, 16, true, true, false, 16),
+            4..=5 => (8, 24, true, true, true, 17),
+            6..=7 => (16, 32, true, true, true, 17),
+            8..=9 => (32, 48, true, true, true, 17),
+            _ => (64, 64, true, true, true, 18),
+        }
+    } else {
+        match quality {
+            0..=1 => (4, 8, false, false, false, 15),
+            _ => (8, 16, false, false, false, 16),
+        }
+    }
 }
 
 /// Parse input into commands using LZ77 + static dictionary, with a
@@ -1469,6 +1592,7 @@ fn parse_input(input: &[u8]) -> Vec<Command> {
 /// context modeling is active, due to a decoder interaction bug).
 fn parse_input_with_offset(
     input: &[u8],
+    mut mf: &mut omnizip_codecs::HashChainMatchFinder,
     mlen_offset: usize,
     quality: i32,
     disable_dict: bool,
@@ -1504,7 +1628,7 @@ fn parse_input_with_offset(
     };
     let use_dict = use_dict_base && !disable_dict && is_text;
 
-    let config = omnizip_codecs::HashChainConfig {
+    let _config = omnizip_codecs::HashChainConfig {
         dict_size: MAX_BACKWARD_DISTANCE,
         min_match: MIN_MATCH,
         max_chain_length: max_chain,
@@ -1512,7 +1636,7 @@ fn parse_input_with_offset(
         hash_log,
         max_match_length: MAX_COPY,
     };
-    let mut mf = omnizip_codecs::HashChainMatchFinder::new(input, config);
+    // MF is provided by the caller — no creation here.
 
     // For text at Q4+: use cost-aware optimal parser (TODO 240).
     // The O(N * 35) DP is tractable for inputs up to ~1 MiB. Beyond
