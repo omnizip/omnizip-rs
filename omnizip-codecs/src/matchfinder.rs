@@ -287,11 +287,63 @@ impl<'a> HashChainMatchFinder<'a> {
     }
 
     /// Word-at-a-time match length between `data[a..]` and `data[b..]`,
-    /// capped at `max_len`. 5-8× faster than byte-by-byte on typical
-    /// inputs via `u64` XOR + `trailing_zeros`.
+    /// capped at `max_len`.
+    ///
+    /// Hybrid strategy (TODO 277): u128 fast-reject for the first 16 bytes
+    /// (eliminates short mismatches in 1 comparison), then u64 chunks for
+    /// the remainder. Strictly faster than pure u64 on 64-bit targets.
     fn match_length(data: &[u8], a: usize, b: usize, max_len: u32) -> u32 {
         let max = max_len as usize;
         let mut len = 0usize;
+
+        // u128 fast-reject: check first 16 bytes in one comparison.
+        // For the majority of candidates (short or non-matches), this
+        // returns immediately without entering the loop.
+        if max >= 16 && a + 16 <= data.len() && b + 16 <= data.len() {
+            let wa = u128::from_le_bytes([
+                data[a],
+                data[a + 1],
+                data[a + 2],
+                data[a + 3],
+                data[a + 4],
+                data[a + 5],
+                data[a + 6],
+                data[a + 7],
+                data[a + 8],
+                data[a + 9],
+                data[a + 10],
+                data[a + 11],
+                data[a + 12],
+                data[a + 13],
+                data[a + 14],
+                data[a + 15],
+            ]);
+            let wb = u128::from_le_bytes([
+                data[b],
+                data[b + 1],
+                data[b + 2],
+                data[b + 3],
+                data[b + 4],
+                data[b + 5],
+                data[b + 6],
+                data[b + 7],
+                data[b + 8],
+                data[b + 9],
+                data[b + 10],
+                data[b + 11],
+                data[b + 12],
+                data[b + 13],
+                data[b + 14],
+                data[b + 15],
+            ]);
+            if wa != wb {
+                let diff = wa ^ wb;
+                return diff.trailing_zeros() as u32 / 8;
+            }
+            len = 16;
+        }
+
+        // u64 chunks for the remainder (fast on all 64-bit targets).
         while len + 8 <= max && a + len + 8 <= data.len() && b + len + 8 <= data.len() {
             let wa = u64::from_le_bytes([
                 data[a + len],
@@ -321,6 +373,7 @@ impl<'a> HashChainMatchFinder<'a> {
                 return len as u32;
             }
         }
+        // Scalar tail.
         while len < max
             && a + len < data.len()
             && b + len < data.len()
