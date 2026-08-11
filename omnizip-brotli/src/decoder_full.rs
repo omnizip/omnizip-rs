@@ -444,7 +444,7 @@ pub(crate) fn decode_compressed_metablock_full_with_trees(
 #[allow(clippy::too_many_lines)]
 fn finish_metablock_decode(
     data: &[u8],
-    mut br: &mut BitReader,
+    br: &mut BitReader,
     mlen: usize,
     npostfix: usize,
     ndirect_raw: usize,

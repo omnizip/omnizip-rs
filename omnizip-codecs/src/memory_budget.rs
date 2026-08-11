@@ -15,7 +15,7 @@ use crate::level::CompressionLevel;
 pub trait MemoryBudget {
     /// Estimated peak memory in bytes for compressing `input_len`
     /// bytes at `level`.
-    fn estimated_compress_memory(&self, input_len: usize, level: CompressionLevel) -> usize {
+    fn estimated_compress_memory(&self, input_len: usize, _level: CompressionLevel) -> usize {
         // Default: input + output buffers + small overhead.
         input_len + input_len / 2 + 4096
     }
