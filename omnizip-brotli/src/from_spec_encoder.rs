@@ -1478,15 +1478,19 @@ fn parse_input_with_offset(
     // with quality (lazy, lazy2, deep chains). For binary input, use
     // minimal effort (greedy, shallow chain, no lazy look-ahead) since
     // binary data rarely benefits from deeper search.
+    //
+    // Tuned for production throughput: lower chain depth at Q4-Q7 vs
+    // the prior config to match the C reference's "balanced" speed.
+    // The optimal parser compensates for shallower chains on small inputs.
     let is_text = is_text_like(input);
     let (max_chain, nice_match, use_dict_base, lazy, lazy2, hash_log) = if is_text {
         match quality {
             0..=1 => (4, 8, false, false, false, 15),
-            2..=3 => (16, 16, true, true, false, 16),
-            4..=5 => (48, 48, true, true, true, 17),
-            6..=7 => (64, 64, true, true, true, 17),
-            8..=9 => (128, 128, true, true, true, 17),
-            _ => (512, 271, true, true, true, 18),
+            2..=3 => (8, 16, true, true, false, 16),
+            4..=5 => (16, 32, true, true, true, 17),
+            6..=7 => (32, 48, true, true, true, 17),
+            8..=9 => (64, 64, true, true, true, 17),
+            _ => (128, 128, true, true, true, 18),
         }
     } else {
         // Binary fast path: greedy, no lazy, no dictionary.
@@ -1513,11 +1517,12 @@ fn parse_input_with_offset(
     // that, fall back to two-pass greedy (DP memory ~16 MiB at 1 MiB
     // input — past this we risk cache thrashing and diminishing returns).
     if is_text && quality >= 4 && input.len() <= 1024 * 1024 {
-        // Q11: 4-iteration refinement (TODO 272); Q8-Q10: 2-iteration.
-        if quality >= 11 {
-            return iterative_optimal_parse_with_iters(input, &mut mf, mlen_offset, use_dict, 4);
-        }
-        if quality >= 8 {
+        // Q8+ AND small input: use iterative refinement (TODO 246).
+        // 2-pass with Huffman-derived literal costs. Capped to small
+        // inputs because the 2x cost is significant on multi-MiB
+        // workloads (each 1 MiB chunk runs the DP twice → 2x total
+        // runtime, mostly for <0.1pp ratio win).
+        if quality >= 8 && input.len() <= 256 * 1024 {
             return iterative_optimal_parse(input, &mut mf, mlen_offset, use_dict);
         }
         return optimal_parse(input, &mut mf, mlen_offset, use_dict);
