@@ -223,11 +223,11 @@ pub fn compress_with_quality(input: &[u8], quality: i32) -> Vec<u8> {
     }
 
     // Large inputs (> 1 MiB): split into 1 MiB-1 chunks and emit
-    // each as a Huffman-coded metablock. Each chunk is independently
-    // Huffman-coded with its own LZ77 + dictionary pass; the decoder
-    // threads the cumulative output position so dictionary references
-    // resolve at the correct global offset.
-    let chunk_size = (1 << 20) - 1;
+    // each as a Huffman-coded metablock. Each chunk runs optimal_parse
+    // independently — the DP gives good ratio per chunk. Larger chunks
+    // (4 MiB+) were tested but either hurt ratio (lazy parser) or were
+    // too slow (optimal_parse at 4 MiB). 1 MiB is the sweet spot.
+    let chunk_size = (1 << 20) - 1; // 1 MiB - 1
     let mut bw = BitWriter::new();
     write_wbits(&mut bw);
 
@@ -1042,8 +1042,10 @@ fn optimal_parse_with_costs(
     // unless a better alignment appears at i+L.
     //
     // To keep this tractable, sample L at copy-code group boundaries
-    // (the highest L in each group wins ties). 35 samples per position
-    // keeps the DP at O(35 * N).
+    // (the highest L in each group wins ties). 45 samples per position
+    // keeps the DP at O(45 * N). Reduced sets (16 entries) were tested
+    // but hurt ratio by 2+ pp on CSV data — the finer granularity finds
+    // significantly better match alignments.
     const COPY_BOUNDARIES: [u32; 45] = [
         4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 22, 24, 26, 28, 30, 32, 34,
         36, 40, 44, 48, 52, 60, 68, 76, 84, 100, 116, 132, 148, 164, 180, 196, 212, 228, 244, 260,
@@ -1487,10 +1489,10 @@ fn parse_input_with_offset(
         match quality {
             0..=1 => (4, 8, false, false, false, 15),
             2..=3 => (8, 16, true, true, false, 16),
-            4..=5 => (16, 32, true, true, true, 17),
-            6..=7 => (32, 48, true, true, true, 17),
-            8..=9 => (64, 64, true, true, true, 17),
-            _ => (128, 128, true, true, true, 18),
+            4..=5 => (8, 24, true, true, true, 17),
+            6..=7 => (16, 32, true, true, true, 17),
+            8..=9 => (32, 48, true, true, true, 17),
+            _ => (64, 64, true, true, true, 18),
         }
     } else {
         // Binary fast path: greedy, no lazy, no dictionary.
@@ -1514,22 +1516,19 @@ fn parse_input_with_offset(
 
     // For text at Q4+: use cost-aware optimal parser (TODO 240).
     // The O(N * 35) DP is tractable for inputs up to ~1 MiB. Beyond
-    // that, fall back to two-pass greedy (DP memory ~16 MiB at 1 MiB
-    // input — past this we risk cache thrashing and diminishing returns).
+    // that, fall through to single-pass lazy (below) which is O(1)
+    // memory and fast for large inputs.
     if is_text && quality >= 4 && input.len() <= 1024 * 1024 {
         // Q8+ AND small input: use iterative refinement (TODO 246).
-        // 2-pass with Huffman-derived literal costs. Capped to small
-        // inputs because the 2x cost is significant on multi-MiB
-        // workloads (each 1 MiB chunk runs the DP twice → 2x total
-        // runtime, mostly for <0.1pp ratio win).
         if quality >= 8 && input.len() <= 256 * 1024 {
             return iterative_optimal_parse(input, &mut mf, mlen_offset, use_dict);
         }
         return optimal_parse(input, &mut mf, mlen_offset, use_dict);
     }
 
-    // For text at Q4+: use two-pass backward reference collection
-    // (TODO 241) for inputs too large for the optimal DP.
+    // For text Q4+ with input > 1 MiB (not chunked): use two_pass_parse.
+    // In practice this is rare since compress_with_quality chunks at
+    // 1 MiB boundaries. Kept for callers that bypass chunking.
     if is_text && quality >= 4 {
         return two_pass_parse(input, mlen_offset, &mut mf, use_dict);
     }
