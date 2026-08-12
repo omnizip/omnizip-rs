@@ -555,6 +555,14 @@ fn finish_metablock_decode(
 
         // Read literals.
         for _ in 0..insert_len {
+            // Metablock boundary: per upstream `ProcessCommandsInternal`,
+            // the literal loop must stop as soon as we've emitted mlen
+            // bytes (a final INSERT-only command can have insert_len >
+            // remaining metablock length).
+            if output.len() >= mlen {
+                break;
+            }
+
             // Block-switch on literal block length (BEFORE reading the
             // literal, per upstream `ProcessCommandsInternal`).
             if lit_bt.num_block_types > 1 {
