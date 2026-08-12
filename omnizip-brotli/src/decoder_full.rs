@@ -589,16 +589,12 @@ fn finish_metablock_decode(
             break;
         }
 
-        // Distance block-switch (BEFORE reading the distance code, per
-        // upstream `ProcessCommandsInternal`).
-        if dist_bt.num_block_types > 1 {
-            if dist_bt.block_length == 0 {
-                dist_block_type = dist_bt.decode_switch(br)? as usize;
-            }
-            dist_bt.block_length -= 1;
-        }
-
         // Distance computation.
+        // Per upstream `ReadDistanceInternal`: dist_bt.block_length is
+        // only decremented for EXPLICIT distance codes (when we actually
+        // read from the distance Huffman tree). Implicit distances (rep
+        // codes, distance_code >= 0) don't touch the distance block
+        // length.
         let distance: u32 = if v.distance_code >= 0 {
             // Implicit distance (kCmdLut.distance_code == 0):
             // use most recent from ring buffer. Matches upstream
@@ -606,6 +602,14 @@ fn finish_metablock_decode(
             dist_rb_idx -= 1;
             dist_rb[(dist_rb_idx & 3) as usize]
         } else {
+            // Distance block-switch (BEFORE reading the distance code).
+            if dist_bt.num_block_types > 1 {
+                if dist_bt.block_length == 0 {
+                    dist_block_type = dist_bt.decode_switch(br)? as usize;
+                }
+                dist_bt.block_length -= 1;
+            }
+
             // Read distance code from distance tree.
             // distance_context = v.context (per upstream ReadCommandInternal).
             let dist_context = v.context as usize;
