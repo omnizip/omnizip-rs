@@ -50,9 +50,10 @@ use crate::prefix::kCmdLut;
 /// to maximize match distance.
 const WINDOW_BITS: u8 = 24;
 
-/// Window gap per RFC 7932 §9.1: 32 KiB reserved to disambiguate
-/// dictionary references from LZ77 back-references.
-const WINDOW_GAP: u32 = 0x8000;
+/// Window gap per upstream brotli (`kBrotliWindowGap = 16`): the
+/// reserved bytes that disambiguate dictionary references from LZ77
+/// back-references.
+const WINDOW_GAP: u32 = 16;
 
 /// Maximum backward distance for LZ77 matches.
 /// Per RFC 7932 §9.1: `max_backward_distance` = (1 << WBITS) - `WINDOW_GAP`.
@@ -343,7 +344,11 @@ fn encode_huffman_chunk_body(
     for i in 0..num_nibbles {
         bw.write_bits((mlen_minus_1 >> (4 * i)) & 0xF, 4);
     }
-    bw.write_bits(0, 1); // ISUNCOMPRESSED = 0
+    // ISUNCOMPRESSED is only written when ISLAST=0 (matches upstream
+    // `DecodeMetaBlockLength` gate: `if (is_last == 0 && is_metadata == 0)`).
+    if !is_last {
+        bw.write_bits(0, 1); // ISUNCOMPRESSED = 0
+    }
 
     // Context modeling: at quality >= 4, split literals into context
     // trees. Active for Q4+ inputs ≥ 4 KiB (any content type — FSST-
@@ -618,12 +623,13 @@ fn encode_huffman_chunk_body(
 
 /// Encode one metablock (uncompressed) into the shared writer.
 /// Kept for the `multi_metablock_uncompressed_round_trips` test.
+/// Always passes `is_last = false`: per upstream brotli, an ISLAST=1
+/// metablock cannot be uncompressed (ISUNCOMPRESSED is only read when
+/// ISLAST=0). Terminate the stream with a separate empty ISLAST=1
+/// metablock via [`empty_frame_terminator_into`].
 #[cfg(test)]
-fn encode_uncompressed_chunk_into(bw: &mut BitWriter, input: &[u8], is_last: bool) {
-    bw.write_bits(if is_last { 1 } else { 0 }, 1); // ISLAST
-    if is_last {
-        bw.write_bits(0, 1); // ISLASTEMPTY = 0
-    }
+fn encode_uncompressed_chunk_into(bw: &mut BitWriter, input: &[u8], _is_last: bool) {
+    bw.write_bits(0, 1); // ISLAST = 0 (so ISUNCOMPRESSED is read)
     bw.write_bits(0, 2); // MNIBBLES = 0 (= 4 nibbles)
     let mlen_minus_1 = (input.len() - 1) as u64;
     for i in 0..4u32 {
@@ -636,16 +642,26 @@ fn encode_uncompressed_chunk_into(bw: &mut BitWriter, input: &[u8], is_last: boo
     }
 }
 
+/// Write an empty ISLAST=1 metablock (the stream terminator).
+#[cfg(test)]
+fn empty_frame_terminator_into(bw: &mut BitWriter) {
+    bw.write_bits(1, 1); // ISLAST = 1
+    bw.write_bits(1, 1); // ISLASTEMPTY = 1
+}
+
 // ---------------------------------------------------------------------------
 // Uncompressed metablock (RFC 7932 §9.2)
 // ---------------------------------------------------------------------------
 
 fn encode_uncompressed_frame(input: &[u8]) -> Vec<u8> {
+    // Per upstream `DecodeMetaBlockLength`: ISUNCOMPRESSED is only read
+    // when ISLAST=0. To emit an uncompressed last metablock, we write
+    // the data as ISLAST=0 + ISUNCOMPRESSED=1, then append a final
+    // empty ISLAST=1 metablock.
     let mut bw = BitWriter::new();
     write_wbits(&mut bw);
 
-    bw.write_bits(1, 1); // ISLAST = 1
-    bw.write_bits(0, 1); // ISLASTEMPTY = 0
+    bw.write_bits(0, 1); // ISLAST = 0 (so ISUNCOMPRESSED is read)
 
     let mnibbles_field: u32 = if input.len() < (1 << 16) { 0 } else { 2 };
     bw.write_bits(mnibbles_field, 2);
@@ -666,6 +682,13 @@ fn encode_uncompressed_frame(input: &[u8]) -> Vec<u8> {
 
     let mut out = bw.flush();
     out.extend_from_slice(input);
+
+    // Append empty ISLAST=1 metablock to terminate the stream.
+    let mut terminator = BitWriter::new();
+    terminator.write_bits(1, 1); // ISLAST = 1
+    terminator.write_bits(1, 1); // ISLASTEMPTY = 1
+    out.extend_from_slice(&terminator.flush());
+
     out
 }
 
@@ -1605,7 +1628,6 @@ fn parse_input_with_offset(
     let n = input.len();
     let mut commands = Vec::new();
 
-    let is_text = is_text_like(input);
     // At Q4+, always use the text config (deeper chains, dict, lazy2)
     // regardless of content type. FSST-transformed data and other
     // semi-structured binary benefits from the same parser effort as
@@ -2332,7 +2354,8 @@ mod tests {
         let mut bw = BitWriter::new();
         write_wbits(&mut bw);
         encode_uncompressed_chunk_into(&mut bw, &chunk1, false);
-        encode_uncompressed_chunk_into(&mut bw, &chunk2, true);
+        encode_uncompressed_chunk_into(&mut bw, &chunk2, false);
+        empty_frame_terminator_into(&mut bw);
         let compressed = bw.flush();
         let decoded = decoder::decode(&compressed).expect("decode");
         let expected: Vec<u8> = chunk1.iter().chain(chunk2.iter()).copied().collect();
