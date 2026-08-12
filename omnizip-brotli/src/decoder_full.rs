@@ -324,22 +324,35 @@ pub(crate) fn decode_compressed_metablock_full(
     bit_pos: usize,
     mlen: usize,
     nbltypesl: u32,
-    nbltypesc: u32,
-    nbltypesd: u32,
+    nbltypesc: Option<u32>,
+    nbltypesd: Option<u32>,
     output_base: usize,
     max_backward_distance: u32,
 ) -> Result<(usize, Vec<u8>), &'static str> {
     let mut br = BitReader::new(data);
     br.bit_pos = bit_pos;
 
-    // Per-category block-type code reading. Caller has already consumed
-    // the NBLTYPES DecodeVarLenUint8 field.
+    // Per upstream `BROTLI_STATE_HUFFMAN_CODE_0..3`: NBLTYPES values
+    // are interleaved with their block-type trees. Caller has already
+    // read NBLTYPES_L (and optionally NBLTYPES_C / NBLTYPES_D); we
+    // read each category's block-type trees after the NBLTYPES value
+    // is known, then read the next NBLTYPES inline if not yet read.
     let mut lit_bt = BlockTypeState::default();
     lit_bt.num_block_types = nbltypesl;
     br.bit_pos = lit_bt.read_block_type_trees(data, br.bit_pos())?;
+
+    let nbltypesc = match nbltypesc {
+        Some(v) => v,
+        None => crate::decoder::read_varlen_uint8(&mut br)? + 1,
+    };
     let mut cmd_bt = BlockTypeState::default();
     cmd_bt.num_block_types = nbltypesc;
     br.bit_pos = cmd_bt.read_block_type_trees(data, br.bit_pos())?;
+
+    let nbltypesd = match nbltypesd {
+        Some(v) => v,
+        None => crate::decoder::read_varlen_uint8(&mut br)? + 1,
+    };
     let mut dist_bt = BlockTypeState::default();
     dist_bt.num_block_types = nbltypesd;
     br.bit_pos = dist_bt.read_block_type_trees(data, br.bit_pos())?;
@@ -542,6 +555,15 @@ fn finish_metablock_decode(
 
         // Read literals.
         for _ in 0..insert_len {
+            // Block-switch on literal block length (BEFORE reading the
+            // literal, per upstream `ProcessCommandsInternal`).
+            if lit_bt.num_block_types > 1 {
+                if lit_bt.block_length == 0 {
+                    lit_block_type = lit_bt.decode_switch(br)? as usize;
+                }
+                lit_bt.block_length -= 1;
+            }
+
             // Compute literal context.
             let context_id = context_modes[lit_block_type].context_id_2(p1, p2);
             let lit_tree_idx = lit_context_map
@@ -552,19 +574,20 @@ fn finish_metablock_decode(
             output.push(lit as u8);
             p2 = p1;
             p1 = lit as u8;
-
-            // Block-switch on literal block length.
-            if lit_bt.num_block_types > 1 {
-                if lit_bt.block_length == 0 {
-                    lit_block_type = lit_bt.decode_switch(br)? as usize;
-                }
-                lit_bt.block_length -= 1;
-            }
         }
 
         // Metablock-end short-circuit (final INSERT-only command).
         if output.len() >= mlen {
             break;
+        }
+
+        // Distance block-switch (BEFORE reading the distance code, per
+        // upstream `ProcessCommandsInternal`).
+        if dist_bt.num_block_types > 1 {
+            if dist_bt.block_length == 0 {
+                dist_block_type = dist_bt.decode_switch(br)? as usize;
+            }
+            dist_bt.block_length -= 1;
         }
 
         // Distance computation.
@@ -592,14 +615,6 @@ fn finish_metablock_decode(
                 &mut dist_rb_idx,
             )
         };
-
-        // Block-switch on distance block length (after each distance code).
-        if dist_bt.num_block_types > 1 {
-            if dist_bt.block_length == 0 {
-                dist_block_type = dist_bt.decode_switch(br)? as usize;
-            }
-            dist_bt.block_length -= 1;
-        }
 
         // Per upstream: max_distance = min(pos, max_backward_distance).
         // pos is the CUMULATIVE output position across all metablocks.
