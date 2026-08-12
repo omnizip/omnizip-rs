@@ -1113,6 +1113,11 @@ fn decode_compressed_metablock(
         let copy_len = usize::from(v.copy_len_offset) + copy_length as usize;
 
         for _ in 0..insert_len {
+            // Metablock boundary: a final INSERT-only command can have
+            // insert_len > remaining metablock length. Stop at mlen.
+            if output.len() >= mlen {
+                break;
+            }
             let lit = lit_table.read_symbol(&mut br).ok_or("invalid literal")?;
             output.push(lit as u8);
         }
