@@ -356,12 +356,13 @@ fn encode_huffman_chunk_body(
     // as natural text).
     let use_context = quality >= 4 && input.len() >= 4096;
 
-    // Block-type switching is disabled — on uniform text data (e.g.,
-    // our synthetic CSV benchmark) the per-block-type Huffman tree
-    // overhead outweighs the benefit. The decoder now correctly handles
-    // NBLTYPES > 1, and `write_block_type_trees` + the inline switch
-    // emission in the literal loop are wired up, so this can be flipped
-    // back on for inputs with strongly varying per-block statistics.
+    // Block-type switching is disabled — testing showed a slight ratio
+    // regression on uniform text data (per-block-type Huffman overhead
+    // exceeds the benefit when statistics don't vary). The decoder now
+    // correctly handles NBLTYPES > 1, and `write_block_type_trees` +
+    // the inline switch emission in the literal loop are wired up, so
+    // this can be flipped back on for inputs with strongly varying
+    // per-block statistics.
     let use_block_switch = false;
     let nbltypes_l: u32 = if use_block_switch { 2 } else { 1 };
     write_varlen_uint8(bw, nbltypes_l - 1); // NBLTYPESL
