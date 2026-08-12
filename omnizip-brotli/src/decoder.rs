@@ -188,6 +188,11 @@ pub struct MetablockHeader {
     /// `IS_UNCOMPRESSED` flag (RFC 7932 §9.2). When true, the metablock
     /// payload is `mlen` raw bytes (no Huffman coding).
     pub is_uncompressed: bool,
+    /// True for metadata metablocks (MNIBBLES raw == 3). These carry
+    /// out-of-band metadata (e.g. seek tables, checksums) and contribute
+    /// nothing to the decoded output. The decoder reads and discards
+    /// `mlen` payload bytes.
+    pub is_metadata: bool,
 }
 
 /// Parse the next metablock header at `bit_pos`.
@@ -200,10 +205,14 @@ pub struct MetablockHeader {
 ///   - if ISLASTEMPTY=1: end (mlen=0, is_uncompressed=false)
 ///   - if ISLASTEMPTY=0: fall through
 /// - MNIBBLES (2 bits): size_nibbles = bits + 4 (so 4, 5, 6, or metadata)
-///   - if bits == 3: metadata metablock (skip; we reject)
+///   - if bits == 3: metadata metablock (RESERVED + NBYTES + METADATA_LEN)
 /// - MLEN (4 × size_nibbles bits): mlen = value + 1
 /// - ISUNCOMPRESSED (1 bit): ONLY read when ISLAST=0 (and not metadata).
 ///   For ISLAST=1, is_uncompressed is implicitly false.
+///
+/// For metadata metablocks, the parser consumes the full header
+/// (including the metadata-length bytes) but NOT the metadata payload.
+/// The caller is responsible for skipping `mlen` bytes of payload.
 ///
 /// # Errors
 ///
@@ -226,6 +235,7 @@ pub fn parse_metablock_header(
                     mlen: 0,
                     mnibbles: 0,
                     is_uncompressed: false,
+                    is_metadata: false,
                 },
                 br.bit_pos(),
             ));
@@ -233,11 +243,59 @@ pub fn parse_metablock_header(
     }
 
     // MNIBBLES encoding (matches upstream `size_nibbles = bits + 4`).
-    // bits == 3 indicates a metadata metablock (skip header bytes); we
-    // reject it since we don't support metadata metablocks.
+    // bits == 3 indicates a metadata metablock (RFC 7932 §9.2).
     let mnibbles_raw = br.read_bits(2);
     if mnibbles_raw == 3 {
-        return Err("metadata metablocks are not supported");
+        // Metadata metablock: RESERVED (1 bit, must be 0), then NBYTES
+        // (2 bits). If NBYTES == 0 there is no payload. Otherwise read
+        // NBYTES bytes for the metadata payload length, then the
+        // payload itself is skipped by the caller. The metadata-length
+        // encoding is `value = payload_len - 1` (matches MLEN), so we
+        // add 1 before returning to the caller (mirrors upstream's
+        // METABLOCK_HEADER_UNCOMPRESSED state which does `+= 1`).
+        let reserved = br.read_bit();
+        if reserved {
+            return Err("metadata metablock reserved bit must be 0");
+        }
+        let nbytes_raw = br.read_bits(2) as usize;
+        if nbytes_raw == 0 {
+            // No metadata payload. Upstream exits the metadata header
+            // parse here WITHOUT going through UNCOMPRESSED state, so
+            // no `+= 1` is applied (in contrast to the nbytes > 0 path
+            // and normal MLEN, which both add 1).
+            return Ok((
+                MetablockHeader {
+                    is_last,
+                    is_last_empty: false,
+                    mlen: 0,
+                    mnibbles: 3,
+                    is_uncompressed: false,
+                    is_metadata: true,
+                },
+                br.bit_pos(),
+            ));
+        }
+        let mut metadata_len_minus_1: u32 = 0;
+        for i in 0..nbytes_raw {
+            let byte = br.read_bits(8);
+            // Reject exuberant meta nibble: last byte must be nonzero
+            // when nbytes > 1 (per upstream ERROR_FORMAT_EXUBERANT_META_NIBBLE).
+            if i + 1 == nbytes_raw && nbytes_raw > 1 && byte == 0 {
+                return Err("metadata length has trailing zero byte");
+            }
+            metadata_len_minus_1 |= byte << (i * 8);
+        }
+        return Ok((
+            MetablockHeader {
+                is_last,
+                is_last_empty: false,
+                mlen: metadata_len_minus_1 + 1,
+                mnibbles: 3,
+                is_uncompressed: false,
+                is_metadata: true,
+            },
+            br.bit_pos(),
+        ));
     }
     let mnibbles = mnibbles_raw + 4;
     let mnibbles_u8 = u8::try_from(mnibbles).map_err(|_| "mnibbles overflow")?;
@@ -255,6 +313,7 @@ pub fn parse_metablock_header(
             mlen,
             mnibbles: mnibbles_u8,
             is_uncompressed,
+            is_metadata: false,
         },
         br.bit_pos(),
     ))
@@ -905,7 +964,19 @@ pub fn decode(compressed: &[u8]) -> Result<Vec<u8>, &'static str> {
             break;
         }
 
-        if mb.is_uncompressed {
+        if mb.is_metadata {
+            // Skip `mlen` payload bytes (RFC 7932 §9.2 metadata).
+            // Payload is byte-aligned: jump to the next byte boundary
+            // and consume `mlen` bytes.
+            let byte_offset = bit_pos.div_ceil(8);
+            let needed = byte_offset
+                .checked_add(mb.mlen as usize)
+                .ok_or("metadata length overflow")?;
+            if needed > compressed.len() {
+                return Err("metadata metablock extends past input");
+            }
+            bit_pos = needed * 8;
+        } else if mb.is_uncompressed {
             let byte_offset = bit_pos.div_ceil(8);
             let needed = byte_offset
                 .checked_add(mb.mlen as usize)
