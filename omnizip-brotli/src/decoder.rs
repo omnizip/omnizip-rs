@@ -194,15 +194,16 @@ pub struct MetablockHeader {
 ///
 /// Returns the parsed header and the bit position past the header.
 ///
-/// Per RFC 7932 §9.2 the layout is:
+/// Per upstream brotli (`DecodeMetaBlockLength` in `decode.rs`) the layout is:
 /// - ISLAST (1 bit)
 /// - if ISLAST=1: ISLASTEMPTY (1 bit)
-///   - if ISLASTEMPTY=1: end (mlen=0, mnibbles=0, `is_uncompressed=false`)
+///   - if ISLASTEMPTY=1: end (mlen=0, is_uncompressed=false)
 ///   - if ISLASTEMPTY=0: fall through
-/// - MNIBBLES (2 bits): if 0 → use 4 nibbles for MLEN; else MNIBBLES itself
-/// - MLEN (4 × MNIBBLES bits): mlen = value + 1
-/// - `IS_UNCOMPRESSED` (1 bit)
-/// - Reserved (1 bit, must be 0)
+/// - MNIBBLES (2 bits): size_nibbles = bits + 4 (so 4, 5, 6, or metadata)
+///   - if bits == 3: metadata metablock (skip; we reject)
+/// - MLEN (4 × size_nibbles bits): mlen = value + 1
+/// - ISUNCOMPRESSED (1 bit): ONLY read when ISLAST=0 (and not metadata).
+///   For ISLAST=1, is_uncompressed is implicitly false.
 ///
 /// # Errors
 ///
@@ -229,36 +230,23 @@ pub fn parse_metablock_header(
                 br.bit_pos(),
             ));
         }
-        let mnibbles_raw = br.read_bits(2);
-        let mnibbles = if mnibbles_raw == 0 {
-            4
-        } else {
-            mnibbles_raw + 4
-        };
-        let mnibbles_u8 = u8::try_from(mnibbles).map_err(|_| "mnibbles overflow")?;
-        let mlen = br.read_mlen(mnibbles);
-        // RFC 7932 §9.2: ISUNCOMPRESSED is read for any non-empty
-        // metablock (including ISLAST=1). RESERVED (1 bit) only
-        // appears when ISLAST=0.
-        let is_uncompressed = br.read_bit();
-        return Ok((
-            MetablockHeader {
-                is_last,
-                is_last_empty: false,
-                mlen,
-                mnibbles: mnibbles_u8,
-                is_uncompressed,
-            },
-            br.bit_pos(),
-        ));
     }
 
-    // ISLAST=0 path: read MNIBBLES, MLEN, IS_UNCOMPRESSED.
+    // MNIBBLES encoding (matches upstream `size_nibbles = bits + 4`).
+    // bits == 3 indicates a metadata metablock (skip header bytes); we
+    // reject it since we don't support metadata metablocks.
     let mnibbles_raw = br.read_bits(2);
-    let mnibbles = if mnibbles_raw == 0 { 4 } else { mnibbles_raw };
+    if mnibbles_raw == 3 {
+        return Err("metadata metablocks are not supported");
+    }
+    let mnibbles = mnibbles_raw + 4;
     let mnibbles_u8 = u8::try_from(mnibbles).map_err(|_| "mnibbles overflow")?;
     let mlen = br.read_mlen(mnibbles);
-    let is_uncompressed = br.read_bit();
+
+    // ISUNCOMPRESSED is only read when ISLAST=0 (per upstream gate
+    // `if (is_last_metablock == 0 && is_metadata == 0)`). For ISLAST=1
+    // it is implicitly false.
+    let is_uncompressed = if is_last { false } else { br.read_bit() };
 
     Ok((
         MetablockHeader {
@@ -903,7 +891,10 @@ pub fn parse_context_mode(
 /// Returns `&'static str` on malformed input or unsupported features.
 pub fn decode(compressed: &[u8]) -> Result<Vec<u8>, &'static str> {
     let (frame, mut bit_pos) = parse_frame_header(compressed, 0)?;
-    let max_backward_distance: u32 = (1u32 << frame.window_bits).saturating_sub(0x8000);
+    // Per upstream brotli (`kBrotliWindowGap = 16`): max_backward_distance =
+    // (1 << WBITS) - 16. Distances larger than this refer to the static
+    // dictionary.
+    let max_backward_distance: u32 = (1u32 << frame.window_bits).saturating_sub(16);
     let mut output = Vec::new();
 
     loop {
@@ -1384,17 +1375,17 @@ mod tests {
 
     #[test]
     fn parse_metablock_header_not_last() {
-        // ISLAST=0 (bit 0), MNIBBLES=11 (bits 1-2) = 3,
-        // MLEN = 0 (bits 3-14, 3 nibbles),
-        // IS_UNCOMPRESSED (bit 15) = 0, reserved (bit 16) = 0.
+        // ISLAST=0 (bit 0), MNIBBLES=00 (bits 1-2) → 4 nibbles,
+        // MLEN = 0 (bits 3-18, 4 nibbles),
+        // IS_UNCOMPRESSED (bit 19) = 0.
         // Packed LSB-first across 3 bytes:
-        //   byte 0: bits 0-7 = 0,1,1,0,0,0,0,0 = 0b0000_0110 = 0x06
+        //   byte 0: bits 0-7 = 0,0,0,0,0,0,0,0 = 0x00
         //   byte 1: bits 8-15 = 0,0,0,0,0,0,0,0 = 0x00
-        //   byte 2: bits 16-17 = 0,0
-        let data = [0x06u8, 0x00, 0x00];
+        //   byte 2: bits 16-19 = 0,0,0,0
+        let data = [0x00u8, 0x00, 0x00];
         let (hdr, _) = parse_metablock_header(&data, 0).expect("parse");
         assert!(!hdr.is_last);
-        assert_eq!(hdr.mnibbles, 3);
+        assert_eq!(hdr.mnibbles, 4);
     }
 
     #[test]
