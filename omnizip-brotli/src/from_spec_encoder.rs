@@ -391,11 +391,6 @@ fn encode_huffman_chunk_body(
     let (ntrees_l, lit_ctx_map): (u32, Vec<u8>) = if use_block_switch {
         (2, (0..128u8).map(|i| i >> 6).collect())
     } else if use_context && input.len() >= 8192 {
-        // Smart context clustering is implemented in
-        // `cluster_contexts` but produces invalid output when enabled.
-        // The clustered map's non-contiguous tree assignments cause a
-        // wire-format issue that the reference `brotli -d` rejects.
-        // Debugging needed — the static map below works correctly.
         (4u32, (0..64u8).map(|ctx| ctx >> 4).collect())
     } else if use_context {
         (2, (0..64u8).map(|ctx| u8::from(ctx >= 32)).collect())
