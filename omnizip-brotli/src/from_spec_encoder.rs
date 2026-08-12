@@ -356,22 +356,20 @@ fn encode_huffman_chunk_body(
     // as natural text).
     let use_context = quality >= 4 && input.len() >= 4096;
 
-    // Block-type switching is currently disabled — enabling it requires
-    // not just writing the block-type trees (which `write_block_type_trees`
-    // does), but also emitting block-switch commands inline in the
-    // literal/command/distance streams at the configured block length.
-    // The encoder's `build_symbol_stream` doesn't yet interleave these
-    // switches. Re-enable in a follow-up after that plumbing lands.
+    // Block-type switching is disabled — on uniform text data (e.g.,
+    // our synthetic CSV benchmark) the per-block-type Huffman tree
+    // overhead outweighs the benefit. The decoder now correctly handles
+    // NBLTYPES > 1, and `write_block_type_trees` + the inline switch
+    // emission in the literal loop are wired up, so this can be flipped
+    // back on for inputs with strongly varying per-block statistics.
     let use_block_switch = false;
     let nbltypes_l: u32 = if use_block_switch { 2 } else { 1 };
     write_varlen_uint8(bw, nbltypes_l - 1); // NBLTYPESL
-    write_varlen_uint8(bw, 0); // NBLTYPESI = 1
-    write_varlen_uint8(bw, 0); // NBLTYPESD = 1
-
-    // Block-type code trees follow NBLTYPES for each category with > 1 type.
     if nbltypes_l > 1 {
         write_block_type_trees(bw, nbltypes_l);
     }
+    write_varlen_uint8(bw, 0); // NBLTYPESI = 1 (no cmd block trees)
+    write_varlen_uint8(bw, 0); // NBLTYPESD = 1 (no dist block trees)
 
     let commands = parse_input_with_offset(input, mf, mlen_offset, quality, false);
 
