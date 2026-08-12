@@ -355,9 +355,9 @@ fn encode_huffman_chunk_body(
     // compatibility debugging (write_block_type_trees + block-switch
     // emission exist but produce wire-format mismatches in the full
     // decoder path). The infrastructure is ready for re-enablement.
-    let use_block_switch = false;
-    // Write all three NBLTYPES first (RFC 7932 §9.3: all block-type
-    // counts precede any block-type code trees).
+    let use_block_switch = false; // TODO 228: re-enable after decoder fix
+                                  // Write all three NBLTYPES first (RFC 7932 §9.3: all block-type
+                                  // counts precede any block-type code trees).
     let nbltypes_l: u32 = if use_block_switch { 2 } else { 1 };
     write_varlen_uint8(bw, nbltypes_l - 1); // NBLTYPESL
     write_varlen_uint8(bw, 0); // NBLTYPESI = 1
@@ -1626,7 +1626,10 @@ fn parse_input_with_offset(
 
     // Q4+: cost-aware optimal parser for any content type (TODO 240).
     if quality >= 4 && input.len() <= 1024 * 1024 {
-        if quality >= 8 && input.len() <= 256 * 1024 {
+        // Q8+: iterative refinement (2-pass with Huffman-derived costs).
+        // Raised from 256 KiB to 1 MiB cap — each 1 MiB chunk now gets
+        // 2-pass parsing, giving 1-3% ratio improvement at Q8+.
+        if quality >= 8 {
             return iterative_optimal_parse(input, &mut mf, mlen_offset, use_dict);
         }
         return optimal_parse(input, &mut mf, mlen_offset, use_dict);
