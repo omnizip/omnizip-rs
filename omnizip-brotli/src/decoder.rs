@@ -957,19 +957,49 @@ fn decode_compressed_metablock(
     let mut br = BitReader::new(data);
     br.bit_pos = bit_pos;
 
+    // Read NBLTYPES one at a time, dispatching to the full decoder as
+    // soon as any category has > 1 block type. Per upstream brotli
+    // (`BROTLI_STATE_HUFFMAN_CODE_0..3`), each NBLTYPES value is
+    // followed by its block-type trees BEFORE the next NBLTYPES is
+    // read. Reading all 3 upfront misaligns the bit stream whenever
+    // any NBLTYPES > 1.
     let nbltypesl = read_varlen_uint8(&mut br)? + 1;
-    let nbltypesc = read_varlen_uint8(&mut br)? + 1;
-    let nbltypesd = read_varlen_uint8(&mut br)? + 1;
-
-    // Dispatch to the full decoder for non-trivial layouts.
-    if nbltypesl > 1 || nbltypesc > 1 || nbltypesd > 1 {
+    if nbltypesl > 1 {
         return crate::decoder_full::decode_compressed_metablock_full(
             data,
             br.bit_pos(),
             mlen,
             nbltypesl,
-            nbltypesc,
-            nbltypesd,
+            None,
+            None,
+            output_base,
+            max_backward_distance,
+        );
+    }
+
+    let nbltypesc = read_varlen_uint8(&mut br)? + 1;
+    if nbltypesc > 1 {
+        return crate::decoder_full::decode_compressed_metablock_full(
+            data,
+            br.bit_pos(),
+            mlen,
+            1,
+            Some(nbltypesc),
+            None,
+            output_base,
+            max_backward_distance,
+        );
+    }
+
+    let nbltypesd = read_varlen_uint8(&mut br)? + 1;
+    if nbltypesd > 1 {
+        return crate::decoder_full::decode_compressed_metablock_full(
+            data,
+            br.bit_pos(),
+            mlen,
+            1,
+            Some(1),
+            Some(nbltypesd),
             output_base,
             max_backward_distance,
         );
