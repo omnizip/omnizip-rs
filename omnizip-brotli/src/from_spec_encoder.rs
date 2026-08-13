@@ -1929,13 +1929,6 @@ fn write_huffman_table(
     // Complex form: HSKIP = 0.
     bw.write_bits(0, 2);
 
-    // Build the RLE-compressed code-length sequence (RFC 7932 §9.5).
-    // Symbol 16 = repeat previous code length 3+extra(2) times (3-6).
-    // Symbol 17 = repeat zero 3+extra(3) times (3-10).
-    // This reduces table description size for inputs with many
-    // same-length codes (typical for near-uniform byte distributions).
-    // Returns Vec<(symbol, extra_bits)> so the writer doesn't need to
-    // re-derive counts from the raw lengths.
     let rle = build_rle_sequence(&lengths.lengths[..alphabet]);
 
     // Build a sub-Huffman over the 18-symbol code-length alphabet,
@@ -1993,11 +1986,15 @@ fn write_huffman_table(
             let (code, clen) = cl_codes[usize::from(sym)];
             let wire = reverse_bits(code, clen);
             bw.write_bits(wire, u32::from(clen));
-            if sym == 16 {
-                bw.write_bits(extra as u32, 2);
-            } else if sym == 17 {
-                bw.write_bits(extra as u32, 3);
-            }
+        }
+        // Extra bits for RLE symbols must be written even when
+        // cl_single is true (decoder reads 0 bits for the symbol
+        // itself via single_symbol fast path, but still reads the
+        // extra bits for symbols 16 and 17).
+        if sym == 16 {
+            bw.write_bits(extra as u32, 2);
+        } else if sym == 17 {
+            bw.write_bits(extra as u32, 3);
         }
 
         if val != 0 {
