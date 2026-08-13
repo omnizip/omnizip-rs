@@ -1158,6 +1158,31 @@ fn optimal_parse_with_costs(
         }
     };
 
+    // Copy-length extra bits cost. Longer copies require more extra bits
+    // in the command encoding (up to 24 bits for copy_len > 4336).
+    // Without this, the DP underestimates long-copy costs and chooses
+    // them too aggressively — a regression on FSST-preprocessed data
+    // where long copies are often suboptimal.
+    let copy_extra_cost = |copy_len: u32| -> f32 {
+        if copy_len <= 18 {
+            0.0 // codes 0-7: 0 extra bits
+        } else if copy_len <= 54 {
+            1.0 // codes 8-9: 1 extra bit
+        } else if copy_len <= 134 {
+            2.0 // codes 10-11: 2 extra bits
+        } else if copy_len <= 302 {
+            3.0 // codes 12-13: 3 extra bits
+        } else if copy_len <= 698 {
+            4.0 // codes 14-15: 4 extra bits
+        } else if copy_len <= 1638 {
+            5.0 // codes 16-17: 5 extra bits
+        } else if copy_len <= 2288 {
+            7.0 // codes 18-22: 6-11 extra bits (approx)
+        } else {
+            18.0 // codes 23+: up to 24 extra bits
+        }
+    };
+
     // --- Step 3: Backward DP considering all sub-match lengths ---
     // For each position i with a longest match of length max_L at distance D:
     //   cost[i] = min over L in [MIN_MATCH, max_L] of:
@@ -1194,12 +1219,9 @@ fn optimal_parse_with_costs(
             if dist > 0 && copy_len >= MIN_MATCH {
                 let m_cost = 7.0 + dist_cost(dist);
                 if is_dict && advance_len != copy_len {
-                    // Length-changing dict transform: must take the full
-                    // match (the decoder produces tl bytes for copy_len
-                    // = wl). Cursor advances by advance_len.
                     let l = i + advance_len as usize;
                     if l <= n {
-                        let total = m_cost + cost[l];
+                        let total = m_cost + copy_extra_cost(copy_len) + cost[l];
                         if total < best {
                             best = total;
                             best_action = copy_len;
@@ -1207,11 +1229,9 @@ fn optimal_parse_with_costs(
                         }
                     }
                 } else if is_dict {
-                    // Length-preserving dict match: copy_len must equal
-                    // word_length exactly. No sub-length selection.
                     let l = i + copy_len as usize;
                     if l <= n {
-                        let total = m_cost + cost[l];
+                        let total = m_cost + copy_extra_cost(copy_len) + cost[l];
                         if total < best {
                             best = total;
                             best_action = copy_len;
@@ -1219,8 +1239,6 @@ fn optimal_parse_with_costs(
                         }
                     }
                 } else {
-                    // Hash match: any sub-length in [MIN_MATCH, copy_len]
-                    // works. Sample at copy-code boundaries.
                     for &boundary in &COPY_BOUNDARIES {
                         if boundary < MIN_MATCH || boundary > copy_len {
                             continue;
@@ -1229,7 +1247,7 @@ fn optimal_parse_with_costs(
                         if l > n {
                             break;
                         }
-                        let total = m_cost + cost[l];
+                        let total = m_cost + copy_extra_cost(boundary) + cost[l];
                         if total < best {
                             best = total;
                             best_action = boundary;
