@@ -63,7 +63,10 @@ const MAX_BACKWARD_DISTANCE: u32 = (1 << WINDOW_BITS) - WINDOW_GAP;
 const MIN_MATCH: u32 = 4;
 
 /// Maximum copy length per command (RFC 7932 §5).
-const MAX_COPY: u32 = 273 - 2;
+/// The spec allows up to ~16M. We cap at 4096 — high enough to capture
+/// most long-match benefit on repetitive inputs while keeping
+/// match_length comparison bounded (4096 bytes max per candidate).
+const MAX_COPY: u32 = 4096;
 
 /// A parsed LZ77 command: insert `insert_len` literals, then copy
 /// `copy_len` bytes from `distance` (1-based backward offset).
@@ -1169,10 +1172,10 @@ fn optimal_parse_with_costs(
     // keeps the DP at O(45 * N). Reduced sets (16 entries) were tested
     // but hurt ratio by 2+ pp on CSV data — the finer granularity finds
     // significantly better match alignments.
-    const COPY_BOUNDARIES: [u32; 45] = [
+    const COPY_BOUNDARIES: [u32; 50] = [
         4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 22, 24, 26, 28, 30, 32, 34,
         36, 40, 44, 48, 52, 60, 68, 76, 84, 100, 116, 132, 148, 164, 180, 196, 212, 228, 244, 260,
-        271,
+        271, 432, 496, 752, 1264, 2288,
     ];
     let mut cost = vec![f32::INFINITY; n + 1];
     let mut back_len: Vec<u32> = vec![0; n]; // 0 = literal, else = copy_len
