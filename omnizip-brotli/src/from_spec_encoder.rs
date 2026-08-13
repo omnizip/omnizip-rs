@@ -1081,6 +1081,21 @@ fn optimal_parse_with_costs(
     use_dict: bool,
     lit_cost_override: Option<[f32; 256]>,
 ) -> Vec<Command> {
+    optimal_parse_with_costs_ext(input, mf, mlen_offset, use_dict, lit_cost_override, None, None)
+}
+
+/// Extended version with command and distance cost overrides.
+/// Used by the iterative parser to feed back actual Huffman-derived
+/// costs into a second DP pass.
+fn optimal_parse_with_costs_ext(
+    input: &[u8],
+    mf: &mut omnizip_codecs::HashChainMatchFinder,
+    mlen_offset: usize,
+    use_dict: bool,
+    lit_cost_override: Option<[f32; 256]>,
+    cmd_cost_override: Option<f32>,
+    dist_cost_table: Option<&[f32; 704]>,
+) -> Vec<Command> {
     let n = input.len();
     if n == 0 {
         return Vec::new();
@@ -1144,9 +1159,9 @@ fn optimal_parse_with_costs(
     };
 
     // --- Distance cost approximation ---
-    // Brotli distance alphabet: ~5 base bits + log2(dist) extra bits.
-    // Returns bits required to encode a given distance.
-    let dist_cost = |dist: u32| -> f32 {
+    // Use override table if provided (from pass 1's Huffman analysis),
+    // otherwise use the logarithmic approximation.
+    let default_dist_cost = |dist: u32| -> f32 {
         if dist == 0 {
             return 0.0;
         }
@@ -1158,6 +1173,9 @@ fn optimal_parse_with_costs(
             (5.0 + log_d).min(22.0)
         }
     };
+
+    // Command base cost: use override if provided, otherwise default.
+    let cmd_base_cost = cmd_cost_override.unwrap_or(7.0);
 
     // Copy-length extra bits cost. Longer copies require more extra bits
     // in the command encoding (up to 24 bits for copy_len > 4336).
@@ -1218,7 +1236,15 @@ fn optimal_parse_with_costs(
         // Option B: Match of length L at copy-code boundaries.
         if let Some((dist, copy_len, advance_len, is_dict)) = matches_at[i] {
             if dist > 0 && copy_len >= MIN_MATCH {
-                let m_cost = 7.0 + dist_cost(dist);
+                let dc = if let Some(table) = dist_cost_table {
+                    // Use per-distance-code Huffman cost from pass 1.
+                    // Map distance to an approximate code index.
+                    let code = if dist <= 4 { (dist - 1) as usize } else { 4 + ((dist as f32).ln() / core::f32::consts::LN_2) as usize };
+                    table[code.min(703)]
+                } else {
+                    default_dist_cost(dist)
+                };
+                let m_cost = cmd_base_cost + dc;
                 if is_dict && advance_len != copy_len {
                     let l = i + advance_len as usize;
                     if l <= n {
@@ -1362,21 +1388,70 @@ fn iterative_optimal_parse_with_iters(
         max_match_length: MAX_COPY,
     };
 
-    // Subsequent passes: refine lit_cost from the previous pass's
-    // actual literals. Stop if no improvement.
+    // Subsequent passes: refine lit_cost AND command/distance costs from
+    // the previous pass's actual output. This is critical for FSST data
+    // where the fixed 7.0-bit command estimate diverges from actual
+    // Huffman costs, causing wrong match decisions.
     for _ in 1..iterations {
         let literals_prev = extract_literals(&best_commands, input, mlen_offset);
         if literals_prev.is_empty() {
             break;
         }
         let lit_cost_refined = compute_shannon_lit_cost(&literals_prev);
+
+        // Compute command cost from pass 1's command symbol frequencies.
+        // Build a histogram of kCmdLut symbols, then Huffman-build to get
+        // average code length.
+        let mut cmd_freq = [0u32; 704];
+        for cmd in &best_commands {
+            if let Some(sym) = find_cmd_symbol(cmd.insert_len, cmd.copy_len) {
+                cmd_freq[sym] += 1;
+            }
+        }
+        let cmd_huff = omnizip_codecs::HuffmanLengths::build(&cmd_freq, 15);
+        let cmd_nonzero: u32 = cmd_freq.iter().sum();
+        let cmd_avg_bits = if cmd_nonzero > 0 {
+            let mut total_bits = 0u32;
+            for (sym, &freq) in cmd_freq.iter().enumerate() {
+                if freq > 0 {
+                    total_bits += freq * u32::from(cmd_huff.lengths[sym]);
+                }
+            }
+            total_bits as f32 / cmd_nonzero as f32
+        } else {
+            7.0
+        };
+
+        // Distance cost table: Huffman-derived per-code costs.
+        let mut dist_freq = [0u32; 704];
+        for cmd in &best_commands {
+            if cmd.copy_len > 0 && cmd.distance > 0 {
+                // Approximate distance code index for histogram
+                let idx = if cmd.distance <= 4 {
+                    (cmd.distance - 1) as usize
+                } else {
+                    (4 + (cmd.distance as f32).ln() as usize).min(703)
+                };
+                dist_freq[idx] += 1;
+            }
+        }
+        let dist_huff = omnizip_codecs::HuffmanLengths::build(&dist_freq, 15);
+        let mut dist_table = [22.0f32; 704];
+        for i in 0..704 {
+            if dist_huff.lengths[i] > 0 {
+                dist_table[i] = dist_huff.lengths[i] as f32;
+            }
+        }
+
         let mut mf_iter = omnizip_codecs::HashChainMatchFinder::new(input, config);
-        let commands_iter = optimal_parse_with_costs(
+        let commands_iter = optimal_parse_with_costs_ext(
             input,
             &mut mf_iter,
             mlen_offset,
             use_dict,
             Some(lit_cost_refined),
+            Some(cmd_avg_bits),
+            Some(&dist_table),
         );
         let score_iter = score_commands(&commands_iter, input, mlen_offset);
         if score_iter < best_score {
@@ -1679,12 +1754,20 @@ fn parse_input_with_offset(
     // MF is provided by the caller — no creation here.
 
     // Q4+: cost-aware optimal parser for any content type (TODO 240).
-    // The single-pass `optimal_parse` matches the 2-pass iterative
-    // parser's ratio on every input we tested, and is 25-35% faster
-    // (Q8: 14.3s → 9.5s, Q11: 19.4s → 15.0s on the 20 MiB CSV
-    // benchmark). 2-pass refinement was over-engineering — the
-    // Shannon-entropy cost model is already within 1-3% of the
-    // actual Huffman cost, so the second pass had little to refine.
+    //
+    // Q8+: use iterative (2-pass) parser. The first pass uses Shannon
+    // entropy estimates; the second pass uses Huffman-derived costs from
+    // pass 1's actual command/literal/distance distributions. This is
+    // critical for FSST-preprocessed data where the Shannon cost model
+    // diverges significantly from actual Huffman costs — causing the
+    // 1-pass parser to make wrong match decisions with long copy support.
+    //
+    // Q4-Q7: single-pass optimal parser. The Shannon cost model is
+    // adequate at lower qualities where parsing effort is limited by
+    // chain depth anyway.
+    if quality >= 8 && input.len() <= 1024 * 1024 {
+        return iterative_optimal_parse(input, &mut mf, mlen_offset, use_dict);
+    }
     if quality >= 4 && input.len() <= 1024 * 1024 {
         return optimal_parse(input, &mut mf, mlen_offset, use_dict);
     }
