@@ -63,10 +63,11 @@ const MAX_BACKWARD_DISTANCE: u32 = (1 << WINDOW_BITS) - WINDOW_GAP;
 const MIN_MATCH: u32 = 4;
 
 /// Maximum copy length per command (RFC 7932 §5).
-/// The spec allows up to ~16M. We cap at 4096 — high enough to capture
-/// most long-match benefit on repetitive inputs while keeping
-/// match_length comparison bounded (4096 bytes max per candidate).
-const MAX_COPY: u32 = 4096;
+/// Capped at 271 (the max for short copy-length codes). Longer copies
+/// were tested (up to 4096) and improve ratio on highly repetitive
+/// synthetic data but regress on FSST-preprocessed data where longer
+/// matches interact poorly with the byte-code distribution.
+const MAX_COPY: u32 = 271;
 
 /// A parsed LZ77 command: insert `insert_len` literals, then copy
 /// `copy_len` bytes from `distance` (1-based backward offset).
