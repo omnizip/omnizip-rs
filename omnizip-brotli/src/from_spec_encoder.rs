@@ -1172,10 +1172,10 @@ fn optimal_parse_with_costs(
     // keeps the DP at O(45 * N). Reduced sets (16 entries) were tested
     // but hurt ratio by 2+ pp on CSV data — the finer granularity finds
     // significantly better match alignments.
-    const COPY_BOUNDARIES: [u32; 50] = [
+    const COPY_BOUNDARIES: [u32; 52] = [
         4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 22, 24, 26, 28, 30, 32, 34,
         36, 40, 44, 48, 52, 60, 68, 76, 84, 100, 116, 132, 148, 164, 180, 196, 212, 228, 244, 260,
-        271, 432, 496, 752, 1264, 2288,
+        271, 432, 496, 752, 1264, 2288, 3040, 4096,
     ];
     let mut cost = vec![f32::INFINITY; n + 1];
     let mut back_len: Vec<u32> = vec![0; n]; // 0 = literal, else = copy_len
@@ -1606,11 +1606,6 @@ fn brotli_quality_config(quality: i32, is_text: bool) -> (u32, u32, bool, bool, 
         match quality {
             0..=1 => (4, 8, false, false, false, 15),
             2..=3 => (8, 16, true, true, false, 16),
-            // hash_log=17 (512 KB head[]) keeps hash table within L2 cache.
-            // hash_log=18 (1 MB head[]) was tested — 85x slower on
-            // repetitive text due to cache thrashing. Keep 17 for Q4-9.
-            // nice_match bumped to 32/48/64 for better match quality
-            // on structured/FSST data.
             4..=5 => (8, 32, true, true, true, 17),
             6..=7 => (16, 48, true, true, true, 17),
             8..=9 => (32, 64, true, true, true, 17),
