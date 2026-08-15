@@ -249,6 +249,166 @@ pub(crate) fn read_context_map(
     Ok((context_map, br.bit_pos()))
 }
 
+/// Diagnostic command-stream statistics (env-gated via BROTLI_DEC_STATS).
+#[derive(Default)]
+struct DecStats {
+    cmds: u64,
+    lits: u64,
+    ins_extra: u64,
+    cpy_extra: u64,
+    cmd_hists: std::collections::BTreeMap<usize, [u32; 704]>,
+    lit_hists: std::collections::BTreeMap<usize, [u32; 256]>,
+    dist_hists: std::collections::BTreeMap<usize, std::collections::BTreeMap<u32, u32>>,
+    copies: u64,
+    copy_bytes: u64,
+    max_copy: u64,
+    implicit: u64,
+    dist_hist: std::collections::BTreeMap<&'static str, u64>,
+    last_dists: std::collections::VecDeque<u32>,
+    recent_cmds: std::collections::VecDeque<(u32, u32, u32)>,
+    dist_code_hist: std::collections::BTreeMap<i32, u64>,
+    npostfix: u32,
+    ndirect_raw: u32,
+    mb_bounds: Vec<(usize, usize)>,
+    // (pos_start, ins, copy, dist_sym (-1=implicit), dist, implicit, rb_before, rb_idx_before)
+    trace: Vec<(usize, u32, u32, i32, u32, bool, [u32; 4], i32)>,
+    at: u64,
+}
+
+static DEC_STATS: std::sync::Mutex<DecStats> = std::sync::Mutex::new(DecStats::empty());
+
+impl DecStats {
+    const fn empty() -> Self {
+        Self {
+            cmds: 0,
+            lits: 0,
+            ins_extra: 0,
+            cpy_extra: 0,
+            cmd_hists: std::collections::BTreeMap::new(),
+            lit_hists: std::collections::BTreeMap::new(),
+            dist_hists: std::collections::BTreeMap::new(),
+            copies: 0,
+            copy_bytes: 0,
+            max_copy: 0,
+            implicit: 0,
+            dist_hist: std::collections::BTreeMap::new(),
+            last_dists: std::collections::VecDeque::new(),
+            recent_cmds: std::collections::VecDeque::new(),
+            dist_code_hist: std::collections::BTreeMap::new(),
+            npostfix: 0,
+            ndirect_raw: 0,
+            mb_bounds: Vec::new(),
+            trace: Vec::new(),
+            at: u64::MAX,
+        }
+    }
+}
+
+fn dec_stats() -> std::sync::MutexGuard<'static, DecStats> {
+    DEC_STATS.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Print the accumulated decoder command statistics (diagnostic).
+#[doc(hidden)]
+pub fn _print_dec_stats(total_input: usize) {
+    let st = dec_stats();
+    eprintln!(
+        "DEC_STATS: cmds={} copies={} (implicit-rep0: {}) lits={} | avg_copy={:.1} max_copy={} copy_pct={:.1}%",
+        st.cmds,
+        st.copies,
+        st.implicit,
+        st.lits,
+        if st.copies > 0 { st.copy_bytes as f64 / st.copies as f64 } else { 0.0 },
+        st.max_copy,
+        st.copy_bytes as f64 * 100.0 / total_input as f64,
+    );
+    eprintln!(
+        "DEC_STATS extras: ins_extra={} cpy_extra={}",
+        st.ins_extra, st.cpy_extra
+    );
+    {
+        let mut bits = 0.0f64;
+        for (_bt, h) in st.cmd_hists.iter() {
+            let t: u64 = h.iter().map(|&x| u64::from(x)).sum();
+            if t == 0 {
+                continue;
+            }
+            for &f in h.iter() {
+                if f > 0 {
+                    bits -= f as f64 * (f as f64 / t as f64).log2();
+                }
+            }
+        }
+        let mut lbits = 0.0f64;
+        for (_t, h) in st.lit_hists.iter() {
+            let t: u64 = h.iter().map(|&x| u64::from(x)).sum();
+            if t == 0 {
+                continue;
+            }
+            for &f in h.iter() {
+                if f > 0 {
+                    lbits -= f as f64 * (f as f64 / t as f64).log2();
+                }
+            }
+        }
+        let mut dbits = 0.0f64;
+        let mut dtot = 0u64;
+        for (_t, h) in st.dist_hists.iter() {
+            let t: u64 = h.values().map(|&x| u64::from(x)).sum();
+            dtot += t;
+            if t == 0 {
+                continue;
+            }
+            for &f in h.values() {
+                if f > 0 {
+                    dbits -= f as f64 * (f as f64 / t as f64).log2();
+                }
+            }
+        }
+        eprintln!(
+            "DEC_STATS entropy: cmd_sym={:.0} lit_sym={:.0} dist_sym={:.0} (n={}) cmd_blocks={} lit_trees={} dist_trees={}",
+            bits, lbits, dbits, dtot, st.cmd_hists.len(), st.lit_hists.len(), st.dist_hists.len()
+        );
+        let mut per_tree: Vec<(usize, u64, usize)> = st
+            .lit_hists
+            .iter()
+            .map(|(t, h)| {
+                (
+                    *t,
+                    h.iter().map(|&x| u64::from(x)).sum(),
+                    h.iter().filter(|&&x| x > 0).count(),
+                )
+            })
+            .collect();
+        per_tree.sort_by_key(|&(_, c, _)| std::cmp::Reverse(c));
+        for (t, c, d) in per_tree.iter().take(24) {
+            eprintln!("DEC_STATS lit_tree[{t}]: count={c} distinct={d}");
+        }
+    }
+    eprintln!("DEC_STATS distances: {:?}", st.dist_hist);
+    eprintln!("DEC_STATS last dists: {:?}", st.last_dists);
+    let mut dch: Vec<(i32, u64)> = st.dist_code_hist.iter().map(|(&k, &v)| (k, v)).collect();
+    dch.sort_by_key(|&(_k, c)| std::cmp::Reverse(c));
+    dch.truncate(10);
+    eprintln!(
+        "DEC_STATS top dist codes (npostfix={}, ndirect_raw={}): {:?}",
+        st.npostfix, st.ndirect_raw, dch
+    );
+    // Print a window of mid-stream commands (rows 2000-2040 of the buffer).
+    let start = st.recent_cmds.len().saturating_sub(2000);
+    for (k, (ins, copy, dist)) in st.recent_cmds.iter().enumerate().skip(start).take(40) {
+        eprintln!("DEC_STATS cmd[{k}]: ins={ins} copy={copy} dist={dist}");
+    }
+    eprintln!("DEC_STATS mb_bounds: {:?}", st.mb_bounds);
+    if st.at != u64::MAX {
+        for (pos, ins, copy, sym, dist, implicit, rb, rb_idx) in st.trace.iter() {
+            eprintln!(
+                "DEC_TRACE pos={pos} ins={ins} copy={copy} sym={sym} dist={dist} implicit={implicit} rb={rb:?} rb_idx={rb_idx}"
+            );
+        }
+    }
+}
+
 /// Inverse Move-to-Front transform (RFC 7932 §9.6).
 ///
 /// Uses the standard sliding algorithm with a stack-of-8 optimisation
@@ -328,7 +488,9 @@ pub(crate) fn decode_compressed_metablock_full(
     nbltypesd: Option<u32>,
     output_base: usize,
     max_backward_distance: u32,
-) -> Result<(usize, Vec<u8>), &'static str> {
+    prior_output: &[u8],
+    ctx_in: (u8, u8),
+) -> Result<(usize, Vec<u8>, (u8, u8)), &'static str> {
     let mut br = BitReader::new(data);
     br.bit_pos = bit_pos;
 
@@ -360,6 +522,11 @@ pub(crate) fn decode_compressed_metablock_full(
     // NPOSTFIX + NDIRECT.
     let npostfix = br.read_bits(2) as usize;
     let ndirect_raw = br.read_bits(4) as usize;
+    if std::env::var("BROTLI_DEC_STATS").is_ok() {
+        let mut st = dec_stats();
+        st.npostfix = npostfix as u32;
+        st.ndirect_raw = ndirect_raw as u32;
+    }
     // Per RFC 7932 §9.4: NDIRECT = NDMOEM << NPOSTFIX.
     let _ndirect = ndirect_raw << npostfix;
 
@@ -396,6 +563,8 @@ pub(crate) fn decode_compressed_metablock_full(
         context_modes,
         output_base,
         max_backward_distance,
+        prior_output,
+        ctx_in,
     )
 }
 
@@ -416,7 +585,9 @@ pub(crate) fn decode_compressed_metablock_full_with_trees(
     ntreesd: Option<u32>,
     output_base: usize,
     max_backward_distance: u32,
-) -> Result<(usize, Vec<u8>), &'static str> {
+    prior_output: &[u8],
+    ctx_in: (u8, u8),
+) -> Result<(usize, Vec<u8>, (u8, u8)), &'static str> {
     let mut br = BitReader::new(data);
     br.bit_pos = bit_pos;
 
@@ -449,6 +620,8 @@ pub(crate) fn decode_compressed_metablock_full_with_trees(
         context_modes,
         output_base,
         max_backward_distance,
+        prior_output,
+        ctx_in,
     )
 }
 
@@ -469,7 +642,16 @@ fn finish_metablock_decode(
     context_modes: Vec<ContextMode>,
     output_base: usize,
     max_backward_distance: u32,
-) -> Result<(usize, Vec<u8>), &'static str> {
+    prior_output: &[u8],
+    ctx_in: (u8, u8),
+) -> Result<(usize, Vec<u8>, (u8, u8)), &'static str> {
+    if let Ok(v) = std::env::var("BROTLI_DEC_AT") {
+        let mut st = dec_stats();
+        if st.at == u64::MAX {
+            st.at = v.parse().unwrap_or(u64::MAX);
+        }
+        st.mb_bounds.push((output_base, mlen));
+    }
     let ndirect = ndirect_raw << npostfix;
     if npostfix > 3 {
         return Err("invalid metablock: NPOSTFIX > 3");
@@ -484,6 +666,9 @@ fn finish_metablock_decode(
     };
     let (lit_context_map, p) = read_context_map(data, br.bit_pos(), lit_cm_size, ntreesl, 0)?;
     br.bit_pos = p;
+    if std::env::var("BROTLI_DBG_TB").is_ok() {
+        eprintln!("LCM ntreesl={ntreesl} cm_size={lit_cm_size} bit_end={p}");
+    }
 
     // ----- Distance context map (§9.6) -----
     let dist_cm_size = (dist_bt.num_block_types as usize) << K_DISTANCE_CONTEXT_BITS;
@@ -493,6 +678,9 @@ fn finish_metablock_decode(
     };
     let (dist_context_map, p) = read_context_map(data, br.bit_pos(), dist_cm_size, ntreesd, 0)?;
     br.bit_pos = p;
+    if std::env::var("BROTLI_DBG_DC").is_ok() {
+        eprintln!("DCDBG ntreesd={ntreesd} cm_size={dist_cm_size} map={dist_context_map:?}");
+    }
 
     // ----- Huffman tree groups -----
     let (lit_trees, p) = read_tree_group(data, br.bit_pos(), 256, ntreesl)?;
@@ -507,8 +695,7 @@ fn finish_metablock_decode(
     let mut output: Vec<u8> = Vec::with_capacity(mlen);
     let mut dist_rb: [u32; 4] = [16, 15, 11, 4];
     let mut dist_rb_idx: i32 = 0;
-    let mut p1: u8 = 0;
-    let mut p2: u8 = 0;
+    let (mut p1, mut p2) = ctx_in;
 
     // Initialise block lengths. For categories with num_block_types==1,
     // the block length is the entire metablock (no switches emitted).
@@ -553,6 +740,7 @@ fn finish_metablock_decode(
         let insert_len = usize::from(v.insert_len_offset) + insert_len_extra as usize;
         let copy_len = usize::from(v.copy_len_offset) + copy_extra as usize;
 
+        let cmd_start_outlen = output.len();
         // Read literals.
         for _ in 0..insert_len {
             // Metablock boundary: per upstream `ProcessCommandsInternal`,
@@ -579,6 +767,10 @@ fn finish_metablock_decode(
                 as usize;
             let lit_tree = &lit_trees[lit_tree_idx];
             let lit = lit_tree.read_symbol(br).ok_or("invalid literal")?;
+            if std::env::var("BROTLI_DEC_STATS").is_ok() {
+                let mut st = dec_stats();
+                st.lit_hists.entry(lit_tree_idx).or_insert([0u32; 256])[lit as usize] += 1;
+            }
             output.push(lit as u8);
             p2 = p1;
             p1 = lit as u8;
@@ -589,6 +781,7 @@ fn finish_metablock_decode(
             break;
         }
 
+        let mut dist_sym: i32 = -1;
         // Distance computation.
         // Per upstream `ReadDistanceInternal`: dist_bt.block_length is
         // only decremented for EXPLICIT distance codes (when we actually
@@ -618,6 +811,26 @@ fn finish_metablock_decode(
                 as usize;
             let dist_tree = &dist_trees[dist_tree_idx];
             let dist_code = dist_tree.read_symbol(br).ok_or("invalid distance symbol")? as i32;
+            if std::env::var("BROTLI_DBG_DC").is_ok() {
+                eprintln!(
+                    "DCREAD pos={} ctx={} tree={} sym={} rb={:?}",
+                    output_base + output.len(),
+                    dist_context,
+                    dist_tree_idx,
+                    dist_code,
+                    dist_rb
+                );
+            }
+            dist_sym = dist_code;
+            if std::env::var("BROTLI_DEC_STATS").is_ok() {
+                let mut st = dec_stats();
+                *st.dist_code_hist.entry(dist_code).or_insert(0u64) += 1;
+                *st.dist_hists
+                    .entry(dist_tree_idx)
+                    .or_default()
+                    .entry(dist_code.unsigned_abs())
+                    .or_insert(0) += 1;
+            }
             crate::decoder::decode_distance_from_code(
                 dist_code,
                 num_direct_distance_codes,
@@ -650,17 +863,93 @@ fn finish_metablock_decode(
                 dist_rb_idx = dist_rb_idx.wrapping_add(1);
             }
         } else {
-            if distance == 0 || distance as usize > output.len() {
+            if distance == 0 || distance as usize > prior_output.len() + output.len() {
                 return Err("invalid back-reference distance");
             }
-            let src = output.len() - distance as usize;
-            for i in 0..copy_len {
-                let b = output[src + i];
-                output.push(b);
+            if distance as usize <= output.len() {
+                let src = output.len() - distance as usize;
+                for i in 0..copy_len {
+                    let b = output[src + i];
+                    output.push(b);
+                }
+            } else {
+                // Cross-metablock back-reference (upstream keeps one
+                // ring buffer across the frame).
+                let back = distance as usize - output.len();
+                if back > prior_output.len() {
+                    return Err("invalid back-reference distance");
+                }
+                let src = prior_output.len() - back;
+                for i in 0..copy_len {
+                    let b = if src + i < prior_output.len() {
+                        prior_output[src + i]
+                    } else {
+                        output[src + i - prior_output.len()]
+                    };
+                    output.push(b);
+                }
             }
             // Update recent-distances cache (upstream LZ77 copy path).
             dist_rb[(dist_rb_idx & 3) as usize] = distance;
             dist_rb_idx = dist_rb_idx.wrapping_add(1);
+        }
+
+        let cmd_pos = output_base + cmd_start_outlen + insert_len;
+        {
+            let mut st = dec_stats();
+            if (st.at == 1 || (st.at != u64::MAX && (cmd_pos as u64).abs_diff(st.at) <= 512))
+                && copy_len > 0
+            {
+                st.trace.push((
+                    cmd_pos,
+                    insert_len as u32,
+                    copy_len as u32,
+                    dist_sym,
+                    distance,
+                    v.distance_code >= 0,
+                    dist_rb,
+                    dist_rb_idx,
+                ));
+            }
+        }
+        // Diagnostic: dump command-stream statistics (env-gated).
+        if std::env::var("BROTLI_DEC_STATS").is_ok() {
+            let mut st = dec_stats();
+            st.cmds += 1;
+            st.lits += insert_len as u64;
+            st.ins_extra += u64::from(v.insert_len_extra_bits);
+            st.cpy_extra += u64::from(v.copy_len_extra_bits);
+            st.cmd_hists.entry(cmd_block_type).or_insert([0u32; 704])[cmd_code] += 1;
+            if copy_len > 0 {
+                st.copies += 1;
+                st.copy_bytes += copy_len as u64;
+                if copy_len as u64 > st.max_copy {
+                    st.max_copy = copy_len as u64;
+                }
+                if v.distance_code >= 0 {
+                    st.implicit += 1;
+                }
+                let bucket = match distance {
+                    0..=4 => "d1-4",
+                    5..=16 => "d5-16",
+                    17..=64 => "d17-64",
+                    65..=256 => "d65-256",
+                    257..=1024 => "d257-1k",
+                    1025..=8192 => "d1k-8k",
+                    8193..=65536 => "d8k-64k",
+                    _ => "dict",
+                };
+                *st.dist_hist.entry(bucket).or_insert(0u64) += 1;
+                st.last_dists.push_back(distance);
+                if st.last_dists.len() > 24 {
+                    st.last_dists.pop_front();
+                }
+                st.recent_cmds
+                    .push_back((insert_len as u32, copy_len as u32, distance));
+                if st.recent_cmds.len() > 4000 {
+                    st.recent_cmds.pop_front();
+                }
+            }
         }
 
         // Update p1/p2 from copied bytes.
@@ -681,5 +970,5 @@ fn finish_metablock_decode(
         }
     }
 
-    Ok((br.bit_pos(), output))
+    Ok((br.bit_pos(), output, (p1, p2)))
 }

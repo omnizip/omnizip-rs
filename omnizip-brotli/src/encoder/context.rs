@@ -114,3 +114,55 @@ pub fn collect_context_histograms(input: &[u8], context_mode: u32) -> Vec<[u32; 
     }
     histograms
 }
+
+/// Data-driven context→tree assignment that isolates LOW-DIVERSITY
+/// contexts into dedicated trees (a pure context = single-symbol tree
+/// = ZERO bits per literal; a 2-symbol context = 1 bit). The remaining
+/// high-diversity contexts are clustered into shared trees.
+///
+/// This mirrors what the reference encoder's ContextBlockSplitter
+/// achieves implicitly: on regular data many (block, context) buckets
+/// hold exactly one byte value, and giving each its own tree removes
+/// those literals from the bitstream entirely.
+pub fn assign_context_trees(
+    histograms: &[[u32; 256]],
+    max_shared_trees: usize,
+) -> (Vec<u8>, usize) {
+    let n = histograms.len();
+    let mut assignment = vec![0u8; n];
+    let mut next_tree: usize = 0;
+    let mut shared: Vec<usize> = Vec::new();
+    for (i, h) in histograms.iter().enumerate() {
+        let total: u64 = h.iter().map(|&x| u64::from(x)).sum();
+        let distinct = h.iter().filter(|&&x| x > 0).count();
+        // Dedicated tree when the per-literal saving clearly beats the
+        // ~12-30-bit tree header: pure contexts always win; 2-3 symbol
+        // contexts win when common enough.
+        let dedicated = distinct == 1 && total >= 8;
+        if dedicated {
+            assignment[i] = next_tree as u8;
+            next_tree += 1;
+        } else {
+            shared.push(i);
+        }
+    }
+    let ntrees = if shared.is_empty() {
+        next_tree.max(1)
+    } else {
+        let shared_hists: Vec<[u32; 256]> = shared.iter().map(|&i| histograms[i]).collect();
+        let k = max_shared_trees.min(shared.len()).max(1);
+        let cmap = cluster_contexts(&shared_hists, k);
+        for (slot, &i) in shared.iter().enumerate() {
+            assignment[i] = (next_tree + cmap[slot] as usize) as u8;
+        }
+        next_tree + k
+    };
+    // Tree ids must fit the cmap's u8 entries.
+    let ntrees = ntrees.min(256);
+    if ntrees == 256 {
+        for a in assignment.iter_mut() {
+            *a = (*a).min(255);
+        }
+    }
+    (assignment, ntrees)
+}

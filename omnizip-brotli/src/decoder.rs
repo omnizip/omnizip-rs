@@ -606,6 +606,9 @@ pub fn read_huffman_table(
     br.bit_pos = bit_pos;
 
     let hskip = br.read_bits(2);
+    if std::env::var("BROTLI_DBG_TB").is_ok() {
+        eprintln!("TBL start={bit_pos} alphabet={alphabet_size} hskip={hskip}");
+    }
     if hskip == 1 {
         read_simple_form(&mut br, alphabet_size)
     } else {
@@ -955,6 +958,10 @@ pub fn decode(compressed: &[u8]) -> Result<Vec<u8>, &'static str> {
     // dictionary.
     let max_backward_distance: u32 = (1u32 << frame.window_bits).saturating_sub(16);
     let mut output = Vec::new();
+    // Literal context p1/p2 carry across metablocks (upstream keeps one
+    // ring buffer; the context of a metablock's first literals is
+    // computed from the frame's previous output bytes).
+    let mut lit_ctx: (u8, u8) = (0, 0);
 
     loop {
         let (mb, next_pos) = parse_metablock_header(compressed, bit_pos)?;
@@ -988,14 +995,17 @@ pub fn decode(compressed: &[u8]) -> Result<Vec<u8>, &'static str> {
             bit_pos = needed * 8;
         } else {
             let output_base = output.len();
-            let (new_pos, bytes_emitted) = decode_compressed_metablock(
+            let (new_pos, bytes_emitted, new_ctx) = decode_compressed_metablock(
                 compressed,
                 bit_pos,
                 mb.mlen as usize,
                 output_base,
                 max_backward_distance,
+                &output,
+                lit_ctx,
             )?;
             bit_pos = new_pos;
+            lit_ctx = new_ctx;
             output.extend(bytes_emitted);
         }
 
@@ -1024,7 +1034,9 @@ fn decode_compressed_metablock(
     mlen: usize,
     output_base: usize,
     max_backward_distance: u32,
-) -> Result<(usize, Vec<u8>), &'static str> {
+    prior_output: &[u8],
+    ctx_in: (u8, u8),
+) -> Result<(usize, Vec<u8>, (u8, u8)), &'static str> {
     let mut br = BitReader::new(data);
     br.bit_pos = bit_pos;
 
@@ -1045,6 +1057,8 @@ fn decode_compressed_metablock(
             None,
             output_base,
             max_backward_distance,
+            prior_output,
+            ctx_in,
         );
     }
 
@@ -1059,6 +1073,8 @@ fn decode_compressed_metablock(
             None,
             output_base,
             max_backward_distance,
+            prior_output,
+            ctx_in,
         );
     }
 
@@ -1073,6 +1089,8 @@ fn decode_compressed_metablock(
             Some(nbltypesd),
             output_base,
             max_backward_distance,
+            prior_output,
+            ctx_in,
         );
     }
 
@@ -1118,6 +1136,8 @@ fn decode_compressed_metablock(
             None,
             output_base,
             max_backward_distance,
+            prior_output,
+            ctx_in,
         );
     }
 
@@ -1136,6 +1156,8 @@ fn decode_compressed_metablock(
             Some(ntreesd),
             output_base,
             max_backward_distance,
+            prior_output,
+            ctx_in,
         );
     }
 
@@ -1203,6 +1225,7 @@ fn decode_compressed_metablock(
 
         if copy_len > 0 {
             // Read distance (RFC 7932 §10.4 + upstream ProcessCommandsInternal).
+            let mut dist_sym: i32 = -1;
             let distance = if v.distance_code >= 0 {
                 // Implicit distance (kCmdLut.distance_code == 0):
                 // use most recent from ring buffer. Matches upstream
@@ -1213,6 +1236,7 @@ fn decode_compressed_metablock(
                 let dist_code = dist_table
                     .read_symbol(&mut br)
                     .ok_or("invalid distance symbol")? as i32;
+                dist_sym = dist_code;
                 decode_distance_from_code(
                     dist_code,
                     num_direct_distance_codes,
@@ -1222,6 +1246,21 @@ fn decode_compressed_metablock(
                     &mut dist_rb_idx,
                 )
             };
+            {
+                static DEC_AT: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+                let at = *DEC_AT.get_or_init(|| {
+                    std::env::var("BROTLI_DEC_AT")
+                        .ok()
+                        .and_then(|s| s.parse().ok())
+                        .unwrap_or(u64::MAX)
+                });
+                let cmd_pos = output_base + output.len() - insert_len;
+                if at == 1 || (at != u64::MAX && (cmd_pos as u64).abs_diff(at) <= 512) {
+                    eprintln!(
+                        "DEC_TRACE pos={cmd_pos} ins={insert_len} copy={copy_len} sym={dist_sym} (-1=implicit) dist={distance} rb={dist_rb:?} rb_idx={dist_rb_idx}"
+                    );
+                }
+            }
             // Per upstream: max_distance = min(pos, max_backward_distance).
             // Distances > max_distance are static-dictionary references.
             // pos is the CUMULATIVE output position across all metablocks
@@ -1252,13 +1291,32 @@ fn decode_compressed_metablock(
                     dist_rb_idx = dist_rb_idx.wrapping_add(1);
                 }
             } else {
-                if distance == 0 || distance as usize > output.len() {
+                if distance == 0 || distance as usize > prior_output.len() + output.len() {
                     return Err("invalid back-reference distance");
                 }
-                let src = output.len() - distance as usize;
-                for i in 0..copy_len {
-                    let b = output[src + i];
-                    output.push(b);
+                if distance as usize <= output.len() {
+                    let src = output.len() - distance as usize;
+                    for i in 0..copy_len {
+                        let b = output[src + i];
+                        output.push(b);
+                    }
+                } else {
+                    // Cross-metablock back-reference: source from the
+                    // previous metablocks' output (upstream keeps one
+                    // ring buffer across the whole frame).
+                    let back = distance as usize - output.len();
+                    if back > prior_output.len() {
+                        return Err("invalid back-reference distance");
+                    }
+                    let src = prior_output.len() - back;
+                    for i in 0..copy_len {
+                        let b = if src + i < prior_output.len() {
+                            prior_output[src + i]
+                        } else {
+                            output[src + i - prior_output.len()]
+                        };
+                        output.push(b);
+                    }
                 }
                 // Update recent-distances cache (upstream LZ77 copy path).
                 dist_rb[(dist_rb_idx & 3) as usize] = distance;
@@ -1271,7 +1329,14 @@ fn decode_compressed_metablock(
         }
     }
 
-    Ok((br.bit_pos(), output))
+    let tail_ctx = if output.is_empty() {
+        ctx_in
+    } else if output.len() == 1 {
+        (output[0], 0)
+    } else {
+        (output[output.len() - 1], output[output.len() - 2])
+    };
+    Ok((br.bit_pos(), output, tail_ctx))
 }
 
 /// Decode a distance from a `dist_table` symbol code (RFC 7932 §9.4 + §10.4).

@@ -69,6 +69,45 @@ const MIN_MATCH: u32 = 4;
 /// matches interact poorly with the byte-code distribution.
 const MAX_COPY: u32 = 271;
 
+/// Static complex UTF-8 context map from the brotli reference encoder
+/// (`kStaticContextMapComplexUTF64`). Maps 64 UTF-8 context IDs into
+/// 13 literal Huffman trees. The split separates character classes
+/// (digits, upper/lowercase, punctuation, whitespace) for tighter
+/// per-tree Huffman coding.
+///
+/// Ported verbatim from `brotli/c/enc/encode.c` (BSD-3-Clause).
+#[rustfmt::skip]
+const K_STATIC_CONTEXT_MAP_COMPLEX_UTF8: [u8; 64] = [
+    11, 11, 12, 12,  // contexts  0- 3: special/control
+     0,  0,  0,  0,  // contexts  4- 7: LF/CR/whitespace
+     1,  1,  9,  9,  // contexts  8-11: space
+     2,  2,  2,  2,  // contexts 12-15: ! first after space/lf
+     1,  1,  1,  1,  // contexts 16-19: "
+     8,  3,  3,  3,  // contexts 20-23: %
+     1,  1,  1,  1,  // contexts 24-27: ({[
+     2,  2,  2,  2,  // contexts 28-31: }])
+     8,  4,  4,  4,  // contexts 32-35: :;
+     8,  7,  4,  4,  // contexts 36-39: .
+     8,  0,  0,  0,  // contexts 40-43: >
+     3,  3,  3,  3,  // contexts 44-47: [0-9]
+     5,  5, 10,  5,  // contexts 48-51: [A-Z]
+     5,  5, 10,  5,  // contexts 52-55: [A-Z]
+     6,  6,  6,  6,  // contexts 56-59: [a-z]
+     6,  6,  6,  6,  // contexts 60-63: [a-z]
+];
+
+/// Number of distinct trees in the complex UTF-8 context map.
+const NTREES_COMPLEX_UTF8: u32 = 13;
+
+/// Copy-length candidates evaluated per match in the optimal parsers.
+/// Sampled at copy-code group boundaries (the highest L in each group
+/// wins ties, since within a copy-length code the wire cost is flat).
+const COPY_BOUNDARIES: [u32; 52] = [
+    4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 22, 24, 26, 28, 30, 32, 34, 36,
+    40, 44, 48, 52, 60, 68, 76, 84, 100, 116, 132, 148, 164, 180, 196, 212, 228, 244, 260, 271,
+    432, 496, 752, 1264, 2288, 3040, 4096,
+];
+
 /// A parsed LZ77 command: insert `insert_len` literals, then copy
 /// `copy_len` bytes from `distance` (1-based backward offset).
 #[derive(Clone, Copy, Debug)]
@@ -98,6 +137,18 @@ pub struct Command {
 ///
 /// Initial state matches the C reference: `dist_rb = [16, 15, 11, 4]`,
 /// `idx = 0`.
+/// Literal-context (p1, p2) at a chunk start: the frame's previous two
+/// output bytes (upstream ring-buffer semantics), or (0, 0) at frame start.
+static LIT0: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn carried_lit_ctx(full_input: &[u8], mlen_offset: usize) -> (u8, u8) {
+    match mlen_offset {
+        0 => (0, 0),
+        1 => (full_input[0], 0),
+        n => (full_input[n - 1], full_input[n - 2]),
+    }
+}
+
 #[derive(Clone, Debug)]
 struct RepBuffer {
     dist_rb: [u32; 4],
@@ -127,6 +178,40 @@ impl RepBuffer {
         for code in 0..4u32 {
             if self.rep_at(code) == distance {
                 return Some(code);
+            }
+        }
+        None
+    }
+
+    /// Returns the cheapest distance SHORT CODE (0-15, RFC 7932 §4)
+    /// that reproduces `distance` from the current ring-buffer state:
+    /// - Codes 0-3: exact rep0/rep1/rep2/rep3.
+    /// - Codes 4-9: rep0 ± {1,2,3}.
+    /// - Codes 10-15: rep1 ± {1,2,3}.
+    ///
+    /// All 16 codes cost only a Huffman symbol (no extra bits). This is
+    /// how the reference encoder encodes slowly-drifting distance chains
+    /// (e.g. periodic structures whose period shifts by ±1 per row) at
+    /// ~3 bits instead of a ~15-bit long-form code.
+    fn find_short_code(&self, distance: u32) -> Option<u32> {
+        for code in 0..4u32 {
+            if self.rep_at(code) == distance {
+                return Some(code);
+            }
+        }
+        const DELTAS: [i32; 6] = [-1, 1, -2, 2, -3, 3];
+        // Codes 4-9: rep0 ± delta.
+        let rep0 = self.rep_at(0) as i32;
+        for (k, &d) in DELTAS.iter().enumerate() {
+            if rep0 + d == distance as i32 && rep0 + d >= 1 {
+                return Some(4 + k as u32);
+            }
+        }
+        // Codes 10-15: rep1 ± delta.
+        let rep1 = self.rep_at(1) as i32;
+        for (k, &d) in DELTAS.iter().enumerate() {
+            if rep1 + d == distance as i32 && rep1 + d >= 1 {
+                return Some(10 + k as u32);
             }
         }
         None
@@ -230,7 +315,16 @@ pub fn compress_with_quality(input: &[u8], quality: i32) -> Vec<u8> {
     // each as a Huffman-coded metablock. Uses a SINGLE match finder
     // over the full input so chunk N+1 can find matches referencing
     // data from chunks 0..N (cross-chunk matching).
-    let chunk_size = (1 << 20) - 1; // 1 MiB - 1
+    // Each chunk is a Huffman-coded metablock. Larger chunks amortize the
+    // Huffman table overhead better but use more DP memory. Quality-dependent:
+    // Q10+ uses 8 MiB, Q4-9 uses 4 MiB, Q0-3 uses 1 MiB.
+    let chunk_size: usize = if q >= 10 {
+        (1 << 23) - 1 // 8 MiB - 1
+    } else if q >= 4 {
+        (1 << 22) - 1 // 4 MiB - 1
+    } else {
+        (1 << 20) - 1 // 1 MiB - 1
+    };
     let mut bw = BitWriter::new();
     write_wbits(&mut bw);
 
@@ -255,6 +349,7 @@ pub fn compress_with_quality(input: &[u8], quality: i32) -> Vec<u8> {
         while offset < input.len() {
             let end = (offset + chunk_size).min(input.len());
             let is_last = end == input.len();
+            let t0 = std::time::Instant::now();
             encode_huffman_chunk_with_shared_mf(
                 &mut bw,
                 input,
@@ -264,6 +359,9 @@ pub fn compress_with_quality(input: &[u8], quality: i32) -> Vec<u8> {
                 q,
                 &mut shared_mf,
             );
+            if std::env::var("BROTLI_STATS").is_ok() {
+                eprintln!("chunk {offset}..{end} q{q} took {:?}", t0.elapsed());
+            }
             offset = end;
         }
     } else {
@@ -272,7 +370,8 @@ pub fn compress_with_quality(input: &[u8], quality: i32) -> Vec<u8> {
         while offset < input.len() {
             let end = (offset + chunk_size).min(input.len());
             let is_last = end == input.len();
-            encode_huffman_chunk_into(&mut bw, &input[offset..end], offset, is_last, q);
+            let ctx_in = carried_lit_ctx(&input, offset);
+            encode_huffman_chunk_into(&mut bw, &input[offset..end], offset, is_last, q, ctx_in);
             offset = end;
         }
     }
@@ -297,6 +396,7 @@ fn encode_huffman_chunk_into(
     mlen_offset: usize,
     is_last: bool,
     quality: i32,
+    ctx_in: (u8, u8),
 ) {
     // Standard path: MF created over the chunk slice itself.
     let is_text = is_text_like(input);
@@ -310,7 +410,7 @@ fn encode_huffman_chunk_into(
         max_match_length: MAX_COPY,
     };
     let mut mf = omnizip_codecs::HashChainMatchFinder::new(input, config);
-    encode_huffman_chunk_body(bw, input, &mut mf, mlen_offset, is_last, quality);
+    encode_huffman_chunk_body(bw, input, &mut mf, mlen_offset, is_last, quality, ctx_in);
 }
 
 /// Internal: encode one metablock with an external match finder.
@@ -323,6 +423,7 @@ fn encode_huffman_chunk_body(
     mlen_offset: usize,
     is_last: bool,
     quality: i32,
+    ctx_in: (u8, u8),
 ) {
     bw.write_bits(u32::from(is_last), 1); // ISLAST
                                           // ISLASTEMPTY only present when ISLAST=1; we never emit empty
@@ -366,59 +467,120 @@ fn encode_huffman_chunk_body(
     // this can be flipped back on for inputs with strongly varying
     // per-block statistics.
     let use_block_switch = false;
-    let nbltypes_l: u32 = if use_block_switch { 2 } else { 1 };
-    write_varlen_uint8(bw, nbltypes_l - 1); // NBLTYPESL
-    if nbltypes_l > 1 {
-        write_block_type_trees(bw, nbltypes_l);
-    }
-    write_varlen_uint8(bw, 0); // NBLTYPESI = 1 (no cmd block trees)
-    write_varlen_uint8(bw, 0); // NBLTYPESD = 1 (no dist block trees)
-
     let commands = parse_input_with_offset(input, mf, mlen_offset, quality, false);
-
     // Choose distance-code configuration from the parsed commands.
     let dist_cfg = DistanceConfig::choose(&commands);
-    bw.write_bits(dist_cfg.npostfix as u32, 2); // NPOSTFIX
-    bw.write_bits(dist_cfg.ndmoem as u32, 4); // NDMOEM
 
+    let Some(stream) = build_symbol_stream(&commands, input, mlen_offset, &dist_cfg) else {
+        // Header consistency: NBLTYPESI/D must still be written before
+        // returning (the metablock prefix is already on the wire).
+        write_varlen_uint8(bw, 0); // NBLTYPESI = 1
+        write_varlen_uint8(bw, 0); // NBLTYPESD = 1
+        return;
+    };
+
+    // --- Command block splitting (BrotliBuildMetaBlock cmd pass) ---
+    let cmd_split_on = quality >= 4
+        && stream.cmd_symbols.len() >= 1024
+        && std::env::var("BROTLI_NO_SPLIT").is_err();
+    let max_blocks = std::env::var("BROTLI_SPLIT_MAX")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(16);
+    let cmd_boundaries: Vec<usize> = if cmd_split_on {
+        split_cmd_symbols_optimal(&stream.cmd_symbols, max_blocks)
+    } else {
+        vec![0]
+    };
+    let nbltypes_c = cmd_boundaries.len() as u32;
+    let cmd_block_len: Vec<u32> = cmd_boundaries
+        .iter()
+        .enumerate()
+        .map(|(k, &b)| {
+            let end = cmd_boundaries
+                .get(k + 1)
+                .copied()
+                .unwrap_or(stream.cmd_symbols.len());
+            (end - b) as u32
+        })
+        .collect();
+    // Per-command block-type assignment.
+    let cmd_block_of: Vec<u8> = {
+        let mut a = vec![0u8; stream.cmd_symbols.len()];
+        for (k, &b) in cmd_boundaries.iter().enumerate() {
+            let end = cmd_boundaries
+                .get(k + 1)
+                .copied()
+                .unwrap_or(stream.cmd_symbols.len());
+            for x in a.iter_mut().take(end).skip(b) {
+                *x = k as u8;
+            }
+        }
+        a
+    };
+
+    // --- Literal block splitting (BrotliBuildMetaBlock literal pass) ---
+    let lit_split_on = quality >= 4
+        && stream.literals.len() >= 4096
+        && use_context
+        && std::env::var("BROTLI_NO_LIT_SPLIT").is_err();
+    let max_lit_blocks = std::env::var("BROTLI_LIT_SPLIT_MAX")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(8);
+    let lit_boundaries: Vec<usize> = if lit_split_on {
+        split_literals(&stream.literals, max_lit_blocks)
+    } else {
+        vec![0]
+    };
+    let nbltypes_l: u32 = lit_boundaries.len() as u32;
+    let lit_block_len: Vec<u32> = lit_boundaries
+        .iter()
+        .enumerate()
+        .map(|(k, &b)| {
+            let end = lit_boundaries
+                .get(k + 1)
+                .copied()
+                .unwrap_or(stream.literals.len());
+            (end - b) as u32
+        })
+        .collect();
     // Context mode selection: UTF8 (2) for text-like input, LSB6 (0) otherwise.
     // UTF8 gives better context separation for multi-byte chars and ASCII text.
     let context_mode: u32 = if use_context && is_text_like(input) {
         2 // UTF8
     } else {
         0 // LSB6
-    }; // Context mode: one field PER literal block type (RFC 7932 §9.3).
-    for _ in 0..nbltypes_l {
-        bw.write_bits(context_mode, 2);
-    }
-
-    let (ntrees_l, lit_ctx_map): (u32, Vec<u8>) = if use_block_switch {
+    };
+    let (mut ntrees_l, mut lit_ctx_map): (u32, Vec<u8>) = if use_block_switch {
         (2, (0..128u8).map(|i| i >> 6).collect())
+    } else if use_context && context_mode == 2 && input.len() >= 1_048_576 && quality >= 10 {
+        // Static complex UTF-8 context map (13 trees) for large text
+        // inputs at Q10+. Ported from the reference encoder's
+        // `kStaticContextMapComplexUTF64`.
+        (
+            NTREES_COMPLEX_UTF8,
+            K_STATIC_CONTEXT_MAP_COMPLEX_UTF8.to_vec(),
+        )
     } else if use_context && input.len() >= 8192 {
-        (4u32, (0..64u8).map(|ctx| ctx >> 4).collect())
+        if std::env::var("BROTLI_CLUSTER").is_ok() {
+            let nt: usize = std::env::var("BROTLI_NTREES")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(4);
+            let hists = crate::encoder::context::collect_context_histograms(input, context_mode);
+            let ctx_map = crate::encoder::context::cluster_contexts(&hists, nt);
+            (nt as u32, ctx_map)
+        } else {
+            (4u32, (0..64u8).map(|ctx| ctx >> 4).collect())
+        }
     } else if use_context {
         (2, (0..64u8).map(|ctx| u8::from(ctx >= 32)).collect())
     } else {
         (1, Vec::new())
     };
 
-    write_varlen_uint8(bw, ntrees_l - 1); // NTREESL
-    if ntrees_l > 1 {
-        write_context_map(bw, &lit_ctx_map, ntrees_l);
-    }
-    write_varlen_uint8(bw, 0); // NTREESD = 1
-
-    let Some(stream) = build_symbol_stream(&commands, input, mlen_offset, &dist_cfg) else {
-        return;
-    };
-
-    let dist_alphabet = dist_cfg.alphabet_size();
-
-    // --- Context modeling: per-tree literal frequencies ---
-    // For NTREES_L > 1, partition literals by their LSB6 context.
-    // Build a virtual output buffer to correctly track the "previous byte"
-    // for context computation (copies change the previous byte too).
-    let ntrees = ntrees_l as usize;
+    let mut ntrees = ntrees_l as usize;
     let mut lit_freqs: Vec<Vec<u32>> = vec![vec![0u32; 256]; ntrees];
 
     // Simulate output to get correct per-position context.
@@ -440,7 +602,12 @@ fn encode_huffman_chunk_body(
             let before = output_sim.len();
             let copy_start_global = mlen_offset + output_sim.len();
             let max_dist = (copy_start_global as u32).min(MAX_BACKWARD_DISTANCE);
-            let is_dict = (cmd.distance as usize) > output_sim.len();
+            // Use GLOBAL position for is_dict check. Cross-chunk LZ77
+            // references have distance > local output_sim.len() but ≤
+            // global position. Using local position misidentifies them
+            // as dict references, corrupting the simulated output bytes
+            // and causing context ID mismatches between encoder and decoder.
+            let is_dict = (cmd.distance as usize) > copy_start_global;
             if is_dict {
                 let mut dict_bytes = Vec::with_capacity(cmd.copy_len as usize);
                 if dictionary_lookup(&mut dict_bytes, cmd.copy_len, cmd.distance as i32, max_dist)
@@ -449,6 +616,17 @@ fn encode_huffman_chunk_body(
                     output_sim.extend_from_slice(&dict_bytes);
                 } else {
                     output_sim.extend(std::iter::repeat(0u8).take(cmd.copy_len as usize));
+                }
+            } else if (cmd.distance as usize) > output_sim.len() {
+                // Cross-chunk LZ77 reference: source data is in a previous
+                // chunk not present in output_sim. Since decoder output
+                // equals the original input, use input bytes directly.
+                let out_pos = output_sim.len();
+                let copy_len = cmd.copy_len as usize;
+                if out_pos + copy_len <= input.len() {
+                    output_sim.extend_from_slice(&input[out_pos..out_pos + copy_len]);
+                } else {
+                    output_sim.extend(std::iter::repeat(0u8).take(copy_len));
                 }
             } else {
                 let src = output_sim.len() - cmd.distance as usize;
@@ -463,45 +641,348 @@ fn encode_huffman_chunk_body(
         cmd_copy_advances.push(copy_advance);
     }
 
-    // Compute per-tree frequencies using simulated output.
-    let mut p1: u8 = 0;
-    let mut p2: u8 = 0;
+    // Compute per-tree frequencies. Since the decoder's output equals
+    // the original input, we use input[out_pos] directly instead of
+    // output_sim[out_pos]. This avoids corruption from cross-chunk LZ77
+    // references that output_sim can't reproduce (it only has the
+    // current chunk's data, not previous chunks').
+    // p1/p2 CARRY across metablocks: upstream's context lookup reads the
+    // frame ring buffer's last two bytes, so a continuation chunk's first
+    // literals are contexted by the previous chunk's tail.
+    let (mut p1, mut p2) = ctx_in;
     let mut out_pos = 0usize;
     let mut lit_block_type: usize = 0;
-    let mut lit_block_remaining: usize = if use_block_switch { 128 } else { usize::MAX };
-    for (cmd_idx, cmd) in commands.iter().enumerate() {
-        for _ in 0..cmd.insert_len {
-            let b = output_sim[out_pos];
-            let ctx = if use_block_switch {
-                let cm_idx = (lit_block_type << 6) + (compute_context_id(p1, p2, 0) as usize);
-                lit_ctx_map[cm_idx] as usize
-            } else {
+    // Per-(block, context) literal histograms. With literal block
+    // splitting (nbltypes_l > 1), each block gets its own context→tree
+    // mapping; trees are shared across blocks (NTREES_L total).
+    let bc_hists: Vec<[u32; 256]> = vec![[0u32; 256]; nbltypes_l as usize * 64];
+    let mut bc_hists = bc_hists;
+    {
+        let mut lit_pos = 0usize;
+        let mut lit_blk = 0usize;
+        let mut next_b = 1usize;
+        for (cmd_idx, cmd) in commands.iter().enumerate() {
+            for _ in 0..cmd.insert_len {
+                if nbltypes_l > 1
+                    && lit_blk + 1 < lit_boundaries.len()
+                    && lit_pos >= lit_boundaries[lit_blk + 1]
+                {
+                    lit_blk += 1;
+                    next_b += 1;
+                }
+                let _ = next_b;
+                let b = input[out_pos];
                 let ctx_id = compute_context_id(p1, p2, context_mode) as usize;
-                if ntrees > 1 {
-                    lit_ctx_map[ctx_id] as usize
-                } else {
-                    0
-                }
-            };
-            lit_freqs[ctx][b as usize] += 1;
-            p2 = p1;
-            p1 = b;
-            out_pos += 1;
-            if use_block_switch {
-                if lit_block_remaining == 0 {
-                    lit_block_type = 1 - lit_block_type;
-                    lit_block_remaining = 128;
-                }
-                lit_block_remaining -= 1;
+                bc_hists[(lit_blk << 6) + ctx_id][b as usize] += 1;
+                p2 = p1;
+                p1 = b;
+                out_pos += 1;
+                lit_pos += 1;
             }
-        }
-        if cmd.copy_len > 0 {
-            out_pos += cmd_copy_advances[cmd_idx];
-            p2 = p1;
-            p1 = output_sim[out_pos - 1];
+            if cmd.copy_len > 0 {
+                out_pos += cmd_copy_advances[cmd_idx];
+                if out_pos > 0 && out_pos <= input.len() {
+                    // Mirror the decoder exactly: for copies ≥ 2 bytes,
+                    // p2 = second-to-last copied byte (NOT the pre-copy p1).
+                    // A wrong p2 selects a different literal context tree
+                    // than the decoder on fine-grained context maps.
+                    let new_p1 = input[out_pos - 1];
+                    p2 = if cmd.copy_len > 1 {
+                        input[out_pos - 2]
+                    } else {
+                        p1
+                    };
+                    p1 = new_p1;
+                }
+            }
         }
     }
 
+    // Data-driven tree assignment: isolate pure/low-diversity contexts
+    // into dedicated (often single-symbol, zero-bit) trees; cluster the
+    // rest into shared trees. Replaces the static map whenever
+    // per-(block,context) histograms are available.
+    if std::env::var("BROTLI_DBG_CTX").is_ok() {
+        let mut rows: Vec<(usize, u64, usize)> = bc_hists
+            .iter()
+            .enumerate()
+            .map(|(i, h)| {
+                (
+                    i,
+                    h.iter().map(|&x| u64::from(x)).sum(),
+                    h.iter().filter(|&&x| x > 0).count(),
+                )
+            })
+            .collect();
+        rows.sort_by_key(|&(_, c, _)| std::cmp::Reverse(c));
+        for (i, c, d) in rows.iter().take(20) {
+            eprintln!("CTXDBG bucket[{i}] count={c} distinct={d}");
+        }
+    }
+    {
+        // Compare two tree strategies by expected wire cost and keep
+        // the cheaper: (A) plain clustering vs (B) singleton isolation.
+        // On literal-sparse inputs B's tree+cmap overhead exceeds its
+        // zero-bit-literal savings.
+        let tree_bits = |h: &[u32; 256]| -> f64 {
+            let t: u64 = h.iter().map(|&x| u64::from(x)).sum();
+            if t == 0 {
+                return 0.0;
+            }
+            let mut e = 0.0f64;
+            for &f in h.iter() {
+                if f > 0 {
+                    let p = f as f64 / t as f64;
+                    e -= f as f64 * p.log2();
+                }
+            }
+            e
+        };
+        let cmap_a = crate::encoder::context::cluster_contexts(&bc_hists, 4);
+        let mut hists_a: Vec<[u32; 256]> = vec![[0u32; 256]; 4];
+        for (i, h) in bc_hists.iter().enumerate() {
+            for (b, &f) in h.iter().enumerate() {
+                hists_a[usize::from(cmap_a[i])][b] += f;
+            }
+        }
+        let cost_a: f64 = hists_a.iter().map(|h| tree_bits(h)).sum::<f64>()
+            + 4.0 * 60.0
+            + bc_hists.len() as f64 * 2.0;
+        let (cmap_b, count_b) =
+            crate::encoder::context::assign_context_trees(&bc_hists, ntrees.max(4));
+        let mut hists_b: Vec<[u32; 256]> = vec![[0u32; 256]; count_b];
+        for (i, h) in bc_hists.iter().enumerate() {
+            for (b, &f) in h.iter().enumerate() {
+                hists_b[usize::from(cmap_b[i])][b] += f;
+            }
+        }
+        let cost_b: f64 = hists_b.iter().map(|h| tree_bits(h)).sum::<f64>()
+            + count_b as f64 * 35.0
+            + bc_hists.len() as f64 * (count_b as f64).log2().max(1.0);
+        let (cmap, tree_count) = if cost_b < cost_a {
+            (cmap_b, count_b)
+        } else {
+            (cmap_a, 4)
+        };
+        lit_ctx_map.clear();
+        lit_ctx_map.extend_from_slice(&cmap);
+        ntrees_l = tree_count as u32;
+        ntrees = tree_count;
+        lit_freqs = vec![vec![0u32; 256]; ntrees];
+        if std::env::var("BROTLI_DBG_CTX").is_ok() {
+            eprintln!("ASSIGN cost_a={cost_a:.0} cost_b={cost_b:.0} trees={tree_count}");
+        }
+    }
+    for (cm_idx, hist) in bc_hists.iter().enumerate() {
+        let tree = if ntrees > 1 {
+            lit_ctx_map[cm_idx] as usize
+        } else {
+            0
+        };
+        for (b, &f) in hist.iter().enumerate() {
+            lit_freqs[tree][b] += f;
+        }
+    }
+    // Prune unused trees: the assignment may create tree ids that no
+    // literal lands in (rare contexts, empty clusters). Every unused
+    // tree would still cost a full header, so compact the ids and
+    // remap the context map.
+    if ntrees > 1 {
+        let mut remap = vec![usize::MAX; ntrees];
+        let mut next = 0usize;
+        for t in 0..ntrees {
+            let total: u32 = lit_freqs[t].iter().sum();
+            if total > 0 {
+                remap[t] = next;
+                next += 1;
+            }
+        }
+        if next == 0 {
+            remap[0] = 0;
+            next = 1;
+        }
+        let compact: Vec<Vec<u32>> = (0..ntrees)
+            .filter(|&t| remap[t] != usize::MAX)
+            .map(|t| std::mem::take(&mut lit_freqs[t]))
+            .collect();
+        lit_freqs = compact;
+        for e in lit_ctx_map.iter_mut() {
+            *e = remap[usize::from(*e)].min(next - 1) as u8;
+        }
+        ntrees = next;
+        ntrees_l = next as u32;
+    }
+
+    write_varlen_uint8(bw, nbltypes_l - 1); // NBLTYPESL
+    let mut lit_bt_wire: Vec<(u32, u8)> = Vec::new();
+    let mut lit_bl_wire: Vec<(u32, u8)> = Vec::new();
+    if nbltypes_l > 1 {
+        let (bt, bl) = write_block_switch_header(bw, nbltypes_l, &lit_block_len);
+        lit_bt_wire = bt;
+        lit_bl_wire = bl;
+    }
+    write_varlen_uint8(bw, nbltypes_c - 1); // NBLTYPESI
+    let mut cmd_bt_wire: Vec<(u32, u8)> = Vec::new();
+    let mut cmd_bl_wire: Vec<(u32, u8)> = Vec::new();
+    if nbltypes_c > 1 {
+        // Block-type code tree over alphabet 2 + nbltypes_c. Switches
+        // always use explicit codes (type + 2).
+        let bt_alphabet = 2 + nbltypes_c as usize;
+        let mut bt_freq = vec![0u32; bt_alphabet];
+        for k in 1..nbltypes_c as usize {
+            bt_freq[k + 2] += 1;
+        }
+        let bt_lengths = omnizip_codecs::HuffmanLengths::build(&bt_freq, 15);
+        write_huffman_table(bw, &bt_lengths, bt_alphabet);
+
+        // Block-length code tree over the 26-symbol alphabet, from the
+        // actual block length distribution.
+        let mut bl_freq = [0u32; 26];
+        let bl_codes: Vec<(usize, u32, u32)> = cmd_block_len
+            .iter()
+            .map(|&l| block_length_code(l))
+            .collect();
+        for &(c, _, _) in &bl_codes {
+            bl_freq[c] += 1;
+        }
+        let bl_lengths = omnizip_codecs::HuffmanLengths::build(&bl_freq, 15);
+        write_huffman_table(bw, &bl_lengths, 26);
+
+        cmd_bt_wire = canonical_with_reverse(&bt_lengths);
+        cmd_bl_wire = canonical_with_reverse(&bl_lengths);
+
+        // Initial block length (block 0) via the block-length tree.
+        let (c0, extra0, nbits0) = bl_codes[0];
+        let (code, len) = cmd_bl_wire[c0];
+        bw.write_bits(code, u32::from(len));
+        bw.write_bits(extra0, nbits0);
+    }
+    write_varlen_uint8(bw, 0); // NBLTYPESD = 1 (no dist block trees)
+
+    bw.write_bits(dist_cfg.npostfix as u32, 2); // NPOSTFIX
+    bw.write_bits(dist_cfg.ndmoem as u32, 4); // NDMOEM
+
+    // Context mode fields: one PER literal block type (RFC 7932 §9.3).
+    for _ in 0..nbltypes_l {
+        bw.write_bits(context_mode, 2);
+    }
+
+    write_varlen_uint8(bw, ntrees_l - 1); // NTREESL
+    if ntrees_l > 1 {
+        write_context_map(bw, &lit_ctx_map, ntrees_l);
+    }
+    if std::env::var("BROTLI_DBG_TB").is_ok() {
+        eprintln!(
+            "WLCM ntreesl={ntrees_l} entries={} bit_end={}",
+            lit_ctx_map.len(),
+            (bw.out.len() * 8 + bw.nbits as usize)
+        );
+    }
+    // Distance context modeling (RFC 7932 §9.6): NTREES_D = 2 with the
+    // context derived from copy length (kCmdLut.context = (len>4)?3:len-2).
+    // Short copies ride a short-code-heavy tree; long copies a long-code
+    // tree — each sharper than the blended single tree.
+    let ntrees_d: u32 = if quality >= 4
+        && !stream.dist_symbols.is_empty()
+        && std::env::var("BROTLI_NO_DTREES").is_err()
+    {
+        std::env::var("BROTLI_DTREES")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(4)
+    } else {
+        1
+    };
+    // Distance context trees, with unused contexts pruned BEFORE the
+    // header write (tree counts and the context map must reflect the
+    // final tree set). The context→tree mapping is recorded for the
+    // emission's tree selection.
+    let dist_alphabet = dist_cfg.alphabet_size();
+    let mut dist_freqs_per_ctx: Vec<Vec<u32>> = vec![vec![0u32; dist_alphabet]; ntrees_d as usize];
+    let mut dist_ctx_tree: [usize; 4] = [0; 4];
+    let mut ntrees_d = ntrees_d;
+    if ntrees_d > 1 {
+        for (&sym, &ctx) in stream.dist_symbols.iter().zip(stream.dist_ctxs.iter()) {
+            let base = match ntrees_d {
+                2 => usize::from(ctx >= 2),
+                _ => ctx as usize,
+            };
+            dist_freqs_per_ctx[base][sym as usize] += 1;
+        }
+        // Only keep the split when its entropy saving beats the tree
+        // + context-map overhead (small or uniform-distance inputs
+        // lose bits on extra tree headers).
+        let ent = |f: &Vec<u32>| -> f64 {
+            let t: u64 = f.iter().map(|&x| u64::from(x)).sum();
+            if t == 0 {
+                return 0.0;
+            }
+            let mut e = 0.0f64;
+            for &v in f.iter() {
+                if v > 0 {
+                    let pr = v as f64 / t as f64;
+                    e -= v as f64 * pr.log2();
+                }
+            }
+            e
+        };
+        let mut global: Vec<u32> = vec![0u32; dist_alphabet];
+        for f in &dist_freqs_per_ctx {
+            for (s, &v) in f.iter().enumerate() {
+                global[s] += v;
+            }
+        }
+        let used: usize = dist_freqs_per_ctx
+            .iter()
+            .filter(|f| f.iter().sum::<u32>() > 0)
+            .count();
+        let split_bits: f64 =
+            dist_freqs_per_ctx.iter().map(ent).sum::<f64>() + used as f64 * 70.0 + 20.0;
+        let single_bits = ent(&global) + 70.0;
+        if split_bits >= single_bits {
+            ntrees_d = 1;
+            dist_freqs_per_ctx = vec![global];
+        }
+    }
+    if ntrees_d > 1 {
+        let used: Vec<bool> = dist_freqs_per_ctx
+            .iter()
+            .map(|f| f.iter().sum::<u32>() > 0)
+            .collect();
+        let mut remap = [0usize; 4];
+        let mut next = 0usize;
+        for t in 0..ntrees_d as usize {
+            if used[t] {
+                remap[t] = next;
+                next += 1;
+            }
+        }
+        if next == 0 {
+            next = 1;
+        }
+        dist_freqs_per_ctx = (0..ntrees_d as usize)
+            .filter(|&t| used[t])
+            .map(|t| std::mem::take(&mut dist_freqs_per_ctx[t]))
+            .collect();
+        for t in 0..4 {
+            let base = match ntrees_d {
+                2 => usize::from(t >= 2),
+                _ => t,
+            };
+            dist_ctx_tree[t] = remap[base.min(remap.len() - 1)];
+        }
+        ntrees_d = next as u32;
+        let dist_cmap: Vec<u8> = dist_ctx_tree.iter().map(|&t| t as u8).collect();
+        write_varlen_uint8(bw, ntrees_d - 1); // NTREESD
+        write_context_map(bw, &dist_cmap, ntrees_d);
+    } else {
+        write_varlen_uint8(bw, 0); // NTREESD = 1
+    }
+
+    // --- Context modeling: per-tree literal frequencies ---
+    // For NTREES_L > 1, partition literals by their LSB6 context.
+    // Build a virtual output buffer to correctly track the "previous byte"
+    // for context computation (copies change the previous byte too).
     let mut cmd_freq = vec![0u32; 704];
     let mut dist_freq = vec![0u32; dist_alphabet];
 
@@ -518,11 +999,39 @@ fn encode_huffman_chunk_body(
         }
     }
 
+    let mut cmd_freqs_per_block: Vec<Vec<u32>> = vec![vec![0u32; 704]; nbltypes_c as usize];
+    for (i, &sym) in stream.cmd_symbols.iter().enumerate() {
+        cmd_freqs_per_block[usize::from(cmd_block_of[i])][sym as usize] += 1;
+    }
+    if let Ok(path) = std::env::var("BROTLI_DUMP_CMDSYM") {
+        use std::io::Write as _;
+        let mut f = std::fs::File::create(&path).unwrap();
+        for &sym in &stream.cmd_symbols {
+            writeln!(f, "{sym}").unwrap();
+        }
+    }
+    for freq in &mut cmd_freqs_per_block {
+        let total: u32 = freq.iter().sum();
+        if total == 0 {
+            freq[0] = 1;
+        }
+    }
     for &sym in &stream.cmd_symbols {
         cmd_freq[sym] += 1;
     }
     for &sym in &stream.dist_symbols {
         dist_freq[sym as usize] += 1;
+    }
+    // (Per-context distance frequencies were computed before the
+    // NTREESD header write — see dist_freqs_per_ctx / dist_ctx_tree.)
+
+    // Dump per-tree literal frequencies for isolated round-trip tests.
+    if std::env::var("BROTLI_DUMP_TREES").is_ok() {
+        for (i, freq) in lit_freqs.iter().enumerate() {
+            let total: u32 = freq.iter().sum();
+            let nz = freq.iter().filter(|&&f| f > 0).count();
+            eprintln!("TREE {i} ntrees={ntrees} total={total} nz={nz} freqs={freq:?}");
+        }
     }
 
     // Build per-tree literal Huffman tables.
@@ -530,8 +1039,134 @@ fn encode_huffman_chunk_body(
         .iter()
         .map(|freq| omnizip_codecs::HuffmanLengths::build(freq, 15))
         .collect();
+    let cmd_lengths_per_block: Vec<omnizip_codecs::HuffmanLengths> = cmd_freqs_per_block
+        .iter()
+        .map(|freq| omnizip_codecs::HuffmanLengths::build(freq, 15))
+        .collect();
     let cmd_lengths = omnizip_codecs::HuffmanLengths::build(&cmd_freq, 15);
+    let dist_lengths_per_ctx: Vec<omnizip_codecs::HuffmanLengths> = if ntrees_d > 1 {
+        dist_freqs_per_ctx
+            .iter()
+            .map(|freq| omnizip_codecs::HuffmanLengths::build(freq, 15))
+            .collect()
+    } else {
+        vec![omnizip_codecs::HuffmanLengths::build(&dist_freq, 15)]
+    };
     let dist_lengths = omnizip_codecs::HuffmanLengths::build(&dist_freq, 15);
+
+    // Diagnostic: entropy breakdown of the final symbol streams.
+    if std::env::var("BROTLI_STATS").is_ok() {
+        let lit_bits: u64 = lit_freqs
+            .iter()
+            .zip(lit_lengths_per_tree.iter())
+            .map(|(freq, huff)| {
+                freq.iter()
+                    .zip(huff.lengths.iter())
+                    .map(|(&f, &l)| u64::from(f) * u64::from(l))
+                    .sum::<u64>()
+            })
+            .sum();
+        let cmd_sym_bits: u64 = cmd_freq
+            .iter()
+            .zip(cmd_lengths.lengths.iter())
+            .map(|(&f, &l)| u64::from(f) * u64::from(l))
+            .sum();
+        // insert/copy extra bits from kCmdLut
+        let cmd_extra_bits: u64 = stream
+            .cmd_symbols
+            .iter()
+            .map(|&sym| {
+                let e = &kCmdLut[sym as usize];
+                u64::from(e.insert_len_extra_bits) + u64::from(e.copy_len_extra_bits)
+            })
+            .sum();
+        let dist_sym_bits: u64 = dist_freq
+            .iter()
+            .zip(dist_lengths.lengths.iter())
+            .map(|(&f, &l)| u64::from(f) * u64::from(l))
+            .sum();
+        let dist_extra_bits: u64 = {
+            // extra bits depend on the distance config; recompute per symbol
+            let mut total = 0u64;
+            for &sym in &stream.dist_symbols {
+                total += u64::from(distance_extra_bits(sym, &dist_cfg));
+            }
+            total
+        };
+        let n_rep = stream.dist_symbols.iter().filter(|&&s| s < 4).count();
+        // Top distance VALUES (decoded from symbols + extras).
+        let mut dist_values: std::collections::BTreeMap<u32, u32> =
+            std::collections::BTreeMap::new();
+        {
+            let mut rep = RepBuffer::new();
+            let mut out_pos = 0usize;
+            let mut di = stream.dist_symbols.iter();
+            for cmd in &commands {
+                out_pos += cmd.insert_len as usize;
+                if cmd.copy_len > 0 {
+                    let is_dict = (cmd.distance as usize) > mlen_offset + out_pos;
+                    if is_dict {
+                        rep.on_dict_reference(false);
+                    } else if rep.find_rep_code(cmd.distance).is_some() {
+                        // rep: distance value already counted via cmd
+                    }
+                    *dist_values.entry(cmd.distance).or_insert(0) += 1;
+                    if rep.find_rep_code(cmd.distance).is_some() {
+                        // update below via find again
+                    }
+                    match rep.find_rep_code(cmd.distance) {
+                        Some(code) => rep.on_rep_lz77(code),
+                        None => rep.on_new_distance_lz77(cmd.distance),
+                    }
+                    out_pos += cmd.copy_len as usize;
+                }
+            }
+            let _ = di;
+        }
+        let mut top: Vec<(u32, u32)> = dist_values.into_iter().collect();
+        top.sort_by_key(|&(_d, c)| std::cmp::Reverse(c));
+        top.truncate(8);
+        eprintln!(
+            "STATS ntrees={ntrees}: cmds={} lits={} dists={} (rep0-3: {n_rep}) | lit_bits={lit_bits} cmd_bits={} dist_bits={}",
+            stream.cmd_symbols.len(),
+            stream.literals.len(),
+            stream.dist_symbols.len(),
+            cmd_sym_bits + cmd_extra_bits,
+            dist_sym_bits + dist_extra_bits
+        );
+        {
+            // True bit split under the emitted block/context trees.
+            let mut cmd_split_bits = 0u64;
+            for (bi, freq) in cmd_freqs_per_block.iter().enumerate() {
+                let lens = &cmd_lengths_per_block[bi].lengths;
+                for (s, &f) in freq.iter().enumerate() {
+                    if f > 0 {
+                        cmd_split_bits += u64::from(f) * u64::from(lens[s]);
+                    }
+                }
+            }
+            let mut dist_split_bits = 0u64;
+            for (ti, freq) in dist_freqs_per_ctx.iter().enumerate() {
+                let lens = &dist_lengths_per_ctx[ti].lengths;
+                for (s, &f) in freq.iter().enumerate() {
+                    if f > 0 {
+                        dist_split_bits += u64::from(f) * u64::from(lens[s]);
+                    }
+                }
+            }
+            eprintln!(
+                "STATS split: cmd_sym={} cmd_extra={} dist_sym={} dist_extra={} lit={} blocks={} dtrees={}",
+                cmd_split_bits,
+                cmd_extra_bits,
+                dist_split_bits,
+                dist_extra_bits,
+                lit_bits,
+                cmd_boundaries.len(),
+                ntrees_d
+            );
+        }
+        eprintln!("STATS top distances: {:?}", &top);
+    }
 
     // Override code lengths for sparse LITERAL trees (2-4 symbols) when
     // using multi-tree context modeling (NTREES > 1). Context-clustered
@@ -549,27 +1184,78 @@ fn encode_huffman_chunk_body(
         .iter()
         .map(canonical_with_reverse)
         .collect();
+    let cmd_codes_per_block: Vec<Vec<(u32, u8)>> = cmd_lengths_per_block
+        .iter()
+        .map(canonical_with_reverse)
+        .collect();
     let cmd_codes = canonical_with_reverse(&cmd_lengths);
+    let dist_codes_per_ctx: Vec<Vec<(u32, u8)>> = dist_lengths_per_ctx
+        .iter()
+        .map(canonical_with_reverse)
+        .collect();
     let dist_codes = canonical_with_reverse(&dist_lengths);
 
     // Write literal tree group (one table per tree).
     for tree in &lit_lengths_per_tree {
         write_huffman_table(bw, tree, 256);
     }
-    write_huffman_table(bw, &cmd_lengths, 704);
-    write_huffman_table(bw, &dist_lengths, dist_alphabet);
+    for tree in &cmd_lengths_per_block {
+        write_huffman_table(bw, tree, 704);
+    }
+    for (ti, tree) in dist_lengths_per_ctx.iter().enumerate() {
+        if std::env::var("BROTLI_DBG_DC").is_ok() {
+            let lens: Vec<String> = tree
+                .lengths
+                .iter()
+                .enumerate()
+                .filter(|(_, &l)| l > 0)
+                .map(|(s, &l)| format!("{s}:{l}"))
+                .collect();
+            eprintln!("DCTREE[{ti}] lens={}", lens.join(","));
+        }
+        write_huffman_table(bw, tree, dist_alphabet);
+    }
 
     // --- Encode commands + literals with per-context tree selection ---
     let mut dist_iter = stream.dist_symbols.iter().zip(stream.dist_extras.iter());
-    p1 = 0;
-    p2 = 0;
+    (p1, p2) = ctx_in;
     lit_idx = 0;
     out_pos = 0;
-    lit_block_type = 0;
-    lit_block_remaining = if use_block_switch { 128 } else { usize::MAX };
+    let mut lit_blk = 0usize;
+    let mut lit_block_remaining: usize =
+        lit_block_len.first().copied().unwrap_or(u32::MAX) as usize;
+    let mut lit_next_switch = 1usize;
+    let mut cmd_block_remaining: usize =
+        cmd_block_len.first().copied().unwrap_or(u32::MAX) as usize;
+    let mut next_switch = 1usize; // index into cmd_boundaries/block types
     for (cmd_idx, (&cmd_sym, cmd)) in stream.cmd_symbols.iter().zip(commands.iter()).enumerate() {
-        let (code, len) = cmd_codes[cmd_sym];
+        if cmd_idx > 0 && cmd_block_remaining == 0 && next_switch < cmd_boundaries.len() {
+            // Block switch: explicit type code (type + 2), then block length.
+            let new_type = next_switch; // blocks are numbered in order
+            let (bt_code, bt_len) = cmd_bt_wire[new_type + 2];
+            bw.write_bits(bt_code, u32::from(bt_len));
+            let (c, extra, nbits) = block_length_code(cmd_block_len[next_switch]);
+            let (bl_code, bl_len) = cmd_bl_wire[c];
+            bw.write_bits(bl_code, u32::from(bl_len));
+            bw.write_bits(extra, nbits);
+            cmd_block_remaining = cmd_block_len[next_switch] as usize;
+            next_switch += 1;
+        }
+        let block = if nbltypes_c > 1 {
+            usize::from(cmd_block_of[cmd_idx])
+        } else {
+            0
+        };
+        let cmd_table = if nbltypes_c > 1 {
+            &cmd_codes_per_block[block]
+        } else {
+            &cmd_codes
+        };
+        let (code, len) = cmd_table[cmd_sym];
         bw.write_bits(code, u32::from(len));
+        if nbltypes_c > 1 {
+            cmd_block_remaining = cmd_block_remaining.saturating_sub(1);
+        }
 
         let entry = &kCmdLut[cmd_sym];
         if entry.insert_len_extra_bits > 0 {
@@ -582,20 +1268,26 @@ fn encode_huffman_chunk_body(
         }
 
         for _ in 0..cmd.insert_len {
-            // Block switch BEFORE the literal (matches decoder's
-            // check-block-length-then-read-literal order). The decoder
-            // checks block_length == 0 at the START of each iteration.
-            if use_block_switch && lit_block_remaining == 0 {
-                let bt_sym = u32::from(lit_block_type == 0);
-                bw.write_bits(bt_sym, 1);
-                bw.write_bits(15, 5); // block-length extra (128-113=15)
-                lit_block_type = 1 - lit_block_type;
-                lit_block_remaining = 128;
+            // Literal block switch BEFORE the literal (decoder checks
+            // block_length == 0 at the start of each literal read).
+            if nbltypes_l > 1 && lit_block_remaining == 0 && lit_next_switch < lit_boundaries.len()
+            {
+                let new_type = lit_next_switch;
+                let (bt_code, bt_len) = lit_bt_wire[new_type + 2];
+                bw.write_bits(bt_code, u32::from(bt_len));
+                let (c, extra, nbits) = block_length_code(lit_block_len[lit_next_switch]);
+                let (bl_code, bl_len) = lit_bl_wire[c];
+                bw.write_bits(bl_code, u32::from(bl_len));
+                bw.write_bits(extra, nbits);
+                lit_blk = lit_next_switch;
+                lit_block_remaining = lit_block_len[lit_next_switch] as usize;
+                lit_next_switch += 1;
             }
 
             let b = stream.literals[lit_idx];
-            let tree = if use_block_switch {
-                lit_block_type
+            let tree = if nbltypes_l > 1 {
+                let ctx = compute_context_id(p1, p2, context_mode) as usize;
+                lit_ctx_map[(lit_blk << 6) + ctx] as usize
             } else if ntrees > 1 {
                 let ctx = compute_context_id(p1, p2, context_mode) as usize;
                 lit_ctx_map[ctx] as usize
@@ -603,14 +1295,17 @@ fn encode_huffman_chunk_body(
                 0
             };
             let (lc, ll) = lit_codes_per_tree[tree][b as usize];
+            if std::env::var("BROTLI_DBG_CTX").is_ok() && u32::from(ll) == 0 {
+                LIT0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
             bw.write_bits(lc, u32::from(ll));
             p2 = p1;
             p1 = b;
             lit_idx += 1;
             out_pos += 1;
 
-            if use_block_switch {
-                lit_block_remaining -= 1;
+            if nbltypes_l > 1 {
+                lit_block_remaining = lit_block_remaining.saturating_sub(1);
             }
         }
 
@@ -620,7 +1315,35 @@ fn encode_huffman_chunk_body(
             let cmd_entry = &kCmdLut[cmd_sym];
             if cmd_entry.distance_code < 0 {
                 let (&d_sym, &d_extra) = dist_iter.next().expect("distance stream exhausted");
-                let (dc, dl) = dist_codes[d_sym as usize];
+                let table = if ntrees_d > 1 {
+                    let ctx = if cmd.copy_len > 4 {
+                        3u8
+                    } else {
+                        (cmd.copy_len - 2) as u8
+                    };
+                    &dist_codes_per_ctx[dist_ctx_tree[usize::from(ctx)]]
+                } else {
+                    &dist_codes
+                };
+                let (dc, dl) = table[d_sym as usize];
+                if std::env::var("BROTLI_DBG_DC").is_ok() {
+                    eprintln!(
+                        "DCWRITE sym={d_sym} code={dc:0b} len={dl} tree_idx={}",
+                        if ntrees_d > 1 {
+                            let ctx = if cmd.copy_len > 4 {
+                                3u8
+                            } else {
+                                (cmd.copy_len - 2) as u8
+                            };
+                            match ntrees_d {
+                                2 => usize::from(ctx >= 2),
+                                _ => ctx as usize,
+                            }
+                        } else {
+                            0
+                        }
+                    );
+                }
                 bw.write_bits(dc, u32::from(dl));
                 let nbits = distance_extra_bits(d_sym, &dist_cfg);
                 if nbits > 0 {
@@ -628,9 +1351,24 @@ fn encode_huffman_chunk_body(
                 }
             }
             out_pos += cmd_copy_advances[cmd_idx];
-            p2 = p1;
-            p1 = output_sim[out_pos - 1];
+            if out_pos > 0 && out_pos <= input.len() {
+                // Mirror the decoder exactly (see frequency-collection
+                // loop): p2 = second-to-last copied byte for copies ≥ 2.
+                let new_p1 = input[out_pos - 1];
+                p2 = if cmd.copy_len > 1 {
+                    input[out_pos - 2]
+                } else {
+                    p1
+                };
+                p1 = new_p1;
+            }
         }
+    }
+    if std::env::var("BROTLI_DBG_CTX").is_ok() {
+        eprintln!(
+            "LIT0-final: zero-bit literals: {}",
+            LIT0.load(std::sync::atomic::Ordering::Relaxed)
+        );
     }
 }
 
@@ -726,7 +1464,7 @@ fn encode_huffman_frame_q(input: &[u8], quality: i32) -> Vec<u8> {
     }
     let mut bw = BitWriter::new();
     write_wbits(&mut bw);
-    encode_huffman_chunk_into(&mut bw, input, 0, true, quality);
+    encode_huffman_chunk_into(&mut bw, input, 0, true, quality, (0, 0));
     bw.flush()
 }
 
@@ -743,7 +1481,8 @@ fn encode_huffman_chunk_with_shared_mf(
     mf: &mut omnizip_codecs::HashChainMatchFinder,
 ) {
     let chunk = &full_input[chunk_start..chunk_end];
-    encode_huffman_chunk_body(bw, chunk, mf, chunk_start, is_last, quality);
+    let ctx_in = carried_lit_ctx(full_input, chunk_start);
+    encode_huffman_chunk_body(bw, chunk, mf, chunk_start, is_last, quality, ctx_in);
 }
 
 /// A parsed symbol stream ready for entropy coding.
@@ -756,6 +1495,10 @@ struct SymbolStream {
     dist_symbols: Vec<u32>,
     /// Distance extra-bit values, parallel to `dist_symbols`.
     dist_extras: Vec<u32>,
+    /// Copy-length context (kCmdLut.context) for each distance symbol,
+    /// parallel to `dist_symbols`. Used to split distance frequencies
+    /// across NTREES_D context trees exactly as emitted.
+    dist_ctxs: Vec<u8>,
 }
 
 /// Build the entropy-coded symbol stream from commands.
@@ -775,12 +1518,23 @@ fn build_symbol_stream(
     let mut cmd_symbols = Vec::with_capacity(commands.len());
     let mut dist_symbols = Vec::new();
     let mut dist_extras = Vec::new();
+    let mut dist_ctxs: Vec<u8> = Vec::new();
 
     // Track the 4-distance ring buffer (TODO 245). Lets us emit
     // explicit distance codes 0-3 for rep0/1/2/3 matches, saving
     // the distance extra bits (typically 5-15 bits per match).
     let mut rep = RepBuffer::new();
     let mut prev_was_implicit = false;
+
+    // Rep-state synchronization across metablocks: the reference decoder
+    // PERSISTS its distance ring buffer across metablocks while this
+    // encoder (and our decoder) reset it. A reset buffer starts as
+    // [16,15,11,4]; a persisted one carries the previous chunk's last
+    // distances. After FOUR explicit long-form distance pushes both
+    // buffers provably hold the same four values, so implicit/short
+    // codes are safe from copy #5 onward. For the first four copies of
+    // a continuation chunk we therefore force explicit encoding.
+    let mut explicit_copies_remaining = if mlen_offset > 0 { 4 } else { 0 };
 
     // Output-position cursor — needed to detect dictionary references
     // (distance > current output) which can't use rep codes (would
@@ -790,18 +1544,31 @@ fn build_symbol_stream(
     for cmd in commands {
         let _ = input;
         output_pos += cmd.insert_len as usize;
-        let is_dict_ref = cmd.copy_len > 0 && (cmd.distance as usize) > output_pos;
+        // Dictionary iff distance exceeds the GLOBAL copy start (decoder
+        // semantics). A chunk-local comparison misreads cross-metablock
+        // LZ77 references as dictionary refs and desyncs the rep model.
+        let is_dict_ref = cmd.copy_len > 0 && (cmd.distance as usize) > mlen_offset + output_pos;
 
-        // Try implicit rep0 command (saves the entire distance Huffman
-        // symbol — ~5 bits — only viable for small copy_len/insert_len).
-        // Disabled for dictionary references (decoder doesn't compensate
-        // explicit code 0 for dicts, only implicit).
-        let can_use_implicit = !prev_was_implicit
-            && cmd.copy_len > 0
+        // Try implicit rep0 command: the command symbol itself implies
+        // "use last distance" (kCmdLut symbols 0-127, i.e. insert ≤ 9
+        // with copy ≤ ~69), saving the ENTIRE distance symbol — ~2-4
+        // bits each. The reference rides this form for ~70% of its
+        // commands. Consecutive implicit commands are legal (rep0 is
+        // unchanged by the implicit read/write-back). Disabled for
+        // dictionary references (decoder doesn't compensate them).
+        let implicit_copy_max = if std::env::var("BROTLI_NARROW_IMPLICIT").is_ok() {
+            9u32
+        } else {
+            u32::MAX
+        };
+        let can_use_implicit = cmd.copy_len > 0
+            && cmd.copy_len <= implicit_copy_max
             && !is_dict_ref
+            && explicit_copies_remaining == 0
             && cmd.distance == rep.rep_at(0)
-            && (2..=9).contains(&cmd.copy_len)
-            && cmd.insert_len <= 9;
+            && cmd.insert_len <= 9
+            && find_cmd_symbol_with_rep(cmd.insert_len, cmd.copy_len, Some(0))
+                .is_some_and(|sym| kCmdLut[sym].distance_code == 0);
 
         let cmd_sym = if can_use_implicit {
             find_cmd_symbol_with_rep(cmd.insert_len, cmd.copy_len, Some(0))
@@ -813,40 +1580,55 @@ fn build_symbol_stream(
 
         let entry = &kCmdLut[cmd_sym];
         let this_was_implicit = entry.distance_code >= 0;
+        let mut emitted_dist_sym: Option<u32> = None;
 
         if entry.distance_code < 0 && cmd.copy_len > 0 {
             // Explicit distance symbol needed. For LZ77 back-references,
-            // try rep codes 0-3 first (each saves the distance extra bits
-            // — typically 5-15 bits — vs. the long-form encoding).
+            // try the 16 short codes first (exact rep0-3 plus rep0/rep1
+            // ± 1-3): each costs only a Huffman symbol — typically ~3
+            // bits vs 10-20 for the long form.
             let (sym, extra) = if is_dict_ref {
-                // Dictionary references can't use rep codes (the decoder
-                // doesn't compensate explicit code 0-3 for dicts).
+                // Dictionary references can't use short codes (the decoder
+                // doesn't compensate them for dicts).
                 encode_distance(cmd.distance, dist_cfg)
-            } else if let Some(code) = rep.find_rep_code(cmd.distance) {
+            } else if explicit_copies_remaining > 0 {
+                // Chunk-start synchronization: long form only.
+                encode_distance(cmd.distance, dist_cfg)
+            } else if std::env::var("BROTLI_NO_SHORT").is_ok() {
+                encode_distance(cmd.distance, dist_cfg)
+            } else if let Some(code) = rep.find_short_code(cmd.distance) {
                 (code, 0)
             } else {
                 encode_distance(cmd.distance, dist_cfg)
             };
             dist_symbols.push(sym);
             dist_extras.push(extra);
+            dist_ctxs.push(if cmd.copy_len > 4 {
+                3
+            } else {
+                (cmd.copy_len - 2) as u8
+            });
+            emitted_dist_sym = Some(sym);
+            if !is_dict_ref && explicit_copies_remaining > 0 {
+                explicit_copies_remaining -= 1;
+            }
         }
 
-        // Update RepBuffer to mirror decoder state.
+        // Update RepBuffer to mirror decoder state. This must follow the
+        // SYMBOL actually emitted, not the distance value: explicit code 0
+        // is a net no-op on the ring buffer, but every other explicit
+        // symbol (short codes 1-15, direct and long form) PUSHES the
+        // resolved distance — even when that value equals an existing rep.
+        // Re-deriving the form from the distance alone desyncs the model
+        // whenever a forced long-form (chunk-start sync) carries a value
+        // that already sits in the buffer.
         if cmd.copy_len > 0 {
             if is_dict_ref {
                 rep.on_dict_reference(this_was_implicit);
-            } else if this_was_implicit {
-                // Implicit == explicit code 0 for LZ77
+            } else if this_was_implicit || emitted_dist_sym == Some(0) {
                 rep.on_rep_lz77(0);
             } else {
-                // Explicit distance code: check which rep was used (if any)
-                // vs. long-form. We re-derive this here rather than thread
-                // it from the encoding decision above, because the cost is
-                // trivial and it keeps the logic readable.
-                match rep.find_rep_code(cmd.distance) {
-                    Some(code) => rep.on_rep_lz77(code),
-                    None => rep.on_new_distance_lz77(cmd.distance),
-                }
+                rep.on_new_distance_lz77(cmd.distance);
             }
         }
 
@@ -880,7 +1662,7 @@ fn build_symbol_stream(
         // with length-changing transforms (prefix/suffix/omit), the
         // transformed length may differ from copy_len (= word_length).
         let advance = if cmd.copy_len > 0 {
-            let is_dict = (cmd.distance as usize) > cur;
+            let is_dict = (cmd.distance as usize) > mlen_offset + end;
             if is_dict {
                 let global_pos = mlen_offset + end;
                 let max_dist = (global_pos as u32).min(MAX_BACKWARD_DISTANCE);
@@ -903,6 +1685,7 @@ fn build_symbol_stream(
         cmd_symbols,
         dist_symbols,
         dist_extras,
+        dist_ctxs,
     })
 }
 
@@ -1043,7 +1826,108 @@ fn optimal_parse(
     mlen_offset: usize,
     use_dict: bool,
 ) -> Vec<Command> {
-    optimal_parse_with_costs(input, mf, mlen_offset, use_dict, None)
+    // Use Huffman-derived literal costs (matches what the wire format
+    // actually pays per byte). Shannon entropy underestimates for small
+    // alphabets — see [`compute_huffman_lit_cost`].
+    let cmds = optimal_parse_with_costs(
+        input,
+        mf,
+        mlen_offset,
+        use_dict,
+        Some(compute_huffman_lit_cost(input)),
+    );
+    rewrite_for_rep_codes(cmds, input, mlen_offset)
+}
+
+/// Post-process commands to increase repeat-distance code usage.
+///
+/// Walks the command stream forward, tracking the 4-distance rep buffer
+/// using the SAME state machine as `build_symbol_stream`'s RepBuffer.
+/// At each command whose distance is NOT in the current rep buffer, checks
+/// whether a match at any of the 4 stored rep distances of the SAME LENGTH
+/// exists at the same position. If so, rewrites the command's distance to
+/// the lowest-code rep that matches (keeping copy_len unchanged).
+///
+/// This significantly increases rep code usage on highly repetitive inputs
+/// (CSV, source code, FSST-transformed data) where the original parser
+/// picks the longest match at the cost of using an explicit distance code.
+fn rewrite_for_rep_codes(
+    mut commands: Vec<Command>,
+    input: &[u8],
+    mlen_offset: usize,
+) -> Vec<Command> {
+    let n = input.len();
+    if commands.is_empty() || n < 4 {
+        return commands;
+    }
+    let mut rep = RepBuffer::new();
+    let mut cur = 0usize;
+
+    for cmd in commands.iter_mut() {
+        cur = cur.saturating_add(cmd.insert_len as usize);
+        if cmd.copy_len == 0 {
+            continue;
+        }
+        let dist = cmd.distance;
+        // A command is a dict reference if distance > global output position.
+        // Cross-chunk LZ77 references have distance > local cur but ≤ global
+        // output position, so they're NOT dict references.
+        let global_output_pos = mlen_offset + cur;
+        let is_dict = (dist as usize) > global_output_pos;
+        if is_dict {
+            // For dict references, advance by the transformed length
+            // (may differ from copy_len when transforms add/remove bytes).
+            let global_pos = mlen_offset + cur;
+            let max_dist = (global_pos as u32).min(MAX_BACKWARD_DISTANCE);
+            let advance = {
+                let mut tmp = Vec::with_capacity(cmd.copy_len as usize + 8);
+                match dictionary_lookup(&mut tmp, cmd.copy_len, cmd.distance as i32, max_dist) {
+                    Some(()) => tmp.len(),
+                    None => cmd.copy_len as usize,
+                }
+            };
+            rep.on_dict_reference(false);
+            cur = cur.saturating_add(advance);
+            continue;
+        }
+
+        let copy_len = cmd.copy_len as usize;
+
+        // If already a rep match, update state and continue.
+        if let Some(code) = rep.find_rep_code(dist) {
+            rep.on_rep_lz77(code);
+            cur = cur.saturating_add(copy_len);
+            continue;
+        }
+
+        // Try each rep slot (0-3) for a same-length match. Prefer the
+        // lowest code (rep0 < rep1 < rep2 < rep3) — same wire bits, but
+        // choosing rep0 keeps the rep buffer warmer for the next match.
+        let mut found: Option<u32> = None;
+        for code in 0..4u32 {
+            let rdist = rep.rep_at(code);
+            if rdist > 0 && (rdist as usize) <= cur && cur + copy_len <= n {
+                let src = cur - rdist as usize;
+                if input[src..src + copy_len] == input[cur..cur + copy_len] {
+                    found = Some(code);
+                    break;
+                }
+            }
+        }
+        if let Some(code) = found {
+            let rdist = rep.rep_at(code);
+            cmd.distance = rdist;
+            rep.on_rep_lz77(code);
+            cur = cur.saturating_add(copy_len);
+            continue;
+        }
+
+        // New explicit distance. Update state.
+        rep.on_new_distance_lz77(dist);
+        cur = cur.saturating_add(copy_len);
+    }
+
+    commands
 }
 
 /// Compute per-byte Shannon entropy as a literal cost model.
@@ -1071,6 +1955,44 @@ fn compute_shannon_lit_cost(data: &[u8]) -> [f32; 256] {
     arr
 }
 
+/// Compute per-byte Huffman-derived literal cost.
+///
+/// Builds a Huffman tree over `data` (max code length 15, matching the
+/// Brotli literal alphabet) and uses the **actual** assigned code length
+/// per byte as the literal cost. This is more accurate than Shannon
+/// entropy for small alphabets because Huffman trees are constrained to
+/// integer bit lengths and a minimum of 1 bit per symbol.
+///
+/// Example: for data with 20 distinct bytes where each byte appears
+/// ~equally often, Shannon entropy = log2(20) ≈ 4.32 bits. But Huffman
+/// assigns ~5-bit codes to most symbols (since 2^4 = 16 < 20 ≤ 32 = 2^5),
+/// giving ~5 bits/symbol. Using Shannon in the DP underestimates by
+/// ~0.7 bits/byte, biasing toward emitting literals when copies would
+/// be cheaper.
+///
+/// Bytes that don't appear in `data` get cost 8.0 (worst case).
+fn compute_huffman_lit_cost(data: &[u8]) -> [f32; 256] {
+    let mut freq = [0u32; 256];
+    for &b in data {
+        freq[b as usize] += 1;
+    }
+    let mut arr = [8.0f32; 256];
+    if data.is_empty() {
+        return arr;
+    }
+
+    let huff = omnizip_codecs::HuffmanLengths::build(&freq, 15);
+    for i in 0..256 {
+        if freq[i] > 0 {
+            let len = huff.lengths[i];
+            // Huffman gives 0 length only for unused symbols, but we've
+            // already filtered. Single-symbol trees assign length 1.
+            arr[i] = if len > 0 { len as f32 } else { 8.0 };
+        }
+    }
+    arr
+}
+
 /// Like [`optimal_parse`] but accepts an optional literal cost override.
 /// Used by the iterative parser refinement (TODO 246) to feed back
 /// actual Huffman-derived code lengths into a second DP pass.
@@ -1081,12 +2003,21 @@ fn optimal_parse_with_costs(
     use_dict: bool,
     lit_cost_override: Option<[f32; 256]>,
 ) -> Vec<Command> {
-    optimal_parse_with_costs_ext(input, mf, mlen_offset, use_dict, lit_cost_override, None, None)
+    optimal_parse_with_costs_ext(
+        input,
+        mf,
+        mlen_offset,
+        use_dict,
+        lit_cost_override,
+        None,
+        None,
+        None,
+    )
 }
 
-/// Extended version with command and distance cost overrides.
+/// Extended version with command, distance cost, and rep-hint overrides.
 /// Used by the iterative parser to feed back actual Huffman-derived
-/// costs into a second DP pass.
+/// costs and rep-code awareness into subsequent DP passes.
 fn optimal_parse_with_costs_ext(
     input: &[u8],
     mf: &mut omnizip_codecs::HashChainMatchFinder,
@@ -1095,6 +2026,7 @@ fn optimal_parse_with_costs_ext(
     lit_cost_override: Option<[f32; 256]>,
     cmd_cost_override: Option<f32>,
     dist_cost_table: Option<&[f32; 704]>,
+    rep_hint: Option<&[u32]>,
 ) -> Vec<Command> {
     let n = input.len();
     if n == 0 {
@@ -1108,7 +2040,14 @@ fn optimal_parse_with_costs_ext(
     // - Dict match (length-changing): copy_len = wl, advance_len = tl
     //   The decoder copies wl bytes from the dict reference but the input
     //   cursor advances by tl bytes.
+    //
+    // We collect TWO candidates per position:
+    // - matches_at: the LONGEST match (best for amortizing command overhead)
+    // - closest_at: the CLOSEST match with length ≥ MIN_MATCH (best for
+    //   rep-code conversion — closer distances are more likely to become
+    //   rep0, saving ~9 bits per match)
     let mut matches_at: Vec<Option<(u32, u32, u32, bool)>> = vec![None; n];
+    let mut closest_at: Vec<Option<(u32, u32, u32, bool)>> = vec![None; n];
     for pos in 0..n {
         let global_pos = mlen_offset + pos;
         let max_dist = (global_pos as u32).min(MAX_BACKWARD_DISTANCE);
@@ -1119,6 +2058,22 @@ fn optimal_parse_with_costs_ext(
                 if m.distance <= max_dist && m.length >= MIN_MATCH {
                     let copy_len = m.length.min(MAX_COPY).max(MIN_MATCH);
                     matches_at[pos] = Some((m.distance, copy_len, copy_len, false));
+                }
+            }
+
+            // Also collect the closest match for rep-code-aware DP.
+            // Only active when rep_hint is provided (iterative parser),
+            // since without rep_hint the closest match is always dominated
+            // by the longest match (shorter copy + similar distance cost).
+            if rep_hint.is_some() {
+                if let Some(cm) = mf.find_closest_match(mlen_offset + pos, MIN_MATCH) {
+                    if cm.distance <= max_dist && cm.length >= MIN_MATCH {
+                        let copy_len = cm.length.min(MAX_COPY).max(MIN_MATCH);
+                        let closest = (cm.distance, copy_len, copy_len, false);
+                        if matches_at[pos] != Some(closest) {
+                            closest_at[pos] = Some(closest);
+                        }
+                    }
                 }
             }
         }
@@ -1175,7 +2130,14 @@ fn optimal_parse_with_costs_ext(
     };
 
     // Command base cost: use override if provided, otherwise default.
-    let cmd_base_cost = cmd_cost_override.unwrap_or(7.0);
+    // 7.0 reflects typical Huffman code length for command symbols.
+    // Env override for tuning experiments only.
+    let cmd_base_cost = cmd_cost_override.unwrap_or_else(|| {
+        std::env::var("BROTLI_CMD_BASE")
+            .ok()
+            .and_then(|v| v.parse::<f32>().ok())
+            .unwrap_or(7.0)
+    });
 
     // Copy-length extra bits cost. Longer copies require more extra bits
     // in the command encoding (up to 24 bits for copy_len > 4336).
@@ -1216,15 +2178,89 @@ fn optimal_parse_with_costs_ext(
     // keeps the DP at O(45 * N). Reduced sets (16 entries) were tested
     // but hurt ratio by 2+ pp on CSV data — the finer granularity finds
     // significantly better match alignments.
-    const COPY_BOUNDARIES: [u32; 52] = [
-        4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 22, 24, 26, 28, 30, 32, 34,
-        36, 40, 44, 48, 52, 60, 68, 76, 84, 100, 116, 132, 148, 164, 180, 196, 212, 228, 244, 260,
-        271, 432, 496, 752, 1264, 2288, 3040, 4096,
-    ];
     let mut cost = vec![f32::INFINITY; n + 1];
     let mut back_len: Vec<u32> = vec![0; n]; // 0 = literal, else = copy_len
     let mut back_advance: Vec<u32> = vec![0; n]; // parallel: cursor advance
+    let mut back_dist: Vec<u32> = vec![0; n]; // parallel: match distance
     cost[n] = 0.0;
+
+    // Evaluate a single match candidate at position i.
+    macro_rules! eval_match {
+        ($i:expr, $dist:expr, $copy_len:expr, $advance_len:expr, $is_dict:expr,
+         $best:expr, $best_action:expr, $best_advance:expr, $best_dist:expr) => {{
+            let dist: u32 = $dist;
+            let copy_len: u32 = $copy_len;
+            let advance_len: u32 = $advance_len;
+            let is_dict: bool = $is_dict;
+            if dist == 0 || copy_len < MIN_MATCH {
+                continue;
+            }
+            let dc = if let Some(hint) = rep_hint {
+                if hint[$i] != 0 && hint[$i] == dist {
+                    0.0
+                } else if let Some(table) = dist_cost_table {
+                    let code = if dist <= 4 {
+                        (dist - 1) as usize
+                    } else {
+                        4 + ((dist as f32).ln() / core::f32::consts::LN_2) as usize
+                    };
+                    table[code.min(703)]
+                } else {
+                    default_dist_cost(dist)
+                }
+            } else if let Some(table) = dist_cost_table {
+                let code = if dist <= 4 {
+                    (dist - 1) as usize
+                } else {
+                    4 + ((dist as f32).ln() / core::f32::consts::LN_2) as usize
+                };
+                table[code.min(703)]
+            } else {
+                default_dist_cost(dist)
+            };
+            let m_cost = cmd_base_cost + dc;
+            if is_dict && advance_len != copy_len {
+                let l = $i + advance_len as usize;
+                if l <= n {
+                    let total = m_cost + copy_extra_cost(copy_len) + cost[l];
+                    if total < $best {
+                        $best = total;
+                        $best_action = copy_len;
+                        $best_advance = advance_len;
+                        $best_dist = dist;
+                    }
+                }
+            } else if is_dict {
+                let l = $i + copy_len as usize;
+                if l <= n {
+                    let total = m_cost + copy_extra_cost(copy_len) + cost[l];
+                    if total < $best {
+                        $best = total;
+                        $best_action = copy_len;
+                        $best_advance = copy_len;
+                        $best_dist = dist;
+                    }
+                }
+            } else {
+                for &boundary in &COPY_BOUNDARIES {
+                    if boundary < MIN_MATCH || boundary > copy_len {
+                        continue;
+                    }
+                    let l = $i + boundary as usize;
+                    if l > n {
+                        break;
+                    }
+                    let total = m_cost + copy_extra_cost(boundary) + cost[l];
+                    if total < $best {
+                        $best = total;
+                        $best_action = boundary;
+                        $best_advance = boundary;
+                        $best_dist = dist;
+                    }
+                }
+            }
+        }};
+    }
 
     for i in (0..n).rev() {
         // Option A: Insert 1 literal.
@@ -1232,62 +2268,44 @@ fn optimal_parse_with_costs_ext(
         let mut best = lit_cost_total;
         let mut best_action = 0u32;
         let mut best_advance = 0u32;
+        let mut best_dist = 0u32;
 
-        // Option B: Match of length L at copy-code boundaries.
+        // Option B: Evaluate all match candidates.
         if let Some((dist, copy_len, advance_len, is_dict)) = matches_at[i] {
-            if dist > 0 && copy_len >= MIN_MATCH {
-                let dc = if let Some(table) = dist_cost_table {
-                    // Use per-distance-code Huffman cost from pass 1.
-                    // Map distance to an approximate code index.
-                    let code = if dist <= 4 { (dist - 1) as usize } else { 4 + ((dist as f32).ln() / core::f32::consts::LN_2) as usize };
-                    table[code.min(703)]
-                } else {
-                    default_dist_cost(dist)
-                };
-                let m_cost = cmd_base_cost + dc;
-                if is_dict && advance_len != copy_len {
-                    let l = i + advance_len as usize;
-                    if l <= n {
-                        let total = m_cost + copy_extra_cost(copy_len) + cost[l];
-                        if total < best {
-                            best = total;
-                            best_action = copy_len;
-                            best_advance = advance_len;
-                        }
-                    }
-                } else if is_dict {
-                    let l = i + copy_len as usize;
-                    if l <= n {
-                        let total = m_cost + copy_extra_cost(copy_len) + cost[l];
-                        if total < best {
-                            best = total;
-                            best_action = copy_len;
-                            best_advance = copy_len;
-                        }
-                    }
-                } else {
-                    for &boundary in &COPY_BOUNDARIES {
-                        if boundary < MIN_MATCH || boundary > copy_len {
-                            continue;
-                        }
-                        let l = i + boundary as usize;
-                        if l > n {
-                            break;
-                        }
-                        let total = m_cost + copy_extra_cost(boundary) + cost[l];
-                        if total < best {
-                            best = total;
-                            best_action = boundary;
-                            best_advance = boundary;
-                        }
-                    }
-                }
+            eval_match!(
+                i,
+                dist,
+                copy_len,
+                advance_len,
+                is_dict,
+                best,
+                best_action,
+                best_advance,
+                best_dist
+            );
+        }
+        // Only evaluate closest match when rep_hint is active — otherwise
+        // it's always dominated by the longest match.
+        if rep_hint.is_some() {
+            if let Some((dist, copy_len, advance_len, is_dict)) = closest_at[i] {
+                eval_match!(
+                    i,
+                    dist,
+                    copy_len,
+                    advance_len,
+                    is_dict,
+                    best,
+                    best_action,
+                    best_advance,
+                    best_dist
+                );
             }
         }
 
         cost[i] = best;
         back_len[i] = best_action;
         back_advance[i] = best_advance;
+        back_dist[i] = best_dist;
     }
 
     // --- Step 4: Forward reconstruction ---
@@ -1299,7 +2317,7 @@ fn optimal_parse_with_costs_ext(
         if back_len[pos] > 0 {
             let copy_len = back_len[pos];
             let advance = back_advance[pos];
-            let (dist, _, _, _) = matches_at[pos].unwrap();
+            let dist = back_dist[pos];
             let insert_len = (pos - insert_start) as u32;
             commands.push(Command {
                 insert_len,
@@ -1323,6 +2341,790 @@ fn optimal_parse_with_costs_ext(
     }
 
     commands
+}
+
+/// True wire-cost model for distance codes. Prices an explicit distance
+/// as its actual (symbol, extra-bits) encoding under a chosen
+/// [`DistanceConfig`], with symbol costs from a Huffman table built on
+/// the observed symbol distribution. Rep codes 0-3 price at their
+/// Huffman symbol cost (no extra bits).
+struct DistCostModel {
+    /// Huffman symbol cost per distance code (bits).
+    code_cost: [f32; 704],
+    cfg: DistanceConfig,
+}
+
+impl DistCostModel {
+    /// Build from a command stream: choose the distance config, encode
+    /// each copy's distance, histogram the symbols, Huffman-build.
+    fn from_commands(commands: &[Command], mlen_offset: usize) -> Self {
+        let cfg = DistanceConfig::choose(commands);
+        let mut freq = [0u32; 704];
+        let mut rep = RepBuffer::new();
+        let mut cur = 0usize;
+        let n = commands
+            .iter()
+            .map(|c| c.insert_len as usize + c.copy_len as usize)
+            .sum::<usize>();
+        let mut has_copy = false;
+        for cmd in commands {
+            cur += cmd.insert_len as usize;
+            if cmd.copy_len > 0 {
+                has_copy = true;
+                let is_dict = (cmd.distance as usize) > mlen_offset + cur;
+                if is_dict {
+                    rep.on_dict_reference(false);
+                } else if let Some(code) = rep.find_rep_code(cmd.distance) {
+                    freq[code as usize] += 1;
+                    rep.on_rep_lz77(code);
+                } else {
+                    let (sym, _) = encode_distance(cmd.distance, &cfg);
+                    freq[sym.min(703) as usize] += 1;
+                    rep.on_new_distance_lz77(cmd.distance);
+                }
+                cur += cmd.copy_len as usize;
+            }
+        }
+        let _ = n;
+        let mut code_cost = [22.0f32; 704];
+        if has_copy {
+            let huff = omnizip_codecs::HuffmanLengths::build(&freq, 15);
+            for i in 0..704 {
+                if huff.lengths[i] > 0 {
+                    code_cost[i] = f32::from(huff.lengths[i]);
+                }
+            }
+        }
+        Self { code_cost, cfg }
+    }
+
+    /// True wire cost (bits) of encoding `distance` explicitly.
+    fn explicit_cost(&self, dist: u32) -> f32 {
+        let (sym, _) = encode_distance(dist, &self.cfg);
+        let nbits = distance_extra_bits(sym, &self.cfg);
+        self.code_cost[sym.min(703) as usize] + nbits as f32
+    }
+
+    /// Wire cost of rep code `k` (0-3).
+    fn rep_cost(&self, k: usize) -> f32 {
+        self.code_cost[k]
+    }
+}
+
+/// Zopfli-style forward DP with full rep-state tracking (port of the
+/// core of `BrotliZopfliComputeShortestPath` from
+/// `brotli/c/enc/backward_references_hq.c`).
+///
+/// Unlike the backward DP in [`optimal_parse_with_costs_ext`], this
+/// walks positions left-to-right so each node's backpointer chain
+/// encodes the full command history — which means the 4-slot rep
+/// buffer state is exactly reconstructible at every position. Match
+/// candidates are then priced with their TRUE wire cost: a distance
+/// already sitting in the rep buffer costs a rep code (~2 bits)
+/// instead of an explicit distance code (~12 bits).
+///
+/// Two candidate sources are evaluated per position:
+/// 1. The longest hash-chain match (as before), priced against the
+///    current rep state.
+/// 2. Each of the 4 current rep distances, extended as a match at
+///    this position — so the parser actively *chooses* distances that
+///    keep the rep chain stable, rather than hoping the hash finder
+///    happens to return them.
+fn zopfli_parse(
+    input: &[u8],
+    mf: &mut omnizip_codecs::HashChainMatchFinder,
+    mlen_offset: usize,
+    use_dict: bool,
+    lit_cost_override: Option<[f32; 256]>,
+    lit_cost_positional: Option<&[f32]>,
+    cmd_cost_override: Option<f32>,
+    dist_model: Option<&DistCostModel>,
+) -> Vec<Command> {
+    zopfli_parse_ext(
+        input,
+        mf,
+        0, // shared MF: data starts at global position 0
+        mlen_offset,
+        use_dict,
+        lit_cost_override,
+        lit_cost_positional,
+        cmd_cost_override,
+        dist_model,
+    )
+}
+
+/// `mf_base` is the global coordinate of `mf`'s data[0]. The shared MF
+/// (whole input) has base 0; refinement MFs built over just the chunk
+/// have base = mlen_offset. Querying an MF with global positions when
+/// its data is chunk-local reads out of bounds and yields no candidates
+/// — silently disabling the refinement pass for every chunk after the
+/// first.
+#[allow(clippy::too_many_arguments)]
+fn zopfli_parse_ext(
+    input: &[u8],
+    mf: &mut omnizip_codecs::HashChainMatchFinder,
+    mf_base: usize,
+    mlen_offset: usize,
+    use_dict: bool,
+    lit_cost_override: Option<[f32; 256]>,
+    lit_cost_positional: Option<&[f32]>,
+    cmd_cost_override: Option<f32>,
+    dist_model: Option<&DistCostModel>,
+) -> Vec<Command> {
+    let n = input.len();
+    if n == 0 {
+        return Vec::new();
+    }
+    // Translate a global position to the MF's own coordinate space.
+    let to_mf = |global_pos: usize| global_pos.saturating_sub(mf_base);
+
+    // --- Step 1: collect candidate matches at each position ---
+    // Multi-candidate: up to `cand_count` distinct distances per position
+    // (newest chain entries first). Distance diversity lets the DP warm
+    // stable rep chains the longest-match policy would never surface.
+    // Stored FLAT (values + per-position offsets): a Vec-per-position
+    // here means millions of heap allocations per parse and dominates
+    // runtime at multi-MB scale.
+    // Candidate budget: the top-K-by-length walk needs enough depth to
+    // reach structural matches buried under frequent short matches
+    // (measured ~14-22 entries on the CSV structure). Patience-bounded,
+    // so the deeper walk stays cheap on dense chains.
+    let (cand_count, walk) = if n <= 1 << 20 { (16, 256) } else { (12, 96) };
+    let mut cand_flat: Vec<(u32, u32)> = Vec::with_capacity(n * 4);
+    let mut cand_off: Vec<u32> = Vec::with_capacity(n + 1);
+    let mut dict_at: Vec<Option<(u32, u32, u32)>> = vec![None; n]; // (d, wl, tl)
+    let mut mf_buf: Vec<omnizip_codecs::Lz77Match> = Vec::new();
+    for pos in 0..n {
+        cand_off.push(cand_flat.len() as u32);
+        let global_pos = mlen_offset + pos;
+        let max_dist = (global_pos as u32).min(MAX_BACKWARD_DISTANCE);
+        if pos + MIN_MATCH as usize <= n {
+            mf.advance();
+            mf.find_candidates_into(to_mf(mlen_offset + pos), cand_count, walk, &mut mf_buf);
+            if std::env::var("BROTLI_DP_DEBUG").is_ok() && pos == 499_992 {
+                eprintln!(
+                    "STEP1[499992] mf_base={mf_base} mlen={mlen_offset} n={n} raw={:?}",
+                    &mf_buf
+                );
+            }
+            for m in &mf_buf {
+                if m.distance <= max_dist && m.length >= MIN_MATCH {
+                    // Clamp to the chunk end: a match may not extend past
+                    // the metablock boundary (decoder rejects overruns).
+                    let copy_len = m.length.min(MAX_COPY).min((n - pos) as u32).max(MIN_MATCH);
+                    cand_flat.push((m.distance, copy_len));
+                }
+            }
+        }
+        if use_dict {
+            let first: Option<&(u32, u32)> = cand_flat[cand_off[pos] as usize..].first();
+            let hash_len = first.map(|&(_, l)| l).unwrap_or(0);
+            if hash_len < 16 {
+                if let Some((d, wl, tl)) = dict_hash::find_match(input, pos, max_dist) {
+                    if tl >= MIN_MATCH && pos + tl as usize <= n {
+                        let is_better = match first {
+                            None => true,
+                            Some(&(_, existing_len)) => tl > existing_len,
+                        };
+                        if is_better {
+                            dict_at[pos] = Some((d, wl.min(MAX_COPY).max(MIN_MATCH), tl));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    cand_off.push(cand_flat.len() as u32);
+    // Sort each position's candidate slice by length desc so the DP's
+    // full-boundary sweep applies to the true longest match.
+    for pos in 0..n {
+        let s = cand_off[pos] as usize;
+        let e = cand_off[pos + 1] as usize;
+        cand_flat[s..e].sort_by(|a, b| b.1.cmp(&a.1));
+    }
+
+    // --- Step 2: cost models (shared with the backward DP) ---
+    let lit_cost = lit_cost_override.unwrap_or_else(|| compute_huffman_lit_cost(input));
+    let cmd_base_cost = cmd_cost_override.unwrap_or(7.0);
+    let default_dist_cost = |dist: u32| -> f32 {
+        if dist == 0 {
+            return 0.0;
+        }
+        let d = dist as f32;
+        if dist <= 4 {
+            2.0 + 0.5 * d
+        } else {
+            let log_d = d.ln() / core::f32::consts::LN_2;
+            (5.0 + log_d).min(22.0)
+        }
+    };
+    let explicit_dist_cost = |dist: u32| -> f32 {
+        if let Some(model) = dist_model {
+            model.explicit_cost(dist)
+        } else {
+            default_dist_cost(dist)
+        }
+    };
+    let rep_cost = |k: usize| -> f32 {
+        if let Some(model) = dist_model {
+            model.rep_cost(k)
+        } else {
+            1.5 + 0.75 * k as f32
+        }
+    };
+    // Short-code (0-15) distance cost: matches rep0/rep1 exactly or at
+    // ±1-3 offset encode as a single Huffman symbol (~3 bits, no extra
+    // bits). Drifting distance chains ride these.
+    let short_code_dist_cost = |dist: u32, reps: &[u32; 4]| -> Option<f32> {
+        for (k, &r) in reps.iter().enumerate() {
+            if r == dist {
+                return Some(rep_cost(k));
+            }
+        }
+        const DELTAS: [i32; 6] = [-1, 1, -2, 2, -3, 3];
+        for &base in [&reps[0], &reps[1]] {
+            if base == 0 {
+                continue;
+            }
+            for &d in &DELTAS {
+                let v = base as i32 + d;
+                if v >= 1 && v == dist as i32 {
+                    return Some(3.0);
+                }
+            }
+        }
+        None
+    };
+    // Exact wire cost: copy-length extra bits per kCmdLut's code table
+    // (K_COPY_LENGTH_EXTRA_BITS over offsets 2,3,4,5,6,7,8,9,10,12,14,
+    // 18,22,30,38,54,70,102,134,198,326,582,1094,2118).
+    let copy_extra_cost = |copy_len: u32| -> f32 {
+        if copy_len <= 9 {
+            0.0
+        } else if copy_len <= 13 {
+            1.0
+        } else if copy_len <= 21 {
+            2.0
+        } else if copy_len <= 37 {
+            3.0
+        } else if copy_len <= 69 {
+            4.0
+        } else if copy_len <= 133 {
+            5.0
+        } else if copy_len <= 197 {
+            6.0
+        } else if copy_len <= 325 {
+            7.0
+        } else if copy_len <= 581 {
+            8.0
+        } else if copy_len <= 1093 {
+            9.0
+        } else if copy_len <= 2117 {
+            10.0
+        } else {
+            24.0
+        }
+    };
+
+    // --- Step 3: forward DP with rep-state tracking ---
+    // cost[i]   = min bits to encode input[0..i] (literals charged
+    //             individually; command overhead charged when the
+    //             pending literal run is flushed by a copy).
+    // back_len  = copy length of the transition INTO i (0 = literal step)
+    // back_pos  = source position of the transition INTO i
+    // back_dist = distance for copy transitions
+    // u[i]      = position where the pending literal run at i started
+    let mut cost = vec![f32::INFINITY; n + 1];
+    let mut back_pos = vec![0u32; n + 1];
+    let mut back_len = vec![0u16; n + 1];
+    let mut back_dist = vec![0u32; n + 1];
+    let mut u = vec![0u32; n + 1];
+    cost[0] = 0.0;
+
+    for i in 0..n {
+        let base = cost[i];
+        if base == f32::INFINITY {
+            continue;
+        }
+
+        // Debug dump for a narrow position window.
+        let dbg = std::env::var("BROTLI_DP_DEBUG").is_ok() && (499_990..=499_996).contains(&i);
+        if dbg {
+            let cs = cand_off[i] as usize;
+            let ce = cand_off[i + 1] as usize;
+            eprintln!(
+                "DP[{i}] base={base:.1} u={} cands={:?} dict={:?}",
+                u[i],
+                &cand_flat[cs..ce],
+                dict_at[i]
+            );
+        }
+
+        // Literal transition. Positional (context-conditioned) costs
+        // override the flat per-byte table when available.
+        let lit_c = match lit_cost_positional {
+            Some(pc) => pc[i],
+            None => lit_cost[input[i] as usize],
+        };
+        let c = base + lit_c;
+        if c < cost[i + 1] {
+            cost[i + 1] = c;
+            back_pos[i + 1] = i as u32;
+            back_len[i + 1] = 0;
+            back_dist[i + 1] = 0;
+            u[i + 1] = u[i];
+        }
+
+        // Rep state at i: walk the backpointer chain back through the
+        // (at most 4) most recent copy commands. Literal runs are
+        // skipped via u[] jumps. Distances are deduplicated, mirroring
+        // the decoder's shuffle-on-use rep semantics.
+        let mut reps = [0u32; 4];
+        {
+            let mut pos = i;
+            let mut k = 0usize;
+            let mut guard = 0usize;
+            while pos > 0 && k < 4 {
+                guard += 1;
+                if guard > n + 8 {
+                    break;
+                }
+                if back_len[pos] == 0 {
+                    // Literal step: jump to where this run began (= end
+                    // of the previous copy, or 0).
+                    pos = u[pos] as usize;
+                    continue;
+                }
+                let d = back_dist[pos];
+                if d != 0 && !reps[..k].contains(&d) {
+                    reps[k] = d;
+                    k += 1;
+                }
+                pos = back_pos[pos] as usize;
+            }
+        }
+
+        // Copy transitions from all hash candidates. The first (longest)
+        // candidate gets the full boundary sweep; the rest get their max
+        // boundary (plus the copy-code boundary below it) — diversity is
+        // for distance selection, not length tuning.
+        let cstart = cand_off[i] as usize;
+        let cend = cand_off[i + 1] as usize;
+        for (cand_idx, &(dist, copy_len)) in cand_flat[cstart..cend].iter().enumerate() {
+            if dist == 0 || copy_len < MIN_MATCH {
+                continue;
+            }
+            let dc = match short_code_dist_cost(dist, &reps) {
+                Some(c) => c,
+                None => explicit_dist_cost(dist),
+            };
+            let m_cost = cmd_base_cost + dc;
+            if cand_idx == 0 {
+                for &boundary in &COPY_BOUNDARIES {
+                    if boundary < MIN_MATCH || boundary > copy_len {
+                        continue;
+                    }
+                    let j = i + boundary as usize;
+                    if j > n {
+                        break;
+                    }
+                    let total = base + m_cost + copy_extra_cost(boundary);
+                    if total < cost[j] {
+                        cost[j] = total;
+                        back_pos[j] = i as u32;
+                        back_len[j] = boundary as u16;
+                        back_dist[j] = dist;
+                        u[j] = j as u32;
+                    }
+                }
+            } else {
+                // Max boundary + the highest copy-code boundary below it.
+                let mut evaluated = [0u32; 2];
+                evaluated[0] = copy_len;
+                for &b in COPY_BOUNDARIES.iter().rev() {
+                    if b < copy_len {
+                        evaluated[1] = b;
+                        break;
+                    }
+                }
+                for &boundary in &evaluated {
+                    if boundary < MIN_MATCH {
+                        continue;
+                    }
+                    let j = i + boundary as usize;
+                    if j > n {
+                        continue;
+                    }
+                    let total = base + m_cost + copy_extra_cost(boundary);
+                    if total < cost[j] {
+                        cost[j] = total;
+                        back_pos[j] = i as u32;
+                        back_len[j] = boundary as u16;
+                        back_dist[j] = dist;
+                        u[j] = j as u32;
+                    }
+                }
+            }
+        }
+
+        // Copy transition from the dictionary candidate (if any).
+        if let Some((dist, copy_len, advance_len)) = dict_at[i] {
+            let m_cost = cmd_base_cost + explicit_dist_cost(dist);
+            let j = i + advance_len as usize;
+            if j <= n {
+                let total = base + m_cost + copy_extra_cost(copy_len);
+                if total < cost[j] {
+                    cost[j] = total;
+                    back_pos[j] = i as u32;
+                    back_len[j] = copy_len.min(u16::MAX as u32) as u16;
+                    back_dist[j] = dist;
+                    u[j] = j as u32;
+                }
+            }
+        }
+
+        // Copy transitions from each rep distance and its ±1-3 offsets
+        // (short codes 4-15): extend each variant as a match at this
+        // position. This is how the parser rides slowly-drifting chains.
+        let global_i = mlen_offset + i;
+        let max_len = ((n - i) as u32).min(MAX_COPY);
+        const DELTAS: [i32; 6] = [-1, 1, -2, 2, -3, 3];
+        for (k, &r) in reps.iter().enumerate() {
+            if r == 0 || (global_i as u64) < u64::from(r) {
+                continue;
+            }
+            let src_global = global_i - r as usize;
+            let l = mf.match_len_between(to_mf(global_i), to_mf(src_global), max_len);
+            if l < MIN_MATCH {
+                continue;
+            }
+            let m_cost = cmd_base_cost + rep_cost(k);
+            for &boundary in &COPY_BOUNDARIES {
+                if boundary < MIN_MATCH || boundary > l {
+                    continue;
+                }
+                let j = i + boundary as usize;
+                if j > n {
+                    break;
+                }
+                let total = base + m_cost + copy_extra_cost(boundary);
+                if total < cost[j] {
+                    cost[j] = total;
+                    back_pos[j] = i as u32;
+                    back_len[j] = boundary as u16;
+                    back_dist[j] = r;
+                    u[j] = j as u32;
+                }
+            }
+            // ±delta variants (only meaningful for the two most recent
+            // distances — short codes 4-15 apply to rep0/rep1).
+            if k >= 2 {
+                continue;
+            }
+            for &d in &DELTAS {
+                let rv = r as i32 + d;
+                if rv < 1 || (global_i as i64) < i64::from(rv) {
+                    continue;
+                }
+                let src = global_i - rv as usize;
+                let lv = mf.match_len_between(to_mf(global_i), to_mf(src), max_len);
+                if lv < MIN_MATCH {
+                    continue;
+                }
+                let m_cost_v = cmd_base_cost + 3.0; // short code
+                for &boundary in &COPY_BOUNDARIES {
+                    if boundary < MIN_MATCH || boundary > lv {
+                        continue;
+                    }
+                    let j = i + boundary as usize;
+                    if j > n {
+                        break;
+                    }
+                    let total = base + m_cost_v + copy_extra_cost(boundary);
+                    if total < cost[j] {
+                        cost[j] = total;
+                        back_pos[j] = i as u32;
+                        back_len[j] = boundary as u16;
+                        back_dist[j] = rv as u32;
+                        u[j] = j as u32;
+                    }
+                }
+            }
+        }
+    }
+
+    // --- Step 4: backtrack ---
+    let mut commands: Vec<Command> = Vec::new();
+    // Trailing literals (after the last copy) form a final insert-only command.
+    let mut last_copy_end = n;
+    let mut guard = 0usize;
+    while last_copy_end > 0 && back_len[last_copy_end] == 0 {
+        guard += 1;
+        if guard > n + 8 {
+            break;
+        }
+        last_copy_end = back_pos[last_copy_end] as usize;
+    }
+    if n > last_copy_end {
+        commands.push(Command {
+            insert_len: (n - last_copy_end) as u32,
+            copy_len: 0,
+            distance: 0,
+        });
+    }
+    let mut pos = last_copy_end;
+    while pos > 0 {
+        // pos is a copy-end node: back_len[pos] > 0.
+        let src = back_pos[pos] as usize;
+        let insert_len = (src - u[src] as usize) as u32;
+        if std::env::var("BROTLI_DP_DEBUG").is_ok() && (499_980..=500_020).contains(&pos) {
+            eprintln!(
+                "BT[end={pos}] src={src} ins={insert_len} copy={} d={} cost={:.1}",
+                back_len[pos], back_dist[pos], cost[pos]
+            );
+        }
+        commands.push(Command {
+            insert_len,
+            copy_len: u32::from(back_len[pos]),
+            distance: back_dist[pos],
+        });
+        // Walk src back through literal steps (u-jump) to the previous
+        // copy end, or to 0. Literal nodes carry the run start in u[],
+        // which is exactly the previous copy's end position.
+        let mut p = src;
+        let mut guard = 0usize;
+        while p > 0 && back_len[p] == 0 {
+            guard += 1;
+            if guard > n + 8 {
+                break;
+            }
+            p = u[p] as usize;
+        }
+        pos = p;
+    }
+    commands.reverse();
+    commands
+}
+
+/// Iterated Zopfli parse. Pass 1 uses default cost models; each
+/// subsequent pass refines the literal/command costs and the
+/// distance-code cost model from the previous pass's actual
+/// distribution, and keeps whichever parse scores best. Iterates until
+/// the score stops improving (max 3 refinement passes).
+fn zopfli_iterative_parse(
+    input: &[u8],
+    mf: &mut omnizip_codecs::HashChainMatchFinder,
+    mlen_offset: usize,
+    use_dict: bool,
+    quality: i32,
+) -> Vec<Command> {
+    // Pass 1a: caller-provided MF (may be shared across chunks for
+    // cross-chunk matching). Pass 1b: light-config MF — a different
+    // hash width orders candidates differently, which measurably changes
+    // which rep chains the DP warms. Keep the better-scoring start.
+    let t0 = std::time::Instant::now();
+    let mut best_commands = zopfli_parse(input, mf, mlen_offset, use_dict, None, None, None, None);
+    if std::env::var("BROTLI_STATS").is_ok() {
+        eprintln!(
+            "PHASE pass1a: {:.1}s ({} cmds)",
+            t0.elapsed().as_secs_f64(),
+            best_commands.len()
+        );
+    }
+    let mut best_score = score_commands(&best_commands, input, mlen_offset);
+    // Pass 1c: greedy+lazy parse (the quality-1 path). On highly
+    // structured data its local, rep-friendly match choices often beat
+    // the DP's globally-priced ones; it's also nearly free to compute.
+    {
+        // Env-tunable for sweeps: BROTLI_GREEDY="chain,nice,hashlog".
+        let (gc, gn, gh) = std::env::var("BROTLI_GREEDY")
+            .ok()
+            .and_then(|v| {
+                let p: Vec<u32> = v.split(',').filter_map(|x| x.parse().ok()).collect();
+                (p.len() == 3).then_some((p[0], p[1], p[2]))
+            })
+            .unwrap_or((24, 64, 17));
+        let greedy_config = omnizip_codecs::HashChainConfig {
+            dict_size: MAX_BACKWARD_DISTANCE,
+            min_match: MIN_MATCH,
+            max_chain_length: gc,
+            nice_match: gn,
+            hash_log: gh,
+            max_match_length: MAX_COPY,
+        };
+        let mut mf_greedy = omnizip_codecs::HashChainMatchFinder::new(input, greedy_config);
+        let t = std::time::Instant::now();
+        let greedy_commands = greedy_parse(input, &mut mf_greedy, mlen_offset);
+        if std::env::var("BROTLI_STATS").is_ok() {
+            eprintln!("PHASE greedy: {:.1}s", t.elapsed().as_secs_f64());
+        }
+        let greedy_score = score_commands(&greedy_commands, input, mlen_offset);
+        if greedy_score < best_score && std::env::var("BROTLI_NO_GREEDY").is_err() {
+            best_score = greedy_score;
+            best_commands = greedy_commands;
+        }
+    }
+    if input.len() <= 1 << 20 {
+        let light_config = omnizip_codecs::HashChainConfig {
+            dict_size: MAX_BACKWARD_DISTANCE,
+            min_match: MIN_MATCH,
+            max_chain_length: 16,
+            nice_match: 96,
+            hash_log: 17,
+            max_match_length: MAX_COPY,
+        };
+        let mut mf_light = omnizip_codecs::HashChainMatchFinder::new(input, light_config);
+        let light_commands = zopfli_parse(
+            input,
+            &mut mf_light,
+            mlen_offset,
+            use_dict,
+            None,
+            None,
+            None,
+            None,
+        );
+        let light_score = score_commands(&light_commands, input, mlen_offset);
+        if light_score < best_score && std::env::var("BROTLI_NO_LIGHT").is_err() {
+            best_score = light_score;
+            best_commands = light_commands;
+        }
+    }
+
+    // Refinement passes use the deepest config: measured best on
+    // structured data regardless of the pass-1 config (deeper candidate
+    // lists stabilize the rep chains during refinement).
+    let _ = quality;
+    let (max_chain, nice_match, _, _, _, hash_log) = brotli_quality_config(11, true);
+    let config = omnizip_codecs::HashChainConfig {
+        dict_size: MAX_BACKWARD_DISTANCE,
+        min_match: MIN_MATCH,
+        max_chain_length: max_chain,
+        nice_match,
+        hash_log,
+        max_match_length: MAX_COPY,
+    };
+
+    let iters_env = std::env::var("BROTLI_ITERS")
+        .ok()
+        .and_then(|v| v.parse().ok());
+    let max_iters = iters_env.unwrap_or(if input.len() <= 1 << 20 { 3 } else { 1 });
+    for _ in 0..max_iters {
+        let literals_prev = extract_literals(&best_commands, input, mlen_offset);
+        if literals_prev.is_empty() {
+            break;
+        }
+
+        // Context-conditioned positional literal costs, matched to the
+        // granularity the encoder actually uses (4 literal trees via
+        // ctx>>4 for inputs ≥ 8 KiB). Modeling finer contexts than the
+        // wire format can express over-promises literal savings and
+        // skews the parse.
+        let _positional_costs: Vec<f32> = {
+            let context_mode: u32 = if is_text_like(input) { 2 } else { 0 };
+            // Per-CONTEXT (64 buckets) literal costs — each bucket priced
+            // under its own Huffman tree. Pure buckets cost ~0 (the final
+            // coding isolates them into zero-bit trees), high-diversity
+            // buckets (digit runs) cost their true entropy. This lets the
+            // DP shift copy boundaries toward cheap literals.
+            let mut hist = vec![[0u32; 256]; 64];
+            let mut p1: u8 = 0;
+            let mut p2: u8 = 0;
+            let mut ctx_of = vec![0u8; input.len()];
+            for (i, &b) in input.iter().enumerate() {
+                let ctx = compute_context_id(p1, p2, context_mode) as usize;
+                ctx_of[i] = ctx as u8;
+                hist[ctx][b as usize] += 1;
+                p2 = p1;
+                p1 = b;
+            }
+            let mut cost_of = vec![[0f32; 256]; 64];
+            for (c, h) in hist.iter().enumerate() {
+                let total: u64 = h.iter().map(|&x| u64::from(x)).sum();
+                if total == 0 {
+                    continue;
+                }
+                let distinct = h.iter().filter(|&&x| x > 0).count();
+                if distinct == 1 {
+                    if let Some(b) = h.iter().position(|&x| x > 0) {
+                        cost_of[c][b] = 0.05;
+                    }
+                    continue;
+                }
+                let tree = omnizip_codecs::HuffmanLengths::build(h, 15);
+                for (b, &f) in h.iter().enumerate() {
+                    let l = tree.lengths[b];
+                    cost_of[c][b] = if f > 0 && l > 0 { f32::from(l) } else { 12.0 };
+                }
+            }
+            let mut out = vec![0f32; input.len()];
+            for i in 0..input.len() {
+                out[i] = cost_of[usize::from(ctx_of[i])][input[i] as usize];
+            }
+            out
+        };
+        let lit_cost_refined = compute_huffman_lit_cost(&literals_prev);
+
+        let mut cmd_freq = [0u32; 704];
+        for cmd in &best_commands {
+            if let Some(sym) = find_cmd_symbol(cmd.insert_len, cmd.copy_len) {
+                cmd_freq[sym] += 1;
+            }
+        }
+        let cmd_huff = omnizip_codecs::HuffmanLengths::build(&cmd_freq, 15);
+        let cmd_nonzero: u32 = cmd_freq.iter().sum();
+        let cmd_avg_bits = if cmd_nonzero > 0 {
+            let mut total_bits = 0u32;
+            for (sym, &freq) in cmd_freq.iter().enumerate() {
+                if freq > 0 {
+                    total_bits += freq * u32::from(cmd_huff.lengths[sym]);
+                }
+            }
+            total_bits as f32 / cmd_nonzero as f32
+        } else {
+            7.0
+        };
+
+        let dist_model = DistCostModel::from_commands(&best_commands, mlen_offset);
+
+        let mut mf_iter = omnizip_codecs::HashChainMatchFinder::new(input, config);
+        // The refinement MF's data is the CHUNK slice, so its coordinate
+        // base is mlen_offset (global positions would read out of bounds).
+        let t = std::time::Instant::now();
+        let commands_iter = zopfli_parse_ext(
+            input,
+            &mut mf_iter,
+            mlen_offset,
+            mlen_offset,
+            use_dict,
+            Some(lit_cost_refined),
+            if std::env::var("BROTLI_POS").is_ok() {
+                Some(&_positional_costs)
+            } else {
+                None
+            },
+            Some(cmd_avg_bits),
+            Some(&dist_model),
+        );
+        if std::env::var("BROTLI_STATS").is_ok() {
+            eprintln!("PHASE refine: {:.1}s", t.elapsed().as_secs_f64());
+        }
+        let score_iter = score_commands(&commands_iter, input, mlen_offset);
+        if std::env::var("BROTLI_STATS").is_ok() {
+            eprintln!(
+                "zopfli iter: best={best_score} candidate={score_iter} (cmds {} -> {})",
+                best_commands.len(),
+                commands_iter.len()
+            );
+        }
+        if score_iter < best_score {
+            best_score = score_iter;
+            best_commands = commands_iter;
+        } else {
+            break;
+        }
+    }
+    best_commands
 }
 
 /// Iterative refinement of [`optimal_parse`] (TODO 246).
@@ -1359,8 +3161,13 @@ fn iterative_optimal_parse(
     mf: &mut omnizip_codecs::HashChainMatchFinder,
     mlen_offset: usize,
     use_dict: bool,
+    quality: i32,
 ) -> Vec<Command> {
-    iterative_optimal_parse_with_iters(input, mf, mlen_offset, use_dict, 2)
+    // Q11+ uses 4 iterations to let the rep_hint converge: iter 1 sets
+    // rep0 from longest matches, iter 2 may choose closer rep-friendly
+    // matches, iter 3's rep_hint reflects those, iter 4 refines further.
+    let iters = if quality >= 11 { 4 } else { 2 };
+    iterative_optimal_parse_with_iters(input, mf, mlen_offset, use_dict, iters)
 }
 
 /// Multi-pass iterative optimal parser (TODO 272). Each iteration
@@ -1375,8 +3182,18 @@ fn iterative_optimal_parse_with_iters(
     use_dict: bool,
     iterations: usize,
 ) -> Vec<Command> {
-    // Pass 1: Shannon cost from input.
-    let mut best_commands = optimal_parse(input, mf, mlen_offset, use_dict);
+    // Pass 1: Huffman-derived cost from input. Shannon entropy
+    // underestimates literal cost for small alphabets (e.g. ~20 distinct
+    // bytes → Shannon ≈ 4.3 bits but Huffman ≈ 5 bits), biasing the DP
+    // toward literals when copies would be cheaper. Huffman code lengths
+    // match what the wire format actually pays per byte.
+    let mut best_commands = optimal_parse_with_costs(
+        input,
+        mf,
+        mlen_offset,
+        use_dict,
+        Some(compute_huffman_lit_cost(input)),
+    );
     let mut best_score = score_commands(&best_commands, input, mlen_offset);
 
     let config = omnizip_codecs::HashChainConfig {
@@ -1397,7 +3214,7 @@ fn iterative_optimal_parse_with_iters(
         if literals_prev.is_empty() {
             break;
         }
-        let lit_cost_refined = compute_shannon_lit_cost(&literals_prev);
+        let lit_cost_refined = compute_huffman_lit_cost(&literals_prev);
 
         // Compute command cost from pass 1's command symbol frequencies.
         // Build a histogram of kCmdLut symbols, then Huffman-build to get
@@ -1443,6 +3260,57 @@ fn iterative_optimal_parse_with_iters(
             }
         }
 
+        // Compute rep0 hint from the previous iteration's commands.
+        // This gives the DP knowledge of which distances are "warm" in
+        // the rep buffer, enabling it to prefer matches that become
+        // cheap rep codes (0 distance bits instead of ~10).
+        let rep_hint: Vec<u32> = {
+            let mut hint = vec![0u32; input.len() + 1];
+            let mut rep = RepBuffer::new();
+            let mut pos = 0usize;
+            for cmd in &best_commands {
+                for _ in 0..cmd.insert_len as usize {
+                    if pos < hint.len() {
+                        hint[pos] = rep.rep_at(0);
+                    }
+                    pos += 1;
+                }
+                if cmd.copy_len > 0 {
+                    let global_pos = mlen_offset + pos;
+                    let is_dict = (cmd.distance as usize) > global_pos;
+                    if is_dict {
+                        rep.on_dict_reference(false);
+                    } else if let Some(code) = rep.find_rep_code(cmd.distance) {
+                        rep.on_rep_lz77(code);
+                    } else {
+                        rep.on_new_distance_lz77(cmd.distance);
+                    }
+                    let advance = if is_dict {
+                        let mut tmp = Vec::with_capacity(cmd.copy_len as usize + 8);
+                        let max_dist = (global_pos as u32).min(MAX_BACKWARD_DISTANCE);
+                        match dictionary_lookup(
+                            &mut tmp,
+                            cmd.copy_len,
+                            cmd.distance as i32,
+                            max_dist,
+                        ) {
+                            Some(()) => tmp.len(),
+                            None => cmd.copy_len as usize,
+                        }
+                    } else {
+                        cmd.copy_len as usize
+                    };
+                    for _ in 0..advance {
+                        if pos < hint.len() {
+                            hint[pos] = rep.rep_at(0);
+                        }
+                        pos += 1;
+                    }
+                }
+            }
+            hint
+        };
+
         let mut mf_iter = omnizip_codecs::HashChainMatchFinder::new(input, config);
         let commands_iter = optimal_parse_with_costs_ext(
             input,
@@ -1452,6 +3320,7 @@ fn iterative_optimal_parse_with_iters(
             Some(lit_cost_refined),
             Some(cmd_avg_bits),
             Some(&dist_table),
+            Some(&rep_hint),
         );
         let score_iter = score_commands(&commands_iter, input, mlen_offset);
         if score_iter < best_score {
@@ -1460,7 +3329,7 @@ fn iterative_optimal_parse_with_iters(
         }
     }
 
-    best_commands
+    rewrite_for_rep_codes(best_commands, input, mlen_offset)
 }
 
 /// Extract just the literal bytes from a command list (in stream order).
@@ -1472,7 +3341,7 @@ fn extract_literals(commands: &[Command], input: &[u8], mlen_offset: usize) -> V
         let end = cur + cmd.insert_len as usize;
         out.extend_from_slice(&input[cur..end]);
         let advance = if cmd.copy_len > 0 {
-            let is_dict = (cmd.distance as usize) > cur;
+            let is_dict = (cmd.distance as usize) > mlen_offset + end;
             if is_dict {
                 let global_pos = mlen_offset + end;
                 let max_dist = (global_pos as u32).min(MAX_BACKWARD_DISTANCE);
@@ -1495,26 +3364,79 @@ fn extract_literals(commands: &[Command], input: &[u8], mlen_offset: usize) -> V
 /// Rough score: total bits the command stream would cost in the
 /// Huffman-coded wire format. Lower is better.
 ///
-/// This is an approximation — it doesn't build actual Huffman trees
-/// — but it's a sufficient signal for "is iteration 2 better?".
+/// Literal bits are priced with the same 4-tree context model the
+/// encoder emits (UTF8 contexts, ctx>>4 grouping); distances are priced
+/// with rep-buffer simulation including the ±1-3 short codes. Keeping
+/// the scorer aligned with the encoder's actual costs is what lets the
+/// iterative parser rank literal-heavy vs copy-heavy parses correctly.
 #[allow(dead_code)]
+/// Per-position literal costs under per-context (64-bucket) Huffman
+/// models, with pure contexts charged ~0 (isolated as zero-bit trees).
+fn context_positional_costs(input: &[u8]) -> Vec<f32> {
+    let context_mode: u32 = if is_text_like(input) { 2 } else { 0 };
+    let mut hist = vec![[0u32; 256]; 64];
+    let mut p1: u8 = 0;
+    let mut p2: u8 = 0;
+    let mut ctx_of = vec![0u8; input.len()];
+    for (i, &b) in input.iter().enumerate() {
+        let ctx = compute_context_id(p1, p2, context_mode) as usize;
+        ctx_of[i] = ctx as u8;
+        hist[ctx][b as usize] += 1;
+        p2 = p1;
+        p1 = b;
+    }
+    let mut cost_of = vec![[0f32; 256]; 64];
+    for (c, h) in hist.iter().enumerate() {
+        let total: u64 = h.iter().map(|&x| u64::from(x)).sum();
+        if total == 0 {
+            continue;
+        }
+        if h.iter().filter(|&&x| x > 0).count() == 1 {
+            if let Some(b) = h.iter().position(|&x| x > 0) {
+                cost_of[c][b] = 0.05;
+            }
+            continue;
+        }
+        let tree = omnizip_codecs::HuffmanLengths::build(h, 15);
+        for (b, &f) in h.iter().enumerate() {
+            let l = tree.lengths[b];
+            cost_of[c][b] = if f > 0 && l > 0 { f32::from(l) } else { 12.0 };
+        }
+    }
+    let mut out = vec![0f32; input.len()];
+    for i in 0..input.len() {
+        out[i] = cost_of[usize::from(ctx_of[i])][input[i] as usize];
+    }
+    out
+}
+
 fn score_commands(commands: &[Command], input: &[u8], mlen_offset: usize) -> u64 {
+    let use_positional = std::env::var("BROTLI_POS").is_ok();
     let mut literal_count = 0u64;
     let mut cmd_count = 0u64;
-    let mut dist_count = 0u64;
     let mut literals_freq = [0u32; 256];
+    // Per-position context-aware literal costs (fixed for the input —
+    // the decoder output equals the input regardless of the parse).
+    let positional = if use_positional {
+        context_positional_costs(input)
+    } else {
+        Vec::new()
+    };
 
+    // First pass: literal frequencies + command count + dict-aware
+    // per-command advances (dict transforms change output length).
     let mut cur = 0usize;
+    let mut cmd_adv: Vec<usize> = Vec::with_capacity(commands.len());
     for cmd in commands {
         let end = cur + cmd.insert_len as usize;
         for &b in &input[cur..end] {
             literals_freq[b as usize] += 1;
             literal_count += 1;
         }
-        if cmd.copy_len > 0 {
+        let adv = if cmd.copy_len > 0 {
             cmd_count += 1;
-            let is_dict = (cmd.distance as usize) > cur;
-            let advance = if is_dict {
+            let is_dict = (cmd.distance as usize) > mlen_offset + end;
+            if is_dict {
                 let global_pos = mlen_offset + end;
                 let max_dist = (global_pos as u32).min(MAX_BACKWARD_DISTANCE);
                 let mut tmp = Vec::with_capacity(cmd.copy_len as usize + 8);
@@ -1524,30 +3446,81 @@ fn score_commands(commands: &[Command], input: &[u8], mlen_offset: usize) -> u64
                 }
             } else {
                 cmd.copy_len as usize
-            };
-            // Heuristic: count as a distance symbol only if not a rep.
-            // We don't track rep state here; assume worst case (all
-            // explicit distances). This biases toward fewer commands
-            // which is fine for ranking.
-            dist_count += 1;
-            cur = end + advance;
+            }
         } else {
-            cur = end;
+            0
+        };
+        cmd_adv.push(adv);
+        cur = end + adv;
+    }
+
+    // Literal bits: context-aware per-position costs when enabled,
+    // otherwise flat Huffman over the literal stream.
+    let mut lit_bits: u64 = 0;
+    if use_positional {
+        let mut cur2 = 0usize;
+        for cmd in commands {
+            let end = cur2 + cmd.insert_len as usize;
+            for i in cur2..end {
+                lit_bits += positional[i] as u64;
+            }
+            cur2 = end
+                + if cmd.copy_len > 0 {
+                    let is_dict = (cmd.distance as usize) > mlen_offset + end;
+                    if is_dict {
+                        cmd.copy_len as usize
+                    } else {
+                        cmd.copy_len as usize
+                    }
+                } else {
+                    0
+                };
+        }
+    } else {
+        let lit_huff = omnizip_codecs::HuffmanLengths::build(&literals_freq, 15);
+        for (b, &f) in literals_freq.iter().enumerate() {
+            if f > 0 && lit_huff.lengths[b] > 0 {
+                lit_bits += u64::from(f) * u64::from(lit_huff.lengths[b]);
+            }
         }
     }
 
-    // Shannon bound on literal stream.
-    let total = literal_count.max(1) as f32;
-    let mut lit_bits = 0.0f32;
-    for &f in &literals_freq {
-        if f > 0 {
-            let p = f as f32 / total;
-            lit_bits += -p.log2() * f as f32;
+    // Distance bits: rep-buffer simulation with short codes (exact reps
+    // AND rep0/rep1 ± 1-3 variants), else the true explicit cost.
+    let cfg = DistanceConfig::choose(commands);
+    let mut rep = RepBuffer::new();
+    let mut dist_bits: u64 = 0;
+    let mut cur2 = 0usize;
+    for cmd in commands {
+        cur2 += cmd.insert_len as usize;
+        if cmd.copy_len > 0 {
+            let is_dict = (cmd.distance as usize) > mlen_offset + cur2;
+            if is_dict {
+                rep.on_dict_reference(false);
+                dist_bits += 14;
+            } else if let Some(code) = rep.find_rep_code(cmd.distance) {
+                dist_bits += u64::from(2 + code); // exact rep code
+                rep.on_rep_lz77(code);
+            } else {
+                let (sym, _) = encode_distance(cmd.distance, &cfg);
+                dist_bits += u64::from(4 + distance_extra_bits(sym, &cfg));
+                rep.on_new_distance_lz77(cmd.distance);
+            }
+            cur2 += if is_dict {
+                let global_pos = mlen_offset + cur2;
+                let max_dist = (global_pos as u32).min(MAX_BACKWARD_DISTANCE);
+                let mut tmp = Vec::with_capacity(cmd.copy_len as usize);
+                match dictionary_lookup(&mut tmp, cmd.copy_len, cmd.distance as i32, max_dist) {
+                    Some(()) => tmp.len(),
+                    None => cmd.copy_len as usize,
+                }
+            } else {
+                cmd.copy_len as usize
+            };
         }
     }
 
-    // Command + distance overhead: ~8 bits per command, ~10 per distance.
-    (lit_bits as u64) + cmd_count * 8 + dist_count * 10
+    lit_bits + cmd_count * 8 + dist_bits
 }
 
 // Read-only accessors for HashChainConfig fields (it's private inside
@@ -1604,7 +3577,8 @@ fn two_pass_parse(
 
         if let Some(m) = mf.find_match(pos) {
             if m.distance > 0 && m.distance <= max_dist && m.length >= MIN_MATCH {
-                let copy_len = m.length.min(MAX_COPY).max(MIN_MATCH);
+                // Clamp to the chunk end (metablock boundary).
+                let copy_len = m.length.min(MAX_COPY).min((n - pos) as u32).max(MIN_MATCH);
                 matches[pos] = Some((m.distance, copy_len, copy_len));
             }
         }
@@ -1698,12 +3672,17 @@ fn parse_input(input: &[u8]) -> Vec<Command> {
 fn brotli_quality_config(quality: i32, is_text: bool) -> (u32, u32, bool, bool, bool, u32) {
     if is_text {
         match quality {
-            0..=1 => (4, 8, false, false, false, 15),
+            0..=1 => (24, 64, false, true, false, 17),
             2..=3 => (8, 16, true, true, false, 16),
-            4..=5 => (8, 32, true, true, true, 17),
-            6..=7 => (16, 48, true, true, true, 17),
-            8..=9 => (32, 64, true, true, true, 17),
-            _ => (64, 128, true, true, true, 18),
+            4..=5 => (16, 96, true, true, true, 17),
+            6..=7 => (32, 192, true, true, true, 17),
+            8..=9 => (64, 256, true, true, true, 18),
+            10 => (128, 512, true, true, true, 18),
+            // Q11: deeper chain walk for exhaustive match evaluation.
+            // The reference's HQ Zopfli uses a binary tree match finder
+            // that evaluates ALL candidates. We approximate this with
+            // a much deeper hash-chain walk.
+            _ => (1024, 4096, true, true, true, 18),
         }
     } else {
         match quality {
@@ -1711,6 +3690,23 @@ fn brotli_quality_config(quality: i32, is_text: bool) -> (u32, u32, bool, bool, 
             _ => (8, 16, false, false, false, 16),
         }
     }
+}
+
+#[allow(dead_code)]
+fn brotli_quality_config_deep(_quality: i32, _is_text: bool) -> (u32, u32, bool, bool, bool, u32) {
+    (256, 512, true, true, true, 18)
+}
+
+/// Greedy+lazy parse (the quality-1 path) with a caller-configured MF.
+/// Used as a candidate parse inside [`zopfli_iterative_parse`]: on
+/// strongly structured data its locally rep-friendly choices can beat
+/// the globally-priced DP parse.
+fn greedy_parse(
+    input: &[u8],
+    mf: &mut omnizip_codecs::HashChainMatchFinder,
+    mlen_offset: usize,
+) -> Vec<Command> {
+    parse_input_with_offset_impl(input, mf, mlen_offset, 1, false)
 }
 
 /// Parse input into commands using LZ77 + static dictionary, with a
@@ -1726,6 +3722,28 @@ fn brotli_quality_config(quality: i32, is_text: bool) -> (u32, u32, bool, bool, 
 /// `disable_dict` temporarily disables dictionary lookups (used when
 /// context modeling is active, due to a decoder interaction bug).
 fn parse_input_with_offset(
+    input: &[u8],
+    mut mf: &mut omnizip_codecs::HashChainMatchFinder,
+    mlen_offset: usize,
+    quality: i32,
+    disable_dict: bool,
+) -> Vec<Command> {
+    parse_input_with_offset_impl(input, &mut mf, mlen_offset, quality, disable_dict)
+}
+
+/// Diagnostic wrapper exposed for benchmarks. Not part of the public API.
+#[doc(hidden)]
+pub fn _parse_input_with_offset_diag(
+    input: &[u8],
+    mf: &mut omnizip_codecs::HashChainMatchFinder,
+    mlen_offset: usize,
+    quality: i32,
+    disable_dict: bool,
+) -> Vec<Command> {
+    parse_input_with_offset_impl(input, mf, mlen_offset, quality, disable_dict)
+}
+
+fn parse_input_with_offset_impl(
     input: &[u8],
     mut mf: &mut omnizip_codecs::HashChainMatchFinder,
     mlen_offset: usize,
@@ -1753,23 +3771,17 @@ fn parse_input_with_offset(
     };
     // MF is provided by the caller — no creation here.
 
-    // Q4+: cost-aware optimal parser for any content type (TODO 240).
-    //
-    // Q8+: use iterative (2-pass) parser. The first pass uses Shannon
-    // entropy estimates; the second pass uses Huffman-derived costs from
-    // pass 1's actual command/literal/distance distributions. This is
-    // critical for FSST-preprocessed data where the Shannon cost model
-    // diverges significantly from actual Huffman costs — causing the
-    // 1-pass parser to make wrong match decisions with long copy support.
-    //
-    // Q4-Q7: single-pass optimal parser. The Shannon cost model is
-    // adequate at lower qualities where parsing effort is limited by
-    // chain depth anyway.
-    if quality >= 8 && input.len() <= 1024 * 1024 {
-        return iterative_optimal_parse(input, &mut mf, mlen_offset, use_dict);
-    }
-    if quality >= 4 && input.len() <= 1024 * 1024 {
-        return optimal_parse(input, &mut mf, mlen_offset, use_dict);
+    // Q4+: Zopfli forward DP with full rep-state tracking (port of
+    // BrotliZopfliComputeShortestPath). The forward direction makes the
+    // 4-slot rep buffer reconstructible at every position, so match
+    // candidates are priced at their TRUE wire cost: exact rep codes,
+    // rep0/rep1 ± 1-3 short codes (~3 bits, no extra bits), or explicit
+    // distance codes. On data with repeating or slowly-drifting
+    // distance structure (CSV, source code), this converts most
+    // distance codes into ~2-3-bit short codes instead of ~12-15-bit
+    // explicit codes.
+    if quality >= 4 && input.len() <= 8 * 1024 * 1024 {
+        return zopfli_iterative_parse(input, &mut mf, mlen_offset, use_dict, quality);
     }
 
     // Q4+ with input > 1 MiB (not chunked): two_pass_parse.
@@ -1795,8 +3807,10 @@ fn parse_input_with_offset(
 
         let best: Option<(u32, u32, u32)> = if lz77_valid {
             let m = lz77.as_ref().unwrap();
+            // Clamp to the chunk end (metablock boundary).
+            let len = m.length.min((n - pos) as u32);
             if m.length >= 8 || !use_dict {
-                Some((m.distance, m.length, m.length))
+                Some((m.distance, len, len))
             } else {
                 let dict = dict_hash::find_match(input, pos, max_dist);
                 match dict {
@@ -2015,9 +4029,11 @@ fn write_huffman_table(
     // NSYM=4: all length 2
     let matches_simple = match nonzero.len() {
         2 => lengths.lengths[nonzero[0]] == 1 && lengths.lengths[nonzero[1]] == 1,
-        3 => lengths.lengths[nonzero[0]] == 1
-            && lengths.lengths[nonzero[1]] == 2
-            && lengths.lengths[nonzero[2]] == 2,
+        3 => {
+            lengths.lengths[nonzero[0]] == 1
+                && lengths.lengths[nonzero[1]] == 2
+                && lengths.lengths[nonzero[2]] == 2
+        }
         4 => nonzero.iter().all(|&i| lengths.lengths[i] == 2),
         _ => false,
     };
@@ -2189,6 +4205,334 @@ fn build_rle_sequence(lengths: &[u8]) -> Vec<(u8, u8)> {
 ///   symbol 2 → type 0, symbol 3 → type 1
 /// - Block-length code tree: simple form NSYM=1, symbol = block-length code
 /// - Initial block length: code 12 (offset=113) + extra (for 128 bytes)
+
+/// Map a block length to its prefix code: (code, extra, nbits).
+fn block_length_code(len: u32) -> (usize, u32, u32) {
+    for (c, e) in crate::prefix::kBlockLengthPrefixCode.iter().enumerate() {
+        let offset = u32::from(e.offset);
+        let span = 1u32 << e.nbits;
+        if len >= offset && len < offset + span {
+            return (c, len - offset, u32::from(e.nbits));
+        }
+    }
+    // Lengths beyond the table are impossible (max code covers 16625+);
+    // clamp defensively to the last code.
+    let last = crate::prefix::kBlockLengthPrefixCode.len() - 1;
+    let e = &crate::prefix::kBlockLengthPrefixCode[last];
+    (last, (1u32 << e.nbits) - 1, u32::from(e.nbits))
+}
+
+fn huff_cost(freq: &[u32; 704]) -> f64 {
+    let h = omnizip_codecs::HuffmanLengths::build(freq, 15);
+    let mut cost = 0.0f64;
+    for (&f, &l) in freq.iter().zip(h.lengths.iter()) {
+        if f > 0 {
+            cost += f as f64 * f64::from(l);
+        }
+    }
+    cost
+}
+
+/// Optimal contiguous block split of the command stream (dynamic
+/// programming over candidate cut points, minimizing summed per-block
+/// Huffman/entropy cost). This is the BrotliBuildMetaBlock command
+/// pass done exactly: candidate cuts every `step` commands, at most
+/// `max_blocks` blocks. Returns block START indices (first is 0).
+fn split_cmd_symbols_optimal(cmd_symbols: &[usize], max_blocks: usize) -> Vec<usize> {
+    let n = cmd_symbols.len();
+    if n < 1024 || max_blocks < 2 {
+        return vec![0];
+    }
+    let step = 256.min(n / 4).max(32);
+    let mut cuts: Vec<usize> = (0..n).step_by(step).collect();
+    if *cuts.last().unwrap() != n {
+        cuts.push(n);
+    }
+    let m = cuts.len() - 1; // segments
+    if m < 2 {
+        return vec![0];
+    }
+    let kmax = max_blocks.min(m);
+
+    // Per-segment histograms + total counts.
+    let mut seg_hist = vec![[0u32; 704]; m];
+    for i in 0..m {
+        for &s in &cmd_symbols[cuts[i]..cuts[i + 1]] {
+            seg_hist[i][s] += 1;
+        }
+    }
+
+    let entropy_bits = |h: &[u32; 704], total: usize| -> f64 {
+        if total == 0 {
+            return 0.0;
+        }
+        let t = total as f64;
+        let mut bits = 0.0;
+        for &f in h.iter() {
+            if f > 0 {
+                let p = f as f64 / t;
+                bits -= f as f64 * p.log2();
+            }
+        }
+        bits
+    };
+
+    // block_cost[j][i] = entropy bits of commands cuts[j]..cuts[i].
+    let mut block_cost = vec![vec![f64::INFINITY; m + 1]; m + 1];
+    for j in 0..m {
+        let mut hist = [0u32; 704];
+        let mut total = 0usize;
+        block_cost[j][j] = 0.0;
+        for i in j..m {
+            let seg = &seg_hist[i];
+            for k in 0..704 {
+                if seg[k] > 0 {
+                    hist[k] += seg[k];
+                }
+            }
+            total += cuts[i + 1] - cuts[i];
+            block_cost[j][i + 1] = entropy_bits(&hist, total);
+        }
+    }
+
+    // dp[k][i]: min cost covering cuts[0..=i] with k blocks.
+    let inf = f64::INFINITY;
+    let mut dp = vec![vec![inf; m + 1]; kmax + 1];
+    let mut choice = vec![vec![0usize; m + 1]; kmax + 1];
+    dp[0][0] = 0.0;
+    for k in 1..=kmax {
+        for i in 1..=m {
+            let mut best = inf;
+            let mut arg = 0;
+            for j in (k - 1..i).rev() {
+                if dp[k - 1][j].is_infinite() {
+                    continue;
+                }
+                let c = dp[k - 1][j] + block_cost[j][i];
+                if c < best {
+                    best = c;
+                    arg = j;
+                }
+            }
+            dp[k][i] = best;
+            choice[k][i] = arg;
+        }
+    }
+    let mut best_k = 1;
+    let mut best_cost = dp[1][m];
+    for k in 2..=kmax {
+        let c = dp[k][m] + 25.0 * k as f64;
+        if c < best_cost {
+            best_cost = c;
+            best_k = k;
+        }
+    }
+    let mut starts = Vec::with_capacity(best_k);
+    let mut i = m;
+    let mut k = best_k;
+    while k > 0 {
+        let j = choice[k][i];
+        starts.push(cuts[j]);
+        i = j;
+        k -= 1;
+    }
+    starts.reverse();
+    starts
+}
+
+/// Optimal contiguous split of the literal stream (byte-histogram DP).
+/// Returns block START indices in literal-index space (first is 0).
+fn split_literals(literals: &[u8], max_blocks: usize) -> Vec<usize> {
+    let n = literals.len();
+    if n < 4096 || max_blocks < 2 {
+        return vec![0];
+    }
+    let step = 512.min(n / 4).max(64);
+    let mut cuts: Vec<usize> = (0..n).step_by(step).collect();
+    if *cuts.last().unwrap() != n {
+        cuts.push(n);
+    }
+    let m = cuts.len() - 1;
+    if m < 2 {
+        return vec![0];
+    }
+    let kmax = max_blocks.min(m);
+    let mut seg_hist = vec![[0u32; 256]; m];
+    for i in 0..m {
+        for &b in &literals[cuts[i]..cuts[i + 1]] {
+            seg_hist[i][b as usize] += 1;
+        }
+    }
+    let entropy_bits = |h: &[u32; 256], total: usize| -> f64 {
+        if total == 0 {
+            return 0.0;
+        }
+        let t = total as f64;
+        let mut bits = 0.0;
+        for &f in h.iter() {
+            if f > 0 {
+                let p = f as f64 / t;
+                bits -= f as f64 * p.log2();
+            }
+        }
+        bits
+    };
+    let mut block_cost = vec![vec![f64::INFINITY; m + 1]; m + 1];
+    for j in 0..m {
+        let mut hist = [0u32; 256];
+        let mut total = 0usize;
+        block_cost[j][j] = 0.0;
+        for i in j..m {
+            let seg = &seg_hist[i];
+            for k in 0..256 {
+                if seg[k] > 0 {
+                    hist[k] += seg[k];
+                }
+            }
+            total += cuts[i + 1] - cuts[i];
+            block_cost[j][i + 1] = entropy_bits(&hist, total);
+        }
+    }
+    let inf = f64::INFINITY;
+    let mut dp = vec![vec![inf; m + 1]; kmax + 1];
+    let mut choice = vec![vec![0usize; m + 1]; kmax + 1];
+    dp[0][0] = 0.0;
+    for k in 1..=kmax {
+        for i in 1..=m {
+            let mut best = inf;
+            let mut arg = 0;
+            for j in (k - 1..i).rev() {
+                if dp[k - 1][j].is_infinite() {
+                    continue;
+                }
+                let c = dp[k - 1][j] + block_cost[j][i];
+                if c < best {
+                    best = c;
+                    arg = j;
+                }
+            }
+            dp[k][i] = best;
+            choice[k][i] = arg;
+        }
+    }
+    // Per-block overhead: block switch codes + extra cmap entries.
+    let switch_cost = std::env::var("BROTLI_LIT_SPLIT_COST")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(80.0);
+    let mut best_k = 1;
+    let mut best_cost = dp[1][m];
+    for k in 2..=kmax {
+        let c = dp[k][m] + switch_cost * k as f64;
+        if c < best_cost {
+            best_cost = c;
+            best_k = k;
+        }
+    }
+    let mut starts = Vec::with_capacity(best_k);
+    let mut i = m;
+    let mut k = best_k;
+    while k > 0 {
+        let j = choice[k][i];
+        starts.push(cuts[j]);
+        i = j;
+        k -= 1;
+    }
+    starts.reverse();
+    starts
+}
+
+/// Greedy command-block splitting (simplified BrotliBuildMetaBlock
+/// command pass): walk the command symbol stream in windows; split off
+/// a new block when coding the window under its own tree is cheaper
+/// than merging it into the current block, net of the block-switch
+/// overhead. Returns block START indices (first entry always 0).
+fn split_cmd_symbols(cmd_symbols: &[usize], max_blocks: usize) -> Vec<usize> {
+    let mut boundaries = vec![0usize];
+    if cmd_symbols.len() < 1024 {
+        return boundaries;
+    }
+    let window = std::env::var("BROTLI_SPLIT_WIN")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(128);
+    let switch_cost = std::env::var("BROTLI_SPLIT_COST")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(24.0);
+    let WINDOW: usize = window;
+    let SWITCH_COST: f64 = switch_cost;
+    let mut cur = [0u32; 704];
+    let mut i = 0usize;
+    while i < cmd_symbols.len() {
+        let wend = (i + WINDOW).min(cmd_symbols.len());
+        if wend == cmd_symbols.len() {
+            for &s in &cmd_symbols[i..wend] {
+                cur[s as usize] += 1;
+            }
+            break;
+        }
+        let mut win = [0u32; 704];
+        for &s in &cmd_symbols[i..wend] {
+            win[s as usize] += 1;
+        }
+        let mut merged = [0u32; 704];
+        for k in 0..704 {
+            merged[k] = cur[k] + win[k];
+        }
+        let c_merged = huff_cost(&merged);
+        let c_split = huff_cost(&cur) + huff_cost(&win);
+        let cur_count: u32 = cur.iter().sum();
+        if c_split + SWITCH_COST < c_merged && boundaries.len() < max_blocks && cur_count >= 64 {
+            boundaries.push(i);
+            cur = win;
+        } else {
+            cur = merged;
+        }
+        i = wend;
+    }
+    boundaries
+}
+
+/// Write the per-category block-switch header (block-type tree +
+/// block-length tree + initial block length). Returns the wire code
+/// tables (bt, bl) for emitting mid-stream switches.
+fn write_block_switch_header(
+    bw: &mut BitWriter,
+    nbltypes: u32,
+    block_lens: &[u32],
+) -> (Vec<(u32, u8)>, Vec<(u32, u8)>) {
+    // Block-type code tree over alphabet 2 + nbltypes; switches use
+    // explicit codes (type + 2).
+    let bt_alphabet = 2 + nbltypes as usize;
+    let mut bt_freq = vec![0u32; bt_alphabet];
+    for k in 1..nbltypes as usize {
+        bt_freq[k + 2] += 1;
+    }
+    let bt_lengths = omnizip_codecs::HuffmanLengths::build(&bt_freq, 15);
+    write_huffman_table(bw, &bt_lengths, bt_alphabet);
+
+    // Block-length code tree over the 26-symbol alphabet.
+    let mut bl_freq = [0u32; 26];
+    let bl_codes: Vec<(usize, u32, u32)> =
+        block_lens.iter().map(|&l| block_length_code(l)).collect();
+    for &(c, _, _) in &bl_codes {
+        bl_freq[c] += 1;
+    }
+    let bl_lengths = omnizip_codecs::HuffmanLengths::build(&bl_freq, 15);
+    write_huffman_table(bw, &bl_lengths, 26);
+
+    let bt_wire = canonical_with_reverse(&bt_lengths);
+    let bl_wire = canonical_with_reverse(&bl_lengths);
+
+    // Initial block length (block 0).
+    let (c0, extra0, nbits0) = bl_codes[0];
+    let (code, len) = bl_wire[c0];
+    bw.write_bits(code, u32::from(len));
+    bw.write_bits(extra0, nbits0);
+    (bt_wire, bl_wire)
+}
+
 fn write_block_type_trees(bw: &mut BitWriter, _nbltypes: u32) {
     // Block-type code tree: alphabet 2 + 2 = 4.
     // Simple form NSYM=2: symbols 2 and 3 (each 1 bit).
@@ -2238,32 +4582,73 @@ fn write_varlen_uint8(bw: &mut BitWriter, value: u32) {
 ///
 /// Format:
 /// 1. RLE flag = 0 (no run-length encoding of zeros)
-/// 2. Context-map code Huffman tree (simple form, alphabet = NTREES)
-/// 3. One symbol per context-map entry (64 entries for LSB6)
+/// 2. Context-map code Huffman tree
+/// 3. One symbol per context-map entry (64 entries for LSB6/UTF8)
 /// 4. Inverse-MTF flag = 0
+///
+/// For NTREES ≤ 4: simple form code tree (uniform code lengths).
+/// For NTREES > 4: complex form Huffman code tree built from the
+/// actual symbol frequencies in `ctx_map`.
 fn write_context_map(bw: &mut BitWriter, ctx_map: &[u8], ntrees: u32) {
     // RLE flag = 0 (no RLE).
     bw.write_bits(0, 1);
 
-    // Context-map code tree: simple form with NTREES symbols.
-    write_context_map_tree(bw, ntrees);
+    // IMTF-encode the map: on block-structured maps most entries repeat
+    // the previous value, which MTF turns into long 0-runs — the entry
+    // code for 0 becomes 1 bit, shrinking the map dramatically.
+    let max_val = ctx_map.iter().copied().max().unwrap_or(0) as usize;
+    let mut mtf: Vec<u8> = (0..=max_val).map(|x| x as u8).collect();
+    let mut encoded: Vec<u8> = Vec::with_capacity(ctx_map.len());
+    for &v in ctx_map {
+        let idx = mtf.iter().position(|&x| x == v).unwrap_or(0);
+        encoded.push(idx as u8);
+        if idx > 0 {
+            mtf.remove(idx);
+            mtf.insert(0, v);
+        }
+    }
+    let ctx_map = encoded.as_slice();
 
-    // Write each context-map entry using the context-map code tree.
-    // The decoder's HuffmanTable stores bit-reversed canonical codes
-    // (LSB-first bitstream convention). We must write the REVERSED
-    // code for each symbol, not the raw symbol value.
-    //
-    // For NSYM=2 (1-bit codes): reversal is identity (0→0, 1→1).
-    // For NSYM=4 (2-bit codes): reversal swaps codes 1↔2
-    //   (canonical 01→reversed 10, canonical 10→reversed 01).
-    let bits_per_entry = if ntrees <= 2 { 1u8 } else { 2u8 };
-    for &entry in ctx_map {
-        let code = reverse_bits(entry as u32, bits_per_entry);
-        bw.write_bits(code, u32::from(bits_per_entry));
+    if ntrees <= 4 {
+        // Simple form code tree. NOTE: NSYM=3 is NON-uniform — symbol 0
+        // gets a 1-bit code, symbols 1-2 get 2-bit codes (mirrors
+        // read_simple_form's lengths[s0]=1, lengths[s1]=lengths[s2]=2).
+        // Treating NSYM=3 as uniform 2-bit silently corrupts every map
+        // entry (tree 1 becomes undecodable) — this was the long-standing
+        // "cluster_contexts wire-format mismatch".
+        write_context_map_tree(bw, ntrees);
+
+        let entry_codes: Vec<(u32, u8)> = match ntrees {
+            1 => vec![(0, 1)],
+            2 => (0..2).map(|v| (v, 1)).collect(),
+            3 => vec![(0, 1), (0b01, 2), (0b11, 2)],
+            // Uniform 2-bit canonical codes 00/01/10/11 reversed for
+            // LSB-first: symbols 1↔2 swap (01→10, 10→01).
+            _ => vec![(0, 2), (0b10, 2), (0b01, 2), (0b11, 2)],
+        };
+        for &entry in ctx_map {
+            let (code, len) = entry_codes[entry as usize];
+            bw.write_bits(code, u32::from(len));
+        }
+    } else {
+        // Complex form: build Huffman tree from actual frequencies.
+        let mut freq = [0u32; 256];
+        for &entry in ctx_map {
+            freq[entry as usize] += 1;
+        }
+        let lengths = omnizip_codecs::HuffmanLengths::build(&freq, 5);
+        write_huffman_table(bw, &lengths, ntrees as usize);
+
+        // Write each entry using the Huffman code (reversed for LSB-first).
+        let codes = canonical_with_reverse(&lengths);
+        for &entry in ctx_map {
+            let (code, len) = codes[entry as usize];
+            bw.write_bits(code, u32::from(len));
+        }
     }
 
-    // Inverse-MTF flag = 0.
-    bw.write_bits(0, 1);
+    // Inverse-MTF flag = 1: the map was MTF-encoded above.
+    bw.write_bits(1, 1);
 }
 
 /// Write the context-map code Huffman tree in simple form.
@@ -2313,8 +4698,14 @@ fn write_simple_form_table(bw: &mut BitWriter, alphabet: usize, symbols: &[usize
 }
 
 /// Override Huffman code lengths to match simple form assignment.
-/// Only applies to tables with exactly 2 non-zero symbols (the most
-/// common sparse-table failure case). Both symbols get length 1.
+/// Forces sparse tables (2-4 non-zero symbols) into simple-form-
+/// compatible code lengths to avoid the complex-form RLE encoding
+/// path which produces wire-format mismatches for certain symbol
+/// distributions.
+///
+/// - 2 symbols → both length 1 (NSYM=2 pattern)
+/// - 3 symbols → lengths [1, 2, 2] (NSYM=3 pattern)
+/// - 4 symbols → lengths [2, 2, 2, 2] (NSYM=4, tree_select=0)
 fn override_lengths_for_simple_form(lengths: &mut [u8], alphabet: usize) {
     let nonzero: Vec<usize> = lengths[..alphabet]
         .iter()
@@ -2322,9 +4713,22 @@ fn override_lengths_for_simple_form(lengths: &mut [u8], alphabet: usize) {
         .filter(|(_, &l)| l > 0)
         .map(|(i, _)| i)
         .collect();
-    if nonzero.len() == 2 {
-        lengths[nonzero[0]] = 1;
-        lengths[nonzero[1]] = 1;
+    match nonzero.len() {
+        2 => {
+            lengths[nonzero[0]] = 1;
+            lengths[nonzero[1]] = 1;
+        }
+        3 => {
+            lengths[nonzero[0]] = 1;
+            lengths[nonzero[1]] = 2;
+            lengths[nonzero[2]] = 2;
+        }
+        4 => {
+            for &i in &nonzero {
+                lengths[i] = 2;
+            }
+        }
+        _ => {}
     }
 }
 
@@ -2531,8 +4935,9 @@ mod tests {
         let chunk2 = b"xyzxyz".repeat(20);
         let mut bw = BitWriter::new();
         write_wbits(&mut bw);
-        encode_huffman_chunk_into(&mut bw, &chunk1, 0, false, 11);
-        encode_huffman_chunk_into(&mut bw, &chunk2, chunk1.len(), true, 11);
+        encode_huffman_chunk_into(&mut bw, &chunk1, 0, false, 11, (0, 0));
+        let ctx2 = (chunk1[chunk1.len() - 1], chunk1[chunk1.len() - 2]);
+        encode_huffman_chunk_into(&mut bw, &chunk2, chunk1.len(), true, 11, ctx2);
         let compressed = bw.flush();
         eprintln!("compressed: {} bytes", compressed.len());
         let decoded = decoder::decode(&compressed).expect("decode");
@@ -2556,7 +4961,8 @@ mod tests {
         while offset < input.len() {
             let end = (offset + chunk_size).min(input.len());
             let is_last = end == input.len();
-            encode_huffman_chunk_into(&mut bw, &input[offset..end], offset, is_last, 11);
+            let ctx_in = carried_lit_ctx(&input, offset);
+            encode_huffman_chunk_into(&mut bw, &input[offset..end], offset, is_last, 11, ctx_in);
             offset = end;
         }
         let compressed = bw.flush();
@@ -2694,5 +5100,188 @@ mod tests {
         let decoded = decoder::decode(&compressed).expect("decode");
         assert_eq!(decoded, input);
         assert!(compressed.len() < input.len() / 2);
+    }
+
+    #[test]
+    fn huffman_table_complex_form_round_trips() {
+        // Test complex-form Huffman table encoding/decoding for various
+        // symbol distributions. This is a regression test for the
+        // wire-format bug triggered by data-driven context clustering.
+        let test_cases: Vec<[u32; 256]> = vec![
+            // Case 1: uniform distribution over 10 symbols (digits).
+            {
+                let mut f = [0u32; 256];
+                for i in b'0'..=b'9' {
+                    f[i as usize] = 100;
+                }
+                f
+            },
+            // Case 2: skewed distribution, one dominant symbol.
+            {
+                let mut f = [0u32; 256];
+                f[b'e' as usize] = 1000;
+                f[b't' as usize] = 500;
+                f[b'a' as usize] = 200;
+                f[b'o' as usize] = 100;
+                f[b'i' as usize] = 50;
+                f[b'n' as usize] = 30;
+                f[b's' as usize] = 20;
+                f[b'r' as usize] = 10;
+                f
+            },
+            // Case 3: many symbols with varying frequencies (text-like).
+            {
+                let mut f = [0u32; 256];
+                for (i, &c) in b"the quick brown fox jumps over the lazy dog"
+                    .iter()
+                    .enumerate()
+                {
+                    f[c as usize] += (i % 7 + 1) as u32;
+                }
+                f
+            },
+            // Case 4: sparse with long zero runs.
+            {
+                let mut f = [0u32; 256];
+                f[0] = 100;
+                f[1] = 50;
+                f[255] = 30;
+                f[128] = 20;
+                f
+            },
+            // Case 5: all 256 symbols present, varying freq.
+            {
+                let mut f = [0u32; 256];
+                for i in 0..256 {
+                    f[i] = ((i * 7 + 13) % 100) as u32 + 1;
+                }
+                f
+            },
+        ];
+
+        for (case_idx, freq) in test_cases.iter().enumerate() {
+            let lengths = omnizip_codecs::HuffmanLengths::build(freq, 15);
+            let codes = lengths.canonical_codes();
+            let mut bw = BitWriter::new();
+            write_huffman_table(&mut bw, &lengths, 256);
+            let encoded = bw.flush();
+
+            let (table, consumed_bits) =
+                decoder::read_huffman_table(&encoded, 0, 256).expect("decode");
+
+            // Verify each symbol can be read back correctly by encoding
+            // it with the original code and decoding with the read table.
+            for sym in 0..256u32 {
+                let (code, len) = codes[sym as usize];
+                if len == 0 {
+                    continue;
+                }
+                // Write this symbol's code into a fresh bitstream.
+                let mut sym_bw = BitWriter::new();
+                let wire = reverse_bits(code, len);
+                sym_bw.write_bits(wire, u32::from(len));
+                let sym_encoded = sym_bw.flush();
+
+                // Read it back using the decoded table.
+                let mut br = crate::decoder::BitReader::new(&sym_encoded);
+                br.bit_pos = 0;
+                let decoded_sym = table.read_symbol(&mut br).unwrap_or(0xFFFF) as u32;
+                assert_eq!(
+                    decoded_sym, sym,
+                    "case {}: symbol {} round-trip failed: code={:#b} ({} bits), decoded={}. Table consumed {} bits.",
+                    case_idx, sym, code, len, decoded_sym, consumed_bits
+                );
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod cluster_debug_tests {
+    use super::*;
+
+    #[test]
+    fn clustered_trees_round_trip() {
+        let cases: Vec<Vec<u32>> = vec![
+            vec![
+                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 20, 0, 1, 0, 49, 37, 36, 10, 10,
+                10, 10, 9, 10, 10, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0,
+                0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                0, 0, 0, 0, 0, 0, 0, 0, 0,
+            ],
+            vec![
+                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 17, 110, 130, 129, 30,
+                29, 29, 29, 28, 28, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                0, 0, 0, 0, 0, 0, 0, 0, 0,
+            ],
+        ];
+        for (ci, freq_v) in cases.iter().enumerate() {
+            let mut freq = [0u32; 256];
+            for (i, &f) in freq_v.iter().enumerate() {
+                freq[i] = f;
+            }
+            let lengths = omnizip_codecs::HuffmanLengths::build(&freq, 15);
+            let mut bw = BitWriter::new();
+            write_huffman_table(&mut bw, &lengths, 256);
+            let encoded = bw.flush();
+            let (table, _) = crate::decoder::read_huffman_table(&encoded, 0, 256).expect("decode");
+            let codes = lengths.canonical_codes();
+            for sym in 0..256u32 {
+                let (code, len) = codes[sym as usize];
+                if len == 0 {
+                    continue;
+                }
+                let mut sym_bw = BitWriter::new();
+                sym_bw.write_bits(reverse_bits(code, len), u32::from(len));
+                let sym_encoded = sym_bw.flush();
+                let mut br = crate::decoder::BitReader::new(&sym_encoded);
+                let decoded = table.read_symbol(&mut br).unwrap_or(0xFFFF) as u32;
+                assert_eq!(
+                    decoded, sym,
+                    "case {ci} sym {sym}: code={code:#b} len={len}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn context_map_round_trips_arbitrary() {
+        let maps: Vec<Vec<u8>> = vec![
+            vec![0; 64],
+            vec![1; 64],
+            (0..64u8).map(|c| c % 2).collect(),
+            (0..64u8).map(|c| c % 3).collect(),
+            vec![0, 0, 1, 0, 0, 2, 0, 0, 3]
+                .iter()
+                .copied()
+                .chain([0u8; 55].iter().copied())
+                .collect(),
+        ];
+        for (i, m) in maps.iter().enumerate() {
+            let nt = (*m.iter().max().unwrap() + 1) as u32;
+            let mut bw = BitWriter::new();
+            write_context_map(&mut bw, m, nt);
+            let enc = bw.flush();
+            let (decoded, _) =
+                crate::decoder_full::read_context_map(&enc, 0, 64, nt, 0).expect("read");
+            assert_eq!(
+                &decoded, m,
+                "map {i} mismatch: wrote {:?} read {:?}",
+                m, decoded
+            );
+        }
     }
 }

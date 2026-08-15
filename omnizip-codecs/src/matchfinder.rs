@@ -120,12 +120,18 @@ impl<'a> HashChainMatchFinder<'a> {
     #[must_use]
     pub fn new(data: &'a [u8], config: HashChainConfig) -> Self {
         let dict_size = config.dict_size.max(4096);
-        let size = dict_size as usize;
-        let mask = size as u32 - 1;
+        // The prev[] chain array MUST be indexed by a power-of-two mask:
+        // a non-power-of-two dict_size (e.g. (1<<24)-16) yields a mask
+        // with clear bits, aliasing positions 2^k apart and scrambling
+        // the chains — long-distance matches silently vanish. The
+        // window/dictionary VALIDITY limit (max_distance) stays at
+        // dict_size; only the indexing space is rounded up.
+        let prev_size = (dict_size as usize).next_power_of_two();
+        let mask = (prev_size - 1) as u32;
         Self {
             data,
             head: vec![SENTINEL; 1usize << config.hash_log],
-            prev: vec![SENTINEL; size],
+            prev: vec![SENTINEL; prev_size],
             mask,
             hash_log: config.hash_log,
             cur: 0,
@@ -249,16 +255,170 @@ impl<'a> HashChainMatchFinder<'a> {
         self.nice_match = n;
     }
 
+    /// Find the CLOSEST match (smallest distance) at `pos` with length >=
+    /// `min_len`. Walks the chain in order (most-recent first) and returns
+    /// the first candidate that yields a match of at least `min_len` bytes.
+    /// Useful for rep-code-aware parsing where closest matches are preferred
+    /// because they're more likely to become rep0 in subsequent positions.
+    #[must_use]
+    pub fn find_closest_match(&self, pos: usize, min_len: u32) -> Option<Lz77Match> {
+        if pos + 4 > self.data.len() {
+            return None;
+        }
+        let h = Self::hash(self.data, pos, self.hash_log);
+        let mut candidate = self.head[h];
+        if candidate == pos as u32 {
+            candidate = self.prev[pos & self.mask as usize];
+        }
+        // Walk at most 8 chain entries to find a close match ≥ min_len.
+        let max_walk = 8u32;
+        let mut chain = 0u32;
+        let max_len = if self.max_match_length > 0 {
+            ((self.data.len() - pos) as u32).min(self.max_match_length)
+        } else {
+            (self.data.len() - pos) as u32
+        };
+        let limit = min_len.min(max_len);
+        while candidate != SENTINEL && chain < max_walk {
+            let cand_us = candidate as usize;
+            let dist = pos.saturating_sub(cand_us);
+            if dist == 0 || dist as u32 > self.max_distance {
+                break;
+            }
+            let len = Self::match_length(self.data, pos, cand_us, max_len);
+            if len >= limit {
+                return Some(Lz77Match {
+                    distance: dist as u32,
+                    length: len,
+                });
+            }
+            candidate = self.prev[cand_us & self.mask as usize];
+            chain += 1;
+        }
+        None
+    }
+
+    /// Measure the match length between two absolute positions in the
+    /// underlying data, capped at `max_len`. Used by rep-code-aware
+    /// parsers to evaluate whether a stored rep distance yields a
+    /// usable match at `pos`.
+    #[must_use]
+    pub fn match_len_between(&self, pos: usize, back: usize, max_len: u32) -> u32 {
+        if back >= pos || pos >= self.data.len() {
+            return 0;
+        }
+        Self::match_length(self.data, pos, back, max_len)
+    }
+
+    /// Collect up to `max_count` candidate matches at `pos`, one per
+    /// DISTINCT distance, walking the hash chain newest-first (up to
+    /// `max_walk` entries). Unlike [`find_match`](Self::find_match),
+    /// which returns only the longest match, this exposes distance
+    /// diversity — letting a cost-aware parser evaluate (and warm as
+    /// rep codes) distances that share the top match length. On data
+    /// with several repeating structures at different periods, the
+    /// longest-match-only policy locks the parser onto whichever chain
+    /// the hash order happens to favor, even when another chain of the
+    /// same length is far more stable to revisit.
+    #[must_use]
+    pub fn find_candidates(&self, pos: usize, max_count: usize, max_walk: u32) -> Vec<Lz77Match> {
+        let mut out = Vec::with_capacity(max_count);
+        self.find_candidates_into(pos, max_count, max_walk, &mut out);
+        out
+    }
+
+    /// Buffer-reusing variant of [`find_candidates`](Self::find_candidates).
+    /// Clears `out` and fills it with the up-to-`max_count` LONGEST
+    /// candidate matches (sorted by length descending), walking at most
+    /// `max_walk` chain entries.
+    ///
+    /// Selection is top-K by LENGTH, not first-K by recency: on data
+    /// with a periodic structure, the chain for a given 4-gram is
+    /// dominated by frequent short matches (e.g. a number suffix
+    /// appearing in a cyclical column), while the long structural
+    /// match (the full-row repeat at the structure period) sits dozens
+    /// of entries deeper. First-K collection never reaches it.
+    ///
+    /// Early exits: (a) a match of `nice` or more bytes is found, (b)
+    /// `patience` consecutive chain entries fail to improve the
+    /// current K-th best — bounding the cost of walking dense chains.
+    pub fn find_candidates_into(
+        &self,
+        pos: usize,
+        max_count: usize,
+        max_walk: u32,
+        out: &mut Vec<Lz77Match>,
+    ) {
+        out.clear();
+        if pos + 4 > self.data.len() || max_count == 0 {
+            return;
+        }
+        let h = Self::hash(self.data, pos, self.hash_log);
+        let mut candidate = self.head[h];
+        if candidate == pos as u32 {
+            candidate = self.prev[pos & self.mask as usize];
+        }
+        let max_len = if self.max_match_length > 0 {
+            ((self.data.len() - pos) as u32).min(self.max_match_length)
+        } else {
+            (self.data.len() - pos) as u32
+        };
+        let nice = self.nice_match.min(max_len);
+        let mut patience = 32u32;
+        let mut chain = 0u32;
+        while candidate != SENTINEL && chain < max_walk {
+            let cand_us = candidate as usize;
+            let dist = pos.saturating_sub(cand_us);
+            if dist == 0 || u32::try_from(dist).unwrap_or(u32::MAX) > self.max_distance {
+                break;
+            }
+            let len = Self::match_length(self.data, pos, cand_us, max_len);
+            if len >= self.min_match {
+                let m = Lz77Match {
+                    distance: dist as u32,
+                    length: len,
+                };
+                // Insert sorted by length descending; keep top max_count.
+                let idx = out.partition_point(|e| e.length >= len);
+                if idx < max_count {
+                    if out.len() < max_count {
+                        out.insert(idx, m);
+                    } else {
+                        let kth = out.len() - 1;
+                        if idx <= kth {
+                            out.insert(idx, m);
+                            out.truncate(max_count);
+                        }
+                    }
+                    if len >= nice {
+                        break;
+                    }
+                    patience = 32;
+                } else if out.len() >= max_count {
+                    // Full and not better than the K-th best.
+                    if patience == 0 {
+                        break;
+                    }
+                    patience -= 1;
+                }
+            }
+            candidate = self.prev[cand_us & self.mask as usize];
+            chain += 1;
+        }
+    }
+
     /// Re-bind to new data, reusing the existing hash/chain allocations
     /// if the `dict_size` is unchanged. Grows them if the new dict is
     /// larger. Equivalent to `drop` + `new` but avoids reallocation.
     pub fn reuse(&mut self, data: &'a [u8], dict_size: u32) {
         let dict_size = dict_size.max(4096);
-        let size = dict_size as usize;
-        if size > self.prev.len() {
-            self.prev.resize(size, SENTINEL);
+        // Power-of-two indexing space (see `new`): a non-power-of-two
+        // size would alias chain entries.
+        let prev_size = (dict_size as usize).next_power_of_two();
+        if prev_size > self.prev.len() {
+            self.prev.resize(prev_size, SENTINEL);
         }
-        self.mask = size as u32 - 1;
+        self.mask = (prev_size - 1) as u32;
         self.data = data;
         self.max_distance = dict_size;
         self.cur = 0;
