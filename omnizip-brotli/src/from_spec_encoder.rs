@@ -857,7 +857,38 @@ fn encode_huffman_chunk_body(
         bw.write_bits(code, u32::from(len));
         bw.write_bits(extra0, nbits0);
     }
-    write_varlen_uint8(bw, 0); // NBLTYPESD = 1 (no dist block trees)
+    // --- Distance block splitting: NBLTYPES_D > 1 with per-block-type
+    // context maps (before NPOSTFIX per the wire order). ---
+    let dist_split_on = quality >= 4
+        && stream.dist_symbols.len() >= 1024
+        && dist_cfg.alphabet_size() <= 256
+        && std::env::var("BROTLI_NO_DSPLIT").is_err();
+    let dist_boundaries: Vec<usize> = if dist_split_on {
+        let syms: Vec<usize> = stream.dist_symbols.iter().map(|&s| s as usize).collect();
+        split_symbol_stream_optimal(&syms, dist_cfg.alphabet_size(), 4)
+    } else {
+        vec![0]
+    };
+    let nbltypes_d = dist_boundaries.len() as u32;
+    let dist_block_len: Vec<u32> = dist_boundaries
+        .iter()
+        .enumerate()
+        .map(|(k, &b)| {
+            let end = dist_boundaries
+                .get(k + 1)
+                .copied()
+                .unwrap_or(stream.dist_symbols.len());
+            (end - b) as u32
+        })
+        .collect();
+    write_varlen_uint8(bw, nbltypes_d - 1); // NBLTYPESD
+    let mut dist_bt_wire: Vec<(u32, u8)> = Vec::new();
+    let mut dist_bl_wire: Vec<(u32, u8)> = Vec::new();
+    if nbltypes_d > 1 {
+        let (bt, bl) = write_block_switch_header(bw, nbltypes_d, &dist_block_len);
+        dist_bt_wire = bt;
+        dist_bl_wire = bl;
+    }
 
     bw.write_bits(dist_cfg.npostfix as u32, 2); // NPOSTFIX
     bw.write_bits(dist_cfg.ndmoem as u32, 4); // NDMOEM
@@ -882,7 +913,7 @@ fn encode_huffman_chunk_body(
     // context derived from copy length (kCmdLut.context = (len>4)?3:len-2).
     // Short copies ride a short-code-heavy tree; long copies a long-code
     // tree — each sharper than the blended single tree.
-    let ntrees_d: u32 = if quality >= 4
+    let mut ntrees_d: u32 = if quality >= 4
         && !stream.dist_symbols.is_empty()
         && std::env::var("BROTLI_NO_DTREES").is_err()
     {
@@ -893,66 +924,115 @@ fn encode_huffman_chunk_body(
     } else {
         1
     };
-    // Distance context trees, with unused contexts pruned BEFORE the
-    // header write (tree counts and the context map must reflect the
-    // final tree set). The context→tree mapping is recorded for the
-    // emission's tree selection.
+    // Distance context trees over per-(block, context) buckets, with
+    // unused trees pruned and a cost gate against the single-tree
+    // variant. Written after the literal context map per wire order.
     let dist_alphabet = dist_cfg.alphabet_size();
-    let mut dist_freqs_per_ctx: Vec<Vec<u32>> = vec![vec![0u32; dist_alphabet]; ntrees_d as usize];
-    let mut dist_ctx_tree: [usize; 4] = [0; 4];
-    let mut ntrees_d = ntrees_d;
-    if ntrees_d > 1 {
-        for (&sym, &ctx) in stream.dist_symbols.iter().zip(stream.dist_ctxs.iter()) {
-            let base = match ntrees_d {
-                2 => usize::from(ctx >= 2),
-                _ => ctx as usize,
-            };
-            dist_freqs_per_ctx[base][sym as usize] += 1;
-        }
-        // Only keep the split when its entropy saving beats the tree
-        // + context-map overhead (small or uniform-distance inputs
-        // lose bits on extra tree headers).
-        let ent = |f: &Vec<u32>| -> f64 {
-            let t: u64 = f.iter().map(|&x| u64::from(x)).sum();
-            if t == 0 {
-                return 0.0;
-            }
-            let mut e = 0.0f64;
-            for &v in f.iter() {
-                if v > 0 {
-                    let pr = v as f64 / t as f64;
-                    e -= v as f64 * pr.log2();
-                }
-            }
-            e
-        };
-        let mut global: Vec<u32> = vec![0u32; dist_alphabet];
-        for f in &dist_freqs_per_ctx {
-            for (s, &v) in f.iter().enumerate() {
-                global[s] += v;
-            }
-        }
-        let used: usize = dist_freqs_per_ctx
+    let nb_d = nbltypes_d as usize;
+    // Per-(block, context) histograms only when symbols fit the fixed
+    // 256-wide buckets (NPOSTFIX > 0 alphabets can reach 520).
+    let dist_bc_ok =
+        dist_alphabet <= 256 && stream.dist_symbols.iter().all(|&s| (s as usize) < 256);
+    let mut dist_bc_hists: Vec<[u32; 256]> = if dist_bc_ok {
+        vec![[0u32; 256]; nb_d * 4]
+    } else {
+        vec![[0u32; 256]; 1]
+    };
+    if dist_bc_ok {
+        let mut blk = 0usize;
+        for (idx, (&sym, &ctx)) in stream
+            .dist_symbols
             .iter()
-            .filter(|f| f.iter().sum::<u32>() > 0)
-            .count();
-        let split_bits: f64 =
-            dist_freqs_per_ctx.iter().map(ent).sum::<f64>() + used as f64 * 70.0 + 20.0;
-        let single_bits = ent(&global) + 70.0;
-        if split_bits >= single_bits {
-            ntrees_d = 1;
-            dist_freqs_per_ctx = vec![global];
+            .zip(stream.dist_ctxs.iter())
+            .enumerate()
+        {
+            while blk + 1 < dist_boundaries.len() && idx >= dist_boundaries[blk + 1] {
+                blk += 1;
+            }
+            dist_bc_hists[(blk << 2) + ctx as usize][sym as usize] += 1;
         }
     }
-    if ntrees_d > 1 {
+    let ent = |h: &[u32; 256]| -> f64 {
+        let t: u64 = h.iter().map(|&x| u64::from(x)).sum();
+        if t == 0 {
+            return 0.0;
+        }
+        let mut e = 0.0f64;
+        for &v in h.iter() {
+            if v > 0 {
+                e -= v as f64 * (v as f64 / t as f64).log2();
+            }
+        }
+        e
+    };
+    let mut global_hist = [0u32; 256];
+    if dist_bc_ok {
+        for h in &dist_bc_hists {
+            for (s, &v) in h.iter().enumerate() {
+                global_hist[s] += v;
+            }
+        }
+    }
+    // Cost gates: (A) single tree, (B) per-(block,ctx) clustered trees.
+    let global_hist = if dist_bc_ok {
+        global_hist
+    } else {
+        let mut g = [0u32; 256];
+        for &s in &stream.dist_symbols {
+            if (s as usize) < 256 {
+                g[s as usize] += 1;
+            }
+        }
+        g
+    };
+    let cost_a = ent(&global_hist) + 70.0 + if dist_bc_ok { 0.0 } else { 1.0e9 };
+    let shared_k = ntrees_d.min(4) as usize;
+    let cmap_bc = crate::encoder::context::cluster_contexts(&dist_bc_hists, shared_k);
+    let used_count = {
+        let mut hists: Vec<[u32; 256]> = vec![[0u32; 256]; shared_k];
+        for (i, h) in dist_bc_hists.iter().enumerate() {
+            for (s, &v) in h.iter().enumerate() {
+                hists[usize::from(cmap_bc[i])][s] += v;
+            }
+        }
+        hists.iter().filter(|h| h.iter().sum::<u32>() > 0).count()
+    };
+    let cost_b: f64 = {
+        let mut hists: Vec<[u32; 256]> = vec![[0u32; 256]; shared_k];
+        for (i, h) in dist_bc_hists.iter().enumerate() {
+            for (s, &v) in h.iter().enumerate() {
+                if v > 0 {
+                    hists[cmap_bc[i] as usize][s] += v;
+                }
+            }
+        }
+        hists.iter().map(|h| ent(h)).sum::<f64>()
+            + used_count as f64 * 70.0
+            + nb_d as f64 * 4.0 * 2.0
+    };
+    let mut dist_freqs_per_ctx: Vec<Vec<u32>>;
+    let mut ntrees_d_out: u32;
+    let mut dist_cmap_full: Vec<u8>;
+    if cost_b < cost_a {
+        dist_freqs_per_ctx = vec![vec![0u32; dist_alphabet]; shared_k];
+        for (i, h) in dist_bc_hists.iter().enumerate() {
+            for (s, &v) in h.iter().enumerate() {
+                if v > 0 && s < dist_alphabet {
+                    dist_freqs_per_ctx[cmap_bc[i] as usize][s] += v;
+                }
+            }
+        }
+        dist_cmap_full = cmap_bc;
+        ntrees_d_out = shared_k as u32;
+        // Prune unused trees.
         let used: Vec<bool> = dist_freqs_per_ctx
             .iter()
             .map(|f| f.iter().sum::<u32>() > 0)
             .collect();
-        let mut remap = [0usize; 4];
+        let mut remap = vec![0usize; shared_k];
         let mut next = 0usize;
-        for t in 0..ntrees_d as usize {
-            if used[t] {
+        for (t, u) in used.iter().enumerate() {
+            if *u {
                 remap[t] = next;
                 next += 1;
             }
@@ -960,24 +1040,26 @@ fn encode_huffman_chunk_body(
         if next == 0 {
             next = 1;
         }
-        dist_freqs_per_ctx = (0..ntrees_d as usize)
+        dist_freqs_per_ctx = (0..shared_k)
             .filter(|&t| used[t])
             .map(|t| std::mem::take(&mut dist_freqs_per_ctx[t]))
             .collect();
-        for t in 0..4 {
-            let base = match ntrees_d {
-                2 => usize::from(t >= 2),
-                _ => t,
-            };
-            dist_ctx_tree[t] = remap[base.min(remap.len() - 1)];
+        for e in dist_cmap_full.iter_mut() {
+            *e = remap[usize::from(*e)].min(next - 1) as u8;
         }
-        ntrees_d = next as u32;
-        let dist_cmap: Vec<u8> = dist_ctx_tree.iter().map(|&t| t as u8).collect();
-        write_varlen_uint8(bw, ntrees_d - 1); // NTREESD
-        write_context_map(bw, &dist_cmap, ntrees_d);
+        ntrees_d_out = next as u32;
     } else {
-        write_varlen_uint8(bw, 0); // NTREESD = 1
+        dist_freqs_per_ctx = vec![global_hist.to_vec()];
+        dist_cmap_full = vec![0u8; nb_d * 4];
+        ntrees_d_out = 1;
     }
+    write_varlen_uint8(bw, ntrees_d_out - 1); // NTREESD
+    if ntrees_d_out > 1 {
+        write_context_map(bw, &dist_cmap_full, ntrees_d_out);
+    }
+    ntrees_d = ntrees_d_out;
+    let dist_ctx_tree_of =
+        |blk: usize, ctx: u8| -> usize { usize::from(dist_cmap_full[(blk << 2) + ctx as usize]) };
 
     // --- Context modeling: per-tree literal frequencies ---
     // For NTREES_L > 1, partition literals by their LSB6 context.
@@ -1228,6 +1310,11 @@ fn encode_huffman_chunk_body(
     let mut cmd_block_remaining: usize =
         cmd_block_len.first().copied().unwrap_or(u32::MAX) as usize;
     let mut next_switch = 1usize; // index into cmd_boundaries/block types
+    let mut dist_blk = 0usize;
+    let mut dist_sym_idx = 0usize;
+    let mut dist_block_remaining: usize =
+        dist_block_len.first().copied().unwrap_or(u32::MAX) as usize;
+    let mut dist_next_switch = 1usize;
     for (cmd_idx, (&cmd_sym, cmd)) in stream.cmd_symbols.iter().zip(commands.iter()).enumerate() {
         if cmd_idx > 0 && cmd_block_remaining == 0 && next_switch < cmd_boundaries.len() {
             // Block switch: explicit type code (type + 2), then block length.
@@ -1315,13 +1402,29 @@ fn encode_huffman_chunk_body(
             let cmd_entry = &kCmdLut[cmd_sym];
             if cmd_entry.distance_code < 0 {
                 let (&d_sym, &d_extra) = dist_iter.next().expect("distance stream exhausted");
+                if nbltypes_d > 1 {
+                    dist_sym_idx += 1;
+                    if dist_block_remaining == 0 && dist_next_switch < dist_boundaries.len() {
+                        let new_type = dist_next_switch;
+                        let (bt_code, bt_len) = dist_bt_wire[new_type + 2];
+                        bw.write_bits(bt_code, u32::from(bt_len));
+                        let (c, extra, nbits) = block_length_code(dist_block_len[dist_next_switch]);
+                        let (bl_code, bl_len) = dist_bl_wire[c];
+                        bw.write_bits(bl_code, u32::from(bl_len));
+                        bw.write_bits(extra, nbits);
+                        dist_blk = dist_next_switch;
+                        dist_block_remaining = dist_block_len[dist_next_switch] as usize;
+                        dist_next_switch += 1;
+                    }
+                    dist_block_remaining = dist_block_remaining.saturating_sub(1);
+                }
                 let table = if ntrees_d > 1 {
                     let ctx = if cmd.copy_len > 4 {
                         3u8
                     } else {
                         (cmd.copy_len - 2) as u8
                     };
-                    &dist_codes_per_ctx[dist_ctx_tree[usize::from(ctx)]]
+                    &dist_codes_per_ctx[dist_ctx_tree_of(dist_blk, ctx)]
                 } else {
                     &dist_codes
                 };
@@ -4239,6 +4342,17 @@ fn huff_cost(freq: &[u32; 704]) -> f64 {
 /// pass done exactly: candidate cuts every `step` commands, at most
 /// `max_blocks` blocks. Returns block START indices (first is 0).
 fn split_cmd_symbols_optimal(cmd_symbols: &[usize], max_blocks: usize) -> Vec<usize> {
+    split_symbol_stream_optimal(cmd_symbols, 704, max_blocks)
+}
+
+/// Optimal contiguous split of a symbol stream (entropy DP over cut
+/// points). Returns block START indices (first is 0).
+fn split_symbol_stream_optimal(
+    symbols: &[usize],
+    alphabet: usize,
+    max_blocks: usize,
+) -> Vec<usize> {
+    let cmd_symbols = symbols;
     let n = cmd_symbols.len();
     if n < 1024 || max_blocks < 2 {
         return vec![0];
@@ -4262,7 +4376,7 @@ fn split_cmd_symbols_optimal(cmd_symbols: &[usize], max_blocks: usize) -> Vec<us
         }
     }
 
-    let entropy_bits = |h: &[u32; 704], total: usize| -> f64 {
+    let entropy_bits = |h: &[u32], total: usize| -> f64 {
         if total == 0 {
             return 0.0;
         }
@@ -4280,12 +4394,12 @@ fn split_cmd_symbols_optimal(cmd_symbols: &[usize], max_blocks: usize) -> Vec<us
     // block_cost[j][i] = entropy bits of commands cuts[j]..cuts[i].
     let mut block_cost = vec![vec![f64::INFINITY; m + 1]; m + 1];
     for j in 0..m {
-        let mut hist = [0u32; 704];
+        let mut hist = vec![0u32; alphabet];
         let mut total = 0usize;
         block_cost[j][j] = 0.0;
         for i in j..m {
             let seg = &seg_hist[i];
-            for k in 0..704 {
+            for k in 0..alphabet {
                 if seg[k] > 0 {
                     hist[k] += seg[k];
                 }
