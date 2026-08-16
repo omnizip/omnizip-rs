@@ -3513,7 +3513,237 @@ fn context_positional_costs(input: &[u8]) -> Vec<f32> {
     out
 }
 
+/// Exact bit-count of what the emission pipeline would produce for
+/// these commands: reuses the SAME decision functions the encoder uses
+/// (optimal block splits, singleton-vs-cluster tree assignment,
+/// HuffmanLengths trees) so a parse the DP prefers is a parse that
+/// actually encodes smaller. Returns None if the stream can't be built
+/// (caller falls back to the heuristic scorer).
+#[allow(clippy::too_many_lines)]
+fn exact_emission_bits(
+    commands: &[Command],
+    input: &[u8],
+    mlen_offset: usize,
+    use_context: bool,
+) -> Option<u64> {
+    let dist_cfg = DistanceConfig::choose(commands);
+    let stream = build_symbol_stream(commands, input, mlen_offset, &dist_cfg)?;
+
+    let mut bits: u64 = 0;
+
+    // --- Command symbols: per-block Huffman after the optimal split ---
+    let cmd_boundaries = split_symbol_stream_optimal(&stream.cmd_symbols, 704, 16);
+    let nblocks = cmd_boundaries.len();
+    for k in 0..nblocks {
+        let start = cmd_boundaries[k];
+        let end = cmd_boundaries
+            .get(k + 1)
+            .copied()
+            .unwrap_or(stream.cmd_symbols.len());
+        let mut freq = vec![0u32; 704];
+        for &s in &stream.cmd_symbols[start..end] {
+            freq[s] += 1;
+        }
+        let huff = omnizip_codecs::HuffmanLengths::build(&freq, 15);
+        let mut nonzero = 0u64;
+        for (s, &f) in freq.iter().enumerate() {
+            if f > 0 {
+                nonzero += u64::from(f);
+                bits += u64::from(f)
+                    * u64::from(if huff.lengths[s] > 0 {
+                        huff.lengths[s]
+                    } else {
+                        15
+                    });
+            }
+        }
+        let _ = nonzero;
+        bits += 120; // per-block tree header (conservative)
+    }
+    bits += 40 * nblocks as u64; // block-type/length switch codes
+
+    // --- Insert/copy extra bits ---
+    for &sym in &stream.cmd_symbols {
+        let entry = &kCmdLut[sym];
+        bits += u64::from(entry.insert_len_extra_bits) + u64::from(entry.copy_len_extra_bits);
+    }
+
+    // --- Distance symbols: per-(block,ctx) clustered trees ---
+    if !stream.dist_symbols.is_empty() && dist_cfg.alphabet_size() <= 256 {
+        let dist_boundaries = split_symbol_stream_optimal(
+            &stream
+                .dist_symbols
+                .iter()
+                .map(|&s| s as usize)
+                .collect::<Vec<_>>(),
+            dist_cfg.alphabet_size(),
+            4,
+        );
+        let nb = dist_boundaries.len();
+        let mut hists: Vec<[u32; 256]> = vec![[0u32; 256]; nb * 4];
+        {
+            let mut blk = 0usize;
+            for (idx, (&sym, &ctx)) in stream
+                .dist_symbols
+                .iter()
+                .zip(stream.dist_ctxs.iter())
+                .enumerate()
+            {
+                while blk + 1 < dist_boundaries.len() && idx >= dist_boundaries[blk + 1] {
+                    blk += 1;
+                }
+                hists[(blk << 2) + ctx as usize][sym as usize] += 1;
+            }
+        }
+        let mut global = [0u32; 256];
+        for h in &hists {
+            for (s, &v) in h.iter().enumerate() {
+                global[s] += v;
+            }
+        }
+        let huff_bits = |hists: &[[u32; 256]]| -> u64 {
+            let mut freq = vec![0u32; 256];
+            for h in hists {
+                for (s, &v) in h.iter().enumerate() {
+                    freq[s] += v;
+                }
+            }
+            let huff = omnizip_codecs::HuffmanLengths::build(&freq, 15);
+            let mut b = 0u64;
+            for (s, &f) in freq.iter().enumerate() {
+                if f > 0 {
+                    b += u64::from(f)
+                        * u64::from(if huff.lengths[s] > 0 {
+                            huff.lengths[s]
+                        } else {
+                            15
+                        });
+                }
+            }
+            b
+        };
+        // Single-tree variant vs per-context clustered variant, choose
+        // the smaller (mirrors the emission's cost gate).
+        let cmap4 = crate::encoder::context::cluster_contexts(&hists, 4);
+        let mut per: Vec<[u32; 256]> = vec![[0u32; 256]; 4];
+        for (i, h) in hists.iter().enumerate() {
+            for (s, &v) in h.iter().enumerate() {
+                per[usize::from(cmap4[i])][s] += v;
+            }
+        }
+        let split_bits = huff_bits(&per) + 3 * 70 + 20;
+        let single_bits = huff_bits(&[global]) + 70;
+        bits += split_bits.min(single_bits);
+        for &s in &stream.dist_symbols {
+            bits += u64::from(distance_extra_bits(s, &dist_cfg));
+        }
+    }
+
+    // --- Literals: block split + singleton/cluster assignment ---
+    if !stream.literals.is_empty() {
+        let lit_boundaries = if use_context && stream.literals.len() >= 4096 {
+            split_literals(&stream.literals, 8)
+        } else {
+            vec![0]
+        };
+        let nlb = lit_boundaries.len();
+        // Per-(block,ctx) histograms via output simulation.
+        let mut bc: Vec<[u32; 256]> = vec![[0u32; 256]; nlb * 64];
+        let context_mode: u32 = if use_context && is_text_like(input) {
+            2
+        } else {
+            0
+        };
+        let (mut p1, mut p2) = carried_lit_ctx(input, mlen_offset);
+        let mut lit_pos = 0usize;
+        let mut lit_blk = 0usize;
+        let mut out_pos = 0usize;
+        for cmd in commands {
+            for _ in 0..cmd.insert_len {
+                if nlb > 1
+                    && lit_blk + 1 < lit_boundaries.len()
+                    && lit_pos >= lit_boundaries[lit_blk + 1]
+                {
+                    lit_blk += 1;
+                }
+                let b = input[out_pos];
+                let ctx = compute_context_id(p1, p2, context_mode) as usize;
+                bc[(lit_blk << 6) + ctx][b as usize] += 1;
+                p2 = p1;
+                p1 = b;
+                out_pos += 1;
+                lit_pos += 1;
+            }
+            if cmd.copy_len > 0 {
+                let is_dict = (cmd.distance as usize) > mlen_offset + out_pos;
+                let adv = if is_dict {
+                    cmd.copy_len as usize
+                } else {
+                    cmd.copy_len as usize
+                };
+                out_pos += adv;
+                if out_pos > 0 && out_pos <= input.len() {
+                    let new_p1 = input[out_pos - 1];
+                    p2 = if cmd.copy_len > 1 {
+                        input[out_pos - 2]
+                    } else {
+                        p1
+                    };
+                    p1 = new_p1;
+                }
+            }
+        }
+        // Same A/B choice as the emission.
+        let huff_bits = |hs: &[[u32; 256]]| -> u64 {
+            let mut total = 0u64;
+            for h in hs {
+                let t: u64 = h.iter().map(|&x| u64::from(x)).sum();
+                if t == 0 {
+                    continue;
+                }
+                let huff = omnizip_codecs::HuffmanLengths::build(h, 15);
+                for (b, &f) in h.iter().enumerate() {
+                    if f > 0 {
+                        total += u64::from(f)
+                            * u64::from(if huff.lengths[b] > 0 {
+                                huff.lengths[b]
+                            } else {
+                                15
+                            });
+                    }
+                }
+            }
+            total
+        };
+        let cmap_a = crate::encoder::context::cluster_contexts(&bc, 4);
+        let mut hists_a: Vec<[u32; 256]> = vec![[0u32; 256]; 4];
+        for (i, h) in bc.iter().enumerate() {
+            for (b, &f) in h.iter().enumerate() {
+                hists_a[usize::from(cmap_a[i])][b] += f;
+            }
+        }
+        let cost_a = huff_bits(&hists_a) + 4 * 60 + (bc.len() as u64) * 2;
+        let (cmap_b, count_b) = crate::encoder::context::assign_context_trees(&bc, 8);
+        let mut hists_b: Vec<[u32; 256]> = vec![[0u32; 256]; count_b];
+        for (i, h) in bc.iter().enumerate() {
+            for (b, &f) in h.iter().enumerate() {
+                hists_b[usize::from(cmap_b[i])][b] += f;
+            }
+        }
+        let cost_b = huff_bits(&hists_b) + count_b as u64 * 35 + (bc.len() as u64) * 8;
+        bits += cost_a.min(cost_b);
+        bits += 40 * nlb as u64; // literal block switches
+    }
+
+    Some(bits)
+}
+
 fn score_commands(commands: &[Command], input: &[u8], mlen_offset: usize) -> u64 {
+    if std::env::var("BROTLI_EXACT_SCORE").is_ok() {
+        if let Some(b) = exact_emission_bits(commands, input, mlen_offset, true) {
+            return b;
+        }
+    }
     let use_positional = std::env::var("BROTLI_POS").is_ok();
     let mut literal_count = 0u64;
     let mut cmd_count = 0u64;
