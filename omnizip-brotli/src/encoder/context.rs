@@ -48,6 +48,65 @@ pub fn cluster_contexts(histograms: &[[u32; 256]], num_trees: usize) -> Vec<u8> 
         return (0..n as u8).collect();
     }
 
+    // The greedy merge is O(n^3): at block-split scale (thousands of
+    // (block, context) buckets) it dominates encode time. Reduce first:
+    // drop empty buckets, then cluster per contiguous group of 64
+    // (block-local contexts are the natural similarity units), then
+    // greedy-merge the per-group centroids.
+    let nonzero: Vec<usize> = (0..n)
+        .filter(|&i| histograms[i].iter().any(|&x| x > 0))
+        .collect();
+
+    let group = 64usize;
+    let mut local_maps: Vec<(usize, Vec<u8>)> = Vec::new();
+    let mut centroids: Vec<[u32; 256]> = Vec::new();
+    for chunk in nonzero.chunks(group) {
+        let hists: Vec<[u32; 256]> = chunk.iter().map(|&i| histograms[i]).collect();
+        // Up to 8 centroids per group keeps the second phase small.
+        let k = 8.min(hists.len());
+        let local = cluster_contexts_greedy(&hists, k);
+        let mut sums: Vec<[u32; 256]> = vec![[0u32; 256]; k];
+        for (gi, &orig_i) in chunk.iter().enumerate() {
+            let t = local[gi] as usize;
+            for (b, &v) in histograms[orig_i].iter().enumerate() {
+                sums[t][b] = sums[t][b].saturating_add(v);
+            }
+        }
+        centroids.extend(sums);
+        local_maps.push((chunk.len(), local));
+    }
+
+    let top = num_trees.min(centroids.len()).max(1);
+    let centroid_map = cluster_contexts_greedy(&centroids, top);
+
+    let mut ctx_map = vec![0u8; n];
+    let mut nonzero_cursor = 0usize;
+    let mut centroid_cursor = 0usize;
+    for (len, local) in &local_maps {
+        let k = centroids_per_chunk(*len);
+        for (gi, &l) in local.iter().enumerate() {
+            let centroid_idx = centroid_cursor + l as usize;
+            let orig_i = nonzero[nonzero_cursor + gi];
+            ctx_map[orig_i] = centroid_map[centroid_idx];
+        }
+        nonzero_cursor += len;
+        centroid_cursor += k;
+    }
+    ctx_map
+}
+
+fn centroids_per_chunk(chunk_len: usize) -> usize {
+    8.min(chunk_len).max(1)
+}
+
+/// Greedy agglomerative merge by L1 distance (exact, O(n^3)).
+/// Only called on reduced inputs (<= a few hundred histograms).
+fn cluster_contexts_greedy(histograms: &[[u32; 256]], num_trees: usize) -> Vec<u8> {
+    let n = histograms.len();
+    if n <= num_trees {
+        return (0..n as u8).collect();
+    }
+
     let mut clusters: Vec<Vec<usize>> = (0..n).map(|i| vec![i]).collect();
     let mut merged_hists: Vec<[u32; 256]> = histograms.to_vec();
 
