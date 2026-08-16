@@ -524,10 +524,13 @@ fn encode_huffman_chunk_body(
         && stream.literals.len() >= 4096
         && use_context
         && std::env::var("BROTLI_NO_LIT_SPLIT").is_err();
+    // Scale the block budget with the literal count: small inputs
+    // lose more to block/tree overhead than they gain from sharper
+    // local statistics (measured crossover near ~2K literals/block).
     let max_lit_blocks = std::env::var("BROTLI_LIT_SPLIT_MAX")
         .ok()
         .and_then(|v| v.parse().ok())
-        .unwrap_or(8);
+        .unwrap_or_else(|| (stream.literals.len() / 2048).clamp(8, 24));
     let lit_boundaries: Vec<usize> = if lit_split_on {
         split_literals(&stream.literals, max_lit_blocks)
     } else {
@@ -759,11 +762,12 @@ fn encode_huffman_chunk_body(
         let cost_b: f64 = hists_b.iter().map(|h| tree_bits(h)).sum::<f64>()
             + count_b as f64 * 35.0
             + bc_hists.len() as f64 * (count_b as f64).log2().max(1.0);
-        let (cmap, tree_count) = if cost_b < cost_a {
-            (cmap_b, count_b)
-        } else {
-            (cmap_a, 4)
-        };
+        let (cmap, tree_count) =
+            if cost_b < cost_a && std::env::var("BROTLI_NO_SINGLETONS").is_err() {
+                (cmap_b, count_b)
+            } else {
+                (cmap_a, 4)
+            };
         lit_ctx_map.clear();
         lit_ctx_map.extend_from_slice(&cmap);
         ntrees_l = tree_count as u32;
