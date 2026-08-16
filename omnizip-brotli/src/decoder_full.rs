@@ -666,9 +666,6 @@ fn finish_metablock_decode(
     };
     let (lit_context_map, p) = read_context_map(data, br.bit_pos(), lit_cm_size, ntreesl, 0)?;
     br.bit_pos = p;
-    if std::env::var("BROTLI_DBG_TB").is_ok() {
-        eprintln!("LCM ntreesl={ntreesl} cm_size={lit_cm_size} bit_end={p}");
-    }
 
     // ----- Distance context map (§9.6) -----
     let dist_cm_size = (dist_bt.num_block_types as usize) << K_DISTANCE_CONTEXT_BITS;

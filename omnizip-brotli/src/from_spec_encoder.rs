@@ -530,7 +530,7 @@ fn encode_huffman_chunk_body(
     let max_lit_blocks = std::env::var("BROTLI_LIT_SPLIT_MAX")
         .ok()
         .and_then(|v| v.parse().ok())
-        .unwrap_or_else(|| (stream.literals.len() / 2048).clamp(8, 24));
+        .unwrap_or_else(|| (stream.literals.len() / 1024).clamp(8, 48));
     let lit_boundaries: Vec<usize> = if lit_split_on {
         split_literals(&stream.literals, max_lit_blocks)
     } else {
@@ -905,13 +905,6 @@ fn encode_huffman_chunk_body(
     write_varlen_uint8(bw, ntrees_l - 1); // NTREESL
     if ntrees_l > 1 {
         write_context_map(bw, &lit_ctx_map, ntrees_l);
-    }
-    if std::env::var("BROTLI_DBG_TB").is_ok() {
-        eprintln!(
-            "WLCM ntreesl={ntrees_l} entries={} bit_end={}",
-            lit_ctx_map.len(),
-            (bw.out.len() * 8 + bw.nbits as usize)
-        );
     }
     // Distance context modeling (RFC 7932 §9.6): NTREES_D = 2 with the
     // context derived from copy length (kCmdLut.context = (len>4)?3:len-2).
@@ -4984,7 +4977,7 @@ fn write_context_map(bw: &mut BitWriter, ctx_map: &[u8], ntrees: u32) {
         for &entry in ctx_map {
             freq[entry as usize] += 1;
         }
-        let lengths = omnizip_codecs::HuffmanLengths::build(&freq, 5);
+        let lengths = omnizip_codecs::HuffmanLengths::build(&freq, 15);
         write_huffman_table(bw, &lengths, ntrees as usize);
 
         // Write each entry using the Huffman code (reversed for LSB-first).
