@@ -158,11 +158,16 @@ pub fn assign_context_trees(
         next_tree + k
     };
     // Tree ids must fit the cmap's u8 entries.
-    let ntrees = ntrees.min(256);
-    if ntrees == 256 {
-        for a in assignment.iter_mut() {
-            *a = (*a).min(255);
-        }
+    // Tree ids must fit the cmap's u8 entries, with margin below the
+    // 256-symbol cmap-table boundary (a full 256-tree table hits wire
+    // edge cases in the complex-form reader).
+    let cap = std::env::var("BROTLI_TREE_CAP")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(240);
+    let ntrees = ntrees.min(cap);
+    for a in assignment.iter_mut() {
+        *a = (*a).min(ntrees as u8 - 1);
     }
     (assignment, ntrees)
 }

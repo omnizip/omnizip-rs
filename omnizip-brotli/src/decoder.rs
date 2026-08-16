@@ -606,9 +606,6 @@ pub fn read_huffman_table(
     br.bit_pos = bit_pos;
 
     let hskip = br.read_bits(2);
-    if std::env::var("BROTLI_DBG_TB").is_ok() {
-        eprintln!("TBL start={bit_pos} alphabet={alphabet_size} hskip={hskip}");
-    }
     if hskip == 1 {
         read_simple_form(&mut br, alphabet_size)
     } else {
