@@ -253,7 +253,7 @@ pub(crate) fn read_context_map(
 #[derive(Default)]
 struct DecStats {
     cmds: u64,
-    lits: u64,
+    literal_count: u64,
     ins_extra: u64,
     cpy_extra: u64,
     cmd_hists: std::collections::BTreeMap<usize, [u32; 704]>,
@@ -281,7 +281,7 @@ impl DecStats {
     const fn empty() -> Self {
         Self {
             cmds: 0,
-            lits: 0,
+            literal_count: 0,
             ins_extra: 0,
             cpy_extra: 0,
             cmd_hists: std::collections::BTreeMap::new(),
@@ -313,11 +313,11 @@ fn dec_stats() -> std::sync::MutexGuard<'static, DecStats> {
 pub fn _print_dec_stats(total_input: usize) {
     let st = dec_stats();
     eprintln!(
-        "DEC_STATS: cmds={} copies={} (implicit-rep0: {}) lits={} | avg_copy={:.1} max_copy={} copy_pct={:.1}%",
+        "DEC_STATS: cmds={} copies={} (implicit-rep0: {}) literals={} | avg_copy={:.1} max_copy={} copy_pct={:.1}%",
         st.cmds,
         st.copies,
         st.implicit,
-        st.lits,
+        st.literal_count,
         if st.copies > 0 { st.copy_bytes as f64 / st.copies as f64 } else { 0.0 },
         st.max_copy,
         st.copy_bytes as f64 * 100.0 / total_input as f64,
@@ -916,7 +916,7 @@ fn finish_metablock_decode(
         if std::env::var("BROTLI_DEC_STATS").is_ok() {
             let mut st = dec_stats();
             st.cmds += 1;
-            st.lits += insert_len as u64;
+            st.literal_count += insert_len as u64;
             st.ins_extra += u64::from(v.insert_len_extra_bits);
             st.cpy_extra += u64::from(v.copy_len_extra_bits);
             st.cmd_hists.entry(cmd_block_type).or_insert([0u32; 704])[cmd_code] += 1;
