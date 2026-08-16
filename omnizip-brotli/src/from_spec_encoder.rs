@@ -1209,7 +1209,7 @@ fn encode_huffman_chunk_body(
         top.sort_by_key(|&(_d, c)| std::cmp::Reverse(c));
         top.truncate(8);
         eprintln!(
-            "STATS ntrees={ntrees}: cmds={} lits={} dists={} (rep0-3: {n_rep}) | lit_bits={lit_bits} cmd_bits={} dist_bits={}",
+            "STATS ntrees={ntrees}: cmds={} literals={} dists={} (rep0-3: {n_rep}) | lit_bits={lit_bits} cmd_bits={} dist_bits={}",
             stream.cmd_symbols.len(),
             stream.literals.len(),
             stream.dist_symbols.len(),
