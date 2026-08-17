@@ -24,7 +24,7 @@
 #![forbid(unsafe_code)]
 
 use crate::decoder::{read_huffman_table, read_varlen_uint8, BitReader, ContextMode, HuffmanTable};
-use crate::prefix::kBlockLengthPrefixCode;
+use crate::prefix::{kBlockLengthPrefixCode, kCmdLut};
 
 /// Number of distance context bits (RFC 7932 §10.4 + upstream
 /// `BROTLI_DISTANCE_CONTEXT_BITS`). Distance context is computed from
@@ -312,6 +312,31 @@ fn dec_stats() -> std::sync::MutexGuard<'static, DecStats> {
 #[doc(hidden)]
 pub fn _print_dec_stats(total_input: usize) {
     let st = dec_stats();
+    if std::env::var("BROTLI_DEC_CMDSYM").is_ok() {
+        let mut agg = [0u64; 704];
+        for (_bt, h) in st.cmd_hists.iter() {
+            for (sym, &f) in h.iter().enumerate() {
+                agg[sym] += u64::from(f);
+            }
+        }
+        let mut top: Vec<(usize, u64)> = agg
+            .iter()
+            .enumerate()
+            .filter(|&(_, &f)| f > 0)
+            .map(|(s, &f)| (s, f))
+            .collect();
+        top.sort_by(|a, b| b.1.cmp(&a.1));
+        let mut out = String::from("DEC_STATS top cmd syms (ins_off,cpy_off,dc -> count):");
+        for (sym, f) in top.iter().take(16) {
+            let e = &kCmdLut[*sym];
+            out.push_str(&format!(
+                " ({},{},{}->{})",
+                e.insert_len_offset, e.copy_len_offset, e.distance_code, f
+            ));
+        }
+        eprintln!("{out}");
+        eprintln!("DEC_STATS distinct cmd syms: {}", top.len());
+    }
     eprintln!(
         "DEC_STATS: cmds={} copies={} (implicit-rep0: {}) literals={} | avg_copy={:.1} max_copy={} copy_pct={:.1}%",
         st.cmds,

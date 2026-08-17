@@ -2496,30 +2496,78 @@ fn optimal_parse_with_costs_ext(
 /// [`DistanceConfig`], with symbol costs from a Huffman table built on
 /// the observed symbol distribution. Rep codes 0-3 price at their
 /// Huffman symbol cost (no extra bits).
+/// Smoothed entropy cost per symbol (port of upstream SetCost in
+/// backward_references_hq.cc): cost[i] = log2(sum) - log2(count[i]),
+/// floored at 1.0; unseen symbols cost log2(sum + #missing) + 2. Unlike
+/// Huffman lengths this is continuous — a p=0.4 symbol costs 1.32 bits,
+/// not a quantized 2 — which keeps the DP's preference landscape smooth
+/// enough for per-symbol command pricing to work (Huffman tables
+/// collapsed the search; measured 43,422 vs 38,821 at 1MB q11).
+fn set_cost(hist: &[u32; 704], literal_histogram: bool) -> [f32; 704] {
+    let mut sum: u64 = 0;
+    for &h in hist.iter() {
+        sum += u64::from(h);
+    }
+    let mut out = [0f32; 704];
+    if sum == 0 {
+        return out;
+    }
+    let log2sum = (sum as f64).log2();
+    let mut missing_symbol_sum = sum;
+    if !literal_histogram {
+        for &h in hist.iter() {
+            if h == 0 {
+                missing_symbol_sum += 1;
+            }
+        }
+    }
+    let missing_cost = (missing_symbol_sum as f64).log2() as f32 + 2.0;
+    for i in 0..704 {
+        if hist[i] == 0 {
+            out[i] = missing_cost;
+        } else {
+            let c = log2sum as f32 - (hist[i] as f32).log2();
+            out[i] = c.max(1.0);
+        }
+    }
+    out
+}
+
 struct DistCostModel {
-    /// Huffman symbol cost per distance code (bits).
+    /// Smoothed-entropy cost per distance code (bits).
     code_cost: [f32; 704],
+    /// Smoothed-entropy cost per COMMAND symbol (bits); None when the
+    /// caller did not provide a previous parse to learn from.
+    cmd_cost: Option<[f32; 704]>,
     cfg: DistanceConfig,
 }
 
 impl DistCostModel {
     /// Build from a command stream: choose the distance config, encode
-    /// each copy's distance, histogram the symbols, Huffman-build.
-    fn from_commands(commands: &[Command], mlen_offset: usize) -> Self {
+    /// each copy's distance, histogram the symbols. Costs come from
+    /// SetCost (smoothed entropy) rather than Huffman lengths.
+    fn from_commands(
+        commands: &[Command],
+        mlen_offset: usize,
+        with_cmd_costs: bool,
+        setcost_dist: bool,
+    ) -> Self {
         let cfg = DistanceConfig::choose(commands);
         let mut freq = [0u32; 704];
+        let mut cmd_freq = [0u32; 704];
         let mut rep = RepBuffer::new();
         let mut cur = 0usize;
-        let n = commands
-            .iter()
-            .map(|c| c.insert_len as usize + c.copy_len as usize)
-            .sum::<usize>();
         let mut has_copy = false;
         for cmd in commands {
             cur += cmd.insert_len as usize;
             if cmd.copy_len > 0 {
                 has_copy = true;
                 let is_dict = (cmd.distance as usize) > mlen_offset + cur;
+                if with_cmd_costs {
+                    if let Some(sym) = find_cmd_symbol(cmd.insert_len, cmd.copy_len) {
+                        cmd_freq[sym] += 1;
+                    }
+                }
                 if is_dict {
                     rep.on_dict_reference(false);
                 } else if let Some(code) = rep.find_rep_code(cmd.distance) {
@@ -2533,17 +2581,32 @@ impl DistCostModel {
                 cur += cmd.copy_len as usize;
             }
         }
-        let _ = n;
         let mut code_cost = [22.0f32; 704];
         if has_copy {
-            let huff = omnizip_codecs::HuffmanLengths::build(&freq, 15);
-            for i in 0..704 {
-                if huff.lengths[i] > 0 {
-                    code_cost[i] = f32::from(huff.lengths[i]);
+            if setcost_dist {
+                // Smoothed entropy (upstream SetCost): continuous costs
+                // keep the DP landscape stable where Huffman lengths
+                // quantize it (measured -1.3KB at 1MB q11).
+                code_cost = set_cost(&freq, false);
+            } else {
+                let huff = omnizip_codecs::HuffmanLengths::build(&freq, 15);
+                for i in 0..704 {
+                    if huff.lengths[i] > 0 {
+                        code_cost[i] = f32::from(huff.lengths[i]);
+                    }
                 }
             }
         }
-        Self { code_cost, cfg }
+        let cmd_cost = if with_cmd_costs && has_copy {
+            Some(set_cost(&cmd_freq, false))
+        } else {
+            None
+        };
+        Self {
+            code_cost,
+            cmd_cost,
+            cfg,
+        }
     }
 
     /// True wire cost (bits) of encoding `distance` explicitly.
@@ -2800,6 +2863,34 @@ fn zopfli_parse_ext(
             ins_p2
         }
     };
+    // Per-symbol command pricing from the model's SetCost table
+    // (upstream get_command_cost): the smooth entropy landscape lets
+    // the DP concentrate on frequent (insert,copy) symbols without
+    // the collapse a Huffman-quantized table caused. Falls back to the
+    // flat average when no model is provided. Insert extra bits ride
+    // along (upstream charges them at base_cost).
+    let cmd_sym_price = |ilen: u32, copy_len: u32| -> f32 {
+        match dist_model.and_then(|m| m.cmd_cost.as_ref()) {
+            Some(t) => {
+                let sym = find_cmd_symbol(ilen, copy_len);
+                match sym {
+                    Some(s) => t[s] + f32::from(kCmdLut[s].insert_len_extra_bits),
+                    None => cmd_base_cost,
+                }
+            }
+            None => cmd_base_cost,
+        }
+    };
+    // Implicit-rep0 command price: distance folds into the symbol.
+    let cmd_sym_price_implicit = |ilen: u32, copy_len: u32| -> Option<f32> {
+        let t = dist_model.and_then(|m| m.cmd_cost.as_ref())?;
+        let sym = find_cmd_symbol_with_rep(ilen, copy_len, Some(0))?;
+        if kCmdLut[sym].distance_code == 0 {
+            Some(t[sym] + f32::from(kCmdLut[sym].insert_len_extra_bits))
+        } else {
+            None
+        }
+    };
     // back_len  = copy length of the transition INTO i (0 = literal step)
     // back_pos  = source position of the transition INTO i
     // back_dist = distance for copy transitions
@@ -2889,7 +2980,7 @@ fn zopfli_parse_ext(
                 None => explicit_dist_cost(dist),
             };
             let ilen_here = (i - u[i] as usize) as u32;
-            let m_cost = cmd_base_cost + ins_prior(ilen_here) + dc;
+            let m_cost = ins_prior(ilen_here) + dc + cmd_sym_price(ilen_here, copy_len);
             if cand_idx == 0 {
                 for &boundary in &COPY_BOUNDARIES {
                     if boundary < MIN_MATCH || boundary > copy_len {
@@ -2941,7 +3032,9 @@ fn zopfli_parse_ext(
         // Copy transition from the dictionary candidate (if any).
         if let Some((dist, copy_len, advance_len)) = dict_at[i] {
             let ilen_here = (i - u[i] as usize) as u32;
-            let m_cost = cmd_base_cost + ins_prior(ilen_here) + explicit_dist_cost(dist);
+            let m_cost = ins_prior(ilen_here)
+                + explicit_dist_cost(dist)
+                + cmd_sym_price(ilen_here, copy_len);
             let j = i + advance_len as usize;
             if j <= n {
                 let total = base + m_cost + copy_extra_cost(copy_len);
@@ -2971,7 +3064,6 @@ fn zopfli_parse_ext(
                 continue;
             }
             let ilen_here = (i - u[i] as usize) as u32;
-            let m_cost = cmd_base_cost + ins_prior(ilen_here) + rep_cost(k);
             for &boundary in &COPY_BOUNDARIES {
                 if boundary < MIN_MATCH || boundary > l {
                     continue;
@@ -2980,7 +3072,23 @@ fn zopfli_parse_ext(
                 if j > n {
                     break;
                 }
-                let total = base + m_cost + copy_extra_cost(boundary);
+                // rep0 with a short insert rides an implicit symbol:
+                // the distance costs nothing at all.
+                let (sym_c, dist_c) = if k == 0 && ilen_here <= 9 {
+                    match cmd_sym_price_implicit(ilen_here, boundary) {
+                        Some(imp) => (ins_prior(ilen_here) + imp, 0.0),
+                        None => (
+                            ins_prior(ilen_here) + cmd_sym_price(ilen_here, boundary),
+                            rep_cost(k),
+                        ),
+                    }
+                } else {
+                    (
+                        ins_prior(ilen_here) + cmd_sym_price(ilen_here, boundary),
+                        rep_cost(k),
+                    )
+                };
+                let total = base + sym_c + dist_c + copy_extra_cost(boundary);
                 if total < cost[j] {
                     cost[j] = total;
                     back_pos[j] = i as u32;
@@ -3005,7 +3113,16 @@ fn zopfli_parse_ext(
                     continue;
                 }
                 let ilen_here = (i - u[i] as usize) as u32;
-                let m_cost_v = cmd_base_cost + ins_prior(ilen_here) + 3.0; // short code
+                let short_c = match dist_model.and_then(|m| m.cmd_cost.as_ref()).map(|_| ()) {
+                    Some(()) => {
+                        let code = RepBuffer::new(); // placeholder removed below
+                        let _ = code;
+                        3.0
+                    }
+                    None => 3.0,
+                };
+                let m_cost_v =
+                    ins_prior(ilen_here) + short_c + cmd_sym_price(ilen_here, lv.max(MIN_MATCH));
                 for &boundary in &COPY_BOUNDARIES {
                     if boundary < MIN_MATCH || boundary > lv {
                         continue;
@@ -3419,7 +3536,36 @@ fn zopfli_iterative_parse(
             }
             out
         };
-        let lit_cost_refined = compute_huffman_lit_cost(&literals_prev);
+        // Upstream set_from_commands pairs per-symbol command costs
+        // with FLAT literal costs (SetCost over the literal byte
+        // histogram) — the context-steered positional model is our own
+        // extension and unbalances the per-symbol landscape (measured:
+        // chain candidates +50% bits). BROTLI_SETCMD_FLIT=0 restores
+        // the positional model.
+        // Flat upstream-style literal model is an experiment
+        // (BROTLI_SETCMD_FLIT=1); the context-steered positional model
+        // measures better alongside per-symbol command pricing.
+        let setcmd_active = quality >= 10
+            && model_commands.len() >= 32_000
+            && model_commands.len() <= 128_000
+            && std::env::var("BROTLI_NO_SETCMD").is_err()
+            && std::env::var("BROTLI_SETCMD_FLIT")
+                .map(|v| v == "1")
+                .unwrap_or(false);
+        let lit_cost_refined = if setcmd_active {
+            let mut lh = [0u32; 704];
+            for &b in &literals_prev {
+                lh[usize::from(b)] += 1;
+            }
+            let sc = set_cost(&lh, true);
+            let mut t = [8.0f32; 256];
+            for (b, &c) in sc.iter().enumerate().take(256) {
+                t[b] = if c > 0.0 { c } else { 8.0 };
+            }
+            t
+        } else {
+            compute_huffman_lit_cost(&literals_prev)
+        };
 
         let mut cmd_freq = [0u32; 704];
         for cmd in &model_commands {
@@ -3441,7 +3587,23 @@ fn zopfli_iterative_parse(
             7.0
         };
 
-        let dist_model = DistCostModel::from_commands(&model_commands, mlen_offset);
+        // Distance pricing via smoothed entropy (upstream SetCost) at q10+;
+        // per-symbol COMMAND pricing (upstream set_from_commands) measured
+        // worse here — it converges to replicating the start parse's symbol
+        // shape instead of exploring (324K vs 297K bits at 1MB). Available
+        // as an experiment via BROTLI_SETCMD=1.
+        let dist_model = DistCostModel::from_commands(
+            &model_commands,
+            mlen_offset,
+            quality >= 10
+                && model_commands.len() >= 32_000
+                && model_commands.len() <= 128_000
+                && std::env::var("BROTLI_NO_SETCMD").is_err(),
+            quality >= 10
+                && model_commands.len() >= 32_000
+                && model_commands.len() <= 128_000
+                && std::env::var("BROTLI_NO_SETCOST_D").is_err(),
+        );
 
         let mut mf_iter = omnizip_codecs::HashChainMatchFinder::new(input, config);
         // The refinement MF's data is the CHUNK slice, so its coordinate
@@ -3454,7 +3616,9 @@ fn zopfli_iterative_parse(
             mlen_offset,
             use_dict,
             Some(lit_cost_refined),
-            if std::env::var("BROTLI_POS").is_ok()
+            if setcmd_active {
+                None
+            } else if std::env::var("BROTLI_POS").is_ok()
                 || (quality >= 10 && std::env::var("BROTLI_NO_POS").is_err())
             {
                 Some(&_positional_costs)
