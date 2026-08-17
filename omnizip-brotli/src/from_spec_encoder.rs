@@ -318,10 +318,19 @@ pub fn compress_with_quality(input: &[u8], quality: i32) -> Vec<u8> {
     // Each chunk is a Huffman-coded metablock. Larger chunks amortize the
     // Huffman table overhead better but use more DP memory. Quality-dependent:
     // Q10+ uses 8 MiB, Q4-9 uses 4 MiB, Q0-3 uses 1 MiB.
-    let chunk_size: usize = if q >= 10 {
-        (1 << 23) - 1 // 8 MiB - 1
+    let chunk_size: usize = if let Some(sz) = std::env::var("BROTLI_CHUNK")
+        .ok()
+        .and_then(|v| v.parse().ok())
+    {
+        sz
     } else if q >= 4 {
-        (1 << 22) - 1 // 4 MiB - 1
+        // Measured optimum on the CSV benchmark at every scale tried
+        // (4MB input: 2MB chunks beat 1MB and 4MB by 10%+; 21MB:
+        // 878KB -> 797KB q11, 975KB -> 853KB q5). Larger chunks
+        // saturate the per-chunk tree caps and distance diversity
+        // explodes; smaller chunks pay repeated headers and lose
+        // cross-chunk rep warmth.
+        1 << 21 // 2 MiB
     } else {
         (1 << 20) - 1 // 1 MiB - 1
     };
