@@ -239,27 +239,40 @@ fn build_huffman_lengths(freqs: &[u32], max_len: u8, lengths: &mut [u8]) {
         lengths[*sym] = (*depth);
     }
 
-    // Length limiting: zlib CPI approach.
+    // Length limiting: zlib CPI overflow algorithm (deflate.c
+    // gen_bitlen). The previous level-by-level variant re-processed
+    // inflow counts, doubling them into each lower level until the
+    // u32 counter overflowed on skewed inputs (debug builds panic;
+    // release builds corrupted the code lengths).
+    let mut overflow = 0u32;
     let mut bl_count = [0u32; 256];
     for &l in lengths.iter() {
-        if l > 0 {
+        if l == 0 {
+            continue;
+        }
+        if l > max_len {
+            overflow += 1;
+        } else {
             bl_count[l as usize] += 1;
         }
     }
-
-    for l in ((max_len as usize + 1)..256).rev() {
-        while bl_count[l] > 0 {
-            let mut j = l - 1;
-            while j > 0 && bl_count[j] == 0 {
-                j -= 1;
+    if overflow > 0 {
+        // Park the overlong leaves at max_len, then move a leaf down
+        // one level per iteration to make room for two of them —
+        // bounded by the overflow count, unlike a full re-walk.
+        bl_count[max_len as usize] += overflow;
+        while overflow > 0 {
+            let mut bits = max_len as usize - 1;
+            while bits > 0 && bl_count[bits] == 0 {
+                bits -= 1;
             }
-            if j == 0 {
+            if bits == 0 {
                 break;
             }
-            bl_count[j] -= 1;
-            bl_count[j + 1] += 2;
-            bl_count[l] -= 1;
-            bl_count[max_len as usize] += 1;
+            bl_count[bits] -= 1;
+            bl_count[bits + 1] += 2;
+            bl_count[max_len as usize] -= 1;
+            overflow = overflow.saturating_sub(2);
         }
     }
 
