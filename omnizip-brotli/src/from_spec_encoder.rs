@@ -2587,6 +2587,7 @@ fn zopfli_parse(
     lit_cost_positional: Option<&[f32]>,
     cmd_cost_override: Option<f32>,
     dist_model: Option<&DistCostModel>,
+    ins_prior_cfg: Option<(u32, f32, f32)>,
 ) -> Vec<Command> {
     zopfli_parse_ext(
         input,
@@ -2598,6 +2599,7 @@ fn zopfli_parse(
         lit_cost_positional,
         cmd_cost_override,
         dist_model,
+        ins_prior_cfg,
     )
 }
 
@@ -2618,6 +2620,7 @@ fn zopfli_parse_ext(
     lit_cost_positional: Option<&[f32]>,
     cmd_cost_override: Option<f32>,
     dist_model: Option<&DistCostModel>,
+    ins_prior_cfg: Option<(u32, f32, f32)>,
 ) -> Vec<Command> {
     let n = input.len();
     if n == 0 {
@@ -2778,6 +2781,25 @@ fn zopfli_parse_ext(
     // cost[i]   = min bits to encode input[0..i] (literals charged
     //             individually; command overhead charged when the
     //             pending literal run is flushed by a copy).
+    // Insert-length prior (experiment): the flat per-command cost
+    // treats a 7-literal flush the same as a 1-literal flush, so the
+    // parse spreads inserts over 0..9 and the command tree stays broad
+    // (measured 2.0 bits/cmd vs the reference's 1.25, which
+    // concentrates at insert<=1). A fixed prior penalizes wide
+    // inserts without learning from the previous parse (a learned
+    // table collapsed the search — see 0.16.53 experiments).
+    // Caller-provided (free_len, p1, p2): inserts <= free_len ride
+    // free, 2..=9 pay p1, longer pay p2. None disables the prior.
+    let (ins_free, ins_p1, ins_p2) = ins_prior_cfg.unwrap_or((1, 0.0, 0.0));
+    let ins_prior = |ilen: u32| -> f32 {
+        if ilen <= ins_free {
+            0.0
+        } else if ilen <= 9 {
+            ins_p1
+        } else {
+            ins_p2
+        }
+    };
     // back_len  = copy length of the transition INTO i (0 = literal step)
     // back_pos  = source position of the transition INTO i
     // back_dist = distance for copy transitions
@@ -2866,7 +2888,8 @@ fn zopfli_parse_ext(
                 Some(c) => c,
                 None => explicit_dist_cost(dist),
             };
-            let m_cost = cmd_base_cost + dc;
+            let ilen_here = (i - u[i] as usize) as u32;
+            let m_cost = cmd_base_cost + ins_prior(ilen_here) + dc;
             if cand_idx == 0 {
                 for &boundary in &COPY_BOUNDARIES {
                     if boundary < MIN_MATCH || boundary > copy_len {
@@ -2917,7 +2940,8 @@ fn zopfli_parse_ext(
 
         // Copy transition from the dictionary candidate (if any).
         if let Some((dist, copy_len, advance_len)) = dict_at[i] {
-            let m_cost = cmd_base_cost + explicit_dist_cost(dist);
+            let ilen_here = (i - u[i] as usize) as u32;
+            let m_cost = cmd_base_cost + ins_prior(ilen_here) + explicit_dist_cost(dist);
             let j = i + advance_len as usize;
             if j <= n {
                 let total = base + m_cost + copy_extra_cost(copy_len);
@@ -2946,7 +2970,8 @@ fn zopfli_parse_ext(
             if l < MIN_MATCH {
                 continue;
             }
-            let m_cost = cmd_base_cost + rep_cost(k);
+            let ilen_here = (i - u[i] as usize) as u32;
+            let m_cost = cmd_base_cost + ins_prior(ilen_here) + rep_cost(k);
             for &boundary in &COPY_BOUNDARIES {
                 if boundary < MIN_MATCH || boundary > l {
                     continue;
@@ -2979,7 +3004,8 @@ fn zopfli_parse_ext(
                 if lv < MIN_MATCH {
                     continue;
                 }
-                let m_cost_v = cmd_base_cost + 3.0; // short code
+                let ilen_here = (i - u[i] as usize) as u32;
+                let m_cost_v = cmd_base_cost + ins_prior(ilen_here) + 3.0; // short code
                 for &boundary in &COPY_BOUNDARIES {
                     if boundary < MIN_MATCH || boundary > lv {
                         continue;
@@ -3106,12 +3132,45 @@ fn zopfli_iterative_parse(
     use_dict: bool,
     quality: i32,
 ) -> Vec<Command> {
+    // Insert-length prior for q10+ (measured on CSV): inserts <= 2 ride
+    // free, 3..=9 pay 0.7 bits, longer pay 3.0. Concentrates the
+    // command stream on the reference's (small-insert) symbol shape —
+    // the flat per-command cost leaves insert length to chance and the
+    // command tree stays broad. Env: BROTLI_INS_FREE /
+    // BROTLI_INS_PRIOR="p1,p2"; BROTLI_NO_INS_PRIOR disables.
+    let ins_prior_cfg: Option<(u32, f32, f32)> = if std::env::var("BROTLI_NO_INS_PRIOR").is_ok() {
+        None
+    } else {
+        let free = std::env::var("BROTLI_INS_FREE")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(2);
+        let (p1, p2) = std::env::var("BROTLI_INS_PRIOR")
+            .ok()
+            .and_then(|v| {
+                let ab: Vec<f32> = v.split(',').filter_map(|x| x.parse().ok()).collect();
+                (ab.len() == 2).then(|| (ab[0], ab[1]))
+            })
+            .unwrap_or((0.7f32, 3.0f32));
+        (quality >= 10).then_some((free, p1, p2))
+    };
+
     // Pass 1a: caller-provided MF (may be shared across chunks for
     // cross-chunk matching). Pass 1b: light-config MF — a different
     // hash width orders candidates differently, which measurably changes
     // which rep chains the DP warms. Keep the better-scoring start.
     let t0 = std::time::Instant::now();
-    let mut best_commands = zopfli_parse(input, mf, mlen_offset, use_dict, None, None, None, None);
+    let mut best_commands = zopfli_parse(
+        input,
+        mf,
+        mlen_offset,
+        use_dict,
+        None,
+        None,
+        None,
+        None,
+        ins_prior_cfg,
+    );
     if std::env::var("BROTLI_STATS").is_ok() {
         eprintln!(
             "PHASE pass1a: {:.1}s ({} cmds)",
@@ -3171,6 +3230,7 @@ fn zopfli_iterative_parse(
             None,
             None,
             None,
+            ins_prior_cfg,
         );
         let light_score = score_commands(&light_commands, input, mlen_offset);
         if light_score < best_score && std::env::var("BROTLI_NO_LIGHT").is_err() {
@@ -3403,6 +3463,7 @@ fn zopfli_iterative_parse(
             },
             Some(cmd_avg_bits),
             Some(&dist_model),
+            ins_prior_cfg,
         );
         if std::env::var("BROTLI_STATS").is_ok() {
             eprintln!("PHASE refine: {:.1}s", t.elapsed().as_secs_f64());
