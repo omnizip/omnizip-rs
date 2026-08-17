@@ -513,10 +513,18 @@ fn emit_metablock_from_commands(
     let cmd_split_on = quality >= 4
         && stream.cmd_symbols.len() >= 1024
         && std::env::var("BROTLI_NO_SPLIT").is_err();
+    // q10+ parses ride implicit-rep0 commands heavily; their symbol
+    // stream is broader and keeps sharpening up to 64 blocks (measured
+    // 16→64 saves ~3.9KB at 1MB q11; 128 regresses on switch overhead).
+    // Below ~32K symbols the switch overhead wins — 100KB regressed.
     let max_blocks = std::env::var("BROTLI_SPLIT_MAX")
         .ok()
         .and_then(|v| v.parse().ok())
-        .unwrap_or(16);
+        .unwrap_or(if quality >= 10 && stream.cmd_symbols.len() >= 32_768 {
+            (stream.cmd_symbols.len() / 900).clamp(16, 64)
+        } else {
+            16
+        });
     let cmd_boundaries: Vec<usize> = if cmd_split_on {
         split_cmd_symbols_optimal(&stream.cmd_symbols, max_blocks)
     } else {
@@ -561,8 +569,15 @@ fn emit_metablock_from_commands(
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or_else(|| {
-            let cap = if quality >= 10 { 64 } else { 48 };
-            (stream.literals.len() / 1024).clamp(8, cap)
+            // q10+ benefits from far finer literal blocks than the
+            // literals/1024 scaling on large streams (measured: 96
+            // blocks vs 39 at 1MB q11 saves 3.5KB); smaller streams
+            // keep the conservative scaling.
+            if quality >= 10 && stream.literals.len() >= 32_768 {
+                (stream.literals.len() / 400).clamp(16, 96)
+            } else {
+                (stream.literals.len() / 1024).clamp(8, 48)
+            }
         });
     let lit_boundaries: Vec<usize> = if lit_split_on {
         split_literals(&stream.literals, max_lit_blocks)
