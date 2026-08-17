@@ -530,7 +530,10 @@ fn encode_huffman_chunk_body(
     let max_lit_blocks = std::env::var("BROTLI_LIT_SPLIT_MAX")
         .ok()
         .and_then(|v| v.parse().ok())
-        .unwrap_or_else(|| (stream.literals.len() / 1024).clamp(8, 48));
+        .unwrap_or_else(|| {
+            let cap = if quality >= 10 { 64 } else { 48 };
+            (stream.literals.len() / 1024).clamp(8, cap)
+        });
     let lit_boundaries: Vec<usize> = if lit_split_on {
         split_literals(&stream.literals, max_lit_blocks)
     } else {
