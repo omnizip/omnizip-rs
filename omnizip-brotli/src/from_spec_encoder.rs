@@ -468,6 +468,36 @@ fn encode_huffman_chunk_body(
     // per-block statistics.
     let use_block_switch = false;
     let commands = parse_input_with_offset(input, mf, mlen_offset, quality, false);
+    emit_metablock_from_commands(
+        bw,
+        input,
+        mlen_offset,
+        is_last,
+        quality,
+        ctx_in,
+        use_context,
+        use_block_switch,
+        &commands,
+    );
+}
+
+/// Emission stage shared by the real encoder and parse-candidate
+/// scoring: everything from the parsed command list to the last
+/// tree-coded symbol. Pure with respect to `bw` — identical commands
+/// produce identical bits.
+#[allow(clippy::too_many_lines)]
+fn emit_metablock_from_commands(
+    bw: &mut BitWriter,
+    input: &[u8],
+    mlen_offset: usize,
+    is_last: bool,
+    quality: i32,
+    ctx_in: (u8, u8),
+    use_context: bool,
+    use_block_switch: bool,
+    commands: &[Command],
+) {
+    let _ = is_last;
     // Choose distance-code configuration from the parsed commands.
     let dist_cfg = DistanceConfig::choose(&commands);
 
@@ -599,7 +629,7 @@ fn encode_huffman_chunk_body(
     let mut output_sim: Vec<u8> = Vec::with_capacity(input.len());
     let mut cmd_copy_advances: Vec<usize> = Vec::with_capacity(commands.len());
     let mut lit_idx = 0usize;
-    for cmd in &commands {
+    for cmd in commands {
         for _ in 0..cmd.insert_len {
             output_sim.push(stream.literals[lit_idx]);
             lit_idx += 1;
@@ -1183,7 +1213,7 @@ fn encode_huffman_chunk_body(
             let mut rep = RepBuffer::new();
             let mut out_pos = 0usize;
             let mut di = stream.dist_symbols.iter();
-            for cmd in &commands {
+            for cmd in commands {
                 out_pos += cmd.insert_len as usize;
                 if cmd.copy_len > 0 {
                     let is_dict = (cmd.distance as usize) > mlen_offset + out_pos;
@@ -3014,6 +3044,46 @@ fn zopfli_parse_ext(
 /// distance-code cost model from the previous pass's actual
 /// distribution, and keeps whichever parse scores best. Iterates until
 /// the score stops improving (max 3 refinement passes).
+/// Bit-exact size of a candidate command list under the real emission
+/// pipeline: same prologue bits, same [`emit_metablock_from_commands`].
+/// Header bits for ISLAST and MLEN are constant across candidates, so
+/// the comparison is unaffected by the is_last/ctx_in approximations.
+fn measure_emission_bits(
+    commands: &[Command],
+    input: &[u8],
+    mlen_offset: usize,
+    quality: i32,
+) -> u64 {
+    let mut bw = BitWriter::new();
+    bw.write_bits(0, 1); // ISLAST
+    bw.write_bits(0, 1); // ISUNCOMPRESSED
+    let mlen_minus_1 = (input.len() - 1) as u32;
+    let (mnibbles, num_nibbles): (u32, u32) = if mlen_minus_1 < (1 << 16) {
+        (0, 4)
+    } else if mlen_minus_1 < (1 << 20) {
+        (1, 5)
+    } else {
+        (2, 6)
+    };
+    bw.write_bits(mnibbles, 2);
+    for i in 0..num_nibbles {
+        bw.write_bits((mlen_minus_1 >> (4 * i)) & 0xF, 4);
+    }
+    let use_context = quality >= 4 && input.len() >= 4096;
+    emit_metablock_from_commands(
+        &mut bw,
+        input,
+        mlen_offset,
+        false,
+        quality,
+        (0, 0),
+        use_context,
+        false,
+        commands,
+    );
+    (bw.out.len() as u64) * 8 + u64::from(bw.nbits)
+}
+
 fn zopfli_iterative_parse(
     input: &[u8],
     mf: &mut omnizip_codecs::HashChainMatchFinder,
@@ -3111,9 +3181,40 @@ fn zopfli_iterative_parse(
     let iters_env = std::env::var("BROTLI_ITERS")
         .ok()
         .and_then(|v| v.parse().ok());
-    let max_iters = iters_env.unwrap_or(if input.len() <= 1 << 20 { 3 } else { 1 });
+    let mut max_iters = iters_env.unwrap_or(if input.len() <= 1 << 20 { 3 } else { 1 });
+    // BROTLI_EXACT_ACCEPT: judge refinement candidates by their REAL
+    // emission size (full splits + trees + cmaps) instead of the
+    // approximate scorer. Approximations mis-ordered candidates by
+    // >10K bits on the CSV benchmark — the emission stage's
+    // block-splitting and singleton-tree assignment shift costs in
+    // ways no analytic model reproduces.
+    let exact_accept = std::env::var("BROTLI_EXACT_ACCEPT").is_ok()
+        || (quality >= 10 && std::env::var("BROTLI_NO_EXACT_ACCEPT").is_err());
+    // Exact-acceptance chains converge by iteration 2 (iteration 3 was
+    // rejected on every benchmark size); 2 iterations across ALL chunk
+    // sizes — the 8 MiB q10+ chunks only reach the winning parse on
+    // iteration 2, so the historical ≤1 MiB → 3 / >1 MiB → 1 split
+    // would leave large inputs stuck at the pre-chain parse.
+    if exact_accept && iters_env.is_none() {
+        max_iters = 2;
+    }
+    let mut best_bits: Option<u64> = if exact_accept {
+        Some(measure_emission_bits(
+            &best_commands,
+            input,
+            mlen_offset,
+            quality,
+        ))
+    } else {
+        None
+    };
+    // Chain state: each iteration's cost model derives from the
+    // previous iteration's OUTPUT (upstream Zopfli semantics), which is
+    // not necessarily the current winner — the chain can pass through a
+    // worse parse on its way to a much better one.
+    let mut model_commands: Vec<Command> = best_commands.clone();
     for _ in 0..max_iters {
-        let literals_prev = extract_literals(&best_commands, input, mlen_offset);
+        let literals_prev = extract_literals(&model_commands, input, mlen_offset);
         if literals_prev.is_empty() {
             break;
         }
@@ -3123,6 +3224,8 @@ fn zopfli_iterative_parse(
         // ctx>>4 for inputs ≥ 8 KiB). Modeling finer contexts than the
         // wire format can express over-promises literal savings and
         // skews the parse.
+        let from_commands = std::env::var("BROTLI_CM_LIT").is_ok()
+            || (quality >= 10 && std::env::var("BROTLI_NO_CM_LIT").is_err());
         let _positional_costs: Vec<f32> = {
             let context_mode: u32 = if is_text_like(input) { 2 } else { 0 };
             // Per-CONTEXT (64 buckets) literal costs — each bucket priced
@@ -3130,46 +3233,121 @@ fn zopfli_iterative_parse(
             // coding isolates them into zero-bit trees), high-diversity
             // buckets (digit runs) cost their true entropy. This lets the
             // DP shift copy boundaries toward cheap literals.
-            let mut hist = vec![[0u32; 256]; 64];
+            //
+            // Two histogram sources:
+            // - raw input (default): every byte counts, contexts covered
+            //   by matches look "cheap" too.
+            // - previous parse's literals (BROTLI_CM_LIT, upstream
+            //   ZopfliCostModelSetFromCommands): only bytes the previous
+            //   parse actually emitted as literals price a context, so
+            //   contexts living inside matches stay expensive and the DP
+            //   won't flip copies into literals there.
             let mut p1: u8 = 0;
             let mut p2: u8 = 0;
             let mut ctx_of = vec![0u8; input.len()];
             for (i, &b) in input.iter().enumerate() {
-                let ctx = compute_context_id(p1, p2, context_mode) as usize;
-                ctx_of[i] = ctx as u8;
-                hist[ctx][b as usize] += 1;
+                ctx_of[i] = compute_context_id(p1, p2, context_mode);
                 p2 = p1;
                 p1 = b;
             }
-            let mut cost_of = vec![[0f32; 256]; 64];
-            for (c, h) in hist.iter().enumerate() {
-                let total: u64 = h.iter().map(|&x| u64::from(x)).sum();
-                if total == 0 {
-                    continue;
-                }
-                let distinct = h.iter().filter(|&&x| x > 0).count();
-                if distinct == 1 {
-                    if let Some(b) = h.iter().position(|&x| x > 0) {
-                        cost_of[c][b] = 0.05;
+            // Batched histograms are available for experiments via
+            // BROTLI_CTX_BATCH; the default is one chunk-wide window,
+            // which measured best (batching lost the chain's win at
+            // 1 MiB by over-fragmenting the context statistics).
+            let batch: usize = std::env::var("BROTLI_CTX_BATCH")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(input.len().max(1))
+                .max(1024);
+            // literal-at-position flags for the from_commands source.
+            let is_literal_pos: Option<Vec<bool>> = if from_commands {
+                let mut flags = vec![false; input.len()];
+                let mut cur = 0usize;
+                for cmd in &model_commands {
+                    let end = cur + cmd.insert_len as usize;
+                    for x in flags.iter_mut().take(end).skip(cur) {
+                        *x = true;
                     }
-                    continue;
+                    if cmd.copy_len > 0 {
+                        let is_dict = (cmd.distance as usize) > mlen_offset + end;
+                        let adv = if is_dict {
+                            let global_pos = mlen_offset + end;
+                            let max_dist = (global_pos as u32).min(MAX_BACKWARD_DISTANCE);
+                            let mut tmp = Vec::with_capacity(cmd.copy_len as usize + 8);
+                            match dictionary_lookup(
+                                &mut tmp,
+                                cmd.copy_len,
+                                cmd.distance as i32,
+                                max_dist,
+                            ) {
+                                Some(()) => tmp.len(),
+                                None => cmd.copy_len as usize,
+                            }
+                        } else {
+                            cmd.copy_len as usize
+                        };
+                        cur = end + adv;
+                    } else {
+                        cur = end;
+                    }
                 }
-                let tree = omnizip_codecs::HuffmanLengths::build(h, 15);
-                for (b, &f) in h.iter().enumerate() {
-                    let l = tree.lengths[b];
-                    cost_of[c][b] = if f > 0 && l > 0 { f32::from(l) } else { 12.0 };
-                }
-            }
+                Some(flags)
+            } else {
+                None
+            };
             let mut out = vec![0f32; input.len()];
-            for i in 0..input.len() {
-                out[i] = cost_of[usize::from(ctx_of[i])][input[i] as usize];
+            let mut s = 0usize;
+            while s < input.len() {
+                let e = (s + batch).min(input.len());
+                let mut hist = [[0u32; 256]; 64];
+                match &is_literal_pos {
+                    Some(flags) => {
+                        for i in s..e {
+                            if flags[i] {
+                                hist[usize::from(ctx_of[i])][usize::from(input[i])] += 1;
+                            }
+                        }
+                    }
+                    None => {
+                        for i in s..e {
+                            hist[usize::from(ctx_of[i])][usize::from(input[i])] += 1;
+                        }
+                    }
+                }
+                let mut cost_of = [[0f32; 256]; 64];
+                for (c, h) in hist.iter().enumerate() {
+                    let total: u64 = h.iter().map(|&x| u64::from(x)).sum();
+                    if total == 0 {
+                        // No literals observed in this context: unseen
+                        // bytes must not price as free or the DP converts
+                        // every covered copy into a literal run.
+                        cost_of[c] = [12.0; 256];
+                        continue;
+                    }
+                    let distinct = h.iter().filter(|&&x| x > 0).count();
+                    if distinct == 1 {
+                        if let Some(b) = h.iter().position(|&x| x > 0) {
+                            cost_of[c][b] = 0.05;
+                        }
+                        continue;
+                    }
+                    let tree = omnizip_codecs::HuffmanLengths::build(h, 15);
+                    for (b, &f) in h.iter().enumerate() {
+                        let l = tree.lengths[b];
+                        cost_of[c][b] = if f > 0 && l > 0 { f32::from(l) } else { 12.0 };
+                    }
+                }
+                for i in s..e {
+                    out[i] = cost_of[usize::from(ctx_of[i])][input[i] as usize];
+                }
+                s = e;
             }
             out
         };
         let lit_cost_refined = compute_huffman_lit_cost(&literals_prev);
 
         let mut cmd_freq = [0u32; 704];
-        for cmd in &best_commands {
+        for cmd in &model_commands {
             if let Some(sym) = find_cmd_symbol(cmd.insert_len, cmd.copy_len) {
                 cmd_freq[sym] += 1;
             }
@@ -3188,7 +3366,7 @@ fn zopfli_iterative_parse(
             7.0
         };
 
-        let dist_model = DistCostModel::from_commands(&best_commands, mlen_offset);
+        let dist_model = DistCostModel::from_commands(&model_commands, mlen_offset);
 
         let mut mf_iter = omnizip_codecs::HashChainMatchFinder::new(input, config);
         // The refinement MF's data is the CHUNK slice, so its coordinate
@@ -3201,7 +3379,9 @@ fn zopfli_iterative_parse(
             mlen_offset,
             use_dict,
             Some(lit_cost_refined),
-            if std::env::var("BROTLI_POS").is_ok() {
+            if std::env::var("BROTLI_POS").is_ok()
+                || (quality >= 10 && std::env::var("BROTLI_NO_POS").is_err())
+            {
                 Some(&_positional_costs)
             } else {
                 None
@@ -3220,9 +3400,25 @@ fn zopfli_iterative_parse(
                 commands_iter.len()
             );
         }
-        if score_iter < best_score {
-            best_score = score_iter;
-            best_commands = commands_iter;
+        if exact_accept {
+            // Chain advances unconditionally; the winner is whichever
+            // parse actually measures smallest. Early-breaking on a
+            // worse intermediate candidate never reaches the better
+            // parses deeper in the chain (measured: candidate 1 is
+            // worse, candidate 3 is 1.8KB better).
+            let bits_iter = measure_emission_bits(&commands_iter, input, mlen_offset, quality);
+            if std::env::var("BROTLI_STATS").is_ok() {
+                eprintln!("zopfli exact: best={best_bits:?} candidate={bits_iter}");
+            }
+            if best_bits.is_none_or(|b| bits_iter < b) {
+                best_bits = Some(bits_iter);
+                best_commands = commands_iter.clone();
+            }
+            model_commands = commands_iter;
+        } else if score_iter < best_score || std::env::var("BROTLI_POS_FORCE").is_ok() {
+            best_score = score_iter.min(best_score);
+            best_commands = commands_iter.clone();
+            model_commands = commands_iter;
         } else {
             break;
         }
@@ -3738,7 +3934,169 @@ fn exact_emission_bits(
     Some(bits)
 }
 
+/// Parse score under the parse's OWN context-conditioned literal model:
+/// per-context Huffman trees over that parse's literals (pure contexts
+/// price ~0, matching singleton-tree emission), plus the same cmd/dist
+/// pricing as [`score_commands`]. Fixed-model scorers misprice parses
+/// that concentrate literals into contexts — the emission stage prices
+/// each parse under its own trees, so acceptance must too.
+fn score_commands_adaptive(commands: &[Command], input: &[u8], mlen_offset: usize) -> u64 {
+    let context_mode: u32 = if is_text_like(input) { 2 } else { 0 };
+    let mut p1: u8 = 0;
+    let mut p2: u8 = 0;
+    let mut ctx_of = vec![0u8; input.len()];
+    for (i, &b) in input.iter().enumerate() {
+        ctx_of[i] = compute_context_id(p1, p2, context_mode);
+        p2 = p1;
+        p1 = b;
+    }
+
+    let mut hists = vec![[0u32; 256]; 64];
+    let mut cmd_count = 0u64;
+    let mut cmd_freq = [0u32; 704];
+    let mut cmd_extra_bits: u64 = 0;
+    let mut cmd_adv: Vec<usize> = Vec::with_capacity(commands.len());
+    let mut cur = 0usize;
+    for cmd in commands {
+        let end = cur + cmd.insert_len as usize;
+        for i in cur..end {
+            hists[usize::from(ctx_of[i])][usize::from(input[i])] += 1;
+        }
+        let adv = if cmd.copy_len > 0 {
+            cmd_count += 1;
+            if let Some(sym) = find_cmd_symbol(cmd.insert_len, cmd.copy_len) {
+                cmd_freq[sym] += 1;
+                let e = &kCmdLut[sym];
+                cmd_extra_bits +=
+                    u64::from(e.insert_len_extra_bits) + u64::from(e.copy_len_extra_bits);
+            }
+            let is_dict = (cmd.distance as usize) > mlen_offset + end;
+            if is_dict {
+                let global_pos = mlen_offset + end;
+                let max_dist = (global_pos as u32).min(MAX_BACKWARD_DISTANCE);
+                let mut tmp = Vec::with_capacity(cmd.copy_len as usize + 8);
+                match dictionary_lookup(&mut tmp, cmd.copy_len, cmd.distance as i32, max_dist) {
+                    Some(()) => tmp.len(),
+                    None => cmd.copy_len as usize,
+                }
+            } else {
+                cmd.copy_len as usize
+            }
+        } else {
+            0
+        };
+        cmd_adv.push(adv);
+        cur = end + adv;
+    }
+
+    let mut lit_bits: u64 = 0;
+    for h in &hists {
+        let distinct = h.iter().filter(|&&x| x > 0).count();
+        if distinct == 0 {
+            continue;
+        }
+        if distinct == 1 {
+            continue; // singleton tree: zero bits per literal
+        }
+        let tree = omnizip_codecs::HuffmanLengths::build(h, 15);
+        for (b, &f) in h.iter().enumerate() {
+            if f > 0 && tree.lengths[b] > 0 {
+                lit_bits += u64::from(f) * u64::from(tree.lengths[b]);
+            }
+        }
+    }
+    // Context-map + tree-header estimate: trees beyond the first cost
+    // header bits; a parse spreading literals over many contexts pays
+    // for them.
+    let used_ctx = hists.iter().filter(|h| h.iter().any(|&x| x > 0)).count();
+
+    // Command symbol bits under the parse's own Huffman tree, plus
+    // exact insert/copy extra bits. A flat per-command constant
+    // overcharges command-heavy parses by ~5 bits/cmd and flips
+    // acceptance toward under-matched parses.
+    let cmd_tree = omnizip_codecs::HuffmanLengths::build(&cmd_freq, 15);
+    let cmd_sym_bits: u64 = cmd_freq
+        .iter()
+        .zip(cmd_tree.lengths.iter())
+        .map(|(&f, &l)| u64::from(f) * u64::from(l))
+        .sum();
+
+    // Distance pricing mirrors build_symbol_stream exactly: implicit
+    // rep0 commands emit NO distance symbol; explicit commands emit a
+    // short code when one matches, else the long form; the rep buffer
+    // updates follow the emitted SYMBOL (not the distance value).
+    // A rep-code-count approximation overcharges implicit-rep0-heavy
+    // parses by the whole distance-symbol cost and rejects parses the
+    // real encoder encodes smaller.
+    let cfg = DistanceConfig::choose(commands);
+    let mut rep = RepBuffer::new();
+    let mut dist_freq = [0u32; 704];
+    let mut dist_extra_bits: u64 = 0;
+    let mut explicit_copies_remaining = if mlen_offset > 0 { 4 } else { 0 };
+    let mut output_pos = 0usize;
+    for cmd in commands {
+        output_pos += cmd.insert_len as usize;
+        let is_dict_ref = cmd.copy_len > 0 && (cmd.distance as usize) > mlen_offset + output_pos;
+        let can_use_implicit = cmd.copy_len > 0
+            && !is_dict_ref
+            && explicit_copies_remaining == 0
+            && cmd.distance == rep.rep_at(0)
+            && cmd.insert_len <= 9
+            && find_cmd_symbol_with_rep(cmd.insert_len, cmd.copy_len, Some(0))
+                .is_some_and(|sym| kCmdLut[sym].distance_code == 0);
+        let emitted_sym: Option<u32> = if cmd.copy_len > 0 && !can_use_implicit {
+            let (sym, extra) = if is_dict_ref || explicit_copies_remaining > 0 {
+                encode_distance(cmd.distance, &cfg)
+            } else if let Some(code) = rep.find_short_code(cmd.distance) {
+                (code, 0)
+            } else {
+                encode_distance(cmd.distance, &cfg)
+            };
+            if !is_dict_ref && explicit_copies_remaining > 0 {
+                explicit_copies_remaining -= 1;
+            }
+            dist_freq[sym as usize] += 1;
+            dist_extra_bits += u64::from(extra);
+            Some(sym)
+        } else {
+            None
+        };
+        if cmd.copy_len > 0 {
+            if is_dict_ref {
+                rep.on_dict_reference(false);
+            } else if can_use_implicit || emitted_sym == Some(0) {
+                rep.on_rep_lz77(0);
+            } else {
+                rep.on_new_distance_lz77(cmd.distance);
+            }
+            output_pos += if is_dict_ref {
+                let global_pos = mlen_offset + output_pos;
+                let max_dist = (global_pos as u32).min(MAX_BACKWARD_DISTANCE);
+                let mut tmp = Vec::with_capacity(cmd.copy_len as usize);
+                match dictionary_lookup(&mut tmp, cmd.copy_len, cmd.distance as i32, max_dist) {
+                    Some(()) => tmp.len(),
+                    None => cmd.copy_len as usize,
+                }
+            } else {
+                cmd.copy_len as usize
+            };
+        }
+    }
+    let dist_tree = omnizip_codecs::HuffmanLengths::build(&dist_freq, 15);
+    let dist_bits: u64 = dist_freq
+        .iter()
+        .zip(dist_tree.lengths.iter())
+        .map(|(&f, &l)| u64::from(f) * u64::from(l))
+        .sum::<u64>()
+        + dist_extra_bits;
+
+    lit_bits + 5 * used_ctx as u64 + cmd_sym_bits + cmd_extra_bits + dist_bits
+}
+
 fn score_commands(commands: &[Command], input: &[u8], mlen_offset: usize) -> u64 {
+    if std::env::var("BROTLI_ADAPT").is_ok() {
+        return score_commands_adaptive(commands, input, mlen_offset);
+    }
     if std::env::var("BROTLI_EXACT_SCORE").is_ok() {
         if let Some(b) = exact_emission_bits(commands, input, mlen_offset, true) {
             return b;
