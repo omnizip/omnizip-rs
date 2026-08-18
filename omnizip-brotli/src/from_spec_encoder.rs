@@ -635,17 +635,7 @@ fn emit_metablock_from_commands(
             K_STATIC_CONTEXT_MAP_COMPLEX_UTF8.to_vec(),
         )
     } else if use_context && input.len() >= 8192 {
-        if std::env::var("BROTLI_CLUSTER").is_ok() {
-            let nt: usize = std::env::var("BROTLI_NTREES")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(4);
-            let hists = crate::encoder::context::collect_context_histograms(input, context_mode);
-            let ctx_map = crate::encoder::context::cluster_contexts(&hists, nt);
-            (nt as u32, ctx_map)
-        } else {
-            (4u32, (0..64u8).map(|ctx| ctx >> 4).collect())
-        }
+        (4u32, (0..64u8).map(|ctx| ctx >> 4).collect())
     } else if use_context {
         (2, (0..64u8).map(|ctx| u8::from(ctx >= 32)).collect())
     } else {
