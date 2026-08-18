@@ -3476,6 +3476,59 @@ fn measure_emission_bits(
     (bw.out.len() as u64) * 8 + u64::from(bw.nbits)
 }
 
+/// H10 binary-tree candidate collection (BROTLI_TREE_MF): every
+/// position's 4-byte bucket forms a binary search tree whose walk
+/// yields one match per length tier — richer distance diversity than
+/// the hash chain's top-K-by-length, and cheaper to walk.
+#[allow(clippy::type_complexity)]
+fn zopfli_collect_tree(
+    input: &[u8],
+    mlen_offset: usize,
+    use_dict: bool,
+) -> (Vec<(u32, u32)>, Vec<u32>, Vec<Option<(u32, u32, u32)>>) {
+    let n = input.len();
+    let mut tree = omnizip_codecs::BinaryTreeMatchFinder::new(input);
+    let mut cand_flat: Vec<(u32, u32)> = Vec::with_capacity(n * 2);
+    let mut cand_off: Vec<u32> = Vec::with_capacity(n + 1);
+    let mut dict_at: Vec<Option<(u32, u32, u32)>> = vec![None; n];
+    let mut buf: Vec<omnizip_codecs::Lz77Match> = Vec::new();
+    for pos in 0..n {
+        cand_off.push(cand_flat.len() as u32);
+        let global_pos = mlen_offset + pos;
+        let max_dist = (global_pos as u32).min(MAX_BACKWARD_DISTANCE);
+        if pos + MIN_MATCH as usize <= n {
+            tree.find_candidates_into(pos, 16, &mut buf);
+            for m in &buf {
+                if m.distance <= max_dist && m.length >= MIN_MATCH {
+                    let copy_len = m.length.min(MAX_COPY).min((n - pos) as u32).max(MIN_MATCH);
+                    cand_flat.push((m.distance, copy_len));
+                }
+            }
+        }
+        if use_dict {
+            let first = cand_flat[cand_off[pos] as usize..].first().copied();
+            let hash_len = first.map(|(_, l)| l).unwrap_or(0);
+            if hash_len < 16 {
+                if let Some((d, wl, tl)) = dict_hash::find_match(input, pos, max_dist) {
+                    if tl >= MIN_MATCH && pos + tl as usize <= n {
+                        let is_better = first.is_none_or(|(_, l)| tl > l);
+                        if is_better {
+                            dict_at[pos] = Some((d, wl.min(MAX_COPY).max(MIN_MATCH), tl));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    cand_off.push(cand_flat.len() as u32);
+    for pos in 0..n {
+        let a = cand_off[pos] as usize;
+        let b = cand_off[pos + 1] as usize;
+        cand_flat[a..b].sort_by(|x, y| y.1.cmp(&x.1));
+    }
+    (cand_flat, cand_off, dict_at)
+}
+
 fn zopfli_iterative_parse(
     input: &[u8],
     history: &[u8],
@@ -3512,20 +3565,43 @@ fn zopfli_iterative_parse(
     // hash width orders candidates differently, which measurably changes
     // which rep chains the DP warms. Keep the better-scoring start.
     let t0 = std::time::Instant::now();
-    let (mut best_commands, cached_candidates) = zopfli_parse_with_candidates(
-        input,
-        mf,
-        mlen_offset,
-        use_dict,
-        None,
-        None,
-        None,
-        None,
-        ins_prior_cfg,
-        None,
-        None,
-        quality,
-    );
+    // H10 binary-tree candidates (BROTLI_TREE_MF): replaces the hash
+    // chain's collection for pass 1a; the refinement's candidate cache
+    // and rep0-hint merge flow unchanged from there.
+    let (mut best_commands, cached_candidates) = if std::env::var("BROTLI_TREE_MF").is_ok() {
+        let cands = zopfli_collect_tree(input, mlen_offset, use_dict);
+        zopfli_parse_ext(
+            input,
+            mf,
+            0,
+            mlen_offset,
+            use_dict,
+            None,
+            None,
+            None,
+            None,
+            ins_prior_cfg,
+            None,
+            None,
+            Some(cands),
+            quality,
+        )
+    } else {
+        zopfli_parse_with_candidates(
+            input,
+            mf,
+            mlen_offset,
+            use_dict,
+            None,
+            None,
+            None,
+            None,
+            ins_prior_cfg,
+            None,
+            None,
+            quality,
+        )
+    };
     if std::env::var("BROTLI_STATS").is_ok() {
         eprintln!(
             "PHASE pass1a: {:.1}s ({} cmds)",
