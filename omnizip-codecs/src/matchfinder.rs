@@ -663,3 +663,135 @@ mod tests {
         assert!(m.length >= 5);
     }
 }
+
+/// Binary-tree match finder — port of the reference encoder's H10
+/// `StoreAndFindMatchesH10` (c/enc/backward_references/hash_to_binary_tree).
+///
+/// Positions sharing a 4-byte hash bucket form a binary search tree
+/// ordered by byte comparison: the walk descends left/right by the
+/// first differing byte, yielding matches of strictly increasing length
+/// (each at a distinct distance) and re-rooting the tree at the current
+/// position as it goes. Unlike a hash chain, the tree surfaces the
+/// best candidate at EVERY length tier, not just whichever entries the
+/// chain happens to visit first.
+pub struct BinaryTreeMatchFinder<'a> {
+    data: &'a [u8],
+    buckets: Vec<u32>,
+    /// forest[2*pos] = left child, forest[2*pos+1] = right child.
+    forest: Vec<u32>,
+    invalid: u32,
+}
+
+const TREE_BUCKET_BITS: usize = 17;
+const TREE_HASH_MUL32: u32 = 0x1E35_A7BD;
+const TREE_MAX_COMP_LEN: usize = 128;
+const TREE_DEPTH: usize = 64;
+
+impl<'a> BinaryTreeMatchFinder<'a> {
+    #[must_use]
+    pub fn new(data: &'a [u8]) -> Self {
+        let invalid = u32::MAX;
+        Self {
+            data,
+            buckets: vec![invalid; 1 << TREE_BUCKET_BITS],
+            forest: vec![invalid; data.len().saturating_mul(2)],
+            invalid,
+        }
+    }
+
+    fn hash_at(&self, pos: usize) -> usize {
+        let b = &self.data[pos..pos + 4];
+        let v = u32::from_le_bytes([b[0], b[1], b[2], b[3]]);
+        ((v.wrapping_mul(TREE_HASH_MUL32)) >> (32 - TREE_BUCKET_BITS)) as usize
+    }
+
+    fn match_len_from(&self, a: usize, b: usize, max: usize) -> usize {
+        let mut l = 0usize;
+        while l < max {
+            match (self.data.get(a + l).copied(), self.data.get(b + l).copied()) {
+                (Some(x), Some(y)) if x == y => l += 1,
+                _ => break,
+            }
+        }
+        l
+    }
+
+    /// Store `pos` into its tree, collecting matches of strictly
+    /// increasing length into `out` (cleared first).
+    pub fn store_and_find(&mut self, pos: usize, out: &mut Vec<Lz77Match>) {
+        out.clear();
+        let n = self.data.len();
+        if pos + 4 > n {
+            return;
+        }
+        let key = self.hash_at(pos);
+        let mut prev_ix = self.buckets[key] as usize;
+        self.buckets[key] = pos as u32;
+        let mut node_left = pos * 2;
+        let mut node_right = pos * 2 + 1;
+        let mut best_len_left = 0usize;
+        let mut best_len_right = 0usize;
+        let mut depth = TREE_DEPTH;
+        loop {
+            let backward = pos.wrapping_sub(prev_ix);
+            if prev_ix == self.invalid as usize || backward == 0 || backward > n || depth == 0 {
+                self.forest[node_left] = self.invalid;
+                self.forest[node_right] = self.invalid;
+                break;
+            }
+            let cur_len = best_len_left.min(best_len_right);
+            let len =
+                cur_len + self.match_len_from(pos + cur_len, prev_ix + cur_len, n - pos - cur_len);
+            let best_so_far = out.last().map_or(0, |m| m.length as usize);
+            if len > best_so_far && len >= 4 {
+                out.push(Lz77Match {
+                    distance: backward as u32,
+                    length: len as u32,
+                });
+            }
+            if len >= TREE_MAX_COMP_LEN || pos + len >= n || prev_ix + len >= n {
+                self.forest[node_left] = self.forest[prev_ix * 2];
+                self.forest[node_right] = self.forest[prev_ix * 2 + 1];
+                break;
+            }
+            if self.data[pos + len] > self.data[prev_ix + len] {
+                best_len_left = len;
+                self.forest[node_left] = prev_ix as u32;
+                node_left = prev_ix * 2 + 1;
+                prev_ix = self.forest[node_left] as usize;
+            } else {
+                best_len_right = len;
+                self.forest[node_right] = prev_ix as u32;
+                node_right = prev_ix * 2;
+                prev_ix = self.forest[node_right] as usize;
+            }
+            depth -= 1;
+        }
+    }
+
+    /// Longest match at `pos`.
+    #[must_use]
+    pub fn find_match(&mut self, pos: usize) -> Option<Lz77Match> {
+        let mut out = Vec::new();
+        self.store_and_find(pos, &mut out);
+        out.pop()
+    }
+
+    /// Matches at `pos`, keeping the LONGEST `max_count` (the walk
+    /// yields ascending lengths; a plain truncate would drop the best).
+    pub fn find_candidates_into(&mut self, pos: usize, max_count: usize, out: &mut Vec<Lz77Match>) {
+        self.store_and_find(pos, out);
+        if out.len() > max_count {
+            out.drain(..out.len() - max_count);
+        }
+    }
+
+    /// Plain byte-compare between two stored positions.
+    #[must_use]
+    pub fn match_len_between(&self, a: usize, b: usize, max_len: u32) -> u32 {
+        if b >= a || a >= self.data.len() {
+            return 0;
+        }
+        self.match_len_from(a, b, max_len as usize) as u32
+    }
+}
