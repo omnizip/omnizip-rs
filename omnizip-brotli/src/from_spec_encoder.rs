@@ -669,7 +669,8 @@ fn emit_metablock_from_commands(
             // global position. Using local position misidentifies them
             // as dict references, corrupting the simulated output bytes
             // and causing context ID mismatches between encoder and decoder.
-            let is_dict = (cmd.distance as usize) > copy_start_global;
+            let is_dict =
+                (cmd.distance as usize) > copy_start_global.min(MAX_BACKWARD_DISTANCE as usize);
             if is_dict {
                 let mut dict_bytes = Vec::with_capacity(cmd.copy_len as usize);
                 if dictionary_lookup(&mut dict_bytes, cmd.copy_len, cmd.distance as i32, max_dist)
@@ -1242,7 +1243,8 @@ fn emit_metablock_from_commands(
             for cmd in commands {
                 out_pos += cmd.insert_len as usize;
                 if cmd.copy_len > 0 {
-                    let is_dict = (cmd.distance as usize) > mlen_offset + out_pos;
+                    let is_dict = (cmd.distance as usize)
+                        > (mlen_offset + out_pos).min(MAX_BACKWARD_DISTANCE as usize);
                     if is_dict {
                         rep.on_dict_reference(false);
                     } else if rep.find_rep_code(cmd.distance).is_some() {
@@ -1717,7 +1719,9 @@ fn build_symbol_stream(
         // Dictionary iff distance exceeds the GLOBAL copy start (decoder
         // semantics). A chunk-local comparison misreads cross-metablock
         // LZ77 references as dictionary refs and desyncs the rep model.
-        let is_dict_ref = cmd.copy_len > 0 && (cmd.distance as usize) > mlen_offset + output_pos;
+        let is_dict_ref = cmd.copy_len > 0
+            && (cmd.distance as usize)
+                > (mlen_offset + output_pos).min(MAX_BACKWARD_DISTANCE as usize);
 
         // Try implicit rep0 command: the command symbol itself implies
         // "use last distance" (kCmdLut symbols 0-127, i.e. insert ≤ 9
@@ -1832,7 +1836,8 @@ fn build_symbol_stream(
         // with length-changing transforms (prefix/suffix/omit), the
         // transformed length may differ from copy_len (= word_length).
         let advance = if cmd.copy_len > 0 {
-            let is_dict = (cmd.distance as usize) > mlen_offset + end;
+            let is_dict =
+                (cmd.distance as usize) > (mlen_offset + end).min(MAX_BACKWARD_DISTANCE as usize);
             if is_dict {
                 let global_pos = mlen_offset + end;
                 let max_dist = (global_pos as u32).min(MAX_BACKWARD_DISTANCE);
@@ -2079,7 +2084,7 @@ fn rewrite_for_rep_codes(
         // Cross-chunk LZ77 references have distance > local cur but ≤ global
         // output position, so they're NOT dict references.
         let global_output_pos = mlen_offset + cur;
-        let is_dict = (dist as usize) > global_output_pos;
+        let is_dict = (dist as usize) > global_output_pos.min(MAX_BACKWARD_DISTANCE as usize);
         if is_dict {
             // For dict references, advance by the transformed length
             // (may differ from copy_len when transforms add/remove bytes).
@@ -2620,7 +2625,8 @@ impl DistCostModel {
             cur += cmd.insert_len as usize;
             if cmd.copy_len > 0 {
                 has_copy = true;
-                let is_dict = (cmd.distance as usize) > mlen_offset + cur;
+                let is_dict = (cmd.distance as usize)
+                    > (mlen_offset + cur).min(MAX_BACKWARD_DISTANCE as usize);
                 if with_cmd_costs {
                     if let Some(sym) = find_cmd_symbol(cmd.insert_len, cmd.copy_len) {
                         cmd_freq[sym] += 1;
@@ -3392,6 +3398,8 @@ fn zopfli_parse_ext(
     }
 
     // --- Step 4: backtrack ---
+    let bt_trace_on = std::env::var("BROTLI_CHAINTRACE").is_ok();
+    let mut bt_trace: Vec<(usize, usize, usize, u32, u32, u32)> = Vec::new();
     let mut commands: Vec<Command> = Vec::new();
     // Trailing literals (after the last copy) form a final insert-only command.
     let mut last_copy_end = n;
@@ -3421,6 +3429,16 @@ fn zopfli_parse_ext(
                 back_len[pos], back_dist[pos], cost[pos]
             );
         }
+        if bt_trace_on {
+            bt_trace.push((
+                u[src] as usize,
+                src,
+                pos,
+                insert_len,
+                u32::from(back_len[pos]),
+                back_dist[pos],
+            ));
+        }
         commands.push(Command {
             insert_len,
             copy_len: u32::from(back_len[pos]),
@@ -3441,6 +3459,46 @@ fn zopfli_parse_ext(
         pos = p;
     }
     commands.reverse();
+    if bt_trace_on {
+        bt_trace.reverse();
+        // Walk-view: what any consumer (scoring/emission) computes.
+        let mut wcur = 0usize;
+        let mut diverged = false;
+        for (idx, (ins_start, cstart, cend, ins, cpy, dist)) in bt_trace.iter().enumerate() {
+            let wstart = wcur + *ins as usize;
+            let wend_dict =
+                (*dist as usize) > (mlen_offset + wstart).min(MAX_BACKWARD_DISTANCE as usize);
+            let wadv = if wend_dict {
+                let max_d = ((mlen_offset + wstart) as u32).min(MAX_BACKWARD_DISTANCE);
+                let mut tmp = Vec::new();
+                match dictionary_lookup(&mut tmp, *cpy, *dist as i32, max_d) {
+                    Some(()) => tmp.len(),
+                    None => *cpy as usize,
+                }
+            } else {
+                *cpy as usize
+            };
+            if !diverged && (wstart != *cstart || *ins_start != wcur) {
+                diverged = true;
+                eprintln!(
+                    "CHAIN-DIVERGE idx={idx} parser=({ins_start},{cstart},{cend}) walk_start={wstart} prev_wcur={wcur} ins={ins} cpy={cpy} dist={dist} wdict={wend_dict} wadv={wadv} padv={}",
+                    cend - cstart
+                );
+                let lo = idx.saturating_sub(6);
+                for j in lo..=idx {
+                    let t = bt_trace[j];
+                    eprintln!(
+                        "  ctx[{j}] parser=({},{},{}) ins={} cpy={} dist={}",
+                        t.0, t.1, t.2, t.3, t.4, t.5
+                    );
+                }
+            }
+            wcur = wstart + wadv;
+        }
+        if !diverged {
+            eprintln!("CHAIN-OK n={n} final_wcur={wcur}");
+        }
+    }
     (commands, (cand_flat, cand_off, dict_at))
 }
 
@@ -3803,7 +3861,8 @@ fn zopfli_iterative_parse(
                         *x = true;
                     }
                     if cmd.copy_len > 0 {
-                        let is_dict = (cmd.distance as usize) > mlen_offset + end;
+                        let is_dict = (cmd.distance as usize)
+                            > (mlen_offset + end).min(MAX_BACKWARD_DISTANCE as usize);
                         let adv = if is_dict {
                             let global_pos = mlen_offset + end;
                             let max_dist = (global_pos as u32).min(MAX_BACKWARD_DISTANCE);
@@ -4318,7 +4377,8 @@ fn extract_literals(commands: &[Command], input: &[u8], mlen_offset: usize) -> V
         let end = cur + cmd.insert_len as usize;
         out.extend_from_slice(&input[cur..end]);
         let advance = if cmd.copy_len > 0 {
-            let is_dict = (cmd.distance as usize) > mlen_offset + end;
+            let is_dict =
+                (cmd.distance as usize) > (mlen_offset + end).min(MAX_BACKWARD_DISTANCE as usize);
             if is_dict {
                 let global_pos = mlen_offset + end;
                 let max_dist = (global_pos as u32).min(MAX_BACKWARD_DISTANCE);
@@ -4549,7 +4609,8 @@ fn exact_emission_bits(
                 lit_pos += 1;
             }
             if cmd.copy_len > 0 {
-                let is_dict = (cmd.distance as usize) > mlen_offset + out_pos;
+                let is_dict = (cmd.distance as usize)
+                    > (mlen_offset + out_pos).min(MAX_BACKWARD_DISTANCE as usize);
                 let adv = if is_dict {
                     cmd.copy_len as usize
                 } else {
@@ -4648,7 +4709,8 @@ fn score_commands_adaptive(commands: &[Command], input: &[u8], mlen_offset: usiz
                 cmd_extra_bits +=
                     u64::from(e.insert_len_extra_bits) + u64::from(e.copy_len_extra_bits);
             }
-            let is_dict = (cmd.distance as usize) > mlen_offset + end;
+            let is_dict =
+                (cmd.distance as usize) > (mlen_offset + end).min(MAX_BACKWARD_DISTANCE as usize);
             if is_dict {
                 let global_pos = mlen_offset + end;
                 let max_dist = (global_pos as u32).min(MAX_BACKWARD_DISTANCE);
@@ -4714,7 +4776,9 @@ fn score_commands_adaptive(commands: &[Command], input: &[u8], mlen_offset: usiz
     let mut output_pos = 0usize;
     for cmd in commands {
         output_pos += cmd.insert_len as usize;
-        let is_dict_ref = cmd.copy_len > 0 && (cmd.distance as usize) > mlen_offset + output_pos;
+        let is_dict_ref = cmd.copy_len > 0
+            && (cmd.distance as usize)
+                > (mlen_offset + output_pos).min(MAX_BACKWARD_DISTANCE as usize);
         let can_use_implicit = cmd.copy_len > 0
             && !is_dict_ref
             && explicit_copies_remaining == 0
@@ -4804,7 +4868,8 @@ fn score_commands(commands: &[Command], input: &[u8], mlen_offset: usize) -> u64
         }
         let adv = if cmd.copy_len > 0 {
             cmd_count += 1;
-            let is_dict = (cmd.distance as usize) > mlen_offset + end;
+            let is_dict =
+                (cmd.distance as usize) > (mlen_offset + end).min(MAX_BACKWARD_DISTANCE as usize);
             if is_dict {
                 let global_pos = mlen_offset + end;
                 let max_dist = (global_pos as u32).min(MAX_BACKWARD_DISTANCE);
@@ -4835,7 +4900,8 @@ fn score_commands(commands: &[Command], input: &[u8], mlen_offset: usize) -> u64
             }
             cur2 = end
                 + if cmd.copy_len > 0 {
-                    let is_dict = (cmd.distance as usize) > mlen_offset + end;
+                    let is_dict = (cmd.distance as usize)
+                        > (mlen_offset + end).min(MAX_BACKWARD_DISTANCE as usize);
                     if is_dict {
                         cmd.copy_len as usize
                     } else {
@@ -4863,7 +4929,8 @@ fn score_commands(commands: &[Command], input: &[u8], mlen_offset: usize) -> u64
     for cmd in commands {
         cur2 += cmd.insert_len as usize;
         if cmd.copy_len > 0 {
-            let is_dict = (cmd.distance as usize) > mlen_offset + cur2;
+            let is_dict =
+                (cmd.distance as usize) > (mlen_offset + cur2).min(MAX_BACKWARD_DISTANCE as usize);
             if is_dict {
                 rep.on_dict_reference(false);
                 dist_bits += 14;
