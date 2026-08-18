@@ -1895,7 +1895,43 @@ fn find_cmd_symbol_with_rep(
     find_cmd_symbol_impl(insert_len, copy_len, rep_code)
 }
 
+/// Precomputed (insert_len, copy_len) -> explicit symbol table for the
+/// DP hot path: find_cmd_symbol_impl's linear scan over the 704-entry
+/// kCmdLut runs per boundary per candidate per position and dominates
+/// refinement runtime. Covers insert 0..=64 x copy 2..=271 (the ranges
+/// the parser generates); outside it the linear scan still applies.
+static CMD_SYM_EXPLICIT: std::sync::OnceLock<[[i16; 272]; 65]> = std::sync::OnceLock::new();
+
+fn cmd_sym_explicit_table() -> &'static [[i16; 272]; 65] {
+    CMD_SYM_EXPLICIT.get_or_init(|| {
+        let mut t = [[-1i16; 272]; 65];
+        for ins in 0..65u32 {
+            for cpy in 2..272u32 {
+                if let Some(sym) = find_cmd_symbol_impl_slow(ins, cpy, None) {
+                    t[ins as usize][cpy as usize] = sym as i16;
+                }
+            }
+        }
+        t
+    })
+}
+
 fn find_cmd_symbol_impl(insert_len: u32, copy_len: u32, rep_code: Option<i32>) -> Option<usize> {
+    if rep_code.is_none() && insert_len <= 64 && (2..=271).contains(&copy_len) {
+        let sym = cmd_sym_explicit_table()[insert_len as usize][copy_len as usize];
+        if sym >= 0 {
+            return Some(sym as usize);
+        }
+        return None;
+    }
+    find_cmd_symbol_impl_slow(insert_len, copy_len, rep_code)
+}
+
+fn find_cmd_symbol_impl_slow(
+    insert_len: u32,
+    copy_len: u32,
+    rep_code: Option<i32>,
+) -> Option<usize> {
     let phantom = copy_len == 0;
     let effective_copy = if phantom { 2 } else { copy_len };
     for (i, entry) in kCmdLut.iter().enumerate() {
