@@ -419,7 +419,18 @@ fn encode_huffman_chunk_into(
         max_match_length: MAX_COPY,
     };
     let mut mf = omnizip_codecs::HashChainMatchFinder::new(input, config);
-    encode_huffman_chunk_body(bw, input, &mut mf, mlen_offset, is_last, quality, ctx_in);
+    let hist_start = mlen_offset.min(MAX_BACKWARD_DISTANCE as usize);
+    let _ = hist_start; // history unavailable on this path (single-chunk callers)
+    encode_huffman_chunk_body(
+        bw,
+        input,
+        &[],
+        &mut mf,
+        mlen_offset,
+        is_last,
+        quality,
+        ctx_in,
+    );
 }
 
 /// Internal: encode one metablock with an external match finder.
@@ -428,6 +439,7 @@ fn encode_huffman_chunk_into(
 fn encode_huffman_chunk_body(
     bw: &mut BitWriter,
     input: &[u8],
+    history: &[u8],
     mf: &mut omnizip_codecs::HashChainMatchFinder,
     mlen_offset: usize,
     is_last: bool,
@@ -476,7 +488,7 @@ fn encode_huffman_chunk_body(
     // this can be flipped back on for inputs with strongly varying
     // per-block statistics.
     let use_block_switch = false;
-    let commands = parse_input_with_offset(input, mf, mlen_offset, quality, false);
+    let commands = parse_input_with_offset(input, history, mf, mlen_offset, quality, false);
     emit_metablock_from_commands(
         bw,
         input,
@@ -1639,7 +1651,18 @@ fn encode_huffman_chunk_with_shared_mf(
 ) {
     let chunk = &full_input[chunk_start..chunk_end];
     let ctx_in = carried_lit_ctx(full_input, chunk_start);
-    encode_huffman_chunk_body(bw, chunk, mf, chunk_start, is_last, quality, ctx_in);
+    let hist_start = chunk_start.saturating_sub(MAX_BACKWARD_DISTANCE as usize);
+    let history = &full_input[hist_start..chunk_start];
+    encode_huffman_chunk_body(
+        bw,
+        chunk,
+        history,
+        mf,
+        chunk_start,
+        is_last,
+        quality,
+        ctx_in,
+    );
 }
 
 /// A parsed symbol stream ready for entropy coding.
@@ -2660,6 +2683,8 @@ fn zopfli_parse(
     cmd_cost_override: Option<f32>,
     dist_model: Option<&DistCostModel>,
     ins_prior_cfg: Option<(u32, f32, f32)>,
+    history: Option<&[u8]>,
+    hint_dist: Option<&[u32]>,
 ) -> Vec<Command> {
     zopfli_parse_ext(
         input,
@@ -2672,6 +2697,44 @@ fn zopfli_parse(
         cmd_cost_override,
         dist_model,
         ins_prior_cfg,
+        history,
+        hint_dist,
+        None,
+    )
+    .0
+}
+
+#[allow(clippy::too_many_arguments)]
+fn zopfli_parse_with_candidates(
+    input: &[u8],
+    mf: &mut omnizip_codecs::HashChainMatchFinder,
+    mlen_offset: usize,
+    use_dict: bool,
+    lit_cost_override: Option<[f32; 256]>,
+    lit_cost_positional: Option<&[f32]>,
+    cmd_cost_override: Option<f32>,
+    dist_model: Option<&DistCostModel>,
+    ins_prior_cfg: Option<(u32, f32, f32)>,
+    history: Option<&[u8]>,
+    hint_dist: Option<&[u32]>,
+) -> (
+    Vec<Command>,
+    (Vec<(u32, u32)>, Vec<u32>, Vec<Option<(u32, u32, u32)>>),
+) {
+    zopfli_parse_ext(
+        input,
+        mf,
+        0,
+        mlen_offset,
+        use_dict,
+        lit_cost_override,
+        lit_cost_positional,
+        cmd_cost_override,
+        dist_model,
+        ins_prior_cfg,
+        history,
+        hint_dist,
+        None,
     )
 }
 
@@ -2693,77 +2756,182 @@ fn zopfli_parse_ext(
     cmd_cost_override: Option<f32>,
     dist_model: Option<&DistCostModel>,
     ins_prior_cfg: Option<(u32, f32, f32)>,
-) -> Vec<Command> {
+    history: Option<&[u8]>,
+    hint_dist: Option<&[u32]>,
+    cand_flat_in: Option<(Vec<(u32, u32)>, Vec<u32>, Vec<Option<(u32, u32, u32)>>)>,
+) -> (
+    Vec<Command>,
+    (Vec<(u32, u32)>, Vec<u32>, Vec<Option<(u32, u32, u32)>>),
+) {
     let n = input.len();
     if n == 0 {
-        return Vec::new();
+        return (Vec::new(), (Vec::new(), Vec::new(), Vec::new()));
     }
     // Translate a global position to the MF's own coordinate space.
     let to_mf = |global_pos: usize| global_pos.saturating_sub(mf_base);
-
-    // --- Step 1: collect candidate matches at each position ---
-    // Multi-candidate: up to `cand_count` distinct distances per position
-    // (newest chain entries first). Distance diversity lets the DP warm
-    // stable rep chains the longest-match policy would never surface.
-    // Stored FLAT (values + per-position offsets): a Vec-per-position
-    // here means millions of heap allocations per parse and dominates
-    // runtime at multi-MB scale.
-    // Candidate budget: the top-K-by-length walk needs enough depth to
-    // reach structural matches buried under frequent short matches
-    // (measured ~14-22 entries on the CSV structure). Patience-bounded,
-    // so the deeper walk stays cheap on dense chains.
-    let (cand_count, walk) = if n <= 1 << 20 { (16, 256) } else { (12, 96) };
-    let mut cand_flat: Vec<(u32, u32)> = Vec::with_capacity(n * 4);
-    let mut cand_off: Vec<u32> = Vec::with_capacity(n + 1);
-    let mut dict_at: Vec<Option<(u32, u32, u32)>> = vec![None; n]; // (d, wl, tl)
-    let mut mf_buf: Vec<omnizip_codecs::Lz77Match> = Vec::new();
-    for pos in 0..n {
-        cand_off.push(cand_flat.len() as u32);
-        let global_pos = mlen_offset + pos;
-        let max_dist = (global_pos as u32).min(MAX_BACKWARD_DISTANCE);
-        if pos + MIN_MATCH as usize <= n {
-            mf.advance();
-            mf.find_candidates_into(to_mf(mlen_offset + pos), cand_count, walk, &mut mf_buf);
-            if std::env::var("BROTLI_DP_DEBUG").is_ok() && pos == 499_992 {
-                eprintln!(
-                    "STEP1[499992] mf_base={mf_base} mlen={mlen_offset} n={n} raw={:?}",
-                    &mf_buf
-                );
+    let cross_match_len = |i: usize, dist: u32, max_len: u32| -> u32 {
+        let Some(hist) = history else {
+            return 0;
+        };
+        let src_global = (mlen_offset + i).saturating_sub(dist as usize);
+        if src_global >= mlen_offset {
+            return 0;
+        }
+        let hist_off = mlen_offset - hist.len();
+        if src_global < hist_off {
+            return 0;
+        }
+        let mut l: u32 = 0;
+        let ilen_max = input.len().saturating_sub(i);
+        while (l as usize) < ilen_max && l < max_len {
+            let src = hist[src_global + l as usize - hist_off];
+            if src != input[i + l as usize] {
+                break;
             }
-            for m in &mf_buf {
-                if m.distance <= max_dist && m.length >= MIN_MATCH {
-                    // Clamp to the chunk end: a match may not extend past
-                    // the metablock boundary (decoder rejects overruns).
-                    let copy_len = m.length.min(MAX_COPY).min((n - pos) as u32).max(MIN_MATCH);
-                    cand_flat.push((m.distance, copy_len));
+            l += 1;
+        }
+        l
+    };
+    // Candidates: reuse the caller's collection when provided (the
+    // collection walk dominates refinement runtime), else collect now.
+    let (cand_flat, cand_off, dict_at) = match cand_flat_in {
+        Some(pre) => pre,
+        None => zopfli_collect(
+            input,
+            mf,
+            mf_base,
+            mlen_offset,
+            use_dict,
+            history,
+            hint_dist,
+        ),
+    };
+
+    #[allow(clippy::type_complexity)]
+    fn zopfli_collect(
+        input: &[u8],
+        mf: &mut omnizip_codecs::HashChainMatchFinder,
+        mf_base: usize,
+        mlen_offset: usize,
+        use_dict: bool,
+        history: Option<&[u8]>,
+        hint_dist: Option<&[u32]>,
+    ) -> (Vec<(u32, u32)>, Vec<u32>, Vec<Option<(u32, u32, u32)>>) {
+        let n = input.len();
+        let to_mf = |global_pos: usize| global_pos.saturating_sub(mf_base);
+        let cross_match_len = |history: Option<&[u8]>, i: usize, dist: u32, max_len: u32| -> u32 {
+            let Some(hist) = history else {
+                return 0;
+            };
+            let src_global = (mlen_offset + i).saturating_sub(dist as usize);
+            if src_global >= mlen_offset {
+                return 0;
+            }
+            let hist_off = mlen_offset - hist.len();
+            if src_global < hist_off {
+                return 0;
+            }
+            let mut l: u32 = 0;
+            let ilen_max = input.len().saturating_sub(i);
+            while (l as usize) < ilen_max && l < max_len {
+                let src = hist[src_global + l as usize - hist_off];
+                if src != input[i + l as usize] {
+                    break;
+                }
+                l += 1;
+            }
+            l
+        };
+        // Multi-candidate: up to `cand_count` distinct distances per position
+        // (newest chain entries first). Distance diversity lets the DP warm
+        // stable rep chains the longest-match policy would never surface.
+        // Stored FLAT (values + per-position offsets): a Vec-per-position
+        // here means millions of heap allocations per parse and dominates
+        // runtime at multi-MB scale.
+        // Candidate budget: the top-K-by-length walk needs enough depth to
+        // reach structural matches buried under frequent short matches
+        // (measured ~14-22 entries on the CSV structure). Patience-bounded,
+        // so the deeper walk stays cheap on dense chains.
+        let (cand_count, walk) = if n <= 1 << 20 { (16, 256) } else { (12, 96) };
+        let mut cand_flat: Vec<(u32, u32)> = Vec::with_capacity(n * 4);
+        let mut cand_off: Vec<u32> = Vec::with_capacity(n + 1);
+        let mut dict_at: Vec<Option<(u32, u32, u32)>> = vec![None; n]; // (d, wl, tl)
+        let mut mf_buf: Vec<omnizip_codecs::Lz77Match> = Vec::new();
+        for pos in 0..n {
+            cand_off.push(cand_flat.len() as u32);
+            let global_pos = mlen_offset + pos;
+            let max_dist = (global_pos as u32).min(MAX_BACKWARD_DISTANCE);
+            if pos + MIN_MATCH as usize <= n {
+                mf.advance();
+                mf.find_candidates_into(to_mf(mlen_offset + pos), cand_count, walk, &mut mf_buf);
+                if std::env::var("BROTLI_DP_DEBUG").is_ok() && pos == 499_992 {
+                    eprintln!(
+                        "STEP1[499992] mf_base={mf_base} mlen={mlen_offset} n={n} raw={:?}",
+                        &mf_buf
+                    );
+                }
+                for m in &mf_buf {
+                    if m.distance <= max_dist && m.length >= MIN_MATCH {
+                        // Clamp to the chunk end: a match may not extend past
+                        // the metablock boundary (decoder rejects overruns).
+                        let copy_len = m.length.min(MAX_COPY).min((n - pos) as u32).max(MIN_MATCH);
+                        cand_flat.push((m.distance, copy_len));
+                    }
                 }
             }
-        }
-        if use_dict {
-            let first: Option<&(u32, u32)> = cand_flat[cand_off[pos] as usize..].first();
-            let hash_len = first.map(|&(_, l)| l).unwrap_or(0);
-            if hash_len < 16 {
-                if let Some((d, wl, tl)) = dict_hash::find_match(input, pos, max_dist) {
-                    if tl >= MIN_MATCH && pos + tl as usize <= n {
-                        let is_better = match first {
-                            None => true,
-                            Some(&(_, existing_len)) => tl > existing_len,
-                        };
-                        if is_better {
-                            dict_at[pos] = Some((d, wl.min(MAX_COPY).max(MIN_MATCH), tl));
+            // Seed the previous parse's rep0 distance as a candidate: the
+            // chunk-local MF cannot surface cross-chunk distances at all,
+            // so without this the refinement loses the structural distance
+            // the previous parse rode (measured: 451K explicit distances
+            // vs the reference's 29K at 21MB).
+            if let Some(hd) = hint_dist {
+                let d = hd[pos.min(hd.len() - 1)];
+                if d > 0 && d <= max_dist {
+                    let l = cross_match_len(history, pos, d, (n - pos) as u32).max({
+                        let src_global = mlen_offset + pos - d as usize;
+                        if src_global >= mf_base {
+                            mf.match_len_between(
+                                to_mf(mlen_offset + pos),
+                                to_mf(src_global),
+                                (n - pos) as u32,
+                            )
+                        } else {
+                            0
+                        }
+                    });
+                    if l >= MIN_MATCH {
+                        cand_flat.push((d, l.min((n - pos) as u32)));
+                    }
+                }
+            }
+            if use_dict {
+                let first: Option<&(u32, u32)> = cand_flat[cand_off[pos] as usize..].first();
+                let hash_len = first.map(|&(_, l)| l).unwrap_or(0);
+                if hash_len < 16 {
+                    if let Some((d, wl, tl)) = dict_hash::find_match(input, pos, max_dist) {
+                        if tl >= MIN_MATCH && pos + tl as usize <= n {
+                            let is_better = match first {
+                                None => true,
+                                Some(&(_, existing_len)) => tl > existing_len,
+                            };
+                            if is_better {
+                                dict_at[pos] = Some((d, wl.min(MAX_COPY).max(MIN_MATCH), tl));
+                            }
                         }
                     }
                 }
             }
         }
-    }
-    cand_off.push(cand_flat.len() as u32);
-    // Sort each position's candidate slice by length desc so the DP's
-    // full-boundary sweep applies to the true longest match.
-    for pos in 0..n {
-        let s = cand_off[pos] as usize;
-        let e = cand_off[pos + 1] as usize;
-        cand_flat[s..e].sort_by(|a, b| b.1.cmp(&a.1));
+        cand_off.push(cand_flat.len() as u32);
+        // Sort each position's candidate slice by length desc so the DP's
+        // full-boundary sweep applies to the true longest match.
+        for pos in 0..n {
+            let s = cand_off[pos] as usize;
+            let e = cand_off[pos + 1] as usize;
+            cand_flat[s..e].sort_by(|a, b| b.1.cmp(&a.1));
+        }
+
+        (cand_flat, cand_off, dict_at)
     }
 
     // --- Step 2: cost models (shared with the backward DP) ---
@@ -3068,7 +3236,11 @@ fn zopfli_parse_ext(
                 continue;
             }
             let src_global = global_i - r as usize;
-            let l = mf.match_len_between(to_mf(global_i), to_mf(src_global), max_len);
+            let l = if src_global >= mf_base {
+                mf.match_len_between(to_mf(global_i), to_mf(src_global), max_len)
+            } else {
+                cross_match_len(i, r, max_len)
+            };
             if l < MIN_MATCH {
                 continue;
             }
@@ -3117,7 +3289,11 @@ fn zopfli_parse_ext(
                     continue;
                 }
                 let src = global_i - rv as usize;
-                let lv = mf.match_len_between(to_mf(global_i), to_mf(src), max_len);
+                let lv = if src >= mf_base {
+                    mf.match_len_between(to_mf(global_i), to_mf(src), max_len)
+                } else {
+                    cross_match_len(i, rv as u32, max_len)
+                };
                 if lv < MIN_MATCH {
                     continue;
                 }
@@ -3203,7 +3379,7 @@ fn zopfli_parse_ext(
         pos = p;
     }
     commands.reverse();
-    commands
+    (commands, (cand_flat, cand_off, dict_at))
 }
 
 /// Iterated Zopfli parse. Pass 1 uses default cost models; each
@@ -3253,6 +3429,7 @@ fn measure_emission_bits(
 
 fn zopfli_iterative_parse(
     input: &[u8],
+    history: &[u8],
     mf: &mut omnizip_codecs::HashChainMatchFinder,
     mlen_offset: usize,
     use_dict: bool,
@@ -3286,7 +3463,7 @@ fn zopfli_iterative_parse(
     // hash width orders candidates differently, which measurably changes
     // which rep chains the DP warms. Keep the better-scoring start.
     let t0 = std::time::Instant::now();
-    let mut best_commands = zopfli_parse(
+    let (mut best_commands, cached_candidates) = zopfli_parse_with_candidates(
         input,
         mf,
         mlen_offset,
@@ -3296,6 +3473,8 @@ fn zopfli_iterative_parse(
         None,
         None,
         ins_prior_cfg,
+        None,
+        None,
     );
     if std::env::var("BROTLI_STATS").is_ok() {
         eprintln!(
@@ -3357,6 +3536,8 @@ fn zopfli_iterative_parse(
             None,
             None,
             ins_prior_cfg,
+            None,
+            None,
         );
         let light_score = score_commands(&light_commands, input, mlen_offset);
         if light_score < best_score && std::env::var("BROTLI_NO_LIGHT").is_err() {
@@ -3596,6 +3777,59 @@ fn zopfli_iterative_parse(
             7.0
         };
 
+        // Per-position rep0 from the previous parse: lets the chunk-local
+        // refinement MF "see" cross-chunk distances (its candidates stop at the
+        // chunk start, so the structural distance the previous parse rode would
+        // otherwise be unreachable and the parse churns explicit distances).
+        let rep_hint: Vec<u32> = {
+            let mut hint = vec![0u32; input.len() + 1];
+            let mut rep = RepBuffer::new();
+            let mut pos = 0usize;
+            for cmd in &model_commands {
+                for _ in 0..cmd.insert_len as usize {
+                    if pos < hint.len() {
+                        hint[pos] = rep.rep_at(0);
+                    }
+                    pos += 1;
+                }
+                if cmd.copy_len > 0 {
+                    let global_pos = mlen_offset + pos;
+                    let is_dict = (cmd.distance as usize) > global_pos;
+                    if is_dict {
+                        rep.on_dict_reference(false);
+                    } else if let Some(code) = rep.find_rep_code(cmd.distance) {
+                        rep.on_rep_lz77(code);
+                    } else {
+                        rep.on_new_distance_lz77(cmd.distance);
+                    }
+                    let advance = if is_dict {
+                        let mut tmp = Vec::with_capacity(cmd.copy_len as usize + 8);
+                        let max_dist = (global_pos as u32).min(MAX_BACKWARD_DISTANCE);
+                        match dictionary_lookup(
+                            &mut tmp,
+                            cmd.copy_len,
+                            cmd.distance as i32,
+                            max_dist,
+                        ) {
+                            Some(()) => tmp.len(),
+                            None => cmd.copy_len as usize,
+                        }
+                    } else {
+                        cmd.copy_len as usize
+                    };
+                    for _ in 0..advance {
+                        if pos < hint.len() {
+                            hint[pos] = rep.rep_at(0);
+                        }
+                        pos += 1;
+                    }
+                }
+            }
+            hint
+        };
+
+        let hint_dist_ref: Option<&[u32]> = Some(&rep_hint);
+
         // Distance pricing via smoothed entropy (upstream SetCost) at q10+;
         // per-symbol COMMAND pricing (upstream set_from_commands) measured
         // worse here — it converges to replicating the start parse's symbol
@@ -3614,14 +3848,52 @@ fn zopfli_iterative_parse(
                 && std::env::var("BROTLI_NO_SETCOST_D").is_err(),
         );
 
-        let mut mf_iter = omnizip_codecs::HashChainMatchFinder::new(input, config);
-        // The refinement MF's data is the CHUNK slice, so its coordinate
-        // base is mlen_offset (global positions would read out of bounds).
         let t = std::time::Instant::now();
+        // Reuse the pass-1 candidate collection (the collection walk
+        // dominates refinement runtime) and append the hint distance —
+        // the cross-chunk structural distance — at each position.
+        let merged: (Vec<(u32, u32)>, Vec<u32>, Vec<Option<(u32, u32, u32)>>) = {
+            let (mut flat, mut off, dict) = cached_candidates.clone();
+            flat.clear();
+            off.clear();
+            off.push(0);
+            for pos in 0..input.len() {
+                let (cs, ce) = (
+                    cached_candidates.1[pos] as usize,
+                    cached_candidates.1[pos + 1] as usize,
+                );
+                for &c in &cached_candidates.0[cs..ce] {
+                    flat.push(c);
+                }
+                if let Some(hd) = hint_dist_ref {
+                    let d = hd[pos.min(hd.len() - 1)];
+                    let global_pos = mlen_offset + pos;
+                    let max_dist = (global_pos as u32).min(MAX_BACKWARD_DISTANCE);
+                    if d > 0 && d <= max_dist {
+                        let src_global = global_pos - d as usize;
+                        let l = mf.match_len_between(
+                            global_pos,
+                            src_global,
+                            MAX_COPY.min((input.len() - pos) as u32),
+                        );
+                        if l >= MIN_MATCH {
+                            flat.push((d, l));
+                        }
+                    }
+                }
+                off.push(flat.len() as u32);
+            }
+            for pos in 0..input.len() {
+                let a = off[pos] as usize;
+                let b = off[pos + 1] as usize;
+                flat[a..b].sort_by(|x, y| y.1.cmp(&x.1));
+            }
+            (flat, off, dict)
+        };
         let commands_iter = zopfli_parse_ext(
             input,
-            &mut mf_iter,
-            mlen_offset,
+            mf,
+            0,
             mlen_offset,
             use_dict,
             Some(lit_cost_refined),
@@ -3637,7 +3909,11 @@ fn zopfli_iterative_parse(
             Some(cmd_avg_bits),
             Some(&dist_model),
             ins_prior_cfg,
-        );
+            Some(history),
+            Some(&rep_hint),
+            Some(merged),
+        )
+        .0;
         if std::env::var("BROTLI_STATS").is_ok() {
             eprintln!("PHASE refine: {:.1}s", t.elapsed().as_secs_f64());
         }
@@ -4604,7 +4880,7 @@ fn parse_input(input: &[u8]) -> Vec<Command> {
         max_match_length: MAX_COPY,
     };
     let mut mf = omnizip_codecs::HashChainMatchFinder::new(input, config);
-    parse_input_with_offset(input, &mut mf, 0, 11, false)
+    parse_input_with_offset(input, &[], &mut mf, 0, 11, false)
 }
 
 /// Quality → (max_chain, nice_match, use_dict_base, lazy, lazy2, hash_log).
@@ -4646,7 +4922,7 @@ fn greedy_parse(
     mf: &mut omnizip_codecs::HashChainMatchFinder,
     mlen_offset: usize,
 ) -> Vec<Command> {
-    parse_input_with_offset_impl(input, mf, mlen_offset, 1, false)
+    parse_input_with_offset_impl(input, &[], mf, mlen_offset, 1, false)
 }
 
 /// Parse input into commands using LZ77 + static dictionary, with a
@@ -4663,12 +4939,13 @@ fn greedy_parse(
 /// context modeling is active, due to a decoder interaction bug).
 fn parse_input_with_offset(
     input: &[u8],
+    history: &[u8],
     mut mf: &mut omnizip_codecs::HashChainMatchFinder,
     mlen_offset: usize,
     quality: i32,
     disable_dict: bool,
 ) -> Vec<Command> {
-    parse_input_with_offset_impl(input, &mut mf, mlen_offset, quality, disable_dict)
+    parse_input_with_offset_impl(input, history, &mut mf, mlen_offset, quality, disable_dict)
 }
 
 /// Diagnostic wrapper exposed for benchmarks. Not part of the public API.
@@ -4680,11 +4957,12 @@ pub fn _parse_input_with_offset_diag(
     quality: i32,
     disable_dict: bool,
 ) -> Vec<Command> {
-    parse_input_with_offset_impl(input, mf, mlen_offset, quality, disable_dict)
+    parse_input_with_offset_impl(input, &[], mf, mlen_offset, quality, disable_dict)
 }
 
 fn parse_input_with_offset_impl(
     input: &[u8],
+    history: &[u8],
     mut mf: &mut omnizip_codecs::HashChainMatchFinder,
     mlen_offset: usize,
     quality: i32,
@@ -4721,7 +4999,7 @@ fn parse_input_with_offset_impl(
     // distance codes into ~2-3-bit short codes instead of ~12-15-bit
     // explicit codes.
     if quality >= 4 && input.len() <= 8 * 1024 * 1024 {
-        return zopfli_iterative_parse(input, &mut mf, mlen_offset, use_dict, quality);
+        return zopfli_iterative_parse(input, history, &mut mf, mlen_offset, use_dict, quality);
     }
 
     // Q4+ with input > 1 MiB (not chunked): two_pass_parse.
