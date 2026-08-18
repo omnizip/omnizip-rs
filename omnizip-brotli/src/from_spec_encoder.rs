@@ -5068,12 +5068,15 @@ fn parse_input_with_offset_impl(
     // distance structure (CSV, source code), this converts most
     // distance codes into ~2-3-bit short codes instead of ~12-15-bit
     // explicit codes.
-    if quality >= 4 && input.len() <= 8 * 1024 * 1024 {
+    // Zopfli is a q10-11 algorithm in the reference (backward
+    // references HQ); q4-9 there is a single greedy/lazy hash-chain
+    // pass. Match that effort mapping: q4-9 fall through to the lazy
+    // path below with quality-tiered chain depths.
+    if quality >= 10 && input.len() <= 8 * 1024 * 1024 {
         return zopfli_iterative_parse(input, history, &mut mf, mlen_offset, use_dict, quality);
     }
 
-    // Q4+ with input > 1 MiB (not chunked): two_pass_parse.
-    if quality >= 4 {
+    if quality >= 10 {
         return two_pass_parse(input, mlen_offset, &mut mf, use_dict);
     }
 
@@ -5086,7 +5089,34 @@ fn parse_input_with_offset_impl(
 
         let lz77 = if pos + MIN_MATCH as usize <= n {
             mf.advance();
-            mf.find_match(pos)
+            if quality >= 8 {
+                // Cost-scored selection (reference-style lazy scoring):
+                // the longest match often pays 10-15 extra bits in an
+                // explicit distance code; score candidates by length
+                // minus a distance penalty instead of taking max length.
+                let mut cands: Vec<omnizip_codecs::Lz77Match> = Vec::new();
+                mf.find_candidates_into(pos, 4, 16, &mut cands);
+                let mut bestc: Option<omnizip_codecs::Lz77Match> = None;
+                let mut best_score = f32::MIN;
+                for m in cands {
+                    if m.distance > max_dist || m.length < MIN_MATCH {
+                        continue;
+                    }
+                    let pen = if m.distance <= 4 {
+                        2.0
+                    } else {
+                        (m.distance as f32).log2()
+                    };
+                    let score = m.length as f32 - pen;
+                    if score > best_score {
+                        best_score = score;
+                        bestc = Some(m);
+                    }
+                }
+                bestc
+            } else {
+                mf.find_match(pos)
+            }
         } else {
             None
         };
