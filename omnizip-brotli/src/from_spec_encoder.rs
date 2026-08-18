@@ -3357,7 +3357,20 @@ fn zopfli_parse_ext(
                 };
                 let m_cost_v =
                     ins_prior(ilen_here) + short_c + cmd_sym_price(ilen_here, lv.max(MIN_MATCH));
-                for &boundary in &COPY_BOUNDARIES {
+                let mut delta_bounds = [0u32; 2];
+                delta_bounds[0] = lv;
+                for &b in COPY_BOUNDARIES.iter().rev() {
+                    if b < lv {
+                        delta_bounds[1] = b;
+                        break;
+                    }
+                }
+                let delta_set: &[u32] = if std::env::var("BROTLI_FULL_DELTA").is_ok() {
+                    &COPY_BOUNDARIES
+                } else {
+                    &delta_bounds
+                };
+                for &boundary in delta_set {
                     if boundary < MIN_MATCH || boundary > lv {
                         continue;
                     }
