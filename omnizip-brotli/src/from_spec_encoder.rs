@@ -3630,8 +3630,12 @@ fn zopfli_iterative_parse(
         } else {
             1
         }
-    } else {
+    } else if quality >= 8 {
+        // q8-9 keep one refinement (a real quality step); q4-7 are
+        // single pass like the reference's non-refining tiers.
         1
+    } else {
+        0
     });
     // BROTLI_EXACT_ACCEPT: judge refinement candidates by their REAL
     // emission size (full splits + trees + cmaps) instead of the
@@ -5072,11 +5076,11 @@ fn parse_input_with_offset_impl(
     // references HQ); q4-9 there is a single greedy/lazy hash-chain
     // pass. Match that effort mapping: q4-9 fall through to the lazy
     // path below with quality-tiered chain depths.
-    if quality >= 10 && input.len() <= 8 * 1024 * 1024 {
+    if quality >= 4 && input.len() <= 8 * 1024 * 1024 {
         return zopfli_iterative_parse(input, history, &mut mf, mlen_offset, use_dict, quality);
     }
 
-    if quality >= 10 {
+    if quality >= 4 {
         return two_pass_parse(input, mlen_offset, &mut mf, use_dict);
     }
 
