@@ -2721,6 +2721,7 @@ fn zopfli_parse(
     ins_prior_cfg: Option<(u32, f32, f32)>,
     history: Option<&[u8]>,
     hint_dist: Option<&[u32]>,
+    quality: i32,
 ) -> Vec<Command> {
     zopfli_parse_ext(
         input,
@@ -2736,6 +2737,7 @@ fn zopfli_parse(
         history,
         hint_dist,
         None,
+        quality,
     )
     .0
 }
@@ -2753,6 +2755,7 @@ fn zopfli_parse_with_candidates(
     ins_prior_cfg: Option<(u32, f32, f32)>,
     history: Option<&[u8]>,
     hint_dist: Option<&[u32]>,
+    quality: i32,
 ) -> (
     Vec<Command>,
     (Vec<(u32, u32)>, Vec<u32>, Vec<Option<(u32, u32, u32)>>),
@@ -2771,6 +2774,7 @@ fn zopfli_parse_with_candidates(
         history,
         hint_dist,
         None,
+        quality,
     )
 }
 
@@ -2795,6 +2799,7 @@ fn zopfli_parse_ext(
     history: Option<&[u8]>,
     hint_dist: Option<&[u32]>,
     cand_flat_in: Option<(Vec<(u32, u32)>, Vec<u32>, Vec<Option<(u32, u32, u32)>>)>,
+    quality: i32,
 ) -> (
     Vec<Command>,
     (Vec<(u32, u32)>, Vec<u32>, Vec<Option<(u32, u32, u32)>>),
@@ -2840,6 +2845,7 @@ fn zopfli_parse_ext(
             use_dict,
             history,
             hint_dist,
+            quality,
         ),
     };
 
@@ -2852,6 +2858,7 @@ fn zopfli_parse_ext(
         use_dict: bool,
         history: Option<&[u8]>,
         hint_dist: Option<&[u32]>,
+        quality: i32,
     ) -> (Vec<(u32, u32)>, Vec<u32>, Vec<Option<(u32, u32, u32)>>) {
         let n = input.len();
         let to_mf = |global_pos: usize| global_pos.saturating_sub(mf_base);
@@ -2888,7 +2895,20 @@ fn zopfli_parse_ext(
         // reach structural matches buried under frequent short matches
         // (measured ~14-22 entries on the CSV structure). Patience-bounded,
         // so the deeper walk stays cheap on dense chains.
-        let (cand_count, walk) = if n <= 1 << 20 { (16, 256) } else { (12, 96) };
+        // Effort tiers by quality (mirrors the reference's algorithm
+        // tiers): q10+ gets the full candidate set; q8-9 moderate; q4-7
+        // lean. Candidate volume dominates DP runtime.
+        let (cand_count, walk) = if quality >= 10 {
+            if n <= 1 << 20 {
+                (16, 256)
+            } else {
+                (12, 96)
+            }
+        } else if quality >= 8 {
+            (8, 64)
+        } else {
+            (4, 32)
+        };
         let mut cand_flat: Vec<(u32, u32)> = Vec::with_capacity(n * 4);
         let mut cand_off: Vec<u32> = Vec::with_capacity(n + 1);
         let mut dict_at: Vec<Option<(u32, u32, u32)>> = vec![None; n]; // (d, wl, tl)
@@ -3511,6 +3531,7 @@ fn zopfli_iterative_parse(
         ins_prior_cfg,
         None,
         None,
+        quality,
     );
     if std::env::var("BROTLI_STATS").is_ok() {
         eprintln!(
@@ -3552,7 +3573,7 @@ fn zopfli_iterative_parse(
             best_commands = greedy_commands;
         }
     }
-    if input.len() <= 1 << 20 {
+    if input.len() <= 1 << 20 && quality >= 10 {
         let light_config = omnizip_codecs::HashChainConfig {
             dict_size: MAX_BACKWARD_DISTANCE,
             min_match: MIN_MATCH,
@@ -3574,6 +3595,7 @@ fn zopfli_iterative_parse(
             ins_prior_cfg,
             None,
             None,
+            quality,
         );
         let light_score = score_commands(&light_commands, input, mlen_offset);
         if light_score < best_score && std::env::var("BROTLI_NO_LIGHT").is_err() {
@@ -3599,7 +3621,15 @@ fn zopfli_iterative_parse(
     let iters_env = std::env::var("BROTLI_ITERS")
         .ok()
         .and_then(|v| v.parse().ok());
-    let mut max_iters = iters_env.unwrap_or(if input.len() <= 1 << 20 { 3 } else { 1 });
+    let mut max_iters = iters_env.unwrap_or(if quality >= 10 {
+        if input.len() <= 1 << 20 {
+            3
+        } else {
+            1
+        }
+    } else {
+        1
+    });
     // BROTLI_EXACT_ACCEPT: judge refinement candidates by their REAL
     // emission size (full splits + trees + cmaps) instead of the
     // approximate scorer. Approximations mis-ordered candidates by
@@ -3948,6 +3978,7 @@ fn zopfli_iterative_parse(
             Some(history),
             Some(&rep_hint),
             Some(merged),
+            quality,
         )
         .0;
         if std::env::var("BROTLI_STATS").is_ok() {
