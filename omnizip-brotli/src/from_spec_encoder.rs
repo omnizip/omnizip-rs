@@ -3128,6 +3128,8 @@ fn zopfli_parse_ext(
     // back_pos  = source position of the transition INTO i
     // back_dist = distance for copy transitions
     // u[i]      = position where the pending literal run at i started
+    let dp_debug = std::env::var("BROTLI_DP_DEBUG").is_ok();
+    let mut rep_state: Vec<[u32; 4]> = vec![[0u32; 4]; n + 1];
     let mut cost = vec![f32::INFINITY; n + 1];
     let mut back_pos = vec![0u32; n + 1];
     let mut back_len = vec![0u16; n + 1];
@@ -3142,7 +3144,7 @@ fn zopfli_parse_ext(
         }
 
         // Debug dump for a narrow position window.
-        let dbg = std::env::var("BROTLI_DP_DEBUG").is_ok() && (499_990..=499_996).contains(&i);
+        let dbg = dp_debug && (499_990..=499_996).contains(&i);
         if dbg {
             let cs = cand_off[i] as usize;
             let ce = cand_off[i + 1] as usize;
@@ -3173,30 +3175,31 @@ fn zopfli_parse_ext(
         // (at most 4) most recent copy commands. Literal runs are
         // skipped via u[] jumps. Distances are deduplicated, mirroring
         // the decoder's shuffle-on-use rep semantics.
+        // the decoder's shuffle-on-use rep semantics — maintained
+        // incrementally: the optimal path into i is frozen before i is
+        // processed (all transitions into i come from earlier
+        // positions), so rep_state[i] derives in O(1) from the
+        // backpointer instead of walking the chain. The chain walk this
+        // replaces hunted for 4 DISTINCT distances through thousands of
+        // same-distance commands on rep0-dense parses — 63% of
+        // refinement runtime.
         let mut reps = [0u32; 4];
-        {
-            let mut pos = i;
-            let mut k = 0usize;
-            let mut guard = 0usize;
-            while pos > 0 && k < 4 {
-                guard += 1;
-                if guard > n + 8 {
-                    break;
+        if i > 0 {
+            if back_len[i] == 0 {
+                reps = rep_state[i - 1];
+            } else {
+                let d = back_dist[i];
+                reps[0] = d;
+                let mut k = 1usize;
+                for &x in &rep_state[back_pos[i] as usize] {
+                    if k < 4 && x != 0 && x != d {
+                        reps[k] = x;
+                        k += 1;
+                    }
                 }
-                if back_len[pos] == 0 {
-                    // Literal step: jump to where this run began (= end
-                    // of the previous copy, or 0).
-                    pos = u[pos] as usize;
-                    continue;
-                }
-                let d = back_dist[pos];
-                if d != 0 && !reps[..k].contains(&d) {
-                    reps[k] = d;
-                    k += 1;
-                }
-                pos = back_pos[pos] as usize;
             }
         }
+        rep_state[i] = reps;
 
         // Copy transitions from all hash candidates. The first (longest)
         // candidate gets the full boundary sweep; the rest get their max
