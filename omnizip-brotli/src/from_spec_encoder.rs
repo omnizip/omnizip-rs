@@ -446,34 +446,6 @@ fn encode_huffman_chunk_body(
     quality: i32,
     ctx_in: (u8, u8),
 ) {
-    bw.write_bits(u32::from(is_last), 1); // ISLAST
-                                          // ISLASTEMPTY only present when ISLAST=1; we never emit empty
-                                          // metablocks, so always 0 when present.
-    if is_last {
-        bw.write_bits(0, 1); // ISLASTEMPTY = 0
-    }
-    // MLEN encoding: pick smallest MNIBBLES that fits.
-    // MNIBBLES=0 → 4 nibbles (max 65536)
-    // MNIBBLES=1 → 5 nibbles (max 1,048,576 = 1 MiB)
-    // MNIBBLES=2 → 6 nibbles (max 16,777,216 = 16 MiB)
-    let mlen_minus_1 = (input.len() - 1) as u32;
-    let (mnibbles, num_nibbles): (u32, u32) = if mlen_minus_1 < (1 << 16) {
-        (0, 4)
-    } else if mlen_minus_1 < (1 << 20) {
-        (1, 5)
-    } else {
-        (2, 6)
-    };
-    bw.write_bits(mnibbles, 2);
-    for i in 0..num_nibbles {
-        bw.write_bits((mlen_minus_1 >> (4 * i)) & 0xF, 4);
-    }
-    // ISUNCOMPRESSED is only written when ISLAST=0 (matches upstream
-    // `DecodeMetaBlockLength` gate: `if (is_last == 0 && is_metadata == 0)`).
-    if !is_last {
-        bw.write_bits(0, 1); // ISUNCOMPRESSED = 0
-    }
-
     // Context modeling: at quality >= 4, split literals into context
     // trees. Active for Q4+ inputs ≥ 4 KiB (any content type — FSST-
     // transformed data benefits from context separation just as much
@@ -488,18 +460,53 @@ fn encode_huffman_chunk_body(
     // this can be flipped back on for inputs with strongly varying
     // per-block statistics.
     let use_block_switch = false;
-    let commands = parse_input_with_offset(input, history, mf, mlen_offset, quality, false);
-    emit_metablock_from_commands(
-        bw,
-        input,
-        mlen_offset,
-        is_last,
-        quality,
-        ctx_in,
-        use_context,
-        use_block_switch,
-        &commands,
-    );
+    let (commands, precomputed) =
+        parse_input_with_offset(input, history, mf, mlen_offset, quality, false, is_last, ctx_in);
+    // The exact-acceptance chain already emitted the winning parse
+    // with these exact header parameters — reuse its bits verbatim
+    // instead of a fourth full emission (3 measures + final became
+    // 3 measures total at q10+). The winner writer contains the
+    // metablock header too, so the header is only written on the
+    // recompute path.
+    if let Some(won) = precomputed {
+        append_writer(bw, won);
+    } else {
+        bw.write_bits(u32::from(is_last), 1); // ISLAST
+        // ISLASTEMPTY only present when ISLAST=1; we never emit empty
+        // metablocks, so always 0 when present.
+        if is_last {
+            bw.write_bits(0, 1); // ISLASTEMPTY = 0
+        }
+        // MLEN encoding: pick smallest MNIBBLES that fits.
+        let mlen_minus_1 = (input.len() - 1) as u32;
+        let (mnibbles, num_nibbles): (u32, u32) = if mlen_minus_1 < (1 << 16) {
+            (0, 4)
+        } else if mlen_minus_1 < (1 << 20) {
+            (1, 5)
+        } else {
+            (2, 6)
+        };
+        bw.write_bits(mnibbles, 2);
+        for i in 0..num_nibbles {
+            bw.write_bits((mlen_minus_1 >> (4 * i)) & 0xF, 4);
+        }
+        // ISUNCOMPRESSED is only written when ISLAST=0 (matches
+        // upstream `DecodeMetaBlockLength` gate).
+        if !is_last {
+            bw.write_bits(0, 1); // ISUNCOMPRESSED = 0
+        }
+        emit_metablock_from_commands(
+            bw,
+            input,
+            mlen_offset,
+            is_last,
+            quality,
+            ctx_in,
+            use_context,
+            use_block_switch,
+            &commands,
+        );
+    }
 }
 
 /// Emission stage shared by the real encoder and parse-candidate
@@ -3516,15 +3523,24 @@ fn zopfli_parse_ext(
 /// pipeline: same prologue bits, same [`emit_metablock_from_commands`].
 /// Header bits for ISLAST and MLEN are constant across candidates, so
 /// the comparison is unaffected by the is_last/ctx_in approximations.
+#[allow(clippy::type_complexity)]
 fn measure_emission_bits(
     commands: &[Command],
     input: &[u8],
     mlen_offset: usize,
     quality: i32,
-) -> u64 {
+    is_last: bool,
+    ctx_in: (u8, u8),
+) -> (u64, BitWriter) {
+    // Header replicated EXACTLY from encode_huffman_chunk_body so the
+    // winning candidate's writer IS the final metablock verbatim — the
+    // real emission then reuses it instead of recomputing (the chain
+    // measured 3 full emissions; recomputing the winner made it 4).
     let mut bw = BitWriter::new();
-    bw.write_bits(0, 1); // ISLAST
-    bw.write_bits(0, 1); // ISUNCOMPRESSED
+    bw.write_bits(u32::from(is_last), 1);
+    if is_last {
+        bw.write_bits(0, 1); // ISLASTEMPTY = 0
+    }
     let mlen_minus_1 = (input.len() - 1) as u32;
     let (mnibbles, num_nibbles): (u32, u32) = if mlen_minus_1 < (1 << 16) {
         (0, 4)
@@ -3537,6 +3553,9 @@ fn measure_emission_bits(
     for i in 0..num_nibbles {
         bw.write_bits((mlen_minus_1 >> (4 * i)) & 0xF, 4);
     }
+    if !is_last {
+        bw.write_bits(0, 1); // ISUNCOMPRESSED = 0
+    }
     let use_context = quality >= 4 && input.len() >= 4096;
     emit_metablock_from_commands(
         &mut bw,
@@ -3544,12 +3563,13 @@ fn measure_emission_bits(
         mlen_offset,
         false,
         quality,
-        (0, 0),
+        ctx_in,
         use_context,
         false,
         commands,
     );
-    (bw.out.len() as u64) * 8 + u64::from(bw.nbits)
+    let bits = (bw.out.len() as u64) * 8 + u64::from(bw.nbits);
+    (bits, bw)
 }
 
 /// H10 binary-tree candidate collection (BROTLI_TREE_MF): every
@@ -3605,6 +3625,7 @@ fn zopfli_collect_tree(
     (cand_flat, cand_off, dict_at)
 }
 
+#[allow(clippy::type_complexity)]
 fn zopfli_iterative_parse(
     input: &[u8],
     history: &[u8],
@@ -3612,7 +3633,9 @@ fn zopfli_iterative_parse(
     mlen_offset: usize,
     use_dict: bool,
     quality: i32,
-) -> Vec<Command> {
+    is_last: bool,
+    ctx_in: (u8, u8),
+) -> (Vec<Command>, Option<BitWriter>) {
     // Insert-length prior for q10+ (measured on CSV): inserts <= 2 ride
     // free, 3..=9 pay 0.7 bits, longer pay 3.0. Concentrates the
     // command stream on the reference's (small-insert) symbol shape —
@@ -3795,16 +3818,16 @@ fn zopfli_iterative_parse(
     if exact_accept && iters_env.is_none() {
         max_iters = 2;
     }
-    let mut best_bits: Option<u64> = if exact_accept {
-        Some(measure_emission_bits(
-            &best_commands,
-            input,
-            mlen_offset,
-            quality,
-        ))
+    let mut best_bits: Option<u64>;
+    let mut winner_bw: Option<BitWriter> = None;
+    if exact_accept {
+        let (bits, bw) =
+            measure_emission_bits(&best_commands, input, mlen_offset, quality, is_last, ctx_in);
+        best_bits = Some(bits);
+        winner_bw = Some(bw);
     } else {
-        None
-    };
+        best_bits = None;
+    }
     // Chain state: each iteration's cost model derives from the
     // previous iteration's OUTPUT (upstream Zopfli semantics), which is
     // not necessarily the current winner — the chain can pass through a
@@ -4148,13 +4171,23 @@ fn zopfli_iterative_parse(
             // worse intermediate candidate never reaches the better
             // parses deeper in the chain (measured: candidate 1 is
             // worse, candidate 3 is 1.8KB better).
-            let bits_iter = measure_emission_bits(&commands_iter, input, mlen_offset, quality);
+            let (bits_iter, iter_bw) = measure_emission_bits(
+                &commands_iter,
+                input,
+                mlen_offset,
+                quality,
+                is_last,
+                ctx_in,
+            );
             if std::env::var("BROTLI_STATS").is_ok() {
                 eprintln!("zopfli exact: best={best_bits:?} candidate={bits_iter}");
             }
             if best_bits.is_none_or(|b| bits_iter < b) {
                 best_bits = Some(bits_iter);
                 best_commands = commands_iter.clone();
+                winner_bw = Some(iter_bw);
+            } else {
+                drop(iter_bw);
             }
             model_commands = commands_iter;
         } else if score_iter < best_score || std::env::var("BROTLI_POS_FORCE").is_ok() {
@@ -4165,7 +4198,7 @@ fn zopfli_iterative_parse(
             break;
         }
     }
-    best_commands
+    (best_commands, winner_bw)
 }
 
 /// Iterative refinement of [`optimal_parse`] (TODO 246).
@@ -5105,7 +5138,7 @@ fn parse_input(input: &[u8]) -> Vec<Command> {
         max_match_length: MAX_COPY,
     };
     let mut mf = omnizip_codecs::HashChainMatchFinder::new(input, config);
-    parse_input_with_offset(input, &[], &mut mf, 0, 11, false)
+    parse_input_with_offset(input, &[], &mut mf, 0, 11, false, false, (0, 0)).0
 }
 
 /// Quality → (max_chain, nice_match, use_dict_base, lazy, lazy2, hash_log).
@@ -5147,7 +5180,7 @@ fn greedy_parse(
     mf: &mut omnizip_codecs::HashChainMatchFinder,
     mlen_offset: usize,
 ) -> Vec<Command> {
-    parse_input_with_offset_impl(input, &[], mf, mlen_offset, 1, false)
+    parse_input_with_offset_impl(input, &[], mf, mlen_offset, 1, false, false, (0, 0)).0
 }
 
 /// Parse input into commands using LZ77 + static dictionary, with a
@@ -5162,6 +5195,7 @@ fn greedy_parse(
 ///
 /// `disable_dict` temporarily disables dictionary lookups (used when
 /// context modeling is active, due to a decoder interaction bug).
+#[allow(clippy::type_complexity)]
 fn parse_input_with_offset(
     input: &[u8],
     history: &[u8],
@@ -5169,8 +5203,19 @@ fn parse_input_with_offset(
     mlen_offset: usize,
     quality: i32,
     disable_dict: bool,
-) -> Vec<Command> {
-    parse_input_with_offset_impl(input, history, &mut mf, mlen_offset, quality, disable_dict)
+    is_last: bool,
+    ctx_in: (u8, u8),
+) -> (Vec<Command>, Option<BitWriter>) {
+    parse_input_with_offset_impl(
+        input,
+        history,
+        &mut mf,
+        mlen_offset,
+        quality,
+        disable_dict,
+        is_last,
+        ctx_in,
+    )
 }
 
 /// Diagnostic wrapper exposed for benchmarks. Not part of the public API.
@@ -5182,7 +5227,8 @@ pub fn _parse_input_with_offset_diag(
     quality: i32,
     disable_dict: bool,
 ) -> Vec<Command> {
-    parse_input_with_offset_impl(input, &[], mf, mlen_offset, quality, disable_dict)
+    parse_input_with_offset_impl(input, &[], mf, mlen_offset, quality, disable_dict, false, (0, 0))
+        .0
 }
 
 fn parse_input_with_offset_impl(
@@ -5192,7 +5238,9 @@ fn parse_input_with_offset_impl(
     mlen_offset: usize,
     quality: i32,
     disable_dict: bool,
-) -> Vec<Command> {
+    is_last: bool,
+    ctx_in: (u8, u8),
+) -> (Vec<Command>, Option<BitWriter>) {
     let n = input.len();
     let mut commands = Vec::new();
 
@@ -5228,11 +5276,20 @@ fn parse_input_with_offset_impl(
     // pass. Match that effort mapping: q4-9 fall through to the lazy
     // path below with quality-tiered chain depths.
     if quality >= 4 && input.len() <= 8 * 1024 * 1024 {
-        return zopfli_iterative_parse(input, history, &mut mf, mlen_offset, use_dict, quality);
+        return zopfli_iterative_parse(
+            input,
+            history,
+            &mut mf,
+            mlen_offset,
+            use_dict,
+            quality,
+            is_last,
+            ctx_in,
+        );
     }
 
     if quality >= 4 {
-        return two_pass_parse(input, mlen_offset, &mut mf, use_dict);
+        return (two_pass_parse(input, mlen_offset, &mut mf, use_dict), None);
     }
 
     let mut pos = 0usize;
@@ -5419,7 +5476,7 @@ fn parse_input_with_offset_impl(
         });
     }
 
-    commands
+    (commands, None)
 }
 
 /// Build canonical Huffman codes (MSB-first) and bit-reverse each code
