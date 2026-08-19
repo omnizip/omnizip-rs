@@ -364,18 +364,28 @@ pub fn dictionary_lookup(
     distance_code: i32,
     max_distance: u32,
 ) -> Option<()> {
+    let dbg = std::env::var("BROTLI_DICT_DEBUG").is_ok();
     if !(MIN_DICTIONARY_WORD_LENGTH as u32..=MAX_DICTIONARY_WORD_LENGTH as u32).contains(&copy_len)
     {
+        if dbg {
+            eprintln!("DICT-REJ copy_len={copy_len}");
+        }
         return None;
     }
     let len = copy_len as usize;
     let shift = SIZE_BITS_BY_LENGTH[len];
     if shift == 0 {
+        if dbg {
+            eprintln!("DICT-REJ shift0 len={len}");
+        }
         return None;
     }
 
     let address = i64::from(distance_code) - i64::from(max_distance) - 1;
     if address < 0 {
+        if dbg {
+            eprintln!("DICT-REJ addr<0 dc={distance_code} maxd={max_distance}");
+        }
         return None;
     }
     let address = address as usize;
@@ -385,11 +395,17 @@ pub fn dictionary_lookup(
     let transform_idx = address >> shift;
 
     if transform_idx >= NUM_TRANSFORMS {
+        if dbg {
+            eprintln!("DICT-REJ transform_idx={transform_idx} >= {NUM_TRANSFORMS} (dc={distance_code} maxd={max_distance} len={len})");
+        }
         return None;
     }
 
     let offset = OFFSETS_BY_LENGTH[len] as usize + word_idx * len;
     if offset + len > DICTIONARY_DATA.len() {
+        if dbg {
+            eprintln!("DICT-REJ offset oob");
+        }
         return None;
     }
 

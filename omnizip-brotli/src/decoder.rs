@@ -1008,6 +1008,11 @@ pub fn decode(compressed: &[u8]) -> Result<Vec<u8>, &'static str> {
     // ring buffer; the context of a metablock's first literals is
     // computed from the frame's previous output bytes).
     let mut lit_ctx: (u8, u8) = (0, 0);
+    // Frame-scoped recent-distances ring: persists across metablocks
+    // (upstream keeps one ring per stream; the encoder does the same
+    // across its 2 MiB chunks).
+    let mut dist_rb: [u32; 4] = [16, 15, 11, 4];
+    let mut dist_rb_idx: i32 = 0;
 
     loop {
         let (mb, next_pos) = parse_metablock_header(compressed, bit_pos)?;
@@ -1049,6 +1054,8 @@ pub fn decode(compressed: &[u8]) -> Result<Vec<u8>, &'static str> {
                 max_backward_distance,
                 &output,
                 lit_ctx,
+                &mut dist_rb,
+                &mut dist_rb_idx,
             )?;
             bit_pos = new_pos;
             lit_ctx = new_ctx;
@@ -1082,6 +1089,8 @@ fn decode_compressed_metablock(
     max_backward_distance: u32,
     prior_output: &[u8],
     ctx_in: (u8, u8),
+    dist_rb: &mut [u32; 4],
+    dist_rb_idx: &mut i32,
 ) -> Result<(usize, Vec<u8>, (u8, u8)), &'static str> {
     let mut br = BitReader::new(data);
     br.set_bit_pos(bit_pos);
@@ -1105,6 +1114,8 @@ fn decode_compressed_metablock(
             max_backward_distance,
             prior_output,
             ctx_in,
+            dist_rb,
+            dist_rb_idx,
         );
     }
 
@@ -1121,6 +1132,8 @@ fn decode_compressed_metablock(
             max_backward_distance,
             prior_output,
             ctx_in,
+            dist_rb,
+            dist_rb_idx,
         );
     }
 
@@ -1137,6 +1150,8 @@ fn decode_compressed_metablock(
             max_backward_distance,
             prior_output,
             ctx_in,
+            dist_rb,
+            dist_rb_idx,
         );
     }
 
@@ -1184,6 +1199,8 @@ fn decode_compressed_metablock(
             max_backward_distance,
             prior_output,
             ctx_in,
+            dist_rb,
+            dist_rb_idx,
         );
     }
 
@@ -1204,6 +1221,8 @@ fn decode_compressed_metablock(
             max_backward_distance,
             prior_output,
             ctx_in,
+            dist_rb,
+            dist_rb_idx,
         );
     }
 
@@ -1227,8 +1246,6 @@ fn decode_compressed_metablock(
     br.set_bit_pos(p);
 
     let mut output = Vec::with_capacity(mlen);
-    let mut dist_rb: [u32; 4] = [16, 15, 11, 4];
-    let mut dist_rb_idx: i32 = 0;
     // max_backward_distance is passed from the frame header (WBITS-dependent).
 
     while output.len() < mlen {
@@ -1276,8 +1293,8 @@ fn decode_compressed_metablock(
                 // Implicit distance (kCmdLut.distance_code == 0):
                 // use most recent from ring buffer. Matches upstream
                 // CommandPostDecodeLiterals: --idx, dist_rb[idx&3].
-                dist_rb_idx -= 1;
-                dist_rb[(dist_rb_idx & 3) as usize]
+                *dist_rb_idx -= 1;
+                dist_rb[(*dist_rb_idx & 3) as usize]
             } else {
                 let dist_code = dist_table
                     .read_symbol(&mut br)
@@ -1288,8 +1305,8 @@ fn decode_compressed_metablock(
                     num_direct_distance_codes,
                     npostfix as i32,
                     &mut br,
-                    &mut dist_rb,
-                    &mut dist_rb_idx,
+                    &mut *dist_rb,
+                    &mut *dist_rb_idx,
                 )
             };
             {
@@ -1334,7 +1351,7 @@ fn decode_compressed_metablock(
                 // The implicit case already decremented idx; the dictionary
                 // path doesn't write back, so restore idx.
                 if v.distance_code >= 0 {
-                    dist_rb_idx = dist_rb_idx.wrapping_add(1);
+                    *dist_rb_idx = (*dist_rb_idx).wrapping_add(1);
                 }
             } else {
                 if distance == 0 || distance as usize > prior_output.len() + output.len() {
@@ -1365,8 +1382,8 @@ fn decode_compressed_metablock(
                     }
                 }
                 // Update recent-distances cache (upstream LZ77 copy path).
-                dist_rb[(dist_rb_idx & 3) as usize] = distance;
-                dist_rb_idx = dist_rb_idx.wrapping_add(1);
+                dist_rb[(*dist_rb_idx & 3) as usize] = distance;
+                *dist_rb_idx = (*dist_rb_idx).wrapping_add(1);
             }
         }
 
