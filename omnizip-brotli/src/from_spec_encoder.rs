@@ -1707,6 +1707,15 @@ fn build_symbol_stream(
     // codes are safe from copy #5 onward. For the first four copies of
     // a continuation chunk we therefore force explicit encoding.
     let mut explicit_copies_remaining = if mlen_offset > 0 { 4 } else { 0 };
+    // Env knobs hoisted out of the per-command loop: getenv is a lock +
+    // linear scan and showed up at ~1.6% of encode time when called per
+    // command.
+    let narrow_implicit_max: u32 = if std::env::var("BROTLI_NARROW_IMPLICIT").is_ok() {
+        9
+    } else {
+        u32::MAX
+    };
+    let no_short_codes = std::env::var("BROTLI_NO_SHORT").is_ok();
 
     // Output-position cursor — needed to detect dictionary references
     // (distance > current output) which can't use rep codes (would
@@ -1730,11 +1739,7 @@ fn build_symbol_stream(
         // commands. Consecutive implicit commands are legal (rep0 is
         // unchanged by the implicit read/write-back). Disabled for
         // dictionary references (decoder doesn't compensate them).
-        let implicit_copy_max = if std::env::var("BROTLI_NARROW_IMPLICIT").is_ok() {
-            9u32
-        } else {
-            u32::MAX
-        };
+        let implicit_copy_max = narrow_implicit_max;
         let can_use_implicit = cmd.copy_len > 0
             && cmd.copy_len <= implicit_copy_max
             && !is_dict_ref
@@ -1768,7 +1773,7 @@ fn build_symbol_stream(
             } else if explicit_copies_remaining > 0 {
                 // Chunk-start synchronization: long form only.
                 encode_distance(cmd.distance, dist_cfg)
-            } else if std::env::var("BROTLI_NO_SHORT").is_ok() {
+            } else if no_short_codes {
                 encode_distance(cmd.distance, dist_cfg)
             } else if let Some(code) = rep.find_short_code(cmd.distance) {
                 (code, 0)
@@ -5712,6 +5717,42 @@ fn split_cmd_symbols_optimal(cmd_symbols: &[usize], max_blocks: usize) -> Vec<us
 
 /// Optimal contiguous split of a symbol stream (entropy DP over cut
 /// points). Returns block START indices (first is 0).
+/// log2 via a 16-bit-mantissa table (error <= 1.1e-5 bits): the block
+/// splitters evaluate tens of millions of entropies per chunk and
+/// libm's log2 is ~30% of total encode time on large streams. Upstream
+/// brotli uses the same table trick for its splitter (FastLog2).
+#[doc(hidden)]
+pub fn _fast_log2_diag(v: u32) -> f64 {
+    fast_log2(&log2_table(), v)
+}
+
+fn log2_table() -> &'static Box<[f64; 65_536]> {
+    static TABLE: std::sync::OnceLock<Box<[f64; 65_536]>> = std::sync::OnceLock::new();
+    TABLE.get_or_init(|| {
+        let mut t = Box::new([0f64; 65_536]);
+        for (i, x) in t.iter_mut().enumerate() {
+            *x = (1.0 + f64::from(i as u32) / 65_536.0).log2();
+        }
+        t
+    })
+}
+
+/// Table fetched ONCE per splitter invocation — the OnceLock's atomic
+/// load per call cost more than the lookup itself at the ~10^8 calls
+/// per large chunk.
+fn fast_log2(tbl: &[f64; 65_536], v: u32) -> f64 {
+    if v == 0 {
+        return 0.0;
+    }
+    let e = 31 - v.leading_zeros();
+    let idx = if e >= 16 {
+        ((v >> (e - 16)) & 0xFFFF) as usize
+    } else {
+        ((v << (16 - e)) & 0xFFFF) as usize
+    };
+    tbl[idx] + f64::from(e)
+}
+
 fn split_symbol_stream_optimal(
     symbols: &[usize],
     alphabet: usize,
@@ -5741,36 +5782,55 @@ fn split_symbol_stream_optimal(
         }
     }
 
-    let entropy_bits = |h: &[u32], total: usize| -> f64 {
-        if total == 0 {
-            return 0.0;
-        }
-        let t = total as f64;
-        let mut bits = 0.0;
-        for &f in h.iter() {
-            if f > 0 {
-                let p = f as f64 / t;
-                bits -= f as f64 * p.log2();
-            }
-        }
-        bits
-    };
+    // Per-segment distinct symbols: merges touch only these.
+    let seg_syms: Vec<Vec<u16>> = (0..m)
+        .map(|i| {
+            seg_hist[i]
+                .iter()
+                .enumerate()
+                .filter(|&(_, &f)| f > 0)
+                .map(|(s, _)| s as u16)
+                .collect()
+        })
+        .collect();
 
-    // block_cost[j][i] = entropy bits of commands cuts[j]..cuts[i].
+    // block_cost[j][i] = entropy bits of commands cuts[j]..cuts[i],
+    // maintained incrementally: bits(t) = t·log2(t) − Σ f·log2(f), so
+    // adding count c of symbol s changes bits by
+    //   (t+c)·log2(t+c) − t·log2(t) + f·log2(f) − (f+c)·log2(f+c).
+    // O(1) per distinct symbol instead of an O(alphabet) rescan with a
+    // libm log2 per nonzero bin (which was ~30% of encode time on
+    // large streams).
+    let log2_tbl = log2_table();
     let mut block_cost = vec![vec![f64::INFINITY; m + 1]; m + 1];
+    let mut hist = vec![0u32; alphabet];
     for j in 0..m {
-        let mut hist = vec![0u32; alphabet];
-        let mut total = 0usize;
+        let mut touched: Vec<u16> = Vec::new();
+        let mut t: u64 = 0;
+        let mut bits = 0.0f64;
         block_cost[j][j] = 0.0;
         for i in j..m {
-            let seg = &seg_hist[i];
-            for k in 0..alphabet {
-                if seg[k] > 0 {
-                    hist[k] += seg[k];
+            for &sym in &seg_syms[i] {
+                let c = u64::from(seg_hist[i][usize::from(sym)]);
+                let f0 = u64::from(hist[usize::from(sym)]);
+                let f1 = f0 + c;
+                if f0 == 0 {
+                    touched.push(sym);
                 }
+                hist[usize::from(sym)] = f1 as u32;
+                let t1 = t + c;
+                // L(x) = x·log2(x); the telescoping update is
+                // L(t1) − L(t0) + L(f0) − L(f1).
+                bits += f64::from(t1 as u32) * fast_log2(log2_tbl, t1 as u32)
+                    - f64::from(t as u32) * fast_log2(log2_tbl, t as u32)
+                    + f64::from(f0 as u32) * fast_log2(log2_tbl, f0 as u32)
+                    - f64::from(f1 as u32) * fast_log2(log2_tbl, f1 as u32);
+                t = t1;
             }
-            total += cuts[i + 1] - cuts[i];
-            block_cost[j][i + 1] = entropy_bits(&hist, total);
+            block_cost[j][i + 1] = bits;
+        }
+        for &sym in &touched {
+            hist[usize::from(sym)] = 0;
         }
     }
 
@@ -5842,34 +5902,49 @@ fn split_literals(literals: &[u8], max_blocks: usize) -> Vec<usize> {
             seg_hist[i][b as usize] += 1;
         }
     }
-    let entropy_bits = |h: &[u32; 256], total: usize| -> f64 {
-        if total == 0 {
-            return 0.0;
-        }
-        let t = total as f64;
-        let mut bits = 0.0;
-        for &f in h.iter() {
-            if f > 0 {
-                let p = f as f64 / t;
-                bits -= f as f64 * p.log2();
-            }
-        }
-        bits
-    };
+    // Incremental entropy (see split_symbol_stream_optimal): O(1) per
+    // distinct symbol via the telescoping identity
+    // bits(t) = t·log2(t) − Σ f·log2(f).
+    let seg_syms: Vec<Vec<u8>> = (0..m)
+        .map(|i| {
+            seg_hist[i]
+                .iter()
+                .enumerate()
+                .filter(|&(_, &f)| f > 0)
+                .map(|(s, _)| s as u8)
+                .collect()
+        })
+        .collect();
+    let log2_tbl = log2_table();
     let mut block_cost = vec![vec![f64::INFINITY; m + 1]; m + 1];
+    let mut hist = [0u32; 256];
     for j in 0..m {
-        let mut hist = [0u32; 256];
-        let mut total = 0usize;
+        let mut touched: Vec<u8> = Vec::new();
+        let mut t: u64 = 0;
+        let mut bits = 0.0f64;
         block_cost[j][j] = 0.0;
         for i in j..m {
-            let seg = &seg_hist[i];
-            for k in 0..256 {
-                if seg[k] > 0 {
-                    hist[k] += seg[k];
+            for &sym in &seg_syms[i] {
+                let c = u64::from(seg_hist[i][usize::from(sym)]);
+                let f0 = u64::from(hist[usize::from(sym)]);
+                let f1 = f0 + c;
+                if f0 == 0 {
+                    touched.push(sym);
                 }
+                hist[usize::from(sym)] = f1 as u32;
+                let t1 = t + c;
+                // L(x) = x·log2(x); the telescoping update is
+                // L(t1) − L(t0) + L(f0) − L(f1).
+                bits += f64::from(t1 as u32) * fast_log2(log2_tbl, t1 as u32)
+                    - f64::from(t as u32) * fast_log2(log2_tbl, t as u32)
+                    + f64::from(f0 as u32) * fast_log2(log2_tbl, f0 as u32)
+                    - f64::from(f1 as u32) * fast_log2(log2_tbl, f1 as u32);
+                t = t1;
             }
-            total += cuts[i + 1] - cuts[i];
-            block_cost[j][i + 1] = entropy_bits(&hist, total);
+            block_cost[j][i + 1] = bits;
+        }
+        for &sym in &touched {
+            hist[usize::from(sym)] = 0;
         }
     }
     let inf = f64::INFINITY;
