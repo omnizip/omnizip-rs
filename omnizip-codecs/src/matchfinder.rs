@@ -349,6 +349,22 @@ impl<'a> HashChainMatchFinder<'a> {
         max_walk: u32,
         out: &mut Vec<Lz77Match>,
     ) {
+        self.find_candidates_into_patience(pos, max_count, max_walk, 32, out)
+    }
+
+    /// `max_patience` caps the trailing chain nodes evaluated after the
+    /// candidate set fills. Those nodes' fast-reject compares are pure
+    /// cache misses on the prev[] walk; measured byte-identical on CSV
+    /// and FITS at q5 with the cap at 8, but q10+ parses DO use them
+    /// (100KB q11 regresses +6.55% at 8) — deep tiers pass 32.
+    pub fn find_candidates_into_patience(
+        &self,
+        pos: usize,
+        max_count: usize,
+        max_walk: u32,
+        max_patience: u32,
+        out: &mut Vec<Lz77Match>,
+    ) {
         out.clear();
         if pos + 4 > self.data.len() || max_count == 0 {
             return;
@@ -364,7 +380,7 @@ impl<'a> HashChainMatchFinder<'a> {
             (self.data.len() - pos) as u32
         };
         let nice = self.nice_match.min(max_len);
-        let mut patience = 32u32;
+        let mut patience = max_patience;
         let mut chain = 0u32;
         while candidate != SENTINEL && chain < max_walk {
             let cand_us = candidate as usize;
@@ -393,7 +409,7 @@ impl<'a> HashChainMatchFinder<'a> {
                     if len >= nice {
                         break;
                     }
-                    patience = 32;
+                    patience = max_patience;
                 } else if out.len() >= max_count {
                     // Full and not better than the K-th best.
                     if patience == 0 {
