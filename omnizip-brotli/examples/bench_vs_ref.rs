@@ -9,44 +9,48 @@ use std::io::Write;
 use std::process::{Command, Stdio};
 
 fn ref_compress(data: &[u8], q: i32) -> Option<(Vec<u8>, f64)> {
+    let infile = std::env::temp_dir().join(format!("bench_ref_in_{}", std::process::id()));
+    std::fs::write(&infile, data).ok()?;
     let t = std::time::Instant::now();
-    let mut child = Command::new("brotli")
+    // Feed via file arg + `.output()`: piping 21MB into stdin while the
+    // child fills its stdout pipe deadlocks both processes.
+    let out = Command::new("brotli")
         .args(["-q", &q.to_string(), "-c"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
+        .arg(&infile)
         .stderr(Stdio::null())
-        .spawn()
+        .output()
         .ok()?;
-    child.stdin.as_mut()?.write_all(data).ok()?;
-    let out = child.wait_with_output().ok()?;
-    Some((out.stdout, t.elapsed().as_secs_f64()))
+    let secs = t.elapsed().as_secs_f64();
+    let _ = std::fs::remove_file(&infile);
+    Some((out.stdout, secs))
 }
 
 fn ref_decompress_ok(data: &[u8], expected: &[u8]) -> bool {
-    let mut child = match Command::new("brotli")
-        .args(["-d", "-c"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-    {
-        Ok(c) => c,
-        Err(_) => return false,
-    };
-    if child.stdin.as_mut().unwrap().write_all(data).is_err() {
+    let infile = std::env::temp_dir().join(format!("bench_ref_dec_{}", std::process::id()));
+    if std::fs::write(&infile, data).is_err() {
         return false;
     }
-    match child.wait_with_output() {
-        Ok(o) => o.stdout == expected,
-        Err(_) => false,
-    }
+    let out = Command::new("brotli")
+        .args(["-d", "-c"])
+        .arg(&infile)
+        .stderr(Stdio::null())
+        .output();
+    let _ = std::fs::remove_file(&infile);
+    matches!(&out, Ok(o) if o.status.success() && o.stdout == expected)
 }
 
 fn run(label: &str, data: &[u8], levels: &[i32]) {
     println!("\n=== {label}: {} bytes ===", data.len());
     println!(
-        "{:>4} | {:>15} | {:>15} | {:>7} {:>7} | {:>6}",
-        "Q", "ours size (ratio)", "ref size (ratio)", "ours_s", "ref_s", "verify"
+        "{:>4} | {:>15} | {:>15} | {:>7} {:>7} | {:>6} {:>6} | {:>6}",
+        "Q",
+        "ours size (ratio)",
+        "ref size (ratio)",
+        "enc_s",
+        "ref_s",
+        "dec_s",
+        "ref_dec",
+        "verify"
     );
     for &q in levels {
         let t = std::time::Instant::now();
@@ -61,9 +65,27 @@ fn run(label: &str, data: &[u8], levels: &[i32]) {
             }
         };
         let ref_ratio = refc.len() as f64 * 100.0 / data.len() as f64;
-        let ok = ref_decompress_ok(&ours, data);
+
+        // Our decoder on our output.
+        let t = std::time::Instant::now();
+        let roundtrip = omnizip_brotli::decoder::decode(&ours).ok();
+        let our_dec_time = t.elapsed().as_secs_f64();
+        let rt_ok = roundtrip.as_ref().is_some_and(|rt| rt == data);
+
+        // Reference decoder on reference output (its own decode perf).
+        let t = std::time::Instant::now();
+        let ref_rt_ok = ref_decompress_ok(&refc, data);
+        let ref_dec_time = t.elapsed().as_secs_f64();
+
+        // Interop: reference decoder must accept our output.
+        let interop_ok = ref_decompress_ok(&ours, data);
+        let verify = if rt_ok && ref_rt_ok && interop_ok {
+            "REF-OK"
+        } else {
+            "REF-FAIL"
+        };
         println!(
-            "{:>4} | {:>9}B ({:4.2}%) | {:>9}B ({:4.2}%) | {:>7.2} {:>7.2} | {}",
+            "{:>4} | {:>9}B ({:4.2}%) | {:>9}B ({:4.2}%) | {:>7.2} {:>7.2} | {:>6.2} {:>6.2} | {}",
             q,
             ours.len(),
             our_ratio,
@@ -71,7 +93,9 @@ fn run(label: &str, data: &[u8], levels: &[i32]) {
             ref_ratio,
             our_time,
             ref_time,
-            if ok { "REF-OK" } else { "REF-FAIL" }
+            our_dec_time,
+            ref_dec_time,
+            verify
         );
     }
 }
