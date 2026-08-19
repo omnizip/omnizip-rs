@@ -6806,7 +6806,7 @@ mod tests {
 
                 // Read it back using the decoded table.
                 let mut br = crate::decoder::BitReader::new(&sym_encoded);
-                br.bit_pos = 0;
+                br.set_bit_pos(0);
                 let decoded_sym = table.read_symbol(&mut br).unwrap_or(0xFFFF) as u32;
                 assert_eq!(
                     decoded_sym, sym,

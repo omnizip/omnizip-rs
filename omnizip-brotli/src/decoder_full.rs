@@ -94,7 +94,7 @@ impl BlockTypeState {
         bit_pos: usize,
     ) -> Result<usize, &'static str> {
         let mut br = BitReader::new(data);
-        br.bit_pos = bit_pos;
+        br.set_bit_pos(bit_pos);
 
         self.block_type_rb = [1, 0];
         if self.num_block_types == 1 {
@@ -105,12 +105,12 @@ impl BlockTypeState {
         let alphabet_size = 2 + self.num_block_types;
         let (tree, p) = read_huffman_table(data, br.bit_pos(), alphabet_size as usize)?;
         self.block_type_tree = Some(tree);
-        br.bit_pos = p;
+        br.set_bit_pos(p);
 
         // Block-length code tree: alphabet size 26 (kBlockLengthPrefixCode).
         let (tree, p) = read_huffman_table(data, br.bit_pos(), 26)?;
         self.block_len_tree = Some(tree);
-        br.bit_pos = p;
+        br.set_bit_pos(p);
 
         // Initial block length via the block-length tree.
         // The initial block type stays at block_type_rb[1] = 0.
@@ -182,7 +182,7 @@ pub(crate) fn read_context_map(
     max_rle_override: u32,
 ) -> Result<(Vec<u8>, usize), &'static str> {
     let mut br = BitReader::new(data);
-    br.bit_pos = bit_pos;
+    br.set_bit_pos(bit_pos);
 
     let mut context_map = vec![0u8; context_map_size];
 
@@ -213,7 +213,7 @@ pub(crate) fn read_context_map(
     // Context-map code Huffman tree.
     let alphabet_size = max_rle + num_htrees;
     let (cm_tree, p) = read_huffman_table(data, br.bit_pos(), alphabet_size as usize)?;
-    br.bit_pos = p;
+    br.set_bit_pos(p);
 
     // Read context-map entries.
     let mut i = 0usize;
@@ -306,6 +306,38 @@ impl DecStats {
 
 fn dec_stats() -> std::sync::MutexGuard<'static, DecStats> {
     DEC_STATS.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+// Hot-path env gates cached once: getenv takes a global lock and walks
+// environ on every call — in the per-command loop it was ~70% of decode
+// time (sampled).
+static DEC_STATS_ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+fn dec_stats_on() -> bool {
+    *DEC_STATS_ON.get_or_init(|| std::env::var("BROTLI_DEC_STATS").is_ok())
+}
+
+static DBG_DC_ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+fn dbg_dc_on() -> bool {
+    *DBG_DC_ON.get_or_init(|| std::env::var("BROTLI_DBG_DC").is_ok())
+}
+
+static TRACE_ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+fn trace_on() -> bool {
+    *TRACE_ON.get_or_init(|| {
+        std::env::var("BROTLI_DEC_AT").is_ok() || std::env::var("BROTLI_DEC_STATS").is_ok()
+    })
+}
+
+/// LZ77 back-reference copy: replicate the span at `src` for `len`
+/// bytes, handling overlap (distance < len) by doubling the copied
+/// window. `extend_from_within` is a bulk memcpy vs the old byte loop.
+fn lz77_copy(output: &mut Vec<u8>, src: usize, len: usize) {
+    let mut remaining = len;
+    while remaining > 0 {
+        let take = remaining.min(output.len() - src);
+        output.extend_from_within(src..src + take);
+        remaining -= take;
+    }
 }
 
 /// Print the accumulated decoder command statistics (diagnostic).
@@ -517,7 +549,7 @@ pub(crate) fn decode_compressed_metablock_full(
     ctx_in: (u8, u8),
 ) -> Result<(usize, Vec<u8>, (u8, u8)), &'static str> {
     let mut br = BitReader::new(data);
-    br.bit_pos = bit_pos;
+    br.set_bit_pos(bit_pos);
 
     // Per upstream `BROTLI_STATE_HUFFMAN_CODE_0..3`: NBLTYPES values
     // are interleaved with their block-type trees. Caller has already
@@ -526,7 +558,7 @@ pub(crate) fn decode_compressed_metablock_full(
     // is known, then read the next NBLTYPES inline if not yet read.
     let mut lit_bt = BlockTypeState::default();
     lit_bt.num_block_types = nbltypesl;
-    br.bit_pos = lit_bt.read_block_type_trees(data, br.bit_pos())?;
+    br.set_bit_pos(lit_bt.read_block_type_trees(data, br.bit_pos())?);
 
     let nbltypesc = match nbltypesc {
         Some(v) => v,
@@ -534,7 +566,7 @@ pub(crate) fn decode_compressed_metablock_full(
     };
     let mut cmd_bt = BlockTypeState::default();
     cmd_bt.num_block_types = nbltypesc;
-    br.bit_pos = cmd_bt.read_block_type_trees(data, br.bit_pos())?;
+    br.set_bit_pos(cmd_bt.read_block_type_trees(data, br.bit_pos())?);
 
     let nbltypesd = match nbltypesd {
         Some(v) => v,
@@ -542,7 +574,7 @@ pub(crate) fn decode_compressed_metablock_full(
     };
     let mut dist_bt = BlockTypeState::default();
     dist_bt.num_block_types = nbltypesd;
-    br.bit_pos = dist_bt.read_block_type_trees(data, br.bit_pos())?;
+    br.set_bit_pos(dist_bt.read_block_type_trees(data, br.bit_pos())?);
 
     // NPOSTFIX + NDIRECT.
     let npostfix = br.read_bits(2) as usize;
@@ -614,7 +646,7 @@ pub(crate) fn decode_compressed_metablock_full_with_trees(
     ctx_in: (u8, u8),
 ) -> Result<(usize, Vec<u8>, (u8, u8)), &'static str> {
     let mut br = BitReader::new(data);
-    br.bit_pos = bit_pos;
+    br.set_bit_pos(bit_pos);
 
     // NBLTYPES = 1 for all categories, so no block-type trees.
     let lit_bt = BlockTypeState::default();
@@ -690,7 +722,7 @@ fn finish_metablock_decode(
         None => read_varlen_uint8(br)? + 1,
     };
     let (lit_context_map, p) = read_context_map(data, br.bit_pos(), lit_cm_size, ntreesl, 0)?;
-    br.bit_pos = p;
+    br.set_bit_pos(p);
 
     // ----- Distance context map (§9.6) -----
     let dist_cm_size = (dist_bt.num_block_types as usize) << K_DISTANCE_CONTEXT_BITS;
@@ -699,19 +731,19 @@ fn finish_metablock_decode(
         None => read_varlen_uint8(br)? + 1,
     };
     let (dist_context_map, p) = read_context_map(data, br.bit_pos(), dist_cm_size, ntreesd, 0)?;
-    br.bit_pos = p;
+    br.set_bit_pos(p);
     if std::env::var("BROTLI_DBG_DC").is_ok() {
         eprintln!("DCDBG ntreesd={ntreesd} cm_size={dist_cm_size} map={dist_context_map:?}");
     }
 
     // ----- Huffman tree groups -----
     let (lit_trees, p) = read_tree_group(data, br.bit_pos(), 256, ntreesl)?;
-    br.bit_pos = p;
+    br.set_bit_pos(p);
     let (cmd_trees, p) = read_tree_group(data, br.bit_pos(), 704, cmd_bt.num_block_types)?;
-    br.bit_pos = p;
+    br.set_bit_pos(p);
     let dist_alphabet_size = num_direct_distance_codes as usize + (48usize << npostfix);
     let (dist_trees, p) = read_tree_group(data, br.bit_pos(), dist_alphabet_size, ntreesd)?;
-    br.bit_pos = p;
+    br.set_bit_pos(p);
 
     // ----- Command loop -----
     let mut output: Vec<u8> = Vec::with_capacity(mlen);
@@ -735,6 +767,11 @@ fn finish_metablock_decode(
     let mut cmd_block_type = cmd_bt.block_type_rb[1] as usize;
     let mut dist_block_type = dist_bt.block_type_rb[1] as usize;
 
+    // Hot-loop diagnostics flags hoisted to locals: the OnceLock
+    // deref is an atomic load per literal otherwise.
+    let stats_flag = dec_stats_on();
+    let dbg_dc_flag = dbg_dc_on();
+    let trace_flag = trace_on();
     while output.len() < mlen {
         // Block-switch handling for insert-copy category.
         if cmd_bt.num_block_types > 1 {
@@ -789,7 +826,7 @@ fn finish_metablock_decode(
                 as usize;
             let lit_tree = &lit_trees[lit_tree_idx];
             let lit = lit_tree.read_symbol(br).ok_or("invalid literal")?;
-            if std::env::var("BROTLI_DEC_STATS").is_ok() {
+            if stats_flag {
                 let mut st = dec_stats();
                 st.lit_hists.entry(lit_tree_idx).or_insert([0u32; 256])[lit as usize] += 1;
             }
@@ -833,7 +870,7 @@ fn finish_metablock_decode(
                 as usize;
             let dist_tree = &dist_trees[dist_tree_idx];
             let dist_code = dist_tree.read_symbol(br).ok_or("invalid distance symbol")? as i32;
-            if std::env::var("BROTLI_DBG_DC").is_ok() {
+            if dbg_dc_flag {
                 eprintln!(
                     "DCREAD pos={} ctx={} tree={} sym={} rb={:?}",
                     output_base + output.len(),
@@ -844,7 +881,7 @@ fn finish_metablock_decode(
                 );
             }
             dist_sym = dist_code;
-            if std::env::var("BROTLI_DEC_STATS").is_ok() {
+            if stats_flag {
                 let mut st = dec_stats();
                 *st.dist_code_hist.entry(dist_code).or_insert(0u64) += 1;
                 *st.dist_hists
@@ -890,10 +927,7 @@ fn finish_metablock_decode(
             }
             if distance as usize <= output.len() {
                 let src = output.len() - distance as usize;
-                for i in 0..copy_len {
-                    let b = output[src + i];
-                    output.push(b);
-                }
+                lz77_copy(&mut output, src, copy_len);
             } else {
                 // Cross-metablock back-reference (upstream keeps one
                 // ring buffer across the frame).
@@ -902,13 +936,11 @@ fn finish_metablock_decode(
                     return Err("invalid back-reference distance");
                 }
                 let src = prior_output.len() - back;
-                for i in 0..copy_len {
-                    let b = if src + i < prior_output.len() {
-                        prior_output[src + i]
-                    } else {
-                        output[src + i - prior_output.len()]
-                    };
-                    output.push(b);
+                let from_prior = (prior_output.len() - src).min(copy_len);
+                output.extend_from_slice(&prior_output[src..src + from_prior]);
+                if copy_len > from_prior {
+                    let span_start = output.len() - from_prior;
+                    lz77_copy(&mut output, span_start, copy_len - from_prior);
                 }
             }
             // Update recent-distances cache (upstream LZ77 copy path).
@@ -917,7 +949,7 @@ fn finish_metablock_decode(
         }
 
         let cmd_pos = output_base + cmd_start_outlen + insert_len;
-        {
+        if trace_flag {
             let mut st = dec_stats();
             if (st.at == 1 || (st.at != u64::MAX && (cmd_pos as u64).abs_diff(st.at) <= 512))
                 && copy_len > 0
@@ -935,7 +967,7 @@ fn finish_metablock_decode(
             }
         }
         // Diagnostic: dump command-stream statistics (env-gated).
-        if std::env::var("BROTLI_DEC_STATS").is_ok() {
+        if stats_flag {
             let mut st = dec_stats();
             st.cmds += 1;
             st.literal_count += insert_len as u64;

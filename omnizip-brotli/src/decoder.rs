@@ -30,14 +30,34 @@ pub const MAX_WINDOW_BITS: u8 = 24;
 /// least-significant end of each byte.
 pub struct BitReader<'a> {
     pub(crate) data: &'a [u8],
+    /// Consumed-bit count (authoritative stream position).
     pub(crate) bit_pos: usize,
+    /// Bit cache: unconsumed bits LSB-aligned. `acc` always holds the
+    /// bits starting at `bit_pos` — refills load up to 64 bits once and
+    /// amortize the per-symbol peek to an AND-mask (the reference
+    /// decoder's approach; a load-per-peek costs 5+ ops every symbol).
+    acc: u64,
+    acc_bits: u32,
 }
 
 impl<'a> BitReader<'a> {
     /// Construct a reader over `data`.
     #[must_use]
     pub fn new(data: &'a [u8]) -> Self {
-        Self { data, bit_pos: 0 }
+        Self {
+            data,
+            bit_pos: 0,
+            acc: 0,
+            acc_bits: 0,
+        }
+    }
+
+    /// Set the absolute bit position (used when resuming after
+    /// sub-parsers that consumed bits via their own readers).
+    pub fn set_bit_pos(&mut self, pos: usize) {
+        self.bit_pos = pos;
+        self.acc = 0;
+        self.acc_bits = 0;
     }
 
     /// Total bits consumeded so far.
@@ -47,45 +67,69 @@ impl<'a> BitReader<'a> {
     }
 
     /// Read `nbits` bits LSB-first. Returns 0 if past end-of-input.
+    #[inline]
     pub fn read_bits(&mut self, nbits: u32) -> u32 {
         if nbits == 0 || nbits > 32 {
             return 0;
         }
-        let mut result = 0u32;
-        for i in 0..nbits {
-            let byte_idx = (self.bit_pos + i as usize) / 8;
-            let bit_in_byte = (self.bit_pos + i as usize) % 8;
-            if byte_idx < self.data.len() {
-                let bit = (self.data[byte_idx] >> bit_in_byte) & 1;
-                result |= u32::from(bit) << i;
+        let v = self.peek_bits(nbits);
+        self.drop_bits(nbits);
+        v
+    }
+
+    #[inline]
+    fn refill(&mut self) {
+        // On an empty accumulator, establish sub-byte alignment: acc
+        // bit 0 must correspond to stream bit `bit_pos`, so the first
+        // byte is loaded shifted right past the prefix bits.
+        if self.acc_bits == 0 {
+            let idx = self.bit_pos >> 3;
+            if let Some(&b) = self.data.get(idx) {
+                let shift = (self.bit_pos & 7) as u32;
+                self.acc = u64::from(b) >> shift;
+                self.acc_bits = 8 - shift;
+            } else {
+                return;
             }
         }
-        self.bit_pos += nbits as usize;
-        result
+        while self.acc_bits <= 56 {
+            let idx = (self.bit_pos + self.acc_bits as usize) >> 3;
+            match self.data.get(idx) {
+                Some(&b) => {
+                    self.acc |= u64::from(b) << self.acc_bits;
+                    self.acc_bits += 8;
+                }
+                None => break,
+            }
+        }
     }
 
     /// Peek `nbits` bits WITHOUT advancing the bit position.
-    /// Used for table-based Huffman symbol lookup.
-    #[must_use]
-    pub fn peek_bits(&self, nbits: u32) -> u32 {
-        if nbits == 0 || nbits > 32 {
+    /// Used for table-based Huffman symbol lookup. Bits beyond
+    /// end-of-input read as 0 (matching the original semantics).
+    #[inline]
+    pub fn peek_bits(&mut self, nbits: u32) -> u32 {
+        debug_assert!(nbits <= 32);
+        if nbits == 0 {
             return 0;
         }
-        let mut result = 0u32;
-        for i in 0..nbits {
-            let byte_idx = (self.bit_pos + i as usize) / 8;
-            let bit_in_byte = (self.bit_pos + i as usize) % 8;
-            if byte_idx < self.data.len() {
-                let bit = (self.data[byte_idx] >> bit_in_byte) & 1;
-                result |= u32::from(bit) << i;
-            }
+        if self.acc_bits < nbits {
+            self.refill();
         }
-        result
+        let mask: u64 = if nbits == 32 {
+            u64::MAX
+        } else {
+            (1u64 << nbits) - 1
+        };
+        (self.acc & mask) as u32
     }
 
     /// Drop `nbits` bits (advance the bit position).
+    #[inline]
     pub fn drop_bits(&mut self, nbits: u32) {
         self.bit_pos += nbits as usize;
+        self.acc >>= nbits;
+        self.acc_bits = self.acc_bits.saturating_sub(nbits);
     }
 
     /// Read a single bit.
@@ -140,7 +184,7 @@ pub fn parse_frame_header(
         return Err("input too short for frame header");
     }
     let mut br = BitReader::new(data);
-    br.bit_pos = bit_pos;
+    br.set_bit_pos(bit_pos);
 
     let wbits_raw = br.read_bits(1);
     let wbits = if wbits_raw == 0 {
@@ -222,7 +266,7 @@ pub fn parse_metablock_header(
     bit_pos: usize,
 ) -> Result<(MetablockHeader, usize), &'static str> {
     let mut br = BitReader::new(data);
-    br.bit_pos = bit_pos;
+    br.set_bit_pos(bit_pos);
 
     let is_last = br.read_bit();
     if is_last {
@@ -361,7 +405,7 @@ pub fn parse_block_type_header(
     _category: BlockTypeCategory,
 ) -> Result<(BlockTypeHeader, usize), &'static str> {
     let mut br = BitReader::new(data);
-    br.bit_pos = bit_pos;
+    br.set_bit_pos(bit_pos);
 
     let num_block_types_raw = br.read_bits(2);
     let num_block_types = num_block_types_raw + 1;
@@ -436,7 +480,7 @@ pub fn parse_distance_header(
     bit_pos: usize,
 ) -> Result<(DistanceHeader, usize), &'static str> {
     let mut br = BitReader::new(data);
-    br.bit_pos = bit_pos;
+    br.set_bit_pos(bit_pos);
 
     let npostfix_raw = br.read_bits(2);
     // NDIRECT is NPOSTFIX + 1 4-bit groups.
@@ -462,11 +506,17 @@ pub fn parse_distance_header(
 /// Maximum Huffman code length per RFC 7932 §9.5.
 pub const MAX_HUFFMAN_CODE_LENGTH: u8 = 15;
 
-/// Canonical Huffman table with flat 2^15 lookup for O(1) correct decode.
+/// Canonical Huffman table with flat lookup for O(1) correct decode.
+///
+/// The table is sized to `1 << root_bits` where `root_bits` is the
+/// tree's actual maximum code length — a shallow tree keeps its whole
+/// lookup table in L1 (a flat 2^15 table is 128 KiB of L2-latency
+/// random accesses per symbol, plus a 128 KiB memset per tree build).
 #[derive(Clone, Debug)]
 pub struct HuffmanTable {
-    /// Flat lookup: for each 15-bit peek value, (symbol, `bits_to_consume`).
+    /// Flat lookup indexed by a `root_bits` peek: (symbol, `bits_to_consume`).
     lookup: Vec<(u16, u8)>,
+    root_bits: u32,
     /// For NSYM=1 simple form: return without consuming bits.
     single_symbol: Option<u32>,
 }
@@ -502,17 +552,19 @@ impl HuffmanTable {
             None
         };
 
-        // Build flat 2^15 lookup table: for each symbol with code
-        // length L, its bit-reversed canonical code fills all
-        // 2^(15-L) possible high-bit extensions.
-        let mut lookup = vec![(0u16, 0u8); 32768];
+        // Flat lookup sized to the tree's max code length: for each
+        // symbol with code length L, its bit-reversed canonical code
+        // fills all 2^(root-L) possible high-bit extensions.
+        let root_bits: u32 = lengths.iter().copied().max().unwrap_or(0) as u32;
+        let size = 1usize << root_bits;
+        let mut lookup = vec![(0u16, 0u8); size];
         for i in 0..n {
             let l = lengths[i];
-            if l > 0 && l <= 15 {
+            if l > 0 && u32::from(l) <= root_bits {
                 let base = u32::from(codes[i]);
-                for high in 0u32..(1u32 << (15 - l)) {
+                for high in 0u32..(1u32 << (root_bits - u32::from(l))) {
                     let idx = (base | (high << l)) as usize;
-                    if idx < 32768 {
+                    if idx < size {
                         lookup[idx] = (i as u16, l);
                     }
                 }
@@ -520,6 +572,7 @@ impl HuffmanTable {
         }
         Self {
             lookup,
+            root_bits,
             single_symbol,
         }
     }
@@ -549,9 +602,8 @@ impl HuffmanTable {
         let s_a = syms[0];
         let s_b = syms[1];
 
-        // 8-entry pattern (indexed by low 3 bits of peek value).
-        // Replicated to fill the full 2^15 lookup.
-        let pattern: [(u16, u8); 8] = [
+        // 8-entry pattern (indexed by a 3-bit peek).
+        let lookup: Vec<(u16, u8)> = vec![
             (s_a, 1), // 000
             (s_b, 2), // 001
             (s_a, 1), // 010
@@ -561,23 +613,20 @@ impl HuffmanTable {
             (s_a, 1), // 110
             (s_d, 3), // 111
         ];
-
-        let mut lookup = vec![(0u16, 0u8); 32768];
-        for idx in 0..32768 {
-            lookup[idx] = pattern[idx & 7];
-        }
         Self {
             lookup,
+            root_bits: 3,
             single_symbol: None,
         }
     }
 
-    /// O(1) symbol decode via 15-bit peek + flat table lookup.
+    /// O(1) symbol decode via `root_bits` peek + flat table lookup.
+    #[inline]
     pub fn read_symbol(&self, br: &mut BitReader) -> Option<u32> {
         if let Some(sym) = self.single_symbol {
             return Some(sym);
         }
-        let bits = br.peek_bits(15);
+        let bits = br.peek_bits(self.root_bits);
         let (sym, len) = self.lookup[bits as usize];
         if len == 0 {
             return None;
@@ -603,7 +652,7 @@ pub fn read_huffman_table(
     alphabet_size: usize,
 ) -> Result<(HuffmanTable, usize), &'static str> {
     let mut br = BitReader::new(data);
-    br.bit_pos = bit_pos;
+    br.set_bit_pos(bit_pos);
 
     let hskip = br.read_bits(2);
     if hskip == 1 {
@@ -707,7 +756,7 @@ fn read_complex_form(
         let ix = br.read_bits(4) as usize;
         let v = K_CL_PREFIX_VALUE[ix];
         let consumed = K_CL_PREFIX_LENGTH[ix] as usize;
-        br.bit_pos -= 4 - consumed;
+        br.set_bit_pos(br.bit_pos() - (4 - consumed));
         cl_code_lengths[usize::from(sym)] = v;
         if v != 0 {
             space = space.wrapping_sub(32u32 >> v);
@@ -808,7 +857,7 @@ pub fn read_huffman_table_simple(
     bit_pos: usize,
 ) -> Result<(HuffmanTable, usize), &'static str> {
     let mut br = BitReader::new(data);
-    br.bit_pos = bit_pos;
+    br.set_bit_pos(bit_pos);
     // Peek HSKIP — if it's 1, dispatch to simple form.
     let hskip = br.read_bits(2);
     if hskip != 1 {
@@ -915,7 +964,7 @@ pub fn parse_context_mode(
     bit_pos: usize,
 ) -> Result<(ContextMode, usize), &'static str> {
     let mut br = BitReader::new(data);
-    br.bit_pos = bit_pos;
+    br.set_bit_pos(bit_pos);
 
     let mode = br.read_bits(2);
     let result = match mode {
@@ -1035,7 +1084,7 @@ fn decode_compressed_metablock(
     ctx_in: (u8, u8),
 ) -> Result<(usize, Vec<u8>, (u8, u8)), &'static str> {
     let mut br = BitReader::new(data);
-    br.bit_pos = bit_pos;
+    br.set_bit_pos(bit_pos);
 
     // Read NBLTYPES one at a time, dispatching to the full decoder as
     // soon as any category has > 1 block type. Per upstream brotli
@@ -1159,7 +1208,7 @@ fn decode_compressed_metablock(
     }
 
     let (lit_table, p) = read_huffman_table(data, br.bit_pos(), 256)?;
-    br.bit_pos = p;
+    br.set_bit_pos(p);
 
     // Read the cmd Huffman tree as a 704-symbol table. This is used
     // directly with kCmdLut — the rearrangement in upstream's
@@ -1167,7 +1216,7 @@ fn decode_compressed_metablock(
     // the 704-alphabet has params from kCmdLut[N] matching the encoder's
     // intent for the original command code that maps to position N.
     let (cmd_table, p) = read_huffman_table(data, br.bit_pos(), 704)?;
-    br.bit_pos = p;
+    br.set_bit_pos(p);
 
     // Distance alphabet size per RFC 7932 §9.4:
     //   alphabet_size = NUM_DISTANCE_SHORT_CODES + NDIRECT + (48 << NPOSTFIX)
@@ -1175,7 +1224,7 @@ fn decode_compressed_metablock(
     let num_direct_distance_codes = 16u32 + ndirect as u32;
     let dist_alphabet_size = num_direct_distance_codes as usize + (48usize << npostfix);
     let (dist_table, p) = read_huffman_table(data, br.bit_pos(), dist_alphabet_size)?;
-    br.bit_pos = p;
+    br.set_bit_pos(p);
 
     let mut output = Vec::with_capacity(mlen);
     let mut dist_rb: [u32; 4] = [16, 15, 11, 4];
