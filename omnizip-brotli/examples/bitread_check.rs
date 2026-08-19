@@ -3,14 +3,20 @@ fn ref_read(data: &[u8], pos: usize, n: u32) -> u32 {
     for i in 0..n {
         let bi = pos + i as usize;
         let byte = bi / 8;
-        let bit = if byte < data.len() { (data[byte] >> (bi % 8)) & 1 } else { 0 };
+        let bit = if byte < data.len() {
+            (data[byte] >> (bi % 8)) & 1
+        } else {
+            0
+        };
         r |= u32::from(bit) << i;
     }
     r
 }
 
 fn main() {
-    let data = [0x21u8, 0x00, 0x00, 0x04, 0x61, 0x03, 0xA7, 0xF0, 0x5B, 0x8E, 0x11, 0xC3];
+    let data = [
+        0x21u8, 0x00, 0x00, 0x04, 0x61, 0x03, 0xA7, 0xF0, 0x5B, 0x8E, 0x11, 0xC3,
+    ];
     let mut br = omnizip_brotli::decoder::BitReader::new(&data);
     let mut pos_ref = 0usize;
     for n in [1u32, 3, 1, 4, 16, 1, 1, 7, 24, 5, 13, 32, 2, 11] {
