@@ -555,7 +555,7 @@ impl HuffmanTable {
         // Flat lookup sized to the tree's max code length: for each
         // symbol with code length L, its bit-reversed canonical code
         // fills all 2^(root-L) possible high-bit extensions.
-        let root_bits: u32 = lengths.iter().copied().max().unwrap_or(0) as u32;
+        let root_bits: u32 = 15; // BISECT: flat table
         let size = 1usize << root_bits;
         let mut lookup = vec![(0u16, 0u8); size];
         for i in 0..n {

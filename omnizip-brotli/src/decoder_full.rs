@@ -796,6 +796,14 @@ fn finish_metablock_decode(
         if cmd_bt.num_block_types > 1 {
             if cmd_bt.block_length == 0 {
                 cmd_block_type = cmd_bt.decode_switch(br)? as usize;
+                if std::env::var("BROTLI_SWITCH_LOG").is_ok() {
+                    eprintln!(
+                        "SW-CMD pos={} type={} len={}",
+                        output_base + output.len(),
+                        cmd_block_type,
+                        cmd_bt.block_length
+                    );
+                }
             }
             cmd_bt.block_length -= 1;
         }
@@ -877,6 +885,14 @@ fn finish_metablock_decode(
             if dist_bt.num_block_types > 1 {
                 if dist_bt.block_length == 0 {
                     dist_block_type = dist_bt.decode_switch(br)? as usize;
+                    if std::env::var("BROTLI_SWITCH_LOG").is_ok() {
+                        eprintln!(
+                            "SW-DIST pos={} type={} len={}",
+                            output_base + output.len(),
+                            dist_block_type,
+                            dist_bt.block_length
+                        );
+                    }
                 }
                 dist_bt.block_length -= 1;
             }
@@ -964,8 +980,13 @@ fn finish_metablock_decode(
                 let from_prior = (prior_output.len() - src).min(copy_len);
                 output.extend_from_slice(&prior_output[src..src + from_prior]);
                 if copy_len > from_prior {
-                    let span_start = output.len() - from_prior;
-                    lz77_copy(&mut output, span_start, copy_len - from_prior);
+                    // The spill reads the current metablock's output
+                    // from its FIRST byte (stream position output_base),
+                    // replicating onto itself as it grows — not from
+                    // `output.len() - from_prior`, which is a different
+                    // position whenever this metablock already emitted
+                    // bytes before the copy.
+                    lz77_copy(&mut output, 0, copy_len - from_prior);
                 }
             }
             // Update recent-distances cache (upstream LZ77 copy path).
