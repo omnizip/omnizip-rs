@@ -460,42 +460,10 @@ impl<'a> HashChainMatchFinder<'a> {
         // For the majority of candidates (short or non-matches), this
         // returns immediately without entering the loop.
         if max >= 16 && a + 16 <= data.len() && b + 16 <= data.len() {
-            let wa = u128::from_le_bytes([
-                data[a],
-                data[a + 1],
-                data[a + 2],
-                data[a + 3],
-                data[a + 4],
-                data[a + 5],
-                data[a + 6],
-                data[a + 7],
-                data[a + 8],
-                data[a + 9],
-                data[a + 10],
-                data[a + 11],
-                data[a + 12],
-                data[a + 13],
-                data[a + 14],
-                data[a + 15],
-            ]);
-            let wb = u128::from_le_bytes([
-                data[b],
-                data[b + 1],
-                data[b + 2],
-                data[b + 3],
-                data[b + 4],
-                data[b + 5],
-                data[b + 6],
-                data[b + 7],
-                data[b + 8],
-                data[b + 9],
-                data[b + 10],
-                data[b + 11],
-                data[b + 12],
-                data[b + 13],
-                data[b + 14],
-                data[b + 15],
-            ]);
+            // Single 16-byte loads: per-byte indexing costs a bounds
+            // check per element and defeats load fusion.
+            let wa = u128::from_le_bytes(data[a..a + 16].try_into().unwrap());
+            let wb = u128::from_le_bytes(data[b..b + 16].try_into().unwrap());
             if wa != wb {
                 let diff = wa ^ wb;
                 return diff.trailing_zeros() as u32 / 8;
@@ -505,26 +473,8 @@ impl<'a> HashChainMatchFinder<'a> {
 
         // u64 chunks for the remainder (fast on all 64-bit targets).
         while len + 8 <= max && a + len + 8 <= data.len() && b + len + 8 <= data.len() {
-            let wa = u64::from_le_bytes([
-                data[a + len],
-                data[a + len + 1],
-                data[a + len + 2],
-                data[a + len + 3],
-                data[a + len + 4],
-                data[a + len + 5],
-                data[a + len + 6],
-                data[a + len + 7],
-            ]);
-            let wb = u64::from_le_bytes([
-                data[b + len],
-                data[b + len + 1],
-                data[b + len + 2],
-                data[b + len + 3],
-                data[b + len + 4],
-                data[b + len + 5],
-                data[b + len + 6],
-                data[b + len + 7],
-            ]);
+            let wa = u64::from_le_bytes(data[a + len..a + len + 8].try_into().unwrap());
+            let wb = u64::from_le_bytes(data[b + len..b + len + 8].try_into().unwrap());
             if wa == wb {
                 len += 8;
             } else {

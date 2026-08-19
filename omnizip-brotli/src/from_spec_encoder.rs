@@ -294,6 +294,17 @@ pub fn compress(input: &[u8]) -> Vec<u8> {
 /// All levels produce RFC 7932-conformant Brotli streams decodable by
 /// any standard Brotli decoder.
 #[must_use]
+/// Env-gated diagnostic flag, cached per call site. `std::env::var`
+/// takes the global environ lock per call; in the parse/emit hot loops
+/// that alone was measurable (~6% of encode, ~70% of decode before
+/// caching).
+macro_rules! env_flag {
+    ($name:literal) => {{
+        static CACHE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *CACHE.get_or_init(|| std::env::var($name).is_ok())
+    }};
+}
+
 pub fn compress_with_quality(input: &[u8], quality: i32) -> Vec<u8> {
     let q = quality.clamp(0, 11);
     if input.is_empty() {
@@ -368,7 +379,7 @@ pub fn compress_with_quality(input: &[u8], quality: i32) -> Vec<u8> {
                 q,
                 &mut shared_mf,
             );
-            if std::env::var("BROTLI_STATS").is_ok() {
+            if env_flag!("BROTLI_STATS") {
                 eprintln!("chunk {offset}..{end} q{q} took {:?}", t0.elapsed());
             }
             offset = end;
@@ -546,9 +557,8 @@ fn emit_metablock_from_commands(
     };
 
     // --- Command block splitting (BrotliBuildMetaBlock cmd pass) ---
-    let cmd_split_on = quality >= 4
-        && stream.cmd_symbols.len() >= 1024
-        && std::env::var("BROTLI_NO_SPLIT").is_err();
+    let cmd_split_on =
+        quality >= 4 && stream.cmd_symbols.len() >= 1024 && !env_flag!("BROTLI_NO_SPLIT");
     // q10+ parses ride implicit-rep0 commands heavily; their symbol
     // stream is broader and keeps sharpening up to 64 blocks (measured
     // 16→64 saves ~3.9KB at 1MB q11; 128 regresses on switch overhead).
@@ -597,7 +607,7 @@ fn emit_metablock_from_commands(
     let lit_split_on = quality >= 4
         && stream.literals.len() >= 4096
         && use_context
-        && std::env::var("BROTLI_NO_LIT_SPLIT").is_err();
+        && !env_flag!("BROTLI_NO_LIT_SPLIT");
     // Scale the block budget with the literal count: small inputs
     // lose more to block/tree overhead than they gain from sharper
     // local statistics (measured crossover near ~2K literals/block).
@@ -780,7 +790,7 @@ fn emit_metablock_from_commands(
     // into dedicated (often single-symbol, zero-bit) trees; cluster the
     // rest into shared trees. Replaces the static map whenever
     // per-(block,context) histograms are available.
-    if std::env::var("BROTLI_DBG_CTX").is_ok() {
+    if env_flag!("BROTLI_DBG_CTX") {
         let mut rows: Vec<(usize, u64, usize)> = bc_hists
             .iter()
             .enumerate()
@@ -837,18 +847,17 @@ fn emit_metablock_from_commands(
         let cost_b: f64 = hists_b.iter().map(|h| tree_bits(h)).sum::<f64>()
             + count_b as f64 * 35.0
             + bc_hists.len() as f64 * (count_b as f64).log2().max(1.0);
-        let (cmap, tree_count) =
-            if cost_b < cost_a && std::env::var("BROTLI_NO_SINGLETONS").is_err() {
-                (cmap_b, count_b)
-            } else {
-                (cmap_a, 4)
-            };
+        let (cmap, tree_count) = if cost_b < cost_a && !env_flag!("BROTLI_NO_SINGLETONS") {
+            (cmap_b, count_b)
+        } else {
+            (cmap_a, 4)
+        };
         lit_ctx_map.clear();
         lit_ctx_map.extend_from_slice(&cmap);
         ntrees_l = tree_count as u32;
         ntrees = tree_count;
         lit_freqs = vec![vec![0u32; 256]; ntrees];
-        if std::env::var("BROTLI_DBG_CTX").is_ok() {
+        if env_flag!("BROTLI_DBG_CTX") {
             eprintln!("ASSIGN cost_a={cost_a:.0} cost_b={cost_b:.0} trees={tree_count}");
         }
     }
@@ -941,7 +950,7 @@ fn emit_metablock_from_commands(
     let dist_split_on = quality >= 4
         && stream.dist_symbols.len() >= 1024
         && dist_cfg.alphabet_size() <= 256
-        && std::env::var("BROTLI_NO_DSPLIT").is_err();
+        && !env_flag!("BROTLI_NO_DSPLIT");
     let dist_boundaries: Vec<usize> = if dist_split_on {
         let syms: Vec<usize> = stream.dist_symbols.iter().map(|&s| s as usize).collect();
         split_symbol_stream_optimal(&syms, dist_cfg.alphabet_size(), 4)
@@ -985,17 +994,15 @@ fn emit_metablock_from_commands(
     // context derived from copy length (kCmdLut.context = (len>4)?3:len-2).
     // Short copies ride a short-code-heavy tree; long copies a long-code
     // tree — each sharper than the blended single tree.
-    let mut ntrees_d: u32 = if quality >= 4
-        && !stream.dist_symbols.is_empty()
-        && std::env::var("BROTLI_NO_DTREES").is_err()
-    {
-        std::env::var("BROTLI_DTREES")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(4)
-    } else {
-        1
-    };
+    let mut ntrees_d: u32 =
+        if quality >= 4 && !stream.dist_symbols.is_empty() && !env_flag!("BROTLI_NO_DTREES") {
+            std::env::var("BROTLI_DTREES")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(4)
+        } else {
+            1
+        };
     // Distance context trees over per-(block, context) buckets, with
     // unused trees pruned and a cost gate against the single-tree
     // variant. Written after the literal context map per wire order.
@@ -1180,7 +1187,7 @@ fn emit_metablock_from_commands(
     // NTREESD header write — see dist_freqs_per_ctx / dist_ctx_tree.)
 
     // Dump per-tree literal frequencies for isolated round-trip tests.
-    if std::env::var("BROTLI_DUMP_TREES").is_ok() {
+    if env_flag!("BROTLI_DUMP_TREES") {
         for (i, freq) in lit_freqs.iter().enumerate() {
             let total: u32 = freq.iter().sum();
             let nz = freq.iter().filter(|&&f| f > 0).count();
@@ -1209,7 +1216,7 @@ fn emit_metablock_from_commands(
     let dist_lengths = omnizip_codecs::HuffmanLengths::build(&dist_freq, 15);
 
     // Diagnostic: entropy breakdown of the final symbol streams.
-    if std::env::var("BROTLI_STATS").is_ok() {
+    if env_flag!("BROTLI_STATS") {
         let lit_bits: u64 = lit_freqs
             .iter()
             .zip(lit_lengths_per_tree.iter())
@@ -1358,7 +1365,7 @@ fn emit_metablock_from_commands(
         write_huffman_table(bw, tree, 704);
     }
     for (ti, tree) in dist_lengths_per_ctx.iter().enumerate() {
-        if std::env::var("BROTLI_DBG_DC").is_ok() {
+        if env_flag!("BROTLI_DBG_DC") {
             let lens: Vec<String> = tree
                 .lengths
                 .iter()
@@ -1455,7 +1462,7 @@ fn emit_metablock_from_commands(
                 0
             };
             let (lc, ll) = lit_codes_per_tree[tree][b as usize];
-            if std::env::var("BROTLI_DBG_CTX").is_ok() && u32::from(ll) == 0 {
+            if env_flag!("BROTLI_DBG_CTX") && u32::from(ll) == 0 {
                 LIT0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
             bw.write_bits(lc, u32::from(ll));
@@ -1502,7 +1509,7 @@ fn emit_metablock_from_commands(
                     &dist_codes
                 };
                 let (dc, dl) = table[d_sym as usize];
-                if std::env::var("BROTLI_DBG_DC").is_ok() {
+                if env_flag!("BROTLI_DBG_DC") {
                     eprintln!(
                         "DCWRITE sym={d_sym} code={dc:0b} len={dl} tree_idx={}",
                         if ntrees_d > 1 {
@@ -1540,7 +1547,7 @@ fn emit_metablock_from_commands(
             }
         }
     }
-    if std::env::var("BROTLI_DBG_CTX").is_ok() {
+    if env_flag!("BROTLI_DBG_CTX") {
         eprintln!(
             "LIT0-final: zero-bit literals: {}",
             LIT0.load(std::sync::atomic::Ordering::Relaxed)
@@ -1725,12 +1732,12 @@ fn build_symbol_stream(
     // Env knobs hoisted out of the per-command loop: getenv is a lock +
     // linear scan and showed up at ~1.6% of encode time when called per
     // command.
-    let narrow_implicit_max: u32 = if std::env::var("BROTLI_NARROW_IMPLICIT").is_ok() {
+    let narrow_implicit_max: u32 = if env_flag!("BROTLI_NARROW_IMPLICIT") {
         9
     } else {
         u32::MAX
     };
-    let no_short_codes = std::env::var("BROTLI_NO_SHORT").is_ok();
+    let no_short_codes = env_flag!("BROTLI_NO_SHORT");
 
     // Output-position cursor — needed to detect dictionary references
     // (distance > current output) which can't use rep codes (would
@@ -2936,7 +2943,7 @@ fn zopfli_parse_ext(
             if pos + MIN_MATCH as usize <= n {
                 mf.advance();
                 mf.find_candidates_into(to_mf(mlen_offset + pos), cand_count, walk, &mut mf_buf);
-                if std::env::var("BROTLI_DP_DEBUG").is_ok() && pos == 499_992 {
+                if env_flag!("BROTLI_DP_DEBUG") && pos == 499_992 {
                     eprintln!(
                         "STEP1[499992] mf_base={mf_base} mlen={mlen_offset} n={n} raw={:?}",
                         &mf_buf
@@ -3144,7 +3151,7 @@ fn zopfli_parse_ext(
     // back_pos  = source position of the transition INTO i
     // back_dist = distance for copy transitions
     // u[i]      = position where the pending literal run at i started
-    let dp_debug = std::env::var("BROTLI_DP_DEBUG").is_ok();
+    let dp_debug = env_flag!("BROTLI_DP_DEBUG");
     let mut rep_state: Vec<[u32; 4]> = vec![[0u32; 4]; n + 1];
     let mut cost = vec![f32::INFINITY; n + 1];
     let mut back_pos = vec![0u32; n + 1];
@@ -3391,7 +3398,7 @@ fn zopfli_parse_ext(
                         break;
                     }
                 }
-                let delta_set: &[u32] = if std::env::var("BROTLI_FULL_DELTA").is_ok() {
+                let delta_set: &[u32] = if env_flag!("BROTLI_FULL_DELTA") {
                     &COPY_BOUNDARIES
                 } else {
                     &delta_bounds
@@ -3418,7 +3425,7 @@ fn zopfli_parse_ext(
     }
 
     // --- Step 4: backtrack ---
-    let bt_trace_on = std::env::var("BROTLI_CHAINTRACE").is_ok();
+    let bt_trace_on = env_flag!("BROTLI_CHAINTRACE");
     let mut bt_trace: Vec<(usize, usize, usize, u32, u32, u32)> = Vec::new();
     let mut commands: Vec<Command> = Vec::new();
     // Trailing literals (after the last copy) form a final insert-only command.
@@ -3443,7 +3450,7 @@ fn zopfli_parse_ext(
         // pos is a copy-end node: back_len[pos] > 0.
         let src = back_pos[pos] as usize;
         let insert_len = (src - u[src] as usize) as u32;
-        if std::env::var("BROTLI_DP_DEBUG").is_ok() && (499_980..=500_020).contains(&pos) {
+        if env_flag!("BROTLI_DP_DEBUG") && (499_980..=500_020).contains(&pos) {
             eprintln!(
                 "BT[end={pos}] src={src} ins={insert_len} copy={} d={} cost={:.1}",
                 back_len[pos], back_dist[pos], cost[pos]
@@ -3650,7 +3657,7 @@ fn zopfli_iterative_parse(
     // the flat per-command cost leaves insert length to chance and the
     // command tree stays broad. Env: BROTLI_INS_FREE /
     // BROTLI_INS_PRIOR="p1,p2"; BROTLI_NO_INS_PRIOR disables.
-    let ins_prior_cfg: Option<(u32, f32, f32)> = if std::env::var("BROTLI_NO_INS_PRIOR").is_ok() {
+    let ins_prior_cfg: Option<(u32, f32, f32)> = if env_flag!("BROTLI_NO_INS_PRIOR") {
         None
     } else {
         let free = std::env::var("BROTLI_INS_FREE")
@@ -3675,7 +3682,7 @@ fn zopfli_iterative_parse(
     // H10 binary-tree candidates (BROTLI_TREE_MF): replaces the hash
     // chain's collection for pass 1a; the refinement's candidate cache
     // and rep0-hint merge flow unchanged from there.
-    let (mut best_commands, cached_candidates) = if std::env::var("BROTLI_TREE_MF").is_ok() {
+    let (mut best_commands, cached_candidates) = if env_flag!("BROTLI_TREE_MF") {
         let cands = zopfli_collect_tree(input, mlen_offset, use_dict);
         zopfli_parse_ext(
             input,
@@ -3709,7 +3716,7 @@ fn zopfli_iterative_parse(
             quality,
         )
     };
-    if std::env::var("BROTLI_STATS").is_ok() {
+    if env_flag!("BROTLI_STATS") {
         eprintln!(
             "PHASE pass1a: {:.1}s ({} cmds)",
             t0.elapsed().as_secs_f64(),
@@ -3740,11 +3747,11 @@ fn zopfli_iterative_parse(
         let mut mf_greedy = omnizip_codecs::HashChainMatchFinder::new(input, greedy_config);
         let t = std::time::Instant::now();
         let greedy_commands = greedy_parse(input, &mut mf_greedy, mlen_offset);
-        if std::env::var("BROTLI_STATS").is_ok() {
+        if env_flag!("BROTLI_STATS") {
             eprintln!("PHASE greedy: {:.1}s", t.elapsed().as_secs_f64());
         }
         let greedy_score = score_commands(&greedy_commands, input, mlen_offset);
-        if greedy_score < best_score && std::env::var("BROTLI_NO_GREEDY").is_err() {
+        if greedy_score < best_score && !env_flag!("BROTLI_NO_GREEDY") {
             best_score = greedy_score;
             best_commands = greedy_commands;
         }
@@ -3774,7 +3781,7 @@ fn zopfli_iterative_parse(
             quality,
         );
         let light_score = score_commands(&light_commands, input, mlen_offset);
-        if light_score < best_score && std::env::var("BROTLI_NO_LIGHT").is_err() {
+        if light_score < best_score && !env_flag!("BROTLI_NO_LIGHT") {
             best_score = light_score;
             best_commands = light_commands;
         }
@@ -3816,8 +3823,8 @@ fn zopfli_iterative_parse(
     // >10K bits on the CSV benchmark — the emission stage's
     // block-splitting and singleton-tree assignment shift costs in
     // ways no analytic model reproduces.
-    let exact_accept = std::env::var("BROTLI_EXACT_ACCEPT").is_ok()
-        || (quality >= 10 && std::env::var("BROTLI_NO_EXACT_ACCEPT").is_err());
+    let exact_accept =
+        env_flag!("BROTLI_EXACT_ACCEPT") || (quality >= 10 && !env_flag!("BROTLI_NO_EXACT_ACCEPT"));
     // Exact-acceptance chains converge by iteration 2 (iteration 3 was
     // rejected on every benchmark size); 2 iterations across ALL chunk
     // sizes — the 8 MiB q10+ chunks only reach the winning parse on
@@ -3852,8 +3859,8 @@ fn zopfli_iterative_parse(
         // ctx>>4 for inputs ≥ 8 KiB). Modeling finer contexts than the
         // wire format can express over-promises literal savings and
         // skews the parse.
-        let from_commands = std::env::var("BROTLI_CM_LIT").is_ok()
-            || (quality >= 10 && std::env::var("BROTLI_NO_CM_LIT").is_err());
+        let from_commands =
+            env_flag!("BROTLI_CM_LIT") || (quality >= 10 && !env_flag!("BROTLI_NO_CM_LIT"));
         let _positional_costs: Vec<f32> = {
             let context_mode: u32 = if is_text_like(input) { 2 } else { 0 };
             // Per-CONTEXT (64 buckets) literal costs — each bucket priced
@@ -3985,7 +3992,7 @@ fn zopfli_iterative_parse(
         let setcmd_active = quality >= 10
             && model_commands.len() >= 32_000
             && model_commands.len() <= 128_000
-            && std::env::var("BROTLI_NO_SETCMD").is_err()
+            && !env_flag!("BROTLI_NO_SETCMD")
             && std::env::var("BROTLI_SETCMD_FLIT")
                 .map(|v| v == "1")
                 .unwrap_or(false);
@@ -4088,11 +4095,11 @@ fn zopfli_iterative_parse(
             quality >= 10
                 && model_commands.len() >= 32_000
                 && model_commands.len() <= 128_000
-                && std::env::var("BROTLI_NO_SETCMD").is_err(),
+                && !env_flag!("BROTLI_NO_SETCMD"),
             quality >= 10
                 && model_commands.len() >= 32_000
                 && model_commands.len() <= 128_000
-                && std::env::var("BROTLI_NO_SETCOST_D").is_err(),
+                && !env_flag!("BROTLI_NO_SETCOST_D"),
         );
 
         let t = std::time::Instant::now();
@@ -4146,9 +4153,7 @@ fn zopfli_iterative_parse(
             Some(lit_cost_refined),
             if setcmd_active {
                 None
-            } else if std::env::var("BROTLI_POS").is_ok()
-                || (quality >= 10 && std::env::var("BROTLI_NO_POS").is_err())
-            {
+            } else if env_flag!("BROTLI_POS") || (quality >= 10 && !env_flag!("BROTLI_NO_POS")) {
                 Some(&_positional_costs)
             } else {
                 None
@@ -4162,11 +4167,11 @@ fn zopfli_iterative_parse(
             quality,
         )
         .0;
-        if std::env::var("BROTLI_STATS").is_ok() {
+        if env_flag!("BROTLI_STATS") {
             eprintln!("PHASE refine: {:.1}s", t.elapsed().as_secs_f64());
         }
         let score_iter = score_commands(&commands_iter, input, mlen_offset);
-        if std::env::var("BROTLI_STATS").is_ok() {
+        if env_flag!("BROTLI_STATS") {
             eprintln!(
                 "zopfli iter: best={best_score} candidate={score_iter} (cmds {} -> {})",
                 best_commands.len(),
@@ -4181,7 +4186,7 @@ fn zopfli_iterative_parse(
             // worse, candidate 3 is 1.8KB better).
             let (bits_iter, iter_bw) =
                 measure_emission_bits(&commands_iter, input, mlen_offset, quality, is_last, ctx_in);
-            if std::env::var("BROTLI_STATS").is_ok() {
+            if env_flag!("BROTLI_STATS") {
                 eprintln!("zopfli exact: best={best_bits:?} candidate={bits_iter}");
             }
             if best_bits.is_none_or(|b| bits_iter < b) {
@@ -4192,7 +4197,7 @@ fn zopfli_iterative_parse(
                 drop(iter_bw);
             }
             model_commands = commands_iter;
-        } else if score_iter < best_score || std::env::var("BROTLI_POS_FORCE").is_ok() {
+        } else if score_iter < best_score || env_flag!("BROTLI_POS_FORCE") {
             best_score = score_iter.min(best_score);
             best_commands = commands_iter.clone();
             model_commands = commands_iter;
@@ -4876,15 +4881,15 @@ fn score_commands_adaptive(commands: &[Command], input: &[u8], mlen_offset: usiz
 }
 
 fn score_commands(commands: &[Command], input: &[u8], mlen_offset: usize) -> u64 {
-    if std::env::var("BROTLI_ADAPT").is_ok() {
+    if env_flag!("BROTLI_ADAPT") {
         return score_commands_adaptive(commands, input, mlen_offset);
     }
-    if std::env::var("BROTLI_EXACT_SCORE").is_ok() {
+    if env_flag!("BROTLI_EXACT_SCORE") {
         if let Some(b) = exact_emission_bits(commands, input, mlen_offset, true) {
             return b;
         }
     }
-    let use_positional = std::env::var("BROTLI_POS").is_ok();
+    let use_positional = env_flag!("BROTLI_POS");
     let mut literal_count = 0u64;
     let mut cmd_count = 0u64;
     let mut literals_freq = [0u32; 256];
