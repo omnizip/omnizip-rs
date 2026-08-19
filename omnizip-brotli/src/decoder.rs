@@ -506,17 +506,30 @@ pub fn parse_distance_header(
 /// Maximum Huffman code length per RFC 7932 §9.5.
 pub const MAX_HUFFMAN_CODE_LENGTH: u8 = 15;
 
-/// Canonical Huffman table with flat lookup for O(1) correct decode.
+/// Canonical Huffman table for O(1) symbol decode.
 ///
-/// The table is sized to `1 << root_bits` where `root_bits` is the
-/// tree's actual maximum code length — a shallow tree keeps its whole
-/// lookup table in L1 (a flat 2^15 table is 128 KiB of L2-latency
-/// random accesses per symbol, plus a 128 KiB memset per tree build).
+/// Two-level layout (upstream's): a root table indexed by the low
+/// `root_bits` wire bits, plus fixed-stride subtables for codes
+/// longer than the root width. A tree whose max code length fits the
+/// root stays single-level (L1-resident). Deep trees — command trees
+/// reach 12-13 bits — cost `2^8 + k·2^(max-8)` entries instead of
+/// `2^max`, which dominates tree-build time (measured at ~43% of
+/// decode on block-switched streams).
 #[derive(Clone, Debug)]
 pub struct HuffmanTable {
-    /// Flat lookup indexed by a `root_bits` peek: (symbol, `bits_to_consume`).
-    lookup: Vec<(u16, u8)>,
+    /// Root entries indexed by `peek & root_mask`:
+    /// (symbol, bits_to_consume), or (subtable offset, 0xFF) when the
+    /// code continues into a subtable. (0, 0) = invalid code.
+    root: Vec<(u16, u8)>,
+    /// Concatenated subtables of stride `1 << sub_bits`, indexed by
+    /// `(peek >> root_bits) & sub_mask` plus the root's offset.
+    subs: Vec<(u16, u8)>,
     root_bits: u32,
+    root_mask: u32,
+    sub_bits: u32,
+    sub_mask: u32,
+    /// Peek width = the tree's max code length.
+    total_bits: u32,
     /// For NSYM=1 simple form: return without consuming bits.
     single_symbol: Option<u32>,
 }
@@ -552,27 +565,87 @@ impl HuffmanTable {
             None
         };
 
-        // Flat lookup sized to the tree's max code length: for each
-        // symbol with code length L, its bit-reversed canonical code
-        // fills all 2^(root-L) possible high-bit extensions.
-        let root_bits: u32 = 15; // BISECT: flat table
-        let size = 1usize << root_bits;
-        let mut lookup = vec![(0u16, 0u8); size];
+        // Two-level build. Root width caps at 8; trees whose max code
+        // length fits stay single-level. For each symbol with code
+        // length L ≤ root_bits, its bit-reversed canonical code fills
+        // all 2^(root-L) high-bit extensions of the root. Longer codes
+        // share a prefix slot that points at a subtable.
+        const ROOT_CAP: u32 = 8;
+        let max_len: u32 = lengths
+            .iter()
+            .copied()
+            .filter(|&l| l > 0)
+            .max()
+            .unwrap_or(0) as u32;
+        let root_bits = max_len.min(ROOT_CAP);
+        let root_size = 1usize << root_bits;
+        let root_mask = root_size as u32 - 1;
+        let mut root = vec![(0u16, 0u8); root_size];
+
+        let sub_bits = max_len.saturating_sub(root_bits);
+        let sub_mask: u32 = if sub_bits > 0 {
+            (1u32 << sub_bits) - 1
+        } else {
+            0
+        };
+        let stride = 1usize << sub_bits;
+        // Long codes grouped by their root prefix.
+        let mut prefix_offset = vec![u32::MAX; root_size];
+        let mut longs: Vec<(u16, u32, u32, u8)> = Vec::new(); // (sym, rev_code, len, raw len)
         for i in 0..n {
             let l = lengths[i];
-            if l > 0 && u32::from(l) <= root_bits {
-                let base = u32::from(codes[i]);
-                for high in 0u32..(1u32 << (root_bits - u32::from(l))) {
+            if l == 0 {
+                continue;
+            }
+            let (lu, base) = (u32::from(l), u32::from(codes[i]));
+            if lu <= root_bits {
+                for high in 0u32..(1u32 << (root_bits - lu)) {
                     let idx = (base | (high << l)) as usize;
-                    if idx < size {
-                        lookup[idx] = (i as u16, l);
+                    if idx < root_size {
+                        root[idx] = (i as u16, l);
                     }
                 }
+            } else {
+                let prefix = (base & root_mask) as usize;
+                longs.push((i as u16, base, lu, l));
+                prefix_offset[prefix] = 0; // mark used
+            }
+        }
+        let mut subs: Vec<(u16, u8)> = Vec::new();
+        if !longs.is_empty() {
+            // Assign each used prefix a subtable slot.
+            let mut next = 0u32;
+            for off in prefix_offset.iter_mut() {
+                if *off == 0 {
+                    *off = next;
+                    next += stride as u32;
+                }
+            }
+            subs = vec![(0u16, 0u8); next as usize];
+            for &(sym, base, lu, l) in &longs {
+                let prefix = (base & root_mask) as usize;
+                let off = prefix_offset[prefix] as usize;
+                let len_rest = lu - root_bits;
+                let low = base >> root_bits;
+                for high in 0u32..(1u32 << (sub_bits - len_rest)) {
+                    let idx = off + ((low | (high << len_rest)) as usize);
+                    if idx < subs.len() {
+                        subs[idx] = (sym, l);
+                    }
+                }
+                // The root slot dispatches into the subtable. The u16
+                // payload is the subtable offset (≤ 32K, fits).
+                root[prefix] = (prefix_offset[prefix] as u16, 0xFF);
             }
         }
         Self {
-            lookup,
+            root,
+            subs,
             root_bits,
+            root_mask,
+            sub_bits,
+            sub_mask,
+            total_bits: max_len,
             single_symbol,
         }
     }
@@ -603,7 +676,7 @@ impl HuffmanTable {
         let s_b = syms[1];
 
         // 8-entry pattern (indexed by a 3-bit peek).
-        let lookup: Vec<(u16, u8)> = vec![
+        let root: Vec<(u16, u8)> = vec![
             (s_a, 1), // 000
             (s_b, 2), // 001
             (s_a, 1), // 010
@@ -614,29 +687,44 @@ impl HuffmanTable {
             (s_d, 3), // 111
         ];
         Self {
-            lookup,
+            root,
+            subs: Vec::new(),
             root_bits: 3,
+            root_mask: 7,
+            sub_bits: 0,
+            sub_mask: 0,
+            total_bits: 3,
             single_symbol: None,
         }
     }
 
-    /// Diagnostic: lookup table size (bench only).
+    /// Diagnostic: total lookup entries (bench only).
     #[doc(hidden)]
     #[must_use]
     pub fn lookup_len(&self) -> usize {
-        self.lookup.len()
+        self.root.len() + self.subs.len()
     }
 
-    /// O(1) symbol decode via `root_bits` peek + flat table lookup.
+    /// O(1) symbol decode: `total_bits` peek, root lookup, subtable
+    /// dispatch for codes longer than the root width.
     #[inline]
     pub fn read_symbol(&self, br: &mut BitReader) -> Option<u32> {
         if let Some(sym) = self.single_symbol {
             return Some(sym);
         }
-        let bits = br.peek_bits(self.root_bits);
-        let (sym, len) = self.lookup[bits as usize];
+        let bits = br.peek_bits(self.total_bits);
+        let (sym, len) = self.root[(bits & self.root_mask) as usize];
         if len == 0 {
             return None;
+        }
+        if len == 0xFF {
+            let idx = ((bits >> self.root_bits) & self.sub_mask) as usize + usize::from(sym);
+            let (sym2, len2) = self.subs[idx];
+            if len2 == 0 {
+                return None;
+            }
+            br.drop_bits(u32::from(len2));
+            return Some(u32::from(sym2));
         }
         br.drop_bits(u32::from(len));
         Some(u32::from(sym))
