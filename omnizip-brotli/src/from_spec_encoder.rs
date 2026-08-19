@@ -1405,6 +1405,12 @@ fn emit_metablock_from_commands(
             let (bl_code, bl_len) = cmd_bl_wire[c];
             bw.write_bits(bl_code, u32::from(bl_len));
             bw.write_bits(extra, nbits);
+            if env_flag!("BROTLI_SWITCH_LOG") {
+                eprintln!(
+                    "SW-CMD pos={mlen_offset}+{out_pos} type={new_type} len={}",
+                    cmd_block_len[next_switch]
+                );
+            }
             cmd_block_remaining = cmd_block_len[next_switch] as usize;
             next_switch += 1;
         }
@@ -1492,6 +1498,12 @@ fn emit_metablock_from_commands(
                         let (bl_code, bl_len) = dist_bl_wire[c];
                         bw.write_bits(bl_code, u32::from(bl_len));
                         bw.write_bits(extra, nbits);
+                        if env_flag!("BROTLI_SWITCH_LOG") {
+                            eprintln!(
+                                "SW-DIST pos={mlen_offset}+{out_pos} type={dist_next_switch} len={}",
+                                dist_block_len[dist_next_switch]
+                            );
+                        }
                         dist_blk = dist_next_switch;
                         dist_block_remaining = dist_block_len[dist_next_switch] as usize;
                         dist_next_switch += 1;
