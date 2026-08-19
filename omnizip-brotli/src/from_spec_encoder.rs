@@ -460,8 +460,16 @@ fn encode_huffman_chunk_body(
     // this can be flipped back on for inputs with strongly varying
     // per-block statistics.
     let use_block_switch = false;
-    let (commands, precomputed) =
-        parse_input_with_offset(input, history, mf, mlen_offset, quality, false, is_last, ctx_in);
+    let (commands, precomputed) = parse_input_with_offset(
+        input,
+        history,
+        mf,
+        mlen_offset,
+        quality,
+        false,
+        is_last,
+        ctx_in,
+    );
     // The exact-acceptance chain already emitted the winning parse
     // with these exact header parameters — reuse its bits verbatim
     // instead of a fourth full emission (3 measures + final became
@@ -472,8 +480,8 @@ fn encode_huffman_chunk_body(
         append_writer(bw, won);
     } else {
         bw.write_bits(u32::from(is_last), 1); // ISLAST
-        // ISLASTEMPTY only present when ISLAST=1; we never emit empty
-        // metablocks, so always 0 when present.
+                                              // ISLASTEMPTY only present when ISLAST=1; we never emit empty
+                                              // metablocks, so always 0 when present.
         if is_last {
             bw.write_bits(0, 1); // ISLASTEMPTY = 0
         }
@@ -4171,14 +4179,8 @@ fn zopfli_iterative_parse(
             // worse intermediate candidate never reaches the better
             // parses deeper in the chain (measured: candidate 1 is
             // worse, candidate 3 is 1.8KB better).
-            let (bits_iter, iter_bw) = measure_emission_bits(
-                &commands_iter,
-                input,
-                mlen_offset,
-                quality,
-                is_last,
-                ctx_in,
-            );
+            let (bits_iter, iter_bw) =
+                measure_emission_bits(&commands_iter, input, mlen_offset, quality, is_last, ctx_in);
             if std::env::var("BROTLI_STATS").is_ok() {
                 eprintln!("zopfli exact: best={best_bits:?} candidate={bits_iter}");
             }
@@ -5227,8 +5229,17 @@ pub fn _parse_input_with_offset_diag(
     quality: i32,
     disable_dict: bool,
 ) -> Vec<Command> {
-    parse_input_with_offset_impl(input, &[], mf, mlen_offset, quality, disable_dict, false, (0, 0))
-        .0
+    parse_input_with_offset_impl(
+        input,
+        &[],
+        mf,
+        mlen_offset,
+        quality,
+        disable_dict,
+        false,
+        (0, 0),
+    )
+    .0
 }
 
 fn parse_input_with_offset_impl(
