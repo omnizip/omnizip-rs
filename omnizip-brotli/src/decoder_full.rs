@@ -547,6 +547,8 @@ pub(crate) fn decode_compressed_metablock_full(
     max_backward_distance: u32,
     prior_output: &[u8],
     ctx_in: (u8, u8),
+    dist_rb: &mut [u32; 4],
+    dist_rb_idx: &mut i32,
 ) -> Result<(usize, Vec<u8>, (u8, u8)), &'static str> {
     let mut br = BitReader::new(data);
     br.set_bit_pos(bit_pos);
@@ -622,6 +624,8 @@ pub(crate) fn decode_compressed_metablock_full(
         max_backward_distance,
         prior_output,
         ctx_in,
+        dist_rb,
+        dist_rb_idx,
     )
 }
 
@@ -644,6 +648,8 @@ pub(crate) fn decode_compressed_metablock_full_with_trees(
     max_backward_distance: u32,
     prior_output: &[u8],
     ctx_in: (u8, u8),
+    dist_rb: &mut [u32; 4],
+    dist_rb_idx: &mut i32,
 ) -> Result<(usize, Vec<u8>, (u8, u8)), &'static str> {
     let mut br = BitReader::new(data);
     br.set_bit_pos(bit_pos);
@@ -679,6 +685,8 @@ pub(crate) fn decode_compressed_metablock_full_with_trees(
         max_backward_distance,
         prior_output,
         ctx_in,
+        dist_rb,
+        dist_rb_idx,
     )
 }
 
@@ -701,6 +709,8 @@ fn finish_metablock_decode(
     max_backward_distance: u32,
     prior_output: &[u8],
     ctx_in: (u8, u8),
+    dist_rb: &mut [u32; 4],
+    dist_rb_idx: &mut i32,
 ) -> Result<(usize, Vec<u8>, (u8, u8)), &'static str> {
     if let Ok(v) = std::env::var("BROTLI_DEC_AT") {
         let mut st = dec_stats();
@@ -712,6 +722,12 @@ fn finish_metablock_decode(
     let ndirect = ndirect_raw << npostfix;
     if npostfix > 3 {
         return Err("invalid metablock: NPOSTFIX > 3");
+    }
+    if std::env::var("BROTLI_DICT_DEBUG").is_ok() {
+        eprintln!(
+            "MB output_base={output_base} mlen={mlen} nbltypesl={} nbltypesc={} nbltypesd={}",
+            lit_bt.num_block_types, cmd_bt.num_block_types, dist_bt.num_block_types
+        );
     }
     let num_direct_distance_codes = 16u32 + ndirect as u32;
 
@@ -747,8 +763,11 @@ fn finish_metablock_decode(
 
     // ----- Command loop -----
     let mut output: Vec<u8> = Vec::with_capacity(mlen);
-    let mut dist_rb: [u32; 4] = [16, 15, 11, 4];
-    let mut dist_rb_idx: i32 = 0;
+    // `dist_rb` / `dist_rb_idx` are frame-scoped state owned by the
+    // caller: the recent-distances ring persists ACROSS metablocks
+    // (upstream keeps one ring per stream). Reinitializing per
+    // metablock broke mid-frame rep codes on multi-metablock streams.
+
     let (mut p1, mut p2) = ctx_in;
 
     // Initialise block lengths. For categories with num_block_types==1,
@@ -851,8 +870,8 @@ fn finish_metablock_decode(
             // Implicit distance (kCmdLut.distance_code == 0):
             // use most recent from ring buffer. Matches upstream
             // CommandPostDecodeLiterals: --idx, dist_rb[idx&3].
-            dist_rb_idx -= 1;
-            dist_rb[(dist_rb_idx & 3) as usize]
+            *dist_rb_idx -= 1;
+            dist_rb[(*dist_rb_idx & 3) as usize]
         } else {
             // Distance block-switch (BEFORE reading the distance code).
             if dist_bt.num_block_types > 1 {
@@ -895,8 +914,8 @@ fn finish_metablock_decode(
                 num_direct_distance_codes,
                 npostfix as i32,
                 br,
-                &mut dist_rb,
-                &mut dist_rb_idx,
+                &mut *dist_rb,
+                &mut *dist_rb_idx,
             )
         };
 
@@ -914,12 +933,18 @@ fn finish_metablock_decode(
             if dictionary_lookup(&mut output, copy_len as u32, distance as i32, max_distance)
                 .is_none()
             {
+                if std::env::var("BROTLI_DICT_DEBUG").is_ok() {
+                    eprintln!(
+                        "DICT-FAIL copy_len={copy_len} distance={distance} max_distance={max_distance} pos={} wbits_max={max_backward_distance}",
+                        output_base + output.len()
+                    );
+                }
                 return Err("static dictionary not supported");
             }
             // Compensate dist_rb_idx for implicit distance path (which
             // decremented idx; the dictionary path doesn't write back).
             if v.distance_code >= 0 {
-                dist_rb_idx = dist_rb_idx.wrapping_add(1);
+                *dist_rb_idx = (*dist_rb_idx).wrapping_add(1);
             }
         } else {
             if distance == 0 || distance as usize > prior_output.len() + output.len() {
@@ -944,8 +969,8 @@ fn finish_metablock_decode(
                 }
             }
             // Update recent-distances cache (upstream LZ77 copy path).
-            dist_rb[(dist_rb_idx & 3) as usize] = distance;
-            dist_rb_idx = dist_rb_idx.wrapping_add(1);
+            dist_rb[(*dist_rb_idx & 3) as usize] = distance;
+            *dist_rb_idx = (*dist_rb_idx).wrapping_add(1);
         }
 
         let cmd_pos = output_base + cmd_start_outlen + insert_len;
@@ -961,8 +986,8 @@ fn finish_metablock_decode(
                     dist_sym,
                     distance,
                     v.distance_code >= 0,
-                    dist_rb,
-                    dist_rb_idx,
+                    *dist_rb,
+                    *dist_rb_idx,
                 ));
             }
         }

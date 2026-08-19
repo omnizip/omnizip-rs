@@ -4205,6 +4205,48 @@ fn zopfli_iterative_parse(
             break;
         }
     }
+    if let Ok(path) = std::env::var("BROTLI_DUMP_CMDS") {
+        // Canonical dump of the WINNING parse only (the measure chain
+        // evaluates several candidates; only this one is emitted).
+        use std::io::Write as _;
+        let mut f = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .unwrap();
+        let mut pos = mlen_offset;
+        for c in &best_commands {
+            writeln!(
+                f,
+                "ENC pos={pos} ins={} copy={} dist={}",
+                c.insert_len, c.copy_len, c.distance
+            )
+            .unwrap();
+            pos += c.insert_len as usize;
+            if c.copy_len > 0 {
+                // Dictionary references advance by the TRANSFORMED
+                // length, which differs from copy_len (the pre-transform
+                // word length) — same rule the decoder applies.
+                let copy_start = (mlen_offset + pos).min(usize::MAX);
+                let max_dist = (copy_start as u32).min(MAX_BACKWARD_DISTANCE);
+                let advance = if c.distance > max_dist {
+                    let mut scratch = Vec::new();
+                    match crate::dictionary::dictionary_lookup(
+                        &mut scratch,
+                        c.copy_len,
+                        c.distance as i32,
+                        max_dist,
+                    ) {
+                        Some(()) => scratch.len(),
+                        None => c.copy_len as usize,
+                    }
+                } else {
+                    c.copy_len as usize
+                };
+                pos += advance;
+            }
+        }
+    }
     (best_commands, winner_bw)
 }
 
