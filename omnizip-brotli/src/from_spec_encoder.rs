@@ -2954,7 +2954,13 @@ fn zopfli_parse_ext(
             let max_dist = (global_pos as u32).min(MAX_BACKWARD_DISTANCE);
             if pos + MIN_MATCH as usize <= n {
                 mf.advance();
-                mf.find_candidates_into(to_mf(mlen_offset + pos), cand_count, walk, &mut mf_buf);
+                mf.find_candidates_into_patience(
+                    to_mf(mlen_offset + pos),
+                    cand_count,
+                    walk,
+                    if quality >= 10 { 32 } else { 16 },
+                    &mut mf_buf,
+                );
                 if env_flag!("BROTLI_DP_DEBUG") && pos == 499_992 {
                     eprintln!(
                         "STEP1[499992] mf_base={mf_base} mlen={mlen_offset} n={n} raw={:?}",
