@@ -753,6 +753,8 @@ fn finish_metablock_decode(
     }
 
     // ----- Huffman tree groups -----
+    let t_dbg = std::env::var("BROTLI_DEC_TIMER").is_ok();
+    let t0 = std::time::Instant::now();
     let (lit_trees, p) = read_tree_group(data, br.bit_pos(), 256, ntreesl)?;
     br.set_bit_pos(p);
     let (cmd_trees, p) = read_tree_group(data, br.bit_pos(), 704, cmd_bt.num_block_types)?;
@@ -760,6 +762,7 @@ fn finish_metablock_decode(
     let dist_alphabet_size = num_direct_distance_codes as usize + (48usize << npostfix);
     let (dist_trees, p) = read_tree_group(data, br.bit_pos(), dist_alphabet_size, ntreesd)?;
     br.set_bit_pos(p);
+    let t_trees = t0.elapsed();
 
     // ----- Command loop -----
     let mut output: Vec<u8> = Vec::with_capacity(mlen);
@@ -1068,6 +1071,13 @@ fn finish_metablock_decode(
         if output.len() > mlen + 1 {
             return Err("metablock overran mlen");
         }
+    }
+    if t_dbg {
+        let t_cmd = t0.elapsed() - t_trees;
+        eprintln!(
+            "MBTIMER base={output_base} mlen={mlen} trees={t_trees:?} cmdloop={t_cmd:?} ntreesl={ntreesl} ncmd={} ndist={ntreesd}",
+            cmd_bt.num_block_types
+        );
     }
 
     Ok((br.bit_pos(), output, (p1, p2)))
