@@ -620,6 +620,13 @@ impl HuffmanTable {
         }
     }
 
+    /// Diagnostic: lookup table size (bench only).
+    #[doc(hidden)]
+    #[must_use]
+    pub fn lookup_len(&self) -> usize {
+        self.lookup.len()
+    }
+
     /// O(1) symbol decode via `root_bits` peek + flat table lookup.
     #[inline]
     pub fn read_symbol(&self, br: &mut BitReader) -> Option<u32> {
@@ -646,20 +653,51 @@ impl HuffmanTable {
 /// `alphabet_size` is the maximum number of symbols in the alphabet
 /// (e.g. 256 for literals, 704 for commands, 64 for distances).
 /// `max_bits` caps the code-length code's symbol bit width.
+thread_local! {
+    static HT_STATS: std::cell::Cell<(u64, u64, u64, u64)> = const { std::cell::Cell::new((0, 0, 0, 0)) };
+}
+
 pub fn read_huffman_table(
     data: &[u8],
     bit_pos: usize,
     alphabet_size: usize,
 ) -> Result<(HuffmanTable, usize), &'static str> {
+    static HT_TIMER_ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let ht_timer = *HT_TIMER_ON.get_or_init(|| std::env::var("BROTLI_HT_STATS").is_ok());
+    let t0 = std::time::Instant::now();
     let mut br = BitReader::new(data);
     br.set_bit_pos(bit_pos);
 
     let hskip = br.read_bits(2);
-    if hskip == 1 {
-        read_simple_form(&mut br, alphabet_size)
+    let r = if hskip == 1 {
+        let r = read_simple_form(&mut br, alphabet_size);
+        HT_STATS.with(|c| {
+            let (n, s, cx, f) = c.get();
+            c.set((n + 1, s + 1, cx, f));
+        });
+        r
     } else {
-        read_complex_form(&mut br, alphabet_size, hskip as usize)
+        let r = read_complex_form(&mut br, alphabet_size, hskip as usize);
+        if ht_timer {
+            HT_STATS.with(|c| {
+                let (n, s, cx, f) = c.get();
+                c.set((n + 1, s, cx + 1, f));
+            });
+        }
+        r
+    };
+    if ht_timer {
+        HT_STATS.with(|c| {
+            let (n, s, cx, f) = c.get();
+            c.set((n, s, cx, f + t0.elapsed().as_nanos() as u64));
+        });
     }
+    r
+}
+
+#[doc(hidden)]
+pub fn _ht_stats() -> (u64, u64, u64, u64) {
+    HT_STATS.with(|c| c.get())
 }
 
 fn read_simple_form(
@@ -668,7 +706,13 @@ fn read_simple_form(
 ) -> Result<(HuffmanTable, usize), &'static str> {
     let nsym = br.read_bits(2) + 1;
     let bits_per_sym = ceil_log2(alphabet_size as u32);
-    let mut lengths = vec![0u8; alphabet_size];
+    // Alphabet ≤ 704 (commands); a stack buffer avoids a heap
+    // allocation per simple-form table — these are common (distance
+    // and command trees with few distinct symbols).
+    let mut stack_lengths = [0u8; 704];
+    debug_assert!(alphabet_size <= stack_lengths.len());
+    let lengths = &mut stack_lengths[..alphabet_size];
+    lengths.fill(0);
 
     match nsym {
         1 => {
@@ -771,6 +815,11 @@ fn read_complex_form(
     }
 
     let cl_table = HuffmanTable::from_lengths(&cl_code_lengths);
+    static CL_TIMER_ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let cl_timer = *CL_TIMER_ON.get_or_init(|| {
+        std::env::var("BROTLI_HT_STATS").is_ok() || std::env::var("BROTLI_TREE_SHAPES").is_ok()
+    });
+    let tcl0 = std::time::Instant::now();
 
     let mut lengths = vec![0u8; alphabet_size];
     let mut i: usize = 0;
@@ -844,7 +893,24 @@ fn read_complex_form(
         }
     }
 
+    // (n, ns_loop, ns_build): loop = symbol-length reading, build = from_lengths.
+    let tcl = tcl0.elapsed();
+    let tbuild0 = std::time::Instant::now();
     let table = HuffmanTable::from_lengths(&lengths);
+    if cl_timer {
+        CL_STATS.with(|c| {
+            let (n, l, b) = c.get();
+            c.set((
+                n + 1,
+                l + tcl.as_nanos() as u64,
+                b + tbuild0.elapsed().as_nanos() as u64,
+            ));
+        });
+    }
+    if std::env::var("BROTLI_TREE_SHAPES").is_ok() {
+        let rb = lengths.iter().copied().max().unwrap_or(0);
+        eprintln!("SHAPE alphabet={alphabet_size} root_bits={rb}");
+    }
     Ok((table, br.bit_pos()))
 }
 
@@ -2047,4 +2113,14 @@ mod tests {
         let decoded = decode(&compressed).expect("decode empty");
         assert!(decoded.is_empty());
     }
+}
+
+thread_local! {
+    static CL_STATS: std::cell::Cell<(u64, u64, u64)> =
+        const { std::cell::Cell::new((0, 0, 0)) };
+}
+
+#[doc(hidden)]
+pub fn _cl_stats() -> (u64, u64, u64) {
+    CL_STATS.with(|c| c.get())
 }
