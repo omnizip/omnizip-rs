@@ -952,6 +952,14 @@ impl<'a> BankMatchFinder<'a> {
         let base = key << self.block_bits;
         let bucket = &self.buckets[base..base + mask + 1];
         let down = count.saturating_sub(mask + 1);
+        // Reject byte at the current best length, loaded once and
+        // refreshed only when best changes (upstream prev_best_val).
+        let mut cur_best = best.map_or(3, |(_, l)| l) as usize;
+        let mut pos_val = if pos + cur_best < self.data.len() {
+            self.data[pos + cur_best]
+        } else {
+            0xFF
+        };
         let mut i = count;
         while i > down {
             i -= 1;
@@ -966,11 +974,7 @@ impl<'a> BankMatchFinder<'a> {
             if backward as u32 > self.max_distance {
                 break;
             }
-            let cur_best = best.map_or(3, |(_, l)| l) as usize;
-            if pos + cur_best < self.data.len()
-                && prev + cur_best < self.data.len()
-                && self.data[pos + cur_best] != self.data[prev + cur_best]
-            {
+            if prev + cur_best < self.data.len() && self.data[prev + cur_best] != pos_val {
                 continue;
             }
             // Upstream requires len >= 4 from the bucket scan
@@ -984,6 +988,11 @@ impl<'a> BankMatchFinder<'a> {
                 if score > best_score {
                     best_score = score;
                     best = Some((backward as u32, len));
+                    let nb = len as usize;
+                    if nb > cur_best && pos + nb < self.data.len() {
+                        cur_best = nb;
+                        pos_val = self.data[pos + nb];
+                    }
                 }
             }
         }
