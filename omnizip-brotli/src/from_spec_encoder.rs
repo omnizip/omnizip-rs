@@ -2156,28 +2156,39 @@ fn encode_distance(distance: u32, cfg: &DistanceConfig) -> (u32, u32) {
         return (NUM_SHORT + distance - 1, 0);
     }
 
-    // Long codes: shift past short + direct codes
-    let d = distance - 1 - ndirect;
+    // Long codes (RFC 7932 §10.4 with NPOSTFIX): the wire distance
+    // value is split into a base (bucketed) and a postfix (low bits).
+    //   adjusted = distance - 1 - ndirect
+    //   postfix = adjusted & ((1 << npostfix) - 1)
+    //   base = adjusted >> npostfix
+    //   distval = (nbits - 1) * 2 + odd/even
+    //   symbol = num_direct + (distval << npostfix) + postfix
+    //   extra_bits_value = base - bucket_offset
+    let adjusted = distance - 1 - ndirect;
+    let postfix_mask = (1u32 << cfg.npostfix) - 1;
+    let postfix = adjusted & postfix_mask;
+    let base = adjusted >> cfg.npostfix;
+
     let mut nbits: u32 = 1;
     while nbits < 24 {
         let limit_even = (4u32 << (nbits - 1)).saturating_sub(4) + (1u32 << nbits);
         let limit_odd = (6u32 << (nbits - 1)).saturating_sub(4) + (1u32 << nbits);
         let limit = limit_even.max(limit_odd);
-        if d < limit {
+        if base < limit {
             break;
         }
         nbits += 1;
     }
     let even_offset = (4u32 << (nbits - 1)).saturating_sub(4);
     let odd_offset = (6u32 << (nbits - 1)).saturating_sub(4);
-    let (postfix_bit, base) = if d >= odd_offset {
+    let (odd_bit, bucket_base) = if base >= odd_offset {
         (1, odd_offset)
     } else {
         (0, even_offset)
     };
-    let distval = (nbits - 1) * 2 + postfix_bit;
-    let sym = cfg.num_direct() + distval;
-    let extra = d - base;
+    let distval = (nbits - 1) * 2 + odd_bit;
+    let sym = cfg.num_direct() + (distval << cfg.npostfix) + postfix;
+    let extra = base - bucket_base;
     (sym, extra)
 }
 
@@ -2188,7 +2199,8 @@ fn distance_extra_bits(sym: u32, cfg: &DistanceConfig) -> u32 {
         // Short codes (0-15) and direct codes (16..16+NDIRECT-1): no extra bits.
         return 0;
     }
-    let distval = sym - num_direct;
+    // Strip the postfix bits to recover the bucket-distval.
+    let distval = (sym - num_direct) >> cfg.npostfix;
     (distval >> 1) + 1
 }
 
