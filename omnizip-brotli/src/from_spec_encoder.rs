@@ -390,6 +390,41 @@ pub fn compress_with_quality(input: &[u8], quality: i32) -> Vec<u8> {
             max_match_length: MAX_COPY,
         };
         let mut shared_mf = omnizip_codecs::HashChainMatchFinder::new(input, mf_config);
+        // H5 bank hasher for the greedy tier (q4-9): one-cache-line
+        // bucket scans instead of prev[] chain walks. Upstream params:
+        // bucket 14 (<=1MiB) / 15, block_bits = min(q-1, 9),
+        // last-distance probes 4/10/16.
+        // H5 bank: binary speed path only. On text the 16-slot banks
+        // fragment the parse (10.6% vs chain 4.3% at CSV 1MB) — the
+        // chain's deep walk is what finds the long structural matches.
+        let mut shared_bank =
+            if q >= 4 && q < 10 && !env_flag!("BROTLI_NO_BANK") && !is_text_like(input) {
+                let n = input.len();
+                // block_bits: upstream uses min(q-1, 9) (=4 at q5). We
+                // use 6 (64 slots) on binary — the extra slots recover the
+                // long matches 16-slot banks miss, still one cache line*
+                // 4 and far cheaper than chain walks.
+                let mut bank = omnizip_codecs::BankMatchFinder::new(
+                    input,
+                    if n <= 1 << 20 { 14 } else { 15 },
+                    if is_text_like(input) {
+                        (q - 1).min(9) as u32
+                    } else {
+                        6
+                    },
+                    if q < 7 {
+                        4
+                    } else if q < 9 {
+                        10
+                    } else {
+                        16
+                    },
+                );
+                bank.set_max_distance(MAX_BACKWARD_DISTANCE);
+                Some(bank)
+            } else {
+                None
+            };
 
         let mut offset = 0usize;
         while offset < input.len() {
@@ -404,7 +439,7 @@ pub fn compress_with_quality(input: &[u8], quality: i32) -> Vec<u8> {
                 is_last,
                 q,
                 &mut shared_mf,
-                None,
+                shared_bank.as_mut(),
             );
             if env_flag!("BROTLI_STATS") {
                 eprintln!("chunk {offset}..{end} q{q} took {:?}", t0.elapsed());
@@ -482,7 +517,7 @@ fn encode_huffman_chunk_body(
     input: &[u8],
     history: &[u8],
     mf: &mut omnizip_codecs::HashChainMatchFinder,
-    mf6: Option<&mut omnizip_codecs::HashChainMatchFinder>,
+    bank_mf: Option<&mut omnizip_codecs::BankMatchFinder>,
     mf_base: usize,
     mlen_offset: usize,
     is_last: bool,
@@ -514,7 +549,7 @@ fn encode_huffman_chunk_body(
         input,
         history,
         mf,
-        mf6,
+        bank_mf,
         mf_base,
         mlen_offset,
         quality,
@@ -1054,7 +1089,8 @@ fn emit_metablock_from_commands(
     let dist_split_on = quality >= 4
         && stream.dist_symbols.len() >= 1024
         && dist_cfg.alphabet_size() <= 256
-        && !env_flag!("BROTLI_NO_DSPLIT");
+        && !env_flag!("BROTLI_NO_DSPLIT")
+        && (quality >= 8 || is_text_like(input));
     let dist_boundaries: Vec<usize> = if dist_split_on {
         let syms: Vec<usize> = stream.dist_symbols.iter().map(|&s| s as usize).collect();
         split_symbol_stream_optimal(&syms, dist_cfg.alphabet_size(), 4)
@@ -1778,7 +1814,7 @@ fn encode_huffman_chunk_with_shared_mf(
     is_last: bool,
     quality: i32,
     mf: &mut omnizip_codecs::HashChainMatchFinder,
-    mf6: Option<&mut omnizip_codecs::HashChainMatchFinder>,
+    bank_mf: Option<&mut omnizip_codecs::BankMatchFinder>,
 ) {
     let chunk = &full_input[chunk_start..chunk_end];
     let ctx_in = carried_lit_ctx(full_input, chunk_start);
@@ -1789,7 +1825,7 @@ fn encode_huffman_chunk_with_shared_mf(
         chunk,
         history,
         mf,
-        mf6,
+        bank_mf,
         0, // shared MF spans the whole input; data[0] is global 0
         chunk_start,
         is_last,
@@ -5391,7 +5427,7 @@ fn parse_input_with_offset(
     input: &[u8],
     history: &[u8],
     mut mf: &mut omnizip_codecs::HashChainMatchFinder,
-    mf6: Option<&mut omnizip_codecs::HashChainMatchFinder>,
+    bank_mf: Option<&mut omnizip_codecs::BankMatchFinder>,
     mf_base: usize,
     mlen_offset: usize,
     quality: i32,
@@ -5403,7 +5439,7 @@ fn parse_input_with_offset(
         input,
         history,
         &mut mf,
-        mf6,
+        bank_mf,
         mf_base,
         mlen_offset,
         quality,
@@ -5441,7 +5477,7 @@ fn parse_input_with_offset_impl(
     input: &[u8],
     history: &[u8],
     mut mf: &mut omnizip_codecs::HashChainMatchFinder,
-    mut mf6: Option<&mut omnizip_codecs::HashChainMatchFinder>,
+    mut bank_mf: Option<&mut omnizip_codecs::BankMatchFinder>,
     mf_base: usize,
     mlen_offset: usize,
     quality: i32,
@@ -5566,9 +5602,21 @@ fn parse_input_with_offset_impl(
         let max_dist = (global_pos as u32).min(MAX_BACKWARD_DISTANCE);
 
         let lz77 = if pos + MIN_MATCH as usize <= n {
-            mf.advance();
-            if let Some(m6) = mf6.as_deref_mut() {
-                m6.advance();
+            // Advance both finders when the bank is live so the chain
+            // stays warm as a long-match secondary source.
+            let bank_hit = if let Some(bank) = bank_mf.as_deref_mut() {
+                bank.advance();
+                let cap_len = ((n - pos) as u32).min(nice_match);
+                bank.find(global_pos, &last_dists[..last_dist_len], cap_len)
+                    .map(|(d, l, _)| omnizip_codecs::Lz77Match {
+                        distance: d,
+                        length: l,
+                    })
+            } else {
+                None
+            };
+            if bank_mf.is_none() {
+                mf.advance();
             }
             if quality >= 8 || greedy_tier {
                 // Cost-scored selection (reference-style lazy scoring):
@@ -5583,7 +5631,15 @@ fn parse_input_with_offset_impl(
                     (4, 16)
                 };
                 let mut cands: Vec<omnizip_codecs::Lz77Match> = Vec::new();
-                mf.find_candidates_into_patience(to_g(pos), ncand, nwalk, 8, &mut cands);
+                if bank_mf.is_some() {
+                    // Binary bank path: bank hit is the sole candidate
+                    // (chain walks are the cost we are eliminating).
+                    if let Some(m) = bank_hit {
+                        cands.push(m);
+                    }
+                } else {
+                    mf.find_candidates_into_patience(to_g(pos), ncand, nwalk, 8, &mut cands);
+                }
                 let mut bestc: Option<omnizip_codecs::Lz77Match> = None;
                 let mut best_score = f32::MIN;
                 let mut best_is_rep = false;
@@ -5664,6 +5720,8 @@ fn parse_input_with_offset_impl(
                 }
                 let _ = best_is_rep;
                 bestc
+            } else if let Some(m) = bank_hit {
+                Some(m)
             } else {
                 mf.find_match(to_g(pos))
             }
@@ -5706,17 +5764,31 @@ fn parse_input_with_offset_impl(
             if advance_len >= MIN_MATCH && distance > 0 {
                 // Lazy matching: if the current match is short, check if
                 // deferring by one position yields a longer match.
-                if lazy && advance_len < nice_match && pos + 1 < n {
+                if lazy && !env_flag!("BROTLI_NO_LAZY") && advance_len < nice_match && pos + 1 < n {
                     let next_pos = pos + 1;
                     let next_global = mlen_offset + next_pos;
                     let next_max = (next_global as u32).min(MAX_BACKWARD_DISTANCE);
 
                     let next_lz77 = if next_pos + MIN_MATCH as usize <= n {
-                        // Approximate lookahead: a shallow chain walk is
-                        // enough for the deferral comparison. The deep
-                        // (48) walk is the periodic-structure discovery
-                        // engine — text only; binary probes shallow.
-                        mf.find_match_capped(to_g(next_pos), 48.min(mf.max_chain_length()))
+                        if let Some(bank) = bank_mf.as_deref() {
+                            // Peek at pos+1 without inserting (bank is
+                            // already at pos+1 cursor-wise after the
+                            // current advance; history-only probe).
+                            bank.find(
+                                next_global,
+                                &last_dists[..last_dist_len],
+                                ((n - next_pos) as u32).min(nice_match),
+                            )
+                            .filter(|(d, _, _)| *d <= next_max)
+                            .map(|(d, l, _)| {
+                                omnizip_codecs::Lz77Match {
+                                    distance: d,
+                                    length: l,
+                                }
+                            })
+                        } else {
+                            mf.find_match_capped(to_g(next_pos), 48.min(mf.max_chain_length()))
+                        }
                     } else {
                         None
                     };
@@ -5794,22 +5866,21 @@ fn parse_input_with_offset_impl(
                     distance,
                 });
                 if greedy_tier && distance <= max_dist {
-                    // Shuffle-on-insert into the recent-distances ring.
-                    if !last_dists[..last_dist_len].contains(&distance) {
-                        if last_dist_len < 4 {
-                            last_dists[last_dist_len] = distance;
-                            last_dist_len += 1;
-                        } else {
-                            last_dists.copy_within(1..4, 0);
-                            last_dists[3] = distance;
-                        }
+                    // Newest-first ring (upstream distance_cache[0] =
+                    // most recent): on hit, pull to front; on miss,
+                    // shift right and insert at [0].
+                    if let Some(k) = last_dists[..last_dist_len]
+                        .iter()
+                        .position(|&d| d == distance)
+                    {
+                        let v = last_dists[k];
+                        last_dists.copy_within(0..k, 1);
+                        last_dists[0] = v;
                     } else {
-                        let k = last_dists[..last_dist_len]
-                            .iter()
-                            .position(|&d| d == distance)
-                            .unwrap();
-                        last_dists.copy_within(k..last_dist_len, 0);
+                        let n = last_dist_len.min(3);
+                        last_dists.copy_within(0..n, 1);
                         last_dists[0] = distance;
+                        last_dist_len = (last_dist_len + 1).min(4);
                     }
                 }
                 // Advance: for LZ77, use clamped copy_len (matches
@@ -5824,9 +5895,10 @@ fn parse_input_with_offset_impl(
                 for _ in 1..advance {
                     if pos + 1 < n {
                         pos += 1;
-                        mf.advance();
-                        if let Some(m6) = mf6.as_deref_mut() {
-                            m6.advance();
+                        if let Some(bank) = bank_mf.as_deref_mut() {
+                            bank.advance();
+                        } else {
+                            mf.advance();
                         }
                     }
                 }
@@ -5850,6 +5922,15 @@ fn parse_input_with_offset_impl(
         });
     }
 
+    if env_flag!("BROTLI_PARSE_STATS") {
+        let n_cmd = commands.len();
+        let n_copy = commands.iter().filter(|c| c.copy_len > 0).count();
+        let copy_bytes: u64 = commands.iter().map(|c| u64::from(c.copy_len)).sum();
+        let bank_on = bank_mf.is_some();
+        eprintln!(
+            "PARSESTATS n={n} cmds={n_cmd} copies={n_copy} copy_bytes={copy_bytes} bank={bank_on} greedy={greedy_tier}"
+        );
+    }
     (commands, None)
 }
 
