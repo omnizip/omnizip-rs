@@ -351,6 +351,23 @@ pub fn compress_with_quality(input: &[u8], quality: i32) -> Vec<u8> {
     // Build quality-dependent config for the shared match finder.
     let is_text = is_text_like(input);
     let (max_chain, nice_match, _, _, _, hash_log) = brotli_quality_config(q, is_text);
+    // Hash-bucket scaling for large inputs (upstream scales hasher
+    // params with input size): with fixed 2^17 buckets over N >> 2^17
+    // positions, chains congest and a max_chain-deep walk only reaches
+    // the most recent positions — the periodic structure at larger
+    // distances vanishes and the greedy parse degrades as the input
+    // grows (measured: CSV q5 greedy 4.55% @1MB -> 6.03% @4MB).
+    // Hash scaling only for the greedy-tier experiment — the zopfli
+    // DP's parse degrades with bigger tables at 21MB (+1.1%); keep the
+    // default byte-identical.
+    let hash_log = if let Ok(v) = std::env::var("BROTLI_HASH_LOG") {
+        v.parse().unwrap_or(hash_log)
+    } else if env_flag!("BROTLI_GREEDY_TIER") {
+        let want = (input.len() as f64).log2().ceil() as u32 - 1;
+        want.clamp(hash_log, 22)
+    } else {
+        hash_log
+    };
     // Cross-chunk MF reuse for Q4+ (any content type). The optimal
     // parser has a cost model that correctly evaluates cross-chunk
     // distances, so this is safe for all data types.
@@ -362,9 +379,11 @@ pub fn compress_with_quality(input: &[u8], quality: i32) -> Vec<u8> {
             max_chain_length: max_chain,
             nice_match,
             hash_log,
+            hash_bytes: 4,
             max_match_length: MAX_COPY,
         };
         let mut shared_mf = omnizip_codecs::HashChainMatchFinder::new(input, mf_config);
+
         let mut offset = 0usize;
         while offset < input.len() {
             let end = (offset + chunk_size).min(input.len());
@@ -378,6 +397,7 @@ pub fn compress_with_quality(input: &[u8], quality: i32) -> Vec<u8> {
                 is_last,
                 q,
                 &mut shared_mf,
+                None,
             );
             if env_flag!("BROTLI_STATS") {
                 eprintln!("chunk {offset}..{end} q{q} took {:?}", t0.elapsed());
@@ -427,6 +447,7 @@ fn encode_huffman_chunk_into(
         max_chain_length: max_chain,
         nice_match,
         hash_log,
+        hash_bytes: 4,
         max_match_length: MAX_COPY,
     };
     let mut mf = omnizip_codecs::HashChainMatchFinder::new(input, config);
@@ -437,6 +458,8 @@ fn encode_huffman_chunk_into(
         input,
         &[],
         &mut mf,
+        None,
+        mlen_offset, // MF data[0] sits at global position mlen_offset
         mlen_offset,
         is_last,
         quality,
@@ -452,6 +475,8 @@ fn encode_huffman_chunk_body(
     input: &[u8],
     history: &[u8],
     mf: &mut omnizip_codecs::HashChainMatchFinder,
+    mf6: Option<&mut omnizip_codecs::HashChainMatchFinder>,
+    mf_base: usize,
     mlen_offset: usize,
     is_last: bool,
     quality: i32,
@@ -475,12 +500,73 @@ fn encode_huffman_chunk_body(
         input,
         history,
         mf,
+        mf6,
+        mf_base,
         mlen_offset,
         quality,
         false,
         is_last,
         ctx_in,
     );
+    if env_flag!("BROTLI_PARSE_AUDIT") {
+        let mut pos = mlen_offset;
+        for c in &commands {
+            pos += c.insert_len as usize;
+            if c.copy_len > 0 {
+                let max_dist = (pos as u32).min(MAX_BACKWARD_DISTANCE);
+                let advance = if c.distance > max_dist {
+                    let mut scratch = Vec::new();
+                    match crate::dictionary::dictionary_lookup(
+                        &mut scratch,
+                        c.copy_len,
+                        c.distance as i32,
+                        max_dist,
+                    ) {
+                        Some(()) => scratch.len(),
+                        None => c.copy_len as usize,
+                    }
+                } else {
+                    c.copy_len as usize
+                };
+                pos += advance;
+            }
+        }
+        if pos != mlen_offset + input.len() {
+            eprintln!(
+                "PARSE-OVERRUN mlen_offset={mlen_offset} len={} accounted={pos}",
+                input.len()
+            );
+            let mut p2 = mlen_offset;
+            for c in &commands {
+                p2 += c.insert_len as usize;
+                if c.copy_len > 0 {
+                    let max_dist = (p2 as u32).min(MAX_BACKWARD_DISTANCE);
+                    let advance = if c.distance > max_dist {
+                        let mut scratch = Vec::new();
+                        match crate::dictionary::dictionary_lookup(
+                            &mut scratch,
+                            c.copy_len,
+                            c.distance as i32,
+                            max_dist,
+                        ) {
+                            Some(()) => scratch.len(),
+                            None => c.copy_len as usize,
+                        }
+                    } else {
+                        c.copy_len as usize
+                    };
+                    p2 += advance;
+                    if p2 > mlen_offset + input.len() {
+                        eprintln!(
+                            "OFFENDING at~{p2} ins={} copy={} dist={} advance={advance}",
+                            c.insert_len, c.copy_len, c.distance
+                        );
+                        break;
+                    }
+                }
+            }
+        }
+    }
     // The exact-acceptance chain already emitted the winning parse
     // with these exact header parameters — reuse its bits verbatim
     // instead of a fourth full emission (3 measures + final became
@@ -1674,6 +1760,7 @@ fn encode_huffman_chunk_with_shared_mf(
     is_last: bool,
     quality: i32,
     mf: &mut omnizip_codecs::HashChainMatchFinder,
+    mf6: Option<&mut omnizip_codecs::HashChainMatchFinder>,
 ) {
     let chunk = &full_input[chunk_start..chunk_end];
     let ctx_in = carried_lit_ctx(full_input, chunk_start);
@@ -1684,6 +1771,8 @@ fn encode_huffman_chunk_with_shared_mf(
         chunk,
         history,
         mf,
+        mf6,
+        0, // shared MF spans the whole input; data[0] is global 0
         chunk_start,
         is_last,
         quality,
@@ -3760,6 +3849,7 @@ fn zopfli_iterative_parse(
             max_chain_length: gc,
             nice_match: gn,
             hash_log: gh,
+            hash_bytes: 4,
             max_match_length: MAX_COPY,
         };
         let mut mf_greedy = omnizip_codecs::HashChainMatchFinder::new(input, greedy_config);
@@ -3781,6 +3871,7 @@ fn zopfli_iterative_parse(
             max_chain_length: 16,
             nice_match: 96,
             hash_log: 17,
+            hash_bytes: 4,
             max_match_length: MAX_COPY,
         };
         let mut mf_light = omnizip_codecs::HashChainMatchFinder::new(input, light_config);
@@ -3816,6 +3907,7 @@ fn zopfli_iterative_parse(
         max_chain_length: max_chain,
         nice_match,
         hash_log,
+        hash_bytes: 4,
         max_match_length: MAX_COPY,
     };
 
@@ -4343,6 +4435,7 @@ fn iterative_optimal_parse_with_iters(
         max_chain_length: mf_max_chain(mf),
         nice_match: mf_nice_match(mf),
         hash_log: mf_hash_log(mf),
+        hash_bytes: 4,
         max_match_length: MAX_COPY,
     };
 
@@ -5202,10 +5295,11 @@ fn parse_input(input: &[u8]) -> Vec<Command> {
         max_chain_length: max_chain,
         nice_match,
         hash_log,
+        hash_bytes: 4,
         max_match_length: MAX_COPY,
     };
     let mut mf = omnizip_codecs::HashChainMatchFinder::new(input, config);
-    parse_input_with_offset(input, &[], &mut mf, 0, 11, false, false, (0, 0)).0
+    parse_input_with_offset(input, &[], &mut mf, None, 0, 0, 11, false, false, (0, 0)).0
 }
 
 /// Quality → (max_chain, nice_match, use_dict_base, lazy, lazy2, hash_log).
@@ -5247,7 +5341,19 @@ fn greedy_parse(
     mf: &mut omnizip_codecs::HashChainMatchFinder,
     mlen_offset: usize,
 ) -> Vec<Command> {
-    parse_input_with_offset_impl(input, &[], mf, mlen_offset, 1, false, false, (0, 0)).0
+    parse_input_with_offset_impl(
+        input,
+        &[],
+        mf,
+        None,
+        mlen_offset,
+        mlen_offset,
+        1,
+        false,
+        false,
+        (0, 0),
+    )
+    .0
 }
 
 /// Parse input into commands using LZ77 + static dictionary, with a
@@ -5267,6 +5373,8 @@ fn parse_input_with_offset(
     input: &[u8],
     history: &[u8],
     mut mf: &mut omnizip_codecs::HashChainMatchFinder,
+    mf6: Option<&mut omnizip_codecs::HashChainMatchFinder>,
+    mf_base: usize,
     mlen_offset: usize,
     quality: i32,
     disable_dict: bool,
@@ -5277,6 +5385,8 @@ fn parse_input_with_offset(
         input,
         history,
         &mut mf,
+        mf6,
+        mf_base,
         mlen_offset,
         quality,
         disable_dict,
@@ -5298,6 +5408,8 @@ pub fn _parse_input_with_offset_diag(
         input,
         &[],
         mf,
+        None,
+        mlen_offset, // diagnostic callers use chunk-local MFs
         mlen_offset,
         quality,
         disable_dict,
@@ -5311,6 +5423,8 @@ fn parse_input_with_offset_impl(
     input: &[u8],
     history: &[u8],
     mut mf: &mut omnizip_codecs::HashChainMatchFinder,
+    mut mf6: Option<&mut omnizip_codecs::HashChainMatchFinder>,
+    mf_base: usize,
     mlen_offset: usize,
     quality: i32,
     disable_dict: bool,
@@ -5334,6 +5448,7 @@ fn parse_input_with_offset_impl(
         max_chain_length: max_chain,
         nice_match,
         hash_log,
+        hash_bytes: 4,
         max_match_length: MAX_COPY,
     };
     // MF is provided by the caller — no creation here.
@@ -5351,7 +5466,30 @@ fn parse_input_with_offset_impl(
     // references HQ); q4-9 there is a single greedy/lazy hash-chain
     // pass. Match that effort mapping: q4-9 fall through to the lazy
     // path below with quality-tiered chain depths.
-    if quality >= 4 && input.len() <= 8 * 1024 * 1024 {
+    // BROTLI_GREEDY_TIER routes q4-9 through the lazy path (the
+    // reference's algorithm shape at those qualities) for measurement
+    // of the deliberate time-for-ratio trade.
+    let greedy_tier = quality >= 4
+        && quality < 10
+        && input.len() <= 8 * 1024 * 1024
+        && env_flag!("BROTLI_GREEDY_TIER");
+    let use_dict = if greedy_tier && env_flag!("BROTLI_GREEDY_NODICT") {
+        false
+    } else {
+        use_dict
+    };
+    if greedy_tier {
+        // Reference behavior: compares cap at nice_match (their matcher
+        // records nice-length matches; long single compares are wasted
+        // work when the parse can chain shorter copies). BROTLI_GREEDY_NOCAP
+        // restores full-length compares for measurement.
+        if env_flag!("BROTLI_GREEDY_NOCAP") {
+            // fall through uncapped
+        } else if mf.max_match_length() > nice_match {
+            mf.set_max_match_length(nice_match);
+        }
+        // fall through to the lazy path below
+    } else if quality >= 4 && input.len() <= 8 * 1024 * 1024 {
         return zopfli_iterative_parse(
             input,
             history,
@@ -5362,14 +5500,15 @@ fn parse_input_with_offset_impl(
             is_last,
             ctx_in,
         );
-    }
-
-    if quality >= 4 {
+    } else if quality >= 4 {
         return (two_pass_parse(input, mlen_offset, &mut mf, use_dict), None);
     }
 
     let mut pos = 0usize;
     let mut insert_start = 0usize;
+    // MF query coordinate: the shared frame MF spans global positions
+    // [mf_base, ..); chunk-local MFs start at global mlen_offset.
+    let to_g = |p: usize| mlen_offset + p - mf_base;
     while pos < n {
         // Global output position (across metablocks) for max_distance.
         let global_pos = mlen_offset + pos;
@@ -5377,23 +5516,37 @@ fn parse_input_with_offset_impl(
 
         let lz77 = if pos + MIN_MATCH as usize <= n {
             mf.advance();
-            if quality >= 8 {
+            if let Some(m6) = mf6.as_deref_mut() {
+                m6.advance();
+            }
+            if quality >= 8 || greedy_tier {
                 // Cost-scored selection (reference-style lazy scoring):
                 // the longest match often pays 10-15 extra bits in an
                 // explicit distance code; score candidates by length
                 // minus a distance penalty instead of taking max length.
+                let (ncand, nwalk) = if quality >= 8 {
+                    (12, 96)
+                } else if quality >= 6 {
+                    (6, 32)
+                } else {
+                    (4, 16)
+                };
                 let mut cands: Vec<omnizip_codecs::Lz77Match> = Vec::new();
-                mf.find_candidates_into(pos, 4, 16, &mut cands);
+                mf.find_candidates_into_patience(to_g(pos), ncand, nwalk, 8, &mut cands);
                 let mut bestc: Option<omnizip_codecs::Lz77Match> = None;
                 let mut best_score = f32::MIN;
                 for m in cands {
                     if m.distance > max_dist || m.length < MIN_MATCH {
                         continue;
                     }
+                    // Upstream's lazy scoring: distance penalty is
+                    // 0.679 * log2(dist) (kBrotliLog2Table-scaled), not
+                    // a full log2 — softer penalties keep nearer (more
+                    // rep-friendly) matches in contention.
                     let pen = if m.distance <= 4 {
                         2.0
                     } else {
-                        (m.distance as f32).log2()
+                        0.679 * (m.distance as f32).log2()
                     };
                     let score = m.length as f32 - pen;
                     if score > best_score {
@@ -5403,7 +5556,7 @@ fn parse_input_with_offset_impl(
                 }
                 bestc
             } else {
-                mf.find_match(pos)
+                mf.find_match(to_g(pos))
             }
         } else {
             None
@@ -5420,12 +5573,22 @@ fn parse_input_with_offset_impl(
             } else {
                 let dict = dict_hash::find_match(input, pos, max_dist);
                 match dict {
-                    Some((d, wl, tl)) if tl > m.length => Some((d, wl, tl)),
-                    _ => Some((m.distance, m.length, m.length)),
+                    // Guard: the TRANSFORMED length may exceed the chunk
+                    // remainder (suffix-appending transforms); a dict
+                    // reference past mlen overruns the metablock.
+                    Some((d, wl, tl)) if tl > m.length && tl as usize <= n - pos => {
+                        Some((d, wl, tl))
+                    }
+                    // Fallback: the CLAMPED length — raw m.length can
+                    // extend past the chunk end (audit bug: copy=7 with
+                    // 5 bytes remaining overran mlen by 2).
+                    _ => Some((m.distance, len, len)),
                 }
             }
         } else if use_dict {
-            dict_hash::find_match(input, pos, max_dist).map(|(d, wl, tl)| (d, wl, tl))
+            dict_hash::find_match(input, pos, max_dist)
+                .filter(|&(_, _, tl)| tl as usize <= n - pos)
+                .map(|(d, wl, tl)| (d, wl, tl))
         } else {
             None
         };
@@ -5440,7 +5603,7 @@ fn parse_input_with_offset_impl(
                     let next_max = (next_global as u32).min(MAX_BACKWARD_DISTANCE);
 
                     let next_lz77 = if next_pos + MIN_MATCH as usize <= n {
-                        mf.find_match(next_pos)
+                        mf.find_match(to_g(next_pos))
                     } else {
                         None
                     };
@@ -5472,7 +5635,7 @@ fn parse_input_with_offset_impl(
                                 let next2_best_len: Option<u32> = if next2_pos + MIN_MATCH as usize
                                     <= n
                                 {
-                                    mf.find_match(next2_pos)
+                                    mf.find_match(to_g(next2_pos))
                                         .filter(|m| m.distance <= next2_max)
                                         .map(|m| {
                                             if m.length >= 8 || !use_dict {
@@ -5530,6 +5693,9 @@ fn parse_input_with_offset_impl(
                     if pos + 1 < n {
                         pos += 1;
                         mf.advance();
+                        if let Some(m6) = mf6.as_deref_mut() {
+                            m6.advance();
+                        }
                     }
                 }
                 pos += 1;

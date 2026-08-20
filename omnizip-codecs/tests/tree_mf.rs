@@ -50,6 +50,7 @@ fn tree_matches_chain_matches_or_better() {
         max_chain_length: 64,
         nice_match: 96,
         hash_log: 17,
+        hash_bytes: 4,
         max_match_length: 271,
     };
     let mut chain = HashChainMatchFinder::new(&data, cfg);
