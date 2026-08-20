@@ -67,7 +67,23 @@ const MIN_MATCH: u32 = 4;
 /// were tested (up to 4096) and improve ratio on highly repetitive
 /// synthetic data but regress on FSST-preprocessed data where longer
 /// matches interact poorly with the byte-code distribution.
-const MAX_COPY: u32 = 271;
+// Wire maximum for a single copy: the last insert&copy code covers
+// copy lengths 2118 + 24 extra bits. The previous 271 cap split every
+// long repeat into multiple commands with explicit distances — the
+// reference emits copies up to ~4KB (measured max 1450 on CSV q9).
+const MAX_COPY: u32 = 16_779_211;
+
+/// Reference MaxZopfliLen: HQ candidate/copy length caps (150 at q10,
+/// 325 at q11). Below HQ our small-input zopfli keeps a 4096 cap.
+fn zopfli_max_len(quality: i32) -> u32 {
+    if quality >= 11 {
+        325
+    } else if quality == 10 {
+        150
+    } else {
+        4096
+    }
+}
 
 /// Static complex UTF-8 context map from the brotli reference encoder
 /// (`kStaticContextMapComplexUTF64`). Maps 64 UTF-8 context IDs into
@@ -98,6 +114,114 @@ const K_STATIC_CONTEXT_MAP_COMPLEX_UTF8: [u8; 64] = [
 
 /// Number of distinct trees in the complex UTF-8 context map.
 const NTREES_COMPLEX_UTF8: u32 = 13;
+
+/// Port of the reference DecideOverLiteralContextModeling (q5-9 text):
+/// pick the literal context map from sampled entropy — the 13-tree
+/// complex UTF8 map for >= 1 MiB inputs when it pays, else the
+/// bigram-prefix-chosen 1/2/3-context maps. Returns None for a single
+/// context.
+fn decide_literal_contexts(input: &[u8], quality: i32, size_hint: usize) -> Option<(usize, Vec<u8>)> {
+    if input.len() < 64 {
+        return None;
+    }
+    let sh = |h: &[u32]| -> f64 {
+        let t: f64 = h.iter().map(|&x| f64::from(x)).sum();
+        if t == 0.0 {
+            return 0.0;
+        }
+        -h.iter()
+            .filter(|&&x| x > 0)
+            .map(|&x| f64::from(x) * (f64::from(x) / t).log2())
+            .sum::<f64>()
+    };
+    if size_hint >= 1 << 20 {
+        // Sample 64-byte strides every 4 KiB; histos over literal >> 3.
+        let mut combined = [0u32; 32];
+        let mut ctx_h = [[0u32; 32]; 13];
+        let mut total = 0u32;
+        let mut start = 0usize;
+        while start + 64 <= input.len() {
+            let mut p2 = input[start];
+            let mut p1 = input[start + 1];
+            for pos in (start + 2)..(start + 64) {
+                let lit = input[pos];
+                let ctx = usize::from(
+                    K_STATIC_CONTEXT_MAP_COMPLEX_UTF8[compute_context_id(p1, p2, 2) as usize],
+                );
+                total += 1;
+                combined[usize::from(lit >> 3)] += 1;
+                ctx_h[ctx][usize::from(lit >> 3)] += 1;
+                p2 = p1;
+                p1 = lit;
+            }
+            start += 4096;
+        }
+        if total > 0 {
+            let inv = 1.0 / f64::from(total);
+            let e1 = sh(&combined) * inv;
+            let e2: f64 = ctx_h.iter().map(|h| sh(h)).sum::<f64>() * inv;
+            if e2 <= 3.0 && e1 - e2 >= 0.2 {
+                return Some((13, K_STATIC_CONTEXT_MAP_COMPLEX_UTF8.to_vec()));
+            }
+        }
+    }
+    // Bigram prefix (top-2-bit classes) → 1 / 2 / 3 contexts.
+    static LUT: [usize; 4] = [0, 0, 1, 2];
+    static SIMPLE: [u8; 64] = {
+        let mut m = [0u8; 64];
+        let mut i = 2;
+        while i < 4 {
+            m[i] = 1;
+            i += 1;
+        }
+        m
+    };
+    static CONTINUATION: [u8; 64] = {
+        let mut m = [0u8; 64];
+        m[2] = 1;
+        m[3] = 2;
+        m
+    };
+    let mut bigram = [0u32; 9];
+    let mut start = 0usize;
+    while start + 64 <= input.len() {
+        let mut prev = LUT[input[start] as usize >> 6] * 3;
+        for pos in (start + 1)..(start + 64) {
+            let lit = input[pos];
+            bigram[prev + LUT[lit as usize >> 6]] += 1;
+            prev = LUT[lit as usize >> 6] * 3;
+        }
+        start += 4096;
+    }
+    let mut mono = [0u32; 3];
+    let mut two = [0u32; 6];
+    for (i, &b) in bigram.iter().enumerate() {
+        mono[i % 3] += b;
+        two[i % 6] += b;
+    }
+    let total: f64 = mono.iter().map(|&x| f64::from(x)).sum();
+    if total == 0.0 {
+        return None;
+    }
+    let inv = 1.0 / total;
+    let e1 = sh(&mono) * inv;
+    let e2 = (sh(&two[..3]) + sh(&two[3..])) * inv;
+    let mut e3 = 0.0;
+    for i in 0..3 {
+        e3 += sh(&bigram[3 * i..3 * i + 3]);
+    }
+    e3 *= inv;
+    if quality < 7 {
+        e3 = e1 * 10.0;
+    }
+    if e1 - e2 < 0.2 && e1 - e3 < 0.2 {
+        None
+    } else if e2 - e3 < 0.02 {
+        Some((2, SIMPLE.to_vec()))
+    } else {
+        Some((3, CONTINUATION.to_vec()))
+    }
+}
 
 /// Copy-length candidates evaluated per match in the optimal parsers.
 /// Sampled at copy-code group boundaries (the highest L in each group
@@ -387,38 +511,33 @@ pub fn compress_with_quality(input: &[u8], quality: i32) -> Vec<u8> {
             nice_match,
             hash_log,
             hash_bytes: 4,
-            max_match_length: MAX_COPY,
+            max_match_length: zopfli_max_len(q),
         };
         let mut shared_mf = omnizip_codecs::HashChainMatchFinder::new(input, mf_config);
         // H5 bank hasher for the greedy tier (q4-9): one-cache-line
-        // bucket scans instead of prev[] chain walks. Upstream params:
-        // bucket 14 (<=1MiB) / 15, block_bits = min(q-1, 9),
-        // last-distance probes 4/10/16.
-        // H5 bank: binary speed path only. On text the 16-slot banks
-        // fragment the parse (10.6% vs chain 4.3% at CSV 1MB) — the
-        // chain's deep walk is what finds the long structural matches.
+        // bucket scans instead of prev[] chain walks, with the 16
+        // short-code distance probes and BackwardReferenceScore
+        // matching the reference hashers.
         let mut shared_bank =
-            if q >= 4 && q < 10 && !env_flag!("BROTLI_NO_BANK") && !is_text_like(input) {
+            if q >= 4 && q < 10 && !env_flag!("BROTLI_NO_BANK") && !env_flag!("BROTLI_NO_TEXT_BANK")
+            {
                 let n = input.len();
-                // block_bits: upstream uses min(q-1, 9) (=4 at q5). We
-                // use 6 (64 slots) on binary — the extra slots recover the
-                // long matches 16-slot banks miss, still one cache line*
-                // 4 and far cheaper than chain walks.
+                // Text params mirror the reference hashers exactly
+                // (H5 at q4-8: block min(q-1,9); H9 at q9: block 8;
+                // num_last_dists 4/10/16). Binary keeps the measured
+                // block_bits=6 tuning that beats the reference.
+                let (block_bits, dists) = if is_text_like(input) {
+                    let b = if q >= 9 { 8 } else { (q - 1).min(9) };
+                    let d = if q < 7 { 4 } else if q < 9 { 10 } else { 16 };
+                    (b as u32, d)
+                } else {
+                    (6, if q < 7 { 4 } else if q < 9 { 10 } else { 16 })
+                };
                 let mut bank = omnizip_codecs::BankMatchFinder::new(
                     input,
                     if n <= 1 << 20 { 14 } else { 15 },
-                    if is_text_like(input) {
-                        (q - 1).min(9) as u32
-                    } else {
-                        6
-                    },
-                    if q < 7 {
-                        4
-                    } else if q < 9 {
-                        10
-                    } else {
-                        16
-                    },
+                    block_bits,
+                    dists,
                 );
                 bank.set_max_distance(MAX_BACKWARD_DISTANCE);
                 Some(bank)
@@ -490,7 +609,7 @@ fn encode_huffman_chunk_into(
         nice_match,
         hash_log,
         hash_bytes: 4,
-        max_match_length: MAX_COPY,
+        max_match_length: zopfli_max_len(quality),
     };
     let mut mf = omnizip_codecs::HashChainMatchFinder::new(input, config);
     let hist_start = mlen_offset.min(MAX_BACKWARD_DISTANCE as usize);
@@ -792,6 +911,7 @@ fn emit_metablock_from_commands(
     } else {
         0 // LSB6
     };
+    let mut decided_ctx: Option<(usize, Vec<u8>)> = None;
     let (mut ntrees_l, mut lit_ctx_map): (u32, Vec<u8>) = if use_block_switch {
         (2, (0..128u8).map(|i| i >> 6).collect())
     } else if use_context && context_mode == 2 && input.len() >= 1_048_576 && quality >= 10 {
@@ -802,6 +922,25 @@ fn emit_metablock_from_commands(
             NTREES_COMPLEX_UTF8,
             K_STATIC_CONTEXT_MAP_COMPLEX_UTF8.to_vec(),
         )
+    } else if use_context && context_mode == 2 && quality >= 5 && !env_flag!("BROTLI_NO_CTX_DECIDE")
+    {
+        // Reference DecideOverLiteralContextModeling at q5-9: pick the
+        // context map from sampled entropy instead of a fixed 4-tree
+        // ctx>>4 split. The decided map participates in the A/B/C
+        // assignment below as option C.
+        let decided =
+            decide_literal_contexts(input, quality, mlen_offset + input.len());
+        if env_flag!("BROTLI_STATS") {
+            eprintln!(
+                "STATS ctx_decide q{quality}: {} contexts",
+                decided.as_ref().map_or(1, |(n, _)| *n)
+            );
+        }
+        decided_ctx = decided;
+        match &decided_ctx {
+            Some((n, map)) => (*n as u32, map.clone()),
+            None => (1, Vec::new()),
+        }
     } else if use_context && input.len() >= 8192 {
         (4u32, (0..64u8).map(|ctx| ctx >> 4).collect())
     } else if use_context {
@@ -1005,19 +1144,66 @@ fn emit_metablock_from_commands(
         let cost_b: f64 = hists_b.iter().map(|h| tree_bits(h)).sum::<f64>()
             + count_b as f64 * 35.0
             + bc_hists.len() as f64 * (count_b as f64).log2().max(1.0);
-        let (cmap, tree_count) = if cost_b < cost_a && !env_flag!("BROTLI_NO_SINGLETONS") {
+        // Option C: the reference's decided static map (tree by ctx
+        // only, independent of block).
+        let mut cost_c = f64::INFINITY;
+        let mut cmap_c: Vec<u8> = Vec::new();
+        let mut count_c = 0usize;
+        if let Some((n, map)) = &decided_ctx {
+            let mut hists_c: Vec<[u32; 256]> = vec![[0u32; 256]; *n];
+            for (i, h) in bc_hists.iter().enumerate() {
+                let t = usize::from(map[i & 63]);
+                for (b, &f) in h.iter().enumerate() {
+                    hists_c[t][b] += f;
+                }
+            }
+            count_c = hists_c.iter().filter(|h| h.iter().sum::<u32>() > 0).count();
+            if count_c > 0 {
+                cost_c = hists_c.iter().map(|h| tree_bits(h)).sum::<f64>()
+                    + count_c as f64 * 60.0
+                    + bc_hists.len() as f64 * (count_c as f64).log2().max(1.0);
+                // Compact tree ids: empty static-map trees are dropped.
+                let mut c_remap = vec![usize::MAX; *n];
+                let mut next = 0usize;
+                for (t, h) in hists_c.iter().enumerate() {
+                    if h.iter().sum::<u32>() > 0 {
+                        c_remap[t] = next;
+                        next += 1;
+                    }
+                }
+                cmap_c = (0..bc_hists.len())
+                    .map(|i| {
+                        let t = c_remap[usize::from(map[i & 63])];
+                        u8::try_from(t.min(count_c - 1)).unwrap_or(0)
+                    })
+                    .collect();
+            }
+        }
+        let (cmap, tree_count) = if cost_c < cost_a && cost_c < cost_b {
+            (cmap_c, count_c)
+        } else if cost_b < cost_a && !env_flag!("BROTLI_NO_SINGLETONS") {
             (cmap_b, count_b)
         } else {
             (cmap_a, 4)
         };
+        if env_flag!("BROTLI_DBG_CTX") {
+            eprintln!(
+                "ASSIGN cost_a={cost_a:.0} cost_b={cost_b:.0} cost_c={cost_c:.0} trees={tree_count}"
+            );
+        }
         lit_ctx_map.clear();
         lit_ctx_map.extend_from_slice(&cmap);
         ntrees_l = tree_count as u32;
         ntrees = tree_count;
         lit_freqs = vec![vec![0u32; 256]; ntrees];
-        if env_flag!("BROTLI_DBG_CTX") {
-            eprintln!("ASSIGN cost_a={cost_a:.0} cost_b={cost_b:.0} trees={tree_count}");
-        }
+    }
+    if env_flag!("BROTLI_DBG_CTX") {
+        let mx = lit_ctx_map.iter().max().copied().unwrap_or(0);
+        eprintln!(
+            "CTXMAP len={} ntrees={ntrees} max_val={mx} decided={}",
+            lit_ctx_map.len(),
+            decided_ctx.as_ref().map_or(0, |(n, _)| *n)
+        );
     }
     for (cm_idx, hist) in bc_hists.iter().enumerate() {
         let tree = if ntrees > 1 {
@@ -2101,15 +2287,16 @@ fn find_cmd_symbol_with_rep(
 /// Precomputed (insert_len, copy_len) -> explicit symbol table for the
 /// DP hot path: find_cmd_symbol_impl's linear scan over the 704-entry
 /// kCmdLut runs per boundary per candidate per position and dominates
-/// refinement runtime. Covers insert 0..=64 x copy 2..=271 (the ranges
-/// the parser generates); outside it the linear scan still applies.
-static CMD_SYM_EXPLICIT: std::sync::OnceLock<[[i16; 272]; 65]> = std::sync::OnceLock::new();
+/// refinement runtime. Covers insert 0..=64 x copy 2..=MAX_COPY (the
+/// ranges the parser generates); outside it the linear scan still
+/// applies.
+static CMD_SYM_EXPLICIT: std::sync::OnceLock<[[i16; 4166]; 65]> = std::sync::OnceLock::new();
 
-fn cmd_sym_explicit_table() -> &'static [[i16; 272]; 65] {
+fn cmd_sym_explicit_table() -> &'static [[i16; 4166]; 65] {
     CMD_SYM_EXPLICIT.get_or_init(|| {
-        let mut t = [[-1i16; 272]; 65];
+        let mut t = [[-1i16; 4166]; 65];
         for ins in 0..65u32 {
-            for cpy in 2..272u32 {
+            for cpy in 2..=4165u32 {
                 if let Some(sym) = find_cmd_symbol_impl_slow(ins, cpy, None) {
                     t[ins as usize][cpy as usize] = sym as i16;
                 }
@@ -2120,7 +2307,7 @@ fn cmd_sym_explicit_table() -> &'static [[i16; 272]; 65] {
 }
 
 fn find_cmd_symbol_impl(insert_len: u32, copy_len: u32, rep_code: Option<i32>) -> Option<usize> {
-    if rep_code.is_none() && insert_len <= 64 && (2..=271).contains(&copy_len) {
+    if rep_code.is_none() && insert_len <= 64 && copy_len >= 2 && copy_len <= 4165 {
         let sym = cmd_sym_explicit_table()[insert_len as usize][copy_len as usize];
         if sym >= 0 {
             return Some(sym as usize);
@@ -3248,7 +3435,9 @@ fn zopfli_parse_ext(
             // literals than a min-length-4 parse can).
             if quality >= 10 && pos + 2 <= n {
                 let short_max: usize = if quality >= 11 { 64 } else { 16 };
-                let cap = ((n - pos) as u32).min(MAX_COPY);
+                // Candidates only feed COPY_BOUNDARIES; capped at the
+                // reference's MaxZopfliLen for this quality.
+                let cap = ((n - pos) as u32).min(zopfli_max_len(quality));
                 let mut best_len: u32 = 1;
                 let mut src = pos;
                 let stop = pos.saturating_sub(short_max);
@@ -3422,7 +3611,7 @@ fn zopfli_parse_ext(
     let mut rep_state: Vec<[u32; 4]> = vec![[0u32; 4]; n + 1];
     let mut cost = vec![f32::INFINITY; n + 1];
     let mut back_pos = vec![0u32; n + 1];
-    let mut back_len = vec![0u16; n + 1];
+    let mut back_len = vec![0u32; n + 1];
     let mut back_dist = vec![0u32; n + 1];
     let mut u = vec![0u32; n + 1];
     cost[0] = 0.0;
@@ -3507,7 +3696,8 @@ fn zopfli_parse_ext(
             };
             let ilen_here = (i - u[i] as usize) as u32;
             let m_cost = ins_prior(ilen_here) + dc + cmd_sym_price(ilen_here, copy_len);
-            if cand_idx == 0 {
+            let saturated = copy_len >= zopfli_max_len(quality);
+            if cand_idx == 0 && !saturated {
                 for &boundary in &COPY_BOUNDARIES {
                     if boundary > copy_len {
                         continue;
@@ -3520,7 +3710,7 @@ fn zopfli_parse_ext(
                     if total < cost[j] {
                         cost[j] = total;
                         back_pos[j] = i as u32;
-                        back_len[j] = boundary as u16;
+                        back_len[j] = boundary;
                         back_dist[j] = dist;
                         u[j] = j as u32;
                     }
@@ -3547,7 +3737,7 @@ fn zopfli_parse_ext(
                     if total < cost[j] {
                         cost[j] = total;
                         back_pos[j] = i as u32;
-                        back_len[j] = boundary as u16;
+                        back_len[j] = boundary;
                         back_dist[j] = dist;
                         u[j] = j as u32;
                     }
@@ -3567,7 +3757,7 @@ fn zopfli_parse_ext(
                 if total < cost[j] {
                     cost[j] = total;
                     back_pos[j] = i as u32;
-                    back_len[j] = copy_len.min(u16::MAX as u32) as u16;
+                    back_len[j] = copy_len.min(u16::MAX as u32);
                     back_dist[j] = dist;
                     u[j] = j as u32;
                 }
@@ -3577,11 +3767,18 @@ fn zopfli_parse_ext(
         // Copy transitions from each rep distance and its ±1-3 offsets
         // (short codes 4-15): extend each variant as a match at this
         // position. This is how the parser rides slowly-drifting chains.
+        // Skipped when the top hash candidate already reached the
+        // boundary cap — a rep can only tie its length, and on long
+        // repetitive runs every probe would scan the full cap.
+        let top_len = cand_flat[cstart..cend].first().map_or(0, |&(_, l)| l);
         let global_i = mlen_offset + i;
-        let max_len = ((n - i) as u32).min(MAX_COPY);
+        // Rep/delta transitions only feed COPY_BOUNDARIES; probing
+        // beyond MaxZopfliLen is wasted compares — unbounded probing
+        // was quadratic on long repetitive runs.
+        let max_len = ((n - i) as u32).min(zopfli_max_len(quality));
         const DELTAS: [i32; 6] = [-1, 1, -2, 2, -3, 3];
         for (k, &r) in reps.iter().enumerate() {
-            if r == 0 || (global_i as u64) < u64::from(r) {
+            if r == 0 || (global_i as u64) < u64::from(r) || top_len >= max_len {
                 continue;
             }
             let src_global = global_i - r as usize;
@@ -3622,7 +3819,7 @@ fn zopfli_parse_ext(
                 if total < cost[j] {
                     cost[j] = total;
                     back_pos[j] = i as u32;
-                    back_len[j] = boundary as u16;
+                    back_len[j] = boundary;
                     back_dist[j] = r;
                     u[j] = j as u32;
                 }
@@ -3682,7 +3879,7 @@ fn zopfli_parse_ext(
                     if total < cost[j] {
                         cost[j] = total;
                         back_pos[j] = i as u32;
-                        back_len[j] = boundary as u16;
+                        back_len[j] = boundary;
                         back_dist[j] = rv as u32;
                         u[j] = j as u32;
                     }
@@ -3729,13 +3926,13 @@ fn zopfli_parse_ext(
                 src,
                 pos,
                 insert_len,
-                u32::from(back_len[pos]),
+                back_len[pos],
                 back_dist[pos],
             ));
         }
         commands.push(Command {
             insert_len,
-            copy_len: u32::from(back_len[pos]),
+            copy_len: back_len[pos],
             distance: back_dist[pos],
         });
         // Walk src back through literal steps (u-jump) to the previous
@@ -4020,7 +4217,7 @@ fn zopfli_iterative_parse(
             nice_match: gn,
             hash_log: gh,
             hash_bytes: 4,
-            max_match_length: MAX_COPY,
+            max_match_length: zopfli_max_len(quality),
         };
         let mut mf_greedy = omnizip_codecs::HashChainMatchFinder::new(input, greedy_config);
         let t = std::time::Instant::now();
@@ -4042,7 +4239,7 @@ fn zopfli_iterative_parse(
             nice_match: 96,
             hash_log: 17,
             hash_bytes: 4,
-            max_match_length: MAX_COPY,
+            max_match_length: zopfli_max_len(quality),
         };
         let mut mf_light = omnizip_codecs::HashChainMatchFinder::new(input, light_config);
         let light_commands = zopfli_parse(
@@ -4078,7 +4275,7 @@ fn zopfli_iterative_parse(
         nice_match,
         hash_log,
         hash_bytes: 4,
-        max_match_length: MAX_COPY,
+        max_match_length: zopfli_max_len(quality),
     };
 
     let iters_env = std::env::var("BROTLI_ITERS")
@@ -4606,7 +4803,7 @@ fn iterative_optimal_parse_with_iters(
         nice_match: mf_nice_match(mf),
         hash_log: mf_hash_log(mf),
         hash_bytes: 4,
-        max_match_length: MAX_COPY,
+        max_match_length: 325,
     };
 
     // Subsequent passes: refine lit_cost AND command/distance costs from
@@ -5466,7 +5663,7 @@ fn parse_input(input: &[u8]) -> Vec<Command> {
         nice_match,
         hash_log,
         hash_bytes: 4,
-        max_match_length: MAX_COPY,
+        max_match_length: 4096,
     };
     let mut mf = omnizip_codecs::HashChainMatchFinder::new(input, config);
     parse_input_with_offset(input, &[], &mut mf, None, 0, 0, 11, false, false, (0, 0)).0
@@ -5625,7 +5822,7 @@ fn parse_input_with_offset_impl(
         nice_match,
         hash_log,
         hash_bytes: 4,
-        max_match_length: MAX_COPY,
+        max_match_length: 4096,
     };
     // MF is provided by the caller — no creation here.
 
@@ -5661,14 +5858,13 @@ fn parse_input_with_offset_impl(
         use_dict
     };
     if greedy_tier {
-        // Reference behavior: compares cap at nice_match (their matcher
-        // records nice-length matches; long single compares are wasted
-        // work when the parse can chain shorter copies). BROTLI_GREEDY_NOCAP
-        // restores full-length compares for measurement.
-        if env_flag!("BROTLI_GREEDY_NOCAP") {
-            // fall through uncapped
-        } else if mf.max_match_length() > nice_match {
-            mf.set_max_match_length(nice_match);
+        // BROTLI_GREEDY_NICECAP restores the old nice_match compare cap
+        // (the reference hashers compute full match lengths — long
+        // copies on repetitive data are their main lever).
+        if env_flag!("BROTLI_GREEDY_NICECAP") {
+            if mf.max_match_length() > nice_match {
+                mf.set_max_match_length(nice_match);
+            }
         }
         if quality < 10 && input.len() >= 2 << 20 {
             // The lazy lookahead walks the MF's own chain cap, and its
@@ -5709,21 +5905,32 @@ fn parse_input_with_offset_impl(
     // explicitly every time (CSV 21MB: 7.18% vs ref 4.98%).
     let mut last_dists: [u32; 4] = [0; 4];
     let mut last_dist_len = 0usize;
+    // Reference CreateBackwardReferences: up to 4 lazy delays in a row.
+    let mut delayed_in_row = 0i32;
     while pos < n {
         // Global output position (across metablocks) for max_distance.
         let global_pos = mlen_offset + pos;
         let max_dist = (global_pos as u32).min(MAX_BACKWARD_DISTANCE);
+        let mut bank_hit_score = 0u64;
 
         let lz77 = if pos + MIN_MATCH as usize <= n {
             // Advance both finders when the bank is live so the chain
             // stays warm as a long-match secondary source.
             let bank_hit = if let Some(bank) = bank_mf.as_deref_mut() {
                 bank.advance();
-                let cap_len = ((n - pos) as u32).min(nice_match);
+                // Full remaining length: the reference hashers do not
+                // cap match length at nice_len. Matches scoring at or
+                // below kMinScore (30*8*8 + 100) are rejected — the
+                // reference emits literals for them instead.
+                let cap_len = (n - pos) as u32;
                 bank.find(global_pos, &last_dists[..last_dist_len], cap_len)
-                    .map(|(d, l, _)| omnizip_codecs::Lz77Match {
-                        distance: d,
-                        length: l,
+                    .filter(|&(_, _, s)| s > 2020)
+                    .map(|(d, l, s)| {
+                        bank_hit_score = s;
+                        omnizip_codecs::Lz77Match {
+                            distance: d,
+                            length: l,
+                        }
                     })
             } else {
                 None
@@ -5757,7 +5964,7 @@ fn parse_input_with_offset_impl(
                 let mut best_score = f32::MIN;
                 let mut best_is_rep = false;
                 for (ci, m) in cands.iter().enumerate() {
-                    if m.distance > max_dist || m.length < MIN_MATCH {
+                    if m.distance > max_dist || m.length < 2 {
                         continue;
                     }
                     let is_rep = greedy_tier && last_dists[..last_dist_len].contains(&m.distance);
@@ -5876,105 +6083,119 @@ fn parse_input_with_offset_impl(
         };
 
         if let Some((distance, copy_len, advance_len)) = best {
-            if advance_len >= MIN_MATCH && distance > 0 {
-                // Lazy matching: if the current match is short, check if
-                // deferring by one position yields a longer match.
-                if lazy && !env_flag!("BROTLI_NO_LAZY") && advance_len < nice_match && pos + 1 < n {
-                    let next_pos = pos + 1;
-                    let next_global = mlen_offset + next_pos;
-                    let next_max = (next_global as u32).min(MAX_BACKWARD_DISTANCE);
-
-                    let next_lz77 = if next_pos + MIN_MATCH as usize <= n {
-                        if let Some(bank) = bank_mf.as_deref() {
-                            // Peek at pos+1 without inserting (bank is
-                            // already at pos+1 cursor-wise after the
-                            // current advance; history-only probe).
-                            bank.find(
-                                next_global,
-                                &last_dists[..last_dist_len],
-                                ((n - next_pos) as u32).min(nice_match),
-                            )
-                            .filter(|(d, _, _)| *d <= next_max)
-                            .map(|(d, l, _)| {
-                                omnizip_codecs::Lz77Match {
-                                    distance: d,
-                                    length: l,
+            if advance_len >= 2 && distance > 0 {
+                // Lazy matching. Bank path uses the reference rule
+                // (CreateBackwardReferences): re-search at pos+1 at
+                // full depth and defer while the next score beats the
+                // current by >= 175, up to 4 delays in a row. The
+                // chain path keeps the length-based heuristic.
+                if lazy && !env_flag!("BROTLI_NO_LAZY") && pos + 1 < n {
+                    if bank_mf.is_some() {
+                        let next_pos = pos + 1;
+                        let next_global = mlen_offset + next_pos;
+                        if delayed_in_row < 4 && next_pos + 4 <= n {
+                            let m2 = bank_mf.as_deref().and_then(|bank| {
+                                bank.find(
+                                    next_global,
+                                    &last_dists[..last_dist_len],
+                                    (n - next_pos) as u32,
+                                )
+                            });
+                            if let Some((_, _, s2)) = m2 {
+                                if s2 >= bank_hit_score + 175 {
+                                    delayed_in_row += 1;
+                                    pos += 1;
+                                    continue;
                                 }
-                            })
-                        } else {
-                            mf.find_match_capped(to_g(next_pos), 48.min(mf.max_chain_length()))
-                        }
-                    } else {
-                        None
-                    };
-
-                    let next_valid = next_lz77.as_ref().is_some_and(|m| m.distance <= next_max);
-                    let next_best_len: Option<u32> = if next_valid {
-                        let nm = next_lz77.as_ref().unwrap();
-                        if nm.length >= 8 || !use_dict {
-                            Some(nm.length)
-                        } else {
-                            match dict_hash::find_match(input, next_pos, next_max) {
-                                Some((_, _, tl)) if tl > nm.length => Some(tl),
-                                _ => Some(nm.length),
                             }
                         }
-                    } else if use_dict {
-                        dict_hash::find_match(input, next_pos, next_max).map(|(_, _, tl)| tl)
-                    } else {
-                        None
-                    };
+                    } else if advance_len < nice_match {
+                        let next_pos = pos + 1;
+                        let next_global = mlen_offset + next_pos;
+                        let next_max = (next_global as u32).min(MAX_BACKWARD_DISTANCE);
 
-                    if let Some(next_len) = next_best_len {
-                        if next_len > advance_len {
-                            // Lazy2: check pos+2 before committing to pos+1.
-                            if lazy2 && next_len < nice_match && pos + 2 < n {
-                                let next2_pos = pos + 2;
-                                let next2_global = mlen_offset + next2_pos;
-                                let next2_max = (next2_global as u32).min(MAX_BACKWARD_DISTANCE);
-                                let next2_best_len: Option<u32> = if next2_pos + MIN_MATCH as usize
-                                    <= n
-                                {
-                                    mf.find_match_capped(to_g(next2_pos), 8)
-                                        .filter(|m| m.distance <= next2_max)
-                                        .map(|m| {
-                                            if m.length >= 8 || !use_dict {
-                                                m.length
-                                            } else {
-                                                match dict_hash::find_match(
-                                                    input, next2_pos, next2_max,
-                                                ) {
-                                                    Some((_, _, tl)) if tl > m.length => tl,
-                                                    _ => m.length,
+                        let next_lz77 = if next_pos + MIN_MATCH as usize <= n {
+                            mf.find_match_capped(to_g(next_pos), 48.min(mf.max_chain_length()))
+                        } else {
+                            None
+                        };
+
+                        let next_valid =
+                            next_lz77.as_ref().is_some_and(|m| m.distance <= next_max);
+                        let next_best_len: Option<u32> = if next_valid {
+                            let nm = next_lz77.as_ref().unwrap();
+                            if nm.length >= 8 || !use_dict {
+                                Some(nm.length)
+                            } else {
+                                match dict_hash::find_match(input, next_pos, next_max) {
+                                    Some((_, _, tl)) if tl > nm.length => Some(tl),
+                                    _ => Some(nm.length),
+                                }
+                            }
+                        } else if use_dict {
+                            dict_hash::find_match(input, next_pos, next_max).map(|(_, _, tl)| tl)
+                        } else {
+                            None
+                        };
+
+                        if let Some(next_len) = next_best_len {
+                            if next_len > advance_len {
+                                // Lazy2: check pos+2 before committing to pos+1.
+                                if lazy2 && next_len < nice_match && pos + 2 < n {
+                                    let next2_pos = pos + 2;
+                                    let next2_global = mlen_offset + next2_pos;
+                                    let next2_max =
+                                        (next2_global as u32).min(MAX_BACKWARD_DISTANCE);
+                                    let next2_best_len: Option<u32> = if next2_pos
+                                        + MIN_MATCH as usize
+                                        <= n
+                                    {
+                                        mf.find_match_capped(to_g(next2_pos), 8)
+                                            .filter(|m| m.distance <= next2_max)
+                                            .map(|m| {
+                                                if m.length >= 8 || !use_dict {
+                                                    m.length
+                                                } else {
+                                                    match dict_hash::find_match(
+                                                        input, next2_pos, next2_max,
+                                                    ) {
+                                                        Some((_, _, tl)) if tl > m.length => tl,
+                                                        _ => m.length,
+                                                    }
                                                 }
-                                            }
-                                        })
-                                        .or_else(|| {
-                                            if use_dict {
-                                                dict_hash::find_match(input, next2_pos, next2_max)
+                                            })
+                                            .or_else(|| {
+                                                if use_dict {
+                                                    dict_hash::find_match(
+                                                        input,
+                                                        next2_pos,
+                                                        next2_max,
+                                                    )
                                                     .map(|(_, _, tl)| tl)
-                                            } else {
-                                                None
-                                            }
-                                        })
-                                } else {
-                                    None
-                                };
-                                if let Some(n2_len) = next2_best_len {
-                                    if n2_len > next_len {
-                                        pos += 2;
-                                        continue;
+                                                } else {
+                                                    None
+                                                }
+                                            })
+                                    } else {
+                                        None
+                                    };
+                                    if let Some(n2_len) = next2_best_len {
+                                        if n2_len > next_len {
+                                            pos += 2;
+                                            continue;
+                                        }
                                     }
                                 }
+                                pos += 1;
+                                continue;
                             }
-                            pos += 1;
-                            continue;
                         }
                     }
                 }
 
-                let clamped_copy = copy_len.min(MAX_COPY).max(MIN_MATCH);
+                let clamped_copy = copy_len.min(MAX_COPY).max(2);
                 let insert_len = (pos - insert_start) as u32;
+                delayed_in_row = 0;
                 commands.push(Command {
                     insert_len,
                     copy_len: clamped_copy,
