@@ -360,9 +360,15 @@ pub fn compress_with_quality(input: &[u8], quality: i32) -> Vec<u8> {
     // Hash scaling only for the greedy-tier experiment — the zopfli
     // DP's parse degrades with bigger tables at 21MB (+1.1%); keep the
     // default byte-identical.
+    // Hash scaling rides the greedy tier's default predicate (text
+    // >= 1 MiB) or its envs — worth 81KB at 21MB; the zopfli parse
+    // degrades with bigger tables (+1.1%) so binary stays at the
+    // per-quality log.
     let hash_log = if let Ok(v) = std::env::var("BROTLI_HASH_LOG") {
         v.parse().unwrap_or(hash_log)
-    } else if env_flag!("BROTLI_GREEDY_TIER") {
+    } else if (q >= 4 && q < 10 && is_text_like(input) && input.len() >= 1 << 20)
+        || env_flag!("BROTLI_GREEDY_TIER")
+    {
         let want = (input.len() as f64).log2().ceil() as u32 - 1;
         want.clamp(hash_log, 22)
     } else {
@@ -383,20 +389,6 @@ pub fn compress_with_quality(input: &[u8], quality: i32) -> Vec<u8> {
             max_match_length: MAX_COPY,
         };
         let mut shared_mf = omnizip_codecs::HashChainMatchFinder::new(input, mf_config);
-        // Companion 6-byte-hash finder (greedy tier): long-structure
-        // chains stay clean when 4-byte buckets congest at scale.
-        let mut shared_mf6 = if q >= 4 && q < 10 {
-            Some(omnizip_codecs::HashChainMatchFinder::new(
-                input,
-                omnizip_codecs::HashChainConfig {
-                    hash_bytes: 6,
-                    hash_log: hash_log.min(20),
-                    ..mf_config
-                },
-            ))
-        } else {
-            None
-        };
 
         let mut offset = 0usize;
         while offset < input.len() {
@@ -411,7 +403,7 @@ pub fn compress_with_quality(input: &[u8], quality: i32) -> Vec<u8> {
                 is_last,
                 q,
                 &mut shared_mf,
-                shared_mf6.as_mut(),
+                None,
             );
             if env_flag!("BROTLI_STATS") {
                 eprintln!("chunk {offset}..{end} q{q} took {:?}", t0.elapsed());
@@ -5483,10 +5475,17 @@ fn parse_input_with_offset_impl(
     // BROTLI_GREEDY_TIER routes q4-9 through the lazy path (the
     // reference's algorithm shape at those qualities) for measurement
     // of the deliberate time-for-ratio trade.
+    // Greedy tier (the reference's algorithm shape at q4-9): on by
+    // default for TEXT-like inputs of >= 1 MiB — measured, the greedy
+    // + rep-ring beats both the reference and our zopfli there (CSV
+    // 21MB q5 644,612B/3.4s vs zopfli 859,006/16.8s vs ref 1,058,795),
+    // while below ~1 MiB the DP's global pricing wins (100KB: +12%).
+    // Binary inputs keep the zopfli parse (FITS ratio 5% better).
+    // BROTLI_GREEDY_TIER forces on, BROTLI_NO_GREEDY_TIER forces off.
     let greedy_tier = quality >= 4
         && quality < 10
-        && input.len() <= 8 * 1024 * 1024
-        && env_flag!("BROTLI_GREEDY_TIER");
+        && !env_flag!("BROTLI_NO_GREEDY_TIER")
+        && (env_flag!("BROTLI_GREEDY_TIER") || (is_text_like(input) && input.len() >= 1 << 20));
     let use_dict = if greedy_tier && env_flag!("BROTLI_GREEDY_NODICT") {
         false
     } else {
@@ -5501,6 +5500,15 @@ fn parse_input_with_offset_impl(
             // fall through uncapped
         } else if mf.max_match_length() > nice_match {
             mf.set_max_match_length(nice_match);
+        }
+        if quality < 8 && input.len() >= 2 << 20 {
+            // The lazy lookahead walks the MF's own chain cap, and its
+            // decisions shape the whole parse: measured at 21MB, the
+            // q8-9 matcher config (chain 64, nice 256) reaches 3.03%
+            // where the q4-7 config (16, 96) lands at 6.34-10%. Below
+            // 2 MiB the override slightly hurts (1MB: 4.33->4.60%).
+            mf.set_max_chain_length(64);
+            mf.set_nice_match(256);
         }
         // fall through to the lazy path below
     } else if quality >= 4 && input.len() <= 8 * 1024 * 1024 {
@@ -5570,7 +5578,10 @@ fn parse_input_with_offset_impl(
                     // rep-friendly) matches in contention. A rep-distance
                     // match rides a ~2-bit rep code instead.
                     let pen = if is_rep {
-                        1.0
+                        // Rep preference scales with the explicit cost
+                        // it displaces: a rep code saves ~10-25 bits at
+                        // far distances but only ~2-4 bits locally.
+                        (0.679 * (m.distance as f32).log2() - 2.0).max(1.0)
                     } else if m.distance <= 4 {
                         2.0
                     } else {
@@ -5588,34 +5599,6 @@ fn parse_input_with_offset_impl(
                 // distance whose match is absent from the congested
                 // 4-byte chains — the structural period on periodic
                 // data — must still be considered.
-                // Companion 6-byte-hash probe: the long-structure
-                // match the congested 4-byte chains miss. Taken once
-                // as an explicit code, it enters the rep ring and is
-                // ridden as rep0 afterwards.
-                if greedy_tier {
-                    if let Some(m6) = mf6.as_deref() {
-                        if let Some(m) = m6.find_match(to_g(pos)) {
-                            // Only genuinely long structural matches —
-                            // marginal far matches churn the rep ring
-                            // on drifting-period data.
-                            if m.distance <= max_dist && m.length >= 96 {
-                                let is_rep = last_dists[..last_dist_len].contains(&m.distance);
-                                let pen = if is_rep {
-                                    1.0
-                                } else if m.distance <= 4 {
-                                    2.0
-                                } else {
-                                    0.679 * (m.distance as f32).log2()
-                                };
-                                let score = m.length as f32 - pen;
-                                if score > best_score {
-                                    best_score = score;
-                                    bestc = Some(m);
-                                }
-                            }
-                        }
-                    }
-                }
                 if greedy_tier && pos + MIN_MATCH as usize <= n {
                     let cap = (n - pos) as u32;
                     for &r in last_dists.iter().take(last_dist_len) {
@@ -5648,7 +5631,7 @@ fn parse_input_with_offset_impl(
                         if l < MIN_MATCH {
                             continue;
                         }
-                        let score = l as f32 - 1.0;
+                        let score = l as f32 - (0.679 * (r as f32).log2() - 2.0).max(1.0);
                         if score > best_score {
                             best_score = score;
                             bestc = Some(omnizip_codecs::Lz77Match {
