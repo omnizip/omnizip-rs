@@ -383,6 +383,20 @@ pub fn compress_with_quality(input: &[u8], quality: i32) -> Vec<u8> {
             max_match_length: MAX_COPY,
         };
         let mut shared_mf = omnizip_codecs::HashChainMatchFinder::new(input, mf_config);
+        // Companion 6-byte-hash finder (greedy tier): long-structure
+        // chains stay clean when 4-byte buckets congest at scale.
+        let mut shared_mf6 = if q >= 4 && q < 10 {
+            Some(omnizip_codecs::HashChainMatchFinder::new(
+                input,
+                omnizip_codecs::HashChainConfig {
+                    hash_bytes: 6,
+                    hash_log: hash_log.min(20),
+                    ..mf_config
+                },
+            ))
+        } else {
+            None
+        };
 
         let mut offset = 0usize;
         while offset < input.len() {
@@ -397,7 +411,7 @@ pub fn compress_with_quality(input: &[u8], quality: i32) -> Vec<u8> {
                 is_last,
                 q,
                 &mut shared_mf,
-                None,
+                shared_mf6.as_mut(),
             );
             if env_flag!("BROTLI_STATS") {
                 eprintln!("chunk {offset}..{end} q{q} took {:?}", t0.elapsed());
@@ -5509,6 +5523,15 @@ fn parse_input_with_offset_impl(
     // MF query coordinate: the shared frame MF spans global positions
     // [mf_base, ..); chunk-local MFs start at global mlen_offset.
     let to_g = |p: usize| mlen_offset + p - mf_base;
+    // Recent-distances ring for the greedy tier (upstream's
+    // last_distances): H5/H6 matchers probe these at every position
+    // BEFORE the hash chain — rep codes cost ~1-2 bits vs ~12-15 for
+    // explicit distances, so a slightly shorter rep match usually
+    // wins on the wire. Without this the structural distance never
+    // stays warm under greedy and far matches get re-encoded
+    // explicitly every time (CSV 21MB: 7.18% vs ref 4.98%).
+    let mut last_dists: [u32; 4] = [0; 4];
+    let mut last_dist_len = 0usize;
     while pos < n {
         // Global output position (across metablocks) for max_distance.
         let global_pos = mlen_offset + pos;
@@ -5535,15 +5558,20 @@ fn parse_input_with_offset_impl(
                 mf.find_candidates_into_patience(to_g(pos), ncand, nwalk, 8, &mut cands);
                 let mut bestc: Option<omnizip_codecs::Lz77Match> = None;
                 let mut best_score = f32::MIN;
-                for m in cands {
+                let mut best_is_rep = false;
+                for (ci, m) in cands.iter().enumerate() {
                     if m.distance > max_dist || m.length < MIN_MATCH {
                         continue;
                     }
+                    let is_rep = greedy_tier && last_dists[..last_dist_len].contains(&m.distance);
                     // Upstream's lazy scoring: distance penalty is
                     // 0.679 * log2(dist) (kBrotliLog2Table-scaled), not
                     // a full log2 — softer penalties keep nearer (more
-                    // rep-friendly) matches in contention.
-                    let pen = if m.distance <= 4 {
+                    // rep-friendly) matches in contention. A rep-distance
+                    // match rides a ~2-bit rep code instead.
+                    let pen = if is_rep {
+                        1.0
+                    } else if m.distance <= 4 {
                         2.0
                     } else {
                         0.679 * (m.distance as f32).log2()
@@ -5551,9 +5579,87 @@ fn parse_input_with_offset_impl(
                     let score = m.length as f32 - pen;
                     if score > best_score {
                         best_score = score;
-                        bestc = Some(m);
+                        bestc = cands.get(ci).copied();
+                        best_is_rep = is_rep;
                     }
                 }
+                // Probe the recent distances directly (upstream's
+                // last-distance check in FindLongestMatch): a rep
+                // distance whose match is absent from the congested
+                // 4-byte chains — the structural period on periodic
+                // data — must still be considered.
+                // Companion 6-byte-hash probe: the long-structure
+                // match the congested 4-byte chains miss. Taken once
+                // as an explicit code, it enters the rep ring and is
+                // ridden as rep0 afterwards.
+                if greedy_tier {
+                    if let Some(m6) = mf6.as_deref() {
+                        if let Some(m) = m6.find_match(to_g(pos)) {
+                            // Only genuinely long structural matches —
+                            // marginal far matches churn the rep ring
+                            // on drifting-period data.
+                            if m.distance <= max_dist && m.length >= 96 {
+                                let is_rep = last_dists[..last_dist_len].contains(&m.distance);
+                                let pen = if is_rep {
+                                    1.0
+                                } else if m.distance <= 4 {
+                                    2.0
+                                } else {
+                                    0.679 * (m.distance as f32).log2()
+                                };
+                                let score = m.length as f32 - pen;
+                                if score > best_score {
+                                    best_score = score;
+                                    bestc = Some(m);
+                                }
+                            }
+                        }
+                    }
+                }
+                if greedy_tier && pos + MIN_MATCH as usize <= n {
+                    let cap = (n - pos) as u32;
+                    for &r in last_dists.iter().take(last_dist_len) {
+                        if r == 0 || r as usize > global_pos {
+                            continue;
+                        }
+                        let src = to_g(pos) - r as usize;
+                        let l = if src >= mf_base {
+                            mf.match_len_between(to_g(pos), src, cap)
+                        } else {
+                            // Source precedes the MF window: compare
+                            // against the history slice directly.
+                            let hist_base = mlen_offset - history.len();
+                            let mut l = 0u32;
+                            while l < cap {
+                                let src_h = src + l as usize - hist_base;
+                                let idx = pos + l as usize;
+                                if idx >= n {
+                                    break;
+                                }
+                                let cur = input[idx];
+                                if src_h < history.len() && history[src_h] == cur {
+                                    l += 1;
+                                } else {
+                                    break;
+                                }
+                            }
+                            l
+                        };
+                        if l < MIN_MATCH {
+                            continue;
+                        }
+                        let score = l as f32 - 1.0;
+                        if score > best_score {
+                            best_score = score;
+                            bestc = Some(omnizip_codecs::Lz77Match {
+                                distance: r,
+                                length: l,
+                            });
+                            best_is_rep = true;
+                        }
+                    }
+                }
+                let _ = best_is_rep;
                 bestc
             } else {
                 mf.find_match(to_g(pos))
@@ -5680,6 +5786,25 @@ fn parse_input_with_offset_impl(
                     copy_len: clamped_copy,
                     distance,
                 });
+                if greedy_tier && distance <= max_dist {
+                    // Shuffle-on-insert into the recent-distances ring.
+                    if !last_dists[..last_dist_len].contains(&distance) {
+                        if last_dist_len < 4 {
+                            last_dists[last_dist_len] = distance;
+                            last_dist_len += 1;
+                        } else {
+                            last_dists.copy_within(1..4, 0);
+                            last_dists[3] = distance;
+                        }
+                    } else {
+                        let k = last_dists[..last_dist_len]
+                            .iter()
+                            .position(|&d| d == distance)
+                            .unwrap();
+                        last_dists.copy_within(k..last_dist_len, 0);
+                        last_dists[0] = distance;
+                    }
+                }
                 // Advance: for LZ77, use clamped copy_len (matches
                 // decoder output). For dictionary, use transformed_len
                 // (may differ from copy_len when transforms add/remove
