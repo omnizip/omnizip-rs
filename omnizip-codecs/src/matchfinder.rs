@@ -895,27 +895,37 @@ impl<'a> BankMatchFinder<'a> {
         HashChainMatchFinder::match_length(self.data, a, b, limit)
     }
 
-    /// Upstream FindLongestMatch: rep-distance probes (scored with the
-    /// last-distance bonus and per-index penalty), then the bucket scan
+    /// Upstream FindLongestMatch: the 16 short-code distance probes
+    /// (exact reps, then rep0/rep1 ±1-3 — kDistanceCacheIndex/Offset
+    /// with kDistanceShortCodeCost scoring), then the bucket scan
     /// newest-first with BackwardReferenceScore. The cursor position
     /// must already be inserted (via [`advance`](Self::advance)).
     #[must_use]
     pub fn find(&self, pos: usize, last_dists: &[u32], max_len: u32) -> Option<(u32, u32, u64)> {
-        if pos + 4 > self.data.len() || max_len < 4 {
+        if pos + 4 > self.data.len() || max_len < 2 {
             return None;
         }
+        // (distance-cache index, offset) per short code — upstream
+        // kDistanceCacheIndex/kDistanceCacheOffset.
+        const CACHE_INDEX: [u8; 16] = [0, 1, 2, 3, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1];
+        const CACHE_OFFSET: [i8; 16] = [0, 0, 0, 0, -1, 1, -2, 2, -3, 3, -1, 1, -2, 2, -3, 3];
+        // Short-code cost deltas from SCORE_BASE (upstream
+        // kDistanceShortCodeCost); the score is (BASE·4 + delta + 540·len) >> 2.
+        const SHORT_CODE_DELTA: [i32; 16] = [
+            60, -95, -117, -127, -93, -93, -96, -96, -99, -99, -105, -105, -115, -115, -125, -125,
+        ];
         let mut best_score = 0u64;
         let mut best: Option<(u32, u32)> = None;
 
-        // Rep probes first (upstream BackwardReferenceScoreUsingLastDistance
-        // = 135*len + 15375; penalty 39 + table per index).
-        for (i, &d) in last_dists.iter().take(self.num_last_dists).enumerate() {
-            if d == 0 || d as usize > pos {
+        for i in 0..self.num_last_dists.min(16) {
+            let base = *last_dists.get(usize::from(CACHE_INDEX[i])).unwrap_or(&0);
+            let v = i64::from(base) + i64::from(CACHE_OFFSET[i]);
+            if v < 1 || v as usize > pos {
                 continue;
             }
-            let prev = pos - d as usize;
-            // Quick reject at the best length so far.
-            let cur_best = best.map_or(4, |(_, l)| l) as usize;
+            let d = v as u32;
+            let prev = pos - v as usize;
+            let cur_best = best.map_or(2, |(_, l)| l) as usize;
             if pos + cur_best < self.data.len()
                 && prev + cur_best < self.data.len()
                 && self.data[pos + cur_best] != self.data[prev + cur_best]
@@ -923,15 +933,14 @@ impl<'a> BankMatchFinder<'a> {
                 continue;
             }
             let len = self.match_len(pos, prev, max_len);
-            if len < 3 {
+            // Upstream: >= 3 always, len 2 only for the two exact-rep
+            // codes (rep0/rep1 ride 1-2 bit codes).
+            if len < 3 && !(len == 2 && i < 2) {
                 continue;
             }
-            let mut score = 135u64 * u64::from(len) + 15375;
-            if i != 0 {
-                score -= 39 + (0x1ca10u64 >> (i & 14)) & 14;
-            }
-            if score > best_score {
-                best_score = score;
+            let score = (7680i64 * 4 + i64::from(SHORT_CODE_DELTA[i]) + 540 * i64::from(len)) >> 2;
+            if score > best_score as i64 {
+                best_score = score as u64;
                 best = Some((d, len));
             }
         }
@@ -968,8 +977,10 @@ impl<'a> BankMatchFinder<'a> {
             // (FindMatchLengthWithLimitMin4).
             let len = self.match_len(pos, prev, max_len);
             if len >= 4 {
-                let score = 135u64 * u64::from(len)
-                    + 15360u64.wrapping_sub(30u64 * u64::from(log2_floor(backward as u64)));
+                let score = 7680u64
+                    .wrapping_add(540u64.wrapping_mul(u64::from(len)))
+                    .wrapping_sub(120u64.wrapping_mul(u64::from(log2_floor(backward as u64))))
+                    >> 2;
                 if score > best_score {
                     best_score = score;
                     best = Some((backward as u32, len));
