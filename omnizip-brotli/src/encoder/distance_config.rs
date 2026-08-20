@@ -104,7 +104,10 @@ fn symbol_for_cost(d: u32, cfg: &DistanceConfig) -> u32 {
     let postfix = distval & postfix_mask;
     distval >>= cfg.npostfix;
     let nbits = (distval >> 1) + 1;
-    let offset = ((2 + (distval & 1)) << nbits) - 4;
+    // Distances near MAX_BACKWARD (~2^24) overflow the bucket shift in
+    // debug builds (checked shift panics); clamp to the alphabet size.
+    let safe_nbits = nbits.min(24);
+    let offset = (((2 + (distval & 1)) << safe_nbits) - 4) & (cfg.alphabet_size() - 1) as u32;
     let base = 16 + ndirect;
     base + ((offset) << cfg.npostfix) + postfix
 }
