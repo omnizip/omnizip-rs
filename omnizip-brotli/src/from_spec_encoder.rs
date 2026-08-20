@@ -5450,6 +5450,9 @@ fn parse_input_with_offset_impl(
     ctx_in: (u8, u8),
 ) -> (Vec<Command>, Option<BitWriter>) {
     let n = input.len();
+    // Content classification is O(n) — a per-position call (as the
+    // lazy lookahead had) is O(n^2) and dwarfs everything else.
+    let is_text_input = is_text_like(input);
     let mut commands = Vec::new();
 
     // At Q4+, always use the text config (deeper chains, dict, lazy2)
@@ -5461,7 +5464,7 @@ fn parse_input_with_offset_impl(
     // The static dictionary pays on text (real word matches); on
     // binary its per-position lookup costs ~30% of greedy-tier encode
     // for ~0.2% size. Binary q4-7 (time-first tier) skips it.
-    let use_dict = use_dict_base && !disable_dict && (quality >= 8 || is_text_like(input));
+    let use_dict = use_dict_base && !disable_dict && (quality >= 8 || is_text_input);
 
     let _config = omnizip_codecs::HashChainConfig {
         dict_size: MAX_BACKWARD_DISTANCE,
@@ -5502,7 +5505,7 @@ fn parse_input_with_offset_impl(
         && !env_flag!("BROTLI_NO_GREEDY_TIER")
         && (env_flag!("BROTLI_GREEDY_TIER")
             || (quality < 8 && input.len() >= 1 << 20)
-            || (is_text_like(input) && input.len() >= 1 << 20));
+            || (is_text_input && input.len() >= 1 << 20));
     let use_dict = if greedy_tier && env_flag!("BROTLI_GREEDY_NODICT") {
         false
     } else {
