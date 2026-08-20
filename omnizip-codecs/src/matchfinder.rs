@@ -151,6 +151,12 @@ impl<'a> HashChainMatchFinder<'a> {
     }
 
     /// Current position in the input data.
+    /// Configured chain-walk depth.
+    #[must_use]
+    pub const fn max_chain_length(&self) -> u32 {
+        self.max_chain_length
+    }
+
     #[must_use]
     pub const fn position(&self) -> usize {
         self.cur
@@ -187,6 +193,12 @@ impl<'a> HashChainMatchFinder<'a> {
     /// current position itself — we follow `prev[pos]` to skip it.
     #[must_use]
     pub fn find_match(&self, pos: usize) -> Option<Lz77Match> {
+        self.find_match_capped(pos, self.max_chain_length)
+    }
+
+    /// Chain walk capped below the configured depth — for approximate
+    /// lookahead where the deferral decision tolerates a shorter best.
+    pub fn find_match_capped(&self, pos: usize, cap: u32) -> Option<Lz77Match> {
         if pos + 4 > self.data.len() {
             return None;
         }
@@ -207,7 +219,7 @@ impl<'a> HashChainMatchFinder<'a> {
             (self.data.len() - pos) as u32
         };
 
-        while candidate != SENTINEL && chain < self.max_chain_length {
+        while candidate != SENTINEL && chain < cap {
             let cand_us = candidate as usize;
             let dist = pos.saturating_sub(cand_us);
             if dist == 0 || dist as u32 > self.max_distance {

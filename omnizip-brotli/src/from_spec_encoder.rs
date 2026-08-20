@@ -366,7 +366,8 @@ pub fn compress_with_quality(input: &[u8], quality: i32) -> Vec<u8> {
     // per-quality log.
     let hash_log = if let Ok(v) = std::env::var("BROTLI_HASH_LOG") {
         v.parse().unwrap_or(hash_log)
-    } else if (q >= 4 && q < 10 && is_text_like(input) && input.len() >= 1 << 20)
+    } else if (((q >= 4 && q < 10 && is_text_like(input)) || (q >= 4 && q < 8))
+        && input.len() >= 1 << 20)
         || env_flag!("BROTLI_GREEDY_TIER")
     {
         let want = (input.len() as f64).log2().ceil() as u32 - 1;
@@ -5485,7 +5486,9 @@ fn parse_input_with_offset_impl(
     let greedy_tier = quality >= 4
         && quality < 10
         && !env_flag!("BROTLI_NO_GREEDY_TIER")
-        && (env_flag!("BROTLI_GREEDY_TIER") || (is_text_like(input) && input.len() >= 1 << 20));
+        && (env_flag!("BROTLI_GREEDY_TIER")
+            || (quality < 8 && input.len() >= 1 << 20)
+            || (is_text_like(input) && input.len() >= 1 << 20));
     let use_dict = if greedy_tier && env_flag!("BROTLI_GREEDY_NODICT") {
         false
     } else {
@@ -5692,7 +5695,9 @@ fn parse_input_with_offset_impl(
                     let next_max = (next_global as u32).min(MAX_BACKWARD_DISTANCE);
 
                     let next_lz77 = if next_pos + MIN_MATCH as usize <= n {
-                        mf.find_match(to_g(next_pos))
+                        // Approximate lookahead: a shallow chain walk is
+                        // enough for the deferral comparison.
+                        mf.find_match_capped(to_g(next_pos), 48.min(mf.max_chain_length()))
                     } else {
                         None
                     };
@@ -5724,7 +5729,7 @@ fn parse_input_with_offset_impl(
                                 let next2_best_len: Option<u32> = if next2_pos + MIN_MATCH as usize
                                     <= n
                                 {
-                                    mf.find_match(to_g(next2_pos))
+                                    mf.find_match_capped(to_g(next2_pos), 8)
                                         .filter(|m| m.distance <= next2_max)
                                         .map(|m| {
                                             if m.length >= 8 || !use_dict {
