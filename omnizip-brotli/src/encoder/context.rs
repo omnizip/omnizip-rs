@@ -110,15 +110,35 @@ fn cluster_contexts_greedy(histograms: &[[u32; 256]], num_trees: usize) -> Vec<u
     let mut clusters: Vec<Vec<usize>> = (0..n).map(|i| vec![i]).collect();
     let mut merged_hists: Vec<[u32; 256]> = histograms.to_vec();
 
+    // Distance matrix cached across merges: only pairs involving the
+    // merged cluster change, so each iteration recomputes one row
+    // (O(n) L1s) instead of rescanning all pairs (O(n^2)). The
+    // selection order and tie-breaking match the full rescan exactly —
+    // only pairs whose value is unchanged are read from cache.
+    let mut dist: Vec<Vec<u64>> = (0..n)
+        .map(|i| {
+            (0..n)
+                .map(|j| {
+                    if i < j {
+                        l1_distance(&merged_hists[i], &merged_hists[j])
+                    } else {
+                        0
+                    }
+                })
+                .collect()
+        })
+        .collect();
+
     while clusters.len() > num_trees {
+        let m = clusters.len();
         let mut best_dist = u64::MAX;
         let mut best_i = 0;
         let mut best_j = 1;
-        for i in 0..clusters.len() {
-            for j in (i + 1)..clusters.len() {
-                let dist = l1_distance(&merged_hists[i], &merged_hists[j]);
-                if dist < best_dist {
-                    best_dist = dist;
+        for i in 0..m {
+            for j in (i + 1)..m {
+                let d = dist[i][j];
+                if d < best_dist {
+                    best_dist = d;
                     best_i = i;
                     best_j = j;
                 }
@@ -132,6 +152,22 @@ fn cluster_contexts_greedy(histograms: &[[u32; 256]], num_trees: usize) -> Vec<u
         let moved = clusters.remove(best_j);
         clusters[best_i].extend(moved);
         merged_hists.remove(best_j);
+        dist.remove(best_j);
+        for row in dist.iter_mut() {
+            row.remove(best_j);
+        }
+        // Recompute the merged row (and its symmetric entries).
+        for j in 0..dist.len() {
+            if best_i != j {
+                let d = if best_i < j {
+                    l1_distance(&merged_hists[best_i], &merged_hists[j])
+                } else {
+                    l1_distance(&merged_hists[j], &merged_hists[best_i])
+                };
+                let (lo, hi) = (best_i.min(j), best_i.max(j));
+                dist[lo][hi] = d;
+            }
+        }
     }
 
     let mut ctx_map = vec![0u8; n];

@@ -493,7 +493,14 @@ fn encode_huffman_chunk_body(
     // trees. Active for Q4+ inputs ≥ 4 KiB (any content type — FSST-
     // transformed data benefits from context separation just as much
     // as natural text).
-    let use_context = quality >= 4 && input.len() >= 4096;
+    // Context modeling earns its cost on TEXT (27% of CSV q5 output)
+    // but only 1.8% on binary for 39% of encode time — binary q4-7
+    // (the time-first tier) skips it. BROTLI_NO_CM forces off,
+    // BROTLI_FORCE_CM forces on.
+    let use_context = quality >= 4
+        && input.len() >= 4096
+        && !env_flag!("BROTLI_NO_CM")
+        && (env_flag!("BROTLI_FORCE_CM") || quality >= 8 || is_text_like(input));
 
     // Block-type switching is disabled — testing showed a slight ratio
     // regression on uniform text data (per-block-type Huffman overhead
@@ -650,8 +657,12 @@ fn emit_metablock_from_commands(
     };
 
     // --- Command block splitting (BrotliBuildMetaBlock cmd pass) ---
-    let cmd_split_on =
-        quality >= 4 && stream.cmd_symbols.len() >= 1024 && !env_flag!("BROTLI_NO_SPLIT");
+    // Splits buy ~2KB (0.07%) on binary q5 for ~18% of encode —
+    // binary q4-7 skips them (text keeps them: they earn their cost).
+    let cmd_split_on = quality >= 4
+        && stream.cmd_symbols.len() >= 1024
+        && !env_flag!("BROTLI_NO_SPLIT")
+        && (quality >= 8 || is_text_like(input));
     // q10+ parses ride implicit-rep0 commands heavily; their symbol
     // stream is broader and keeps sharpening up to 64 blocks (measured
     // 16→64 saves ~3.9KB at 1MB q11; 128 regresses on switch overhead).
@@ -5447,7 +5458,10 @@ fn parse_input_with_offset_impl(
     // natural text. The optimal parser compensates for any mismatch.
     let (max_chain, nice_match, use_dict_base, lazy, lazy2, hash_log) =
         brotli_quality_config(quality, true);
-    let use_dict = use_dict_base && !disable_dict;
+    // The static dictionary pays on text (real word matches); on
+    // binary its per-position lookup costs ~30% of greedy-tier encode
+    // for ~0.2% size. Binary q4-7 (time-first tier) skips it.
+    let use_dict = use_dict_base && !disable_dict && (quality >= 8 || is_text_like(input));
 
     let _config = omnizip_codecs::HashChainConfig {
         dict_size: MAX_BACKWARD_DISTANCE,
@@ -5696,7 +5710,9 @@ fn parse_input_with_offset_impl(
 
                     let next_lz77 = if next_pos + MIN_MATCH as usize <= n {
                         // Approximate lookahead: a shallow chain walk is
-                        // enough for the deferral comparison.
+                        // enough for the deferral comparison. The deep
+                        // (48) walk is the periodic-structure discovery
+                        // engine — text only; binary probes shallow.
                         mf.find_match_capped(to_g(next_pos), 48.min(mf.max_chain_length()))
                     } else {
                         None
