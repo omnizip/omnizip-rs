@@ -102,10 +102,10 @@ const NTREES_COMPLEX_UTF8: u32 = 13;
 /// Copy-length candidates evaluated per match in the optimal parsers.
 /// Sampled at copy-code group boundaries (the highest L in each group
 /// wins ties, since within a copy-length code the wire cost is flat).
-const COPY_BOUNDARIES: [u32; 52] = [
-    4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 22, 24, 26, 28, 30, 32, 34, 36,
-    40, 44, 48, 52, 60, 68, 76, 84, 100, 116, 132, 148, 164, 180, 196, 212, 228, 244, 260, 271,
-    432, 496, 752, 1264, 2288, 3040, 4096,
+const COPY_BOUNDARIES: [u32; 54] = [
+    2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 22, 24, 26, 28, 30, 32,
+    34, 36, 40, 44, 48, 52, 60, 68, 76, 84, 100, 116, 132, 148, 164, 180, 196, 212, 228, 244, 260,
+    271, 432, 496, 752, 1264, 2288, 3040, 4096,
 ];
 
 /// A parsed LZ77 command: insert `insert_len` literals, then copy
@@ -761,6 +761,10 @@ fn emit_metablock_from_commands(
             if quality >= 10 && stream.literals.len() >= 32_768 {
                 (stream.literals.len() / 400).clamp(16, 96)
             } else {
+                // q<10: cap keeps the (block x context) clustering's
+                // second phase small (blocks/64 groups x 8 centroids);
+                // a few hundred uncapped blocks measured 8s of
+                // clustering for +1% size.
                 (stream.literals.len() / 1024).clamp(8, 48)
             }
         });
@@ -883,6 +887,8 @@ fn emit_metablock_from_commands(
     // splitting (nbltypes_l > 1), each block gets its own context→tree
     // mapping; trees are shared across blocks (NTREES_L total).
     let bc_hists: Vec<[u32; 256]> = vec![[0u32; 256]; nbltypes_l as usize * 64];
+    let max_lit_blocks_dbg = lit_boundaries.len();
+    let nbltypes_l_dbg = nbltypes_l;
     let mut bc_hists = bc_hists;
     {
         let mut lit_pos = 0usize;
@@ -965,7 +971,20 @@ fn emit_metablock_from_commands(
             }
             e
         };
-        let cmap_a = crate::encoder::context::cluster_contexts(&bc_hists, 4);
+        let cmap_a = if env_flag!("BROTLI_STATS") {
+            let t = std::time::Instant::now();
+            let r = crate::encoder::context::cluster_contexts(&bc_hists, 4);
+            eprintln!(
+                "STATS cluster_lit rows={} blocks_dbg={max_lit_blocks_dbg} nbltypes_l={} cap={max_lit_blocks} lits={} {:.2}s",
+                bc_hists.len(),
+                nbltypes_l_dbg,
+                stream.literals.len(),
+                t.elapsed().as_secs_f64()
+            );
+            r
+        } else {
+            crate::encoder::context::cluster_contexts(&bc_hists, 4)
+        };
         let mut hists_a: Vec<[u32; 256]> = vec![[0u32; 256]; 4];
         for (i, h) in bc_hists.iter().enumerate() {
             for (b, &f) in h.iter().enumerate() {
@@ -1206,7 +1225,14 @@ fn emit_metablock_from_commands(
     };
     let cost_a = ent(&global_hist) + 70.0 + if dist_bc_ok { 0.0 } else { 1.0e9 };
     let shared_k = ntrees_d.min(4) as usize;
-    let cmap_bc = crate::encoder::context::cluster_contexts(&dist_bc_hists, shared_k);
+    let cmap_bc = if env_flag!("BROTLI_STATS") {
+        let t = std::time::Instant::now();
+        let r = crate::encoder::context::cluster_contexts(&dist_bc_hists, shared_k);
+        eprintln!("STATS cluster_dist rows={} {:.2}s", dist_bc_hists.len(), t.elapsed().as_secs_f64());
+        r
+    } else {
+        crate::encoder::context::cluster_contexts(&dist_bc_hists, shared_k)
+    };
     let used_count = {
         let mut hists: Vec<[u32; 256]> = vec![[0u32; 256]; shared_k];
         for (i, h) in dist_bc_hists.iter().enumerate() {
@@ -2398,6 +2424,45 @@ fn compute_huffman_lit_cost(data: &[u8]) -> [f32; 256] {
     arr
 }
 
+/// Port of the reference BrotliEstimateBitCostsForLiterals (non-UTF8
+/// branch): each literal is priced by a sliding 4000-byte window byte
+/// histogram — LOCAL entropy, not the whole-metablock average. On
+/// region-structured binary (columnar data) the reference's Zopfli
+/// parse leans on these local prices to decide copy-vs-literal.
+fn sliding_window_lit_costs(input: &[u8]) -> Vec<f32> {
+    let n = input.len();
+    let mut out = vec![0f32; n];
+    let window_half = 2000usize;
+    let mut hist = [0u32; 256];
+    let mut in_window = window_half.min(n);
+    for &b in &input[..in_window] {
+        hist[usize::from(b)] += 1;
+    }
+    for i in 0..n {
+        if i >= window_half {
+            hist[usize::from(input[i - window_half])] -= 1;
+            in_window -= 1;
+        }
+        if i + window_half < n {
+            hist[usize::from(input[i + window_half])] += 1;
+            in_window += 1;
+        }
+        let mut h = hist[usize::from(input[i])];
+        if h == 0 {
+            h = 1;
+        }
+        let mut c = (in_window as f64).log2() - f64::from(h).log2() + 0.02905;
+        if c < 1.0 {
+            c = c * 0.5 + 0.5;
+        }
+        if i < 2000 {
+            c += 0.7 - (2000 - i) as f64 / 2000.0 * 0.35;
+        }
+        out[i] = c as f32;
+    }
+    out
+}
+
 /// Like [`optimal_parse`] but accepts an optional literal cost override.
 /// Used by the iterative parser refinement (TODO 246) to feed back
 /// actual Huffman-derived code lengths into a second DP pass.
@@ -3173,6 +3238,35 @@ fn zopfli_parse_ext(
                     }
                 }
             }
+            // Short-match scan (reference FindAllMatchesH10, HQ q10-11):
+            // walk the nearest distances while no match longer than 2 is
+            // known, recording each progressive improvement. At q11 the
+            // scan reaches 64 bytes back, q10 16. These 2-3 byte copies
+            // at short distances never surface from the 4-byte hash
+            // chain, yet on columnar data they are the bulk of the
+            // reference's copy stream (its FITS q11 emits 4x fewer
+            // literals than a min-length-4 parse can).
+            if quality >= 10 && pos + 2 <= n {
+                let short_max: usize = if quality >= 11 { 64 } else { 16 };
+                let cap = ((n - pos) as u32).min(MAX_COPY);
+                let mut best_len: u32 = 1;
+                let mut src = pos;
+                let stop = pos.saturating_sub(short_max);
+                while src > stop && best_len <= 2 {
+                    let prev = src - 1;
+                    if input[prev] == input[pos] && input[prev + 1] == input[pos + 1] {
+                        let mut l = 2u32;
+                        while l < cap && input[prev + l as usize] == input[pos + l as usize] {
+                            l += 1;
+                        }
+                        if l > best_len {
+                            cand_flat.push(((pos - prev) as u32, l));
+                            best_len = l;
+                        }
+                    }
+                    src = prev;
+                }
+            }
         }
         cand_off.push(cand_flat.len() as u32);
         // Sort each position's candidate slice by length desc so the DP's
@@ -3404,7 +3498,7 @@ fn zopfli_parse_ext(
         let cstart = cand_off[i] as usize;
         let cend = cand_off[i + 1] as usize;
         for (cand_idx, &(dist, copy_len)) in cand_flat[cstart..cend].iter().enumerate() {
-            if dist == 0 || copy_len < MIN_MATCH {
+            if dist == 0 || copy_len < 2 {
                 continue;
             }
             let dc = match short_code_dist_cost(dist, &reps) {
@@ -3415,7 +3509,7 @@ fn zopfli_parse_ext(
             let m_cost = ins_prior(ilen_here) + dc + cmd_sym_price(ilen_here, copy_len);
             if cand_idx == 0 {
                 for &boundary in &COPY_BOUNDARIES {
-                    if boundary < MIN_MATCH || boundary > copy_len {
+                    if boundary > copy_len {
                         continue;
                     }
                     let j = i + boundary as usize;
@@ -3442,7 +3536,7 @@ fn zopfli_parse_ext(
                     }
                 }
                 for &boundary in &evaluated {
-                    if boundary < MIN_MATCH {
+                    if boundary < 2 {
                         continue;
                     }
                     let j = i + boundary as usize;
@@ -3496,12 +3590,12 @@ fn zopfli_parse_ext(
             } else {
                 cross_match_len(i, r, max_len)
             };
-            if l < MIN_MATCH {
+            if l < 2 {
                 continue;
             }
             let ilen_here = (i - u[i] as usize) as u32;
             for &boundary in &COPY_BOUNDARIES {
-                if boundary < MIN_MATCH || boundary > l {
+                if boundary > l {
                     continue;
                 }
                 let j = i + boundary as usize;
@@ -3549,7 +3643,7 @@ fn zopfli_parse_ext(
                 } else {
                     cross_match_len(i, rv as u32, max_len)
                 };
-                if lv < MIN_MATCH {
+                if lv < 2 {
                     continue;
                 }
                 let ilen_here = (i - u[i] as usize) as u32;
@@ -3874,13 +3968,23 @@ fn zopfli_iterative_parse(
             quality,
         )
     } else {
+        // Pass-1a literal pricing: the reference's Zopfli prices each
+        // literal by a sliding 4000-byte window (local entropy) — on
+        // region-structured binary this decides copy-vs-literal far
+        // better than the whole-metablock average. Text keeps the
+        // global table (their UTF8 variant differs; measured later).
+        let sw_costs = if quality >= 10 && !is_text_like(input) && !env_flag!("BROTLI_NO_SW_LIT") {
+            Some(sliding_window_lit_costs(input))
+        } else {
+            None
+        };
         zopfli_parse_with_candidates(
             input,
             mf,
             mlen_offset,
             use_dict,
             None,
-            None,
+            sw_costs.as_deref(),
             None,
             None,
             ins_prior_cfg,
@@ -5542,18 +5646,15 @@ fn parse_input_with_offset_impl(
     // reference's algorithm shape at those qualities) for measurement
     // of the deliberate time-for-ratio trade.
     // Greedy tier (the reference's algorithm shape at q4-9): on by
-    // default for TEXT-like inputs of >= 1 MiB — measured, the greedy
-    // + rep-ring beats both the reference and our zopfli there (CSV
-    // 21MB q5 644,612B/3.4s vs zopfli 859,006/16.8s vs ref 1,058,795),
-    // while below ~1 MiB the DP's global pricing wins (100KB: +12%).
-    // Binary inputs keep the zopfli parse (FITS ratio 5% better).
+    // default for inputs of >= 1 MiB — measured, the greedy + rep-ring
+    // beats both the reference and our zopfli there (CSV 21MB q5
+    // 644,612B/3.4s vs zopfli 859,006/16.8s vs ref 1,058,795), while
+    // below ~1 MiB the DP's global pricing wins (100KB: +12%).
     // BROTLI_GREEDY_TIER forces on, BROTLI_NO_GREEDY_TIER forces off.
     let greedy_tier = quality >= 4
         && quality < 10
         && !env_flag!("BROTLI_NO_GREEDY_TIER")
-        && (env_flag!("BROTLI_GREEDY_TIER")
-            || (quality < 8 && input.len() >= 1 << 20)
-            || (is_text_input && input.len() >= 1 << 20));
+        && (env_flag!("BROTLI_GREEDY_TIER") || input.len() >= 1 << 20);
     let use_dict = if greedy_tier && env_flag!("BROTLI_GREEDY_NODICT") {
         false
     } else {
@@ -5569,7 +5670,7 @@ fn parse_input_with_offset_impl(
         } else if mf.max_match_length() > nice_match {
             mf.set_max_match_length(nice_match);
         }
-        if quality < 8 && input.len() >= 2 << 20 {
+        if quality < 10 && input.len() >= 2 << 20 {
             // The lazy lookahead walks the MF's own chain cap, and its
             // decisions shape the whole parse: measured at 21MB, the
             // q8-9 matcher config (chain 64, nice 256) reaches 3.03%
@@ -5686,9 +5787,11 @@ fn parse_input_with_offset_impl(
                 // last-distance check in FindLongestMatch): a rep
                 // distance whose match is absent from the congested
                 // 4-byte chains — the structural period on periodic
-                // data — must still be considered.
-                if greedy_tier && pos + MIN_MATCH as usize <= n {
-                    let cap = (n - pos) as u32;
+                // data — must still be considered. The bank already
+                // probes these internally (they are passed to find),
+                // so this is the text/chain path only.
+                if greedy_tier && bank_mf.is_none() && pos + MIN_MATCH as usize <= n {
+                    let cap = ((n - pos) as u32).min(nice_match);
                     for &r in last_dists.iter().take(last_dist_len) {
                         if r == 0 || r as usize > global_pos {
                             continue;
@@ -6282,6 +6385,192 @@ fn split_symbol_stream_optimal(
     alphabet: usize,
     max_blocks: usize,
 ) -> Vec<usize> {
+    if std::env::var("BROTLI_DP_SPLIT").is_ok() {
+        return split_symbol_stream_dp(symbols, alphabet, max_blocks);
+    }
+    // Reference params (BrotliBuildMetaBlockGreedyInternal): commands
+    // min-block 1024 / threshold 500, distances 512 / 100.
+    if alphabet == 704 {
+        greedy_split(symbols.len(), alphabet, 1024, 500.0, max_blocks, |i| symbols[i])
+    } else {
+        greedy_split(symbols.len(), alphabet, 512, 100.0, max_blocks, |i| symbols[i])
+    }
+}
+
+/// Reference BitsEntropy: Shannon bits with a 1-bit/symbol floor.
+fn bits_entropy(h: &[u32]) -> f32 {
+    let tbl = log2_table();
+    let mut sum: u64 = 0;
+    let mut acc: f64 = 0.0;
+    for &p in h {
+        if p > 0 {
+            sum += u64::from(p);
+            acc -= f64::from(p) * f64::from(fast_log2(tbl, p));
+        }
+    }
+    if sum == 0 {
+        return 0.0;
+    }
+    acc += f64::from(fast_log2(tbl, sum as u32)) * (sum as f64);
+    let r = acc as f32;
+    if r < sum as f32 {
+        sum as f32
+    } else {
+        r
+    }
+}
+
+/// Greedy block splitter (port of the reference BlockSplitter state
+/// machine from BrotliBuildMetaBlockGreedy): symbols accumulate into
+/// the current histogram; once the target block size is reached the
+/// splitter decides to start a new type, merge with the type two back,
+/// or extend the previous block, by comparing entropy deltas against a
+/// threshold. Returns block START indices (first is 0). O(n) — the
+/// exact DP this replaces was O(m²) over cut candidates and dominated
+/// emission time on multi-MB streams.
+fn greedy_split(
+    n: usize,
+    alphabet: usize,
+    min_block_size: usize,
+    threshold: f32,
+    max_blocks: usize,
+    sym: impl Fn(usize) -> usize,
+) -> Vec<usize> {
+    if n == 0 {
+        return vec![0];
+    }
+    let mut cuts = vec![0usize];
+    let mut curr = vec![0u32; alphabet];
+    let mut h_last = vec![0u32; alphabet];
+    let mut h_last2 = vec![0u32; alphabet];
+    let mut e_last = [f32::MAX; 2];
+    let mut target = min_block_size;
+    let mut block_size = 0usize;
+    let mut num_types = 1usize;
+    let mut merge_last_count = 0usize;
+    let mut started = false;
+    let mut cut_start = 0usize;
+    let mut finish = |i: usize,
+                      curr: &mut Vec<u32>,
+                      h_last: &mut Vec<u32>,
+                      h_last2: &mut Vec<u32>,
+                      e_last: &mut [f32; 2],
+                      target: &mut usize,
+                      merge_last_count: &mut usize,
+                      cuts: &mut Vec<usize>,
+                      num_types: &mut usize,
+                      cut_start: &mut usize,
+                      started: &mut bool,
+                      block_size: &mut usize| {
+        if !*started {
+            h_last.clone_from(curr);
+            e_last[0] = bits_entropy(curr);
+            e_last[1] = e_last[0];
+            *started = true;
+            *cut_start = i + 1;
+            curr.iter_mut().for_each(|x| *x = 0);
+            *block_size = 0;
+            return;
+        }
+        if *block_size == 0 {
+            return;
+        }
+        let ent = bits_entropy(curr);
+        let mut comb0 = curr.clone();
+        let mut comb1 = curr.clone();
+        for (a, &b) in comb0.iter_mut().zip(h_last.iter()) {
+            *a += b;
+        }
+        for (a, &b) in comb1.iter_mut().zip(h_last2.iter()) {
+            *a += b;
+        }
+        let ce0 = bits_entropy(&comb0);
+        let ce1 = bits_entropy(&comb1);
+        let d0 = ce0 - ent - e_last[0];
+        let d1 = ce1 - ent - e_last[1];
+        if *num_types < 256 && cuts.len() < max_blocks && d0 > threshold && d1 > threshold {
+            cuts.push(*cut_start);
+            *cut_start = i + 1;
+            h_last2.clone_from(h_last);
+            h_last.clone_from(curr);
+            e_last[1] = e_last[0];
+            e_last[0] = ent;
+            *num_types += 1;
+            *merge_last_count = 0;
+            *target = min_block_size;
+        } else if d1 < d0 - 20.0 && cuts.len() < max_blocks {
+            // Merge with the type two back: the reference reuses that
+            // block type here; without type reuse on our wire this is
+            // still a block boundary.
+            cuts.push(*cut_start);
+            *cut_start = i + 1;
+            h_last2.clone_from(h_last);
+            h_last.clone_from(&comb1);
+            e_last[1] = e_last[0];
+            e_last[0] = ce1;
+            *merge_last_count = 0;
+            *target = min_block_size;
+        } else {
+            for (a, &b) in h_last.iter_mut().zip(comb0.iter()) {
+                *a = b;
+            }
+            e_last[0] = ce0;
+            if *num_types == 1 {
+                e_last[1] = e_last[0];
+            }
+            *merge_last_count += 1;
+            if *merge_last_count > 1 {
+                *target += min_block_size;
+            }
+        }
+        curr.iter_mut().for_each(|x| *x = 0);
+        *block_size = 0;
+    };
+    for i in 0..n {
+        curr[sym(i)] += 1;
+        block_size += 1;
+        if block_size >= target {
+            finish(
+                i,
+                &mut curr,
+                &mut h_last,
+                &mut h_last2,
+                &mut e_last,
+                &mut target,
+                &mut merge_last_count,
+                &mut cuts,
+                &mut num_types,
+                &mut cut_start,
+                &mut started,
+                &mut block_size,
+            );
+        }
+    }
+    if block_size > 0 {
+        finish(
+            n - 1,
+            &mut curr,
+            &mut h_last,
+            &mut h_last2,
+            &mut e_last,
+            &mut target,
+            &mut merge_last_count,
+            &mut cuts,
+            &mut num_types,
+            &mut cut_start,
+            &mut started,
+            &mut block_size,
+        );
+    }
+    cuts
+}
+
+/// Exact O(m²) cut DP (env: BROTLI_DP_SPLIT) — the pre-greedy splitter.
+fn split_symbol_stream_dp(
+    symbols: &[usize],
+    alphabet: usize,
+    max_blocks: usize,
+) -> Vec<usize> {
     let cmd_symbols = symbols;
     let n = cmd_symbols.len();
     if n < 1024 || max_blocks < 2 {
@@ -6406,6 +6695,17 @@ fn split_symbol_stream_optimal(
 /// Optimal contiguous split of the literal stream (byte-histogram DP).
 /// Returns block START indices in literal-index space (first is 0).
 fn split_literals(literals: &[u8], max_blocks: usize) -> Vec<usize> {
+    if std::env::var("BROTLI_DP_SPLIT").is_ok() {
+        return split_literals_dp(literals, max_blocks);
+    }
+    // Reference params: literals min-block 512 / threshold 400.
+    greedy_split(literals.len(), 256, 512, 400.0, max_blocks, |i| {
+        usize::from(literals[i])
+    })
+}
+
+/// Exact literal-split DP (env: BROTLI_DP_SPLIT).
+fn split_literals_dp(literals: &[u8], max_blocks: usize) -> Vec<usize> {
     let n = literals.len();
     if n < 4096 || max_blocks < 2 {
         return vec![0];
