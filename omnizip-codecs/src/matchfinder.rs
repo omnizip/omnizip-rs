@@ -799,3 +799,223 @@ impl<'a> BinaryTreeMatchFinder<'a> {
         self.match_len_from(a, b, max_len as usize) as u32
     }
 }
+
+// ---------------------------------------------------------------------------
+// H5 bank hasher (port of upstream's AdvHasher<H5Sub>): a fixed-size
+// circular buffer of recent positions per hash bucket. The bounded scan
+// stays inside one cache line per probe — no prev[] pointer chasing.
+// Scoring is upstream's exact BackwardReferenceScore family.
+// ---------------------------------------------------------------------------
+
+/// Upstream `Log2FloorNonZero`.
+const fn log2_floor(v: u64) -> u32 {
+    63 - v.leading_zeros()
+}
+
+pub struct BankMatchFinder<'a> {
+    data: &'a [u8],
+    /// Per-bucket insertion counter (upstream `num`).
+    num: Vec<u16>,
+    /// `1 << block_bits` most-recent positions per bucket (upstream
+    /// `buckets`).
+    buckets: Vec<u32>,
+    bucket_bits: u32,
+    block_bits: u32,
+    max_distance: u32,
+    /// Insert cursor (absolute position).
+    cur: usize,
+    /// Upstream num_last_distances_to_check: rep distances probed
+    /// (with per-index penalty) before the bucket.
+    num_last_dists: usize,
+}
+
+impl<'a> BankMatchFinder<'a> {
+    #[must_use]
+    pub fn new(data: &'a [u8], bucket_bits: u32, block_bits: u32, num_last_dists: usize) -> Self {
+        let bucket_count = 1usize << bucket_bits;
+        Self {
+            data,
+            num: vec![0; bucket_count],
+            buckets: vec![u32::MAX; bucket_count << block_bits],
+            bucket_bits,
+            block_bits,
+            max_distance: u32::MAX,
+            cur: 0,
+            num_last_dists,
+        }
+    }
+
+    #[must_use]
+    pub fn position(&self) -> usize {
+        self.cur
+    }
+
+    pub fn set_max_distance(&mut self, d: u32) {
+        self.max_distance = d;
+    }
+
+    #[inline]
+    fn key(&self, pos: usize) -> usize {
+        if pos + 4 > self.data.len() {
+            return 0;
+        }
+        let word = u32::from_le_bytes([
+            self.data[pos],
+            self.data[pos + 1],
+            self.data[pos + 2],
+            self.data[pos + 3],
+        ]);
+        (word.wrapping_mul(0x1E35_A7BD) >> (32 - self.bucket_bits)) as usize // kHashMul32
+    }
+
+    fn insert(&mut self, pos: usize) {
+        if pos + 4 > self.data.len() {
+            return;
+        }
+        let key = self.key(pos);
+        let mask = (1usize << self.block_bits) - 1;
+        let slot = (self.num[key] as usize & mask) << self.block_bits;
+        let _ = slot;
+        let base = key << self.block_bits;
+        self.buckets[base | (self.num[key] as usize & mask)] = pos as u32;
+        self.num[key] = self.num[key].wrapping_add(1);
+    }
+
+    /// Store the cursor's position and advance (our greedy loop calls
+    /// this once per position, including inside copies).
+    pub fn advance(&mut self) {
+        if self.cur >= self.data.len() {
+            return;
+        }
+        self.insert(self.cur);
+        self.cur += 1;
+    }
+
+    fn match_len(&self, a: usize, b: usize, limit: u32) -> u32 {
+        HashChainMatchFinder::match_length(self.data, a, b, limit)
+    }
+
+    /// Upstream FindLongestMatch: rep-distance probes (scored with the
+    /// last-distance bonus and per-index penalty), then the bucket scan
+    /// newest-first with BackwardReferenceScore. The cursor position
+    /// must already be inserted (via [`advance`](Self::advance)).
+    #[must_use]
+    pub fn find(&self, pos: usize, last_dists: &[u32], max_len: u32) -> Option<(u32, u32, u64)> {
+        if pos + 4 > self.data.len() || max_len < 4 {
+            return None;
+        }
+        let mut best_score = 0u64;
+        let mut best: Option<(u32, u32)> = None;
+
+        // Rep probes first (upstream BackwardReferenceScoreUsingLastDistance
+        // = 135*len + 15375; penalty 39 + table per index).
+        for (i, &d) in last_dists.iter().take(self.num_last_dists).enumerate() {
+            if d == 0 || d as usize > pos {
+                continue;
+            }
+            let prev = pos - d as usize;
+            // Quick reject at the best length so far.
+            let cur_best = best.map_or(4, |(_, l)| l) as usize;
+            if pos + cur_best < self.data.len()
+                && prev + cur_best < self.data.len()
+                && self.data[pos + cur_best] != self.data[prev + cur_best]
+            {
+                continue;
+            }
+            let len = self.match_len(pos, prev, max_len);
+            if len < 3 {
+                continue;
+            }
+            let mut score = 135u64 * u64::from(len) + 15375;
+            if i != 0 {
+                score -= 39 + (0x1ca10u64 >> (i & 14)) & 14;
+            }
+            if score > best_score {
+                best_score = score;
+                best = Some((d, len));
+            }
+        }
+
+        // Bucket scan, newest-first.
+        let key = self.key(pos);
+        let mask = (1usize << self.block_bits) - 1;
+        let count = self.num[key] as usize;
+        let base = key << self.block_bits;
+        let bucket = &self.buckets[base..base + mask + 1];
+        let down = count.saturating_sub(mask + 1);
+        let mut i = count;
+        while i > down {
+            i -= 1;
+            let prev = bucket[i & mask] as usize;
+            let backward = pos.wrapping_sub(prev);
+            // Uninitialized slots are u32::MAX (backward huge); skip
+            // them. Only break when a REAL position is beyond the
+            // window — older ring entries are then also beyond.
+            if prev == usize::MAX || backward == 0 {
+                continue;
+            }
+            if backward as u32 > self.max_distance {
+                break;
+            }
+            let cur_best = best.map_or(3, |(_, l)| l) as usize;
+            if pos + cur_best < self.data.len()
+                && prev + cur_best < self.data.len()
+                && self.data[pos + cur_best] != self.data[prev + cur_best]
+            {
+                continue;
+            }
+            // Upstream requires len >= 4 from the bucket scan
+            // (FindMatchLengthWithLimitMin4).
+            let len = self.match_len(pos, prev, max_len);
+            if len >= 4 {
+                let score = 135u64 * u64::from(len)
+                    + 15360u64.wrapping_sub(30u64 * u64::from(log2_floor(backward as u64)));
+                if score > best_score {
+                    best_score = score;
+                    best = Some((backward as u32, len));
+                }
+            }
+        }
+        best.map(|(d, l)| (d, l, best_score))
+    }
+}
+
+#[cfg(test)]
+mod bank_tests {
+    use super::*;
+    #[test]
+    fn bank_finds_repeated_pattern() {
+        // 64-byte period repeating for 4KB.
+        let mut data = Vec::new();
+        let pat: Vec<u8> = (0..64u8).collect();
+        while data.len() < 4096 {
+            data.extend_from_slice(&pat);
+        }
+        let mut bank = BankMatchFinder::new(&data, 14, 4, 4);
+        bank.set_max_distance(u32::MAX);
+        let mut last = [0u32; 4];
+        let mut n_matches = 0u32;
+        let mut n_period = 0u32;
+        for pos in 0..data.len().saturating_sub(4) {
+            bank.advance(); // inserts pos
+            if let Some((d, l, _)) = bank.find(pos, &last, 128) {
+                n_matches += 1;
+                if d == 64 {
+                    n_period += 1;
+                }
+                // update last like the greedy ring
+                if !last.contains(&d) {
+                    last.rotate_right(1);
+                    last[0] = d;
+                } else {
+                    let k = last.iter().position(|&x| x == d).unwrap();
+                    last[..=k].rotate_right(1);
+                }
+                let _ = l;
+            }
+        }
+        eprintln!("matches={n_matches} period64={n_period}");
+        assert!(n_matches > 1000, "too few matches: {n_matches}");
+        assert!(n_period > 500, "period not found often: {n_period}");
+    }
+}
