@@ -50,9 +50,10 @@ fn hash4(data: &[u8]) -> u32 {
 
 fn build_table() -> DictHashTable {
     let mut head = vec![u32::MAX; HASH_SIZE];
-    let mut chain = Vec::new();
-    let mut entries = Vec::new();
-    let mut byte_pool = Vec::new();
+    // ~260K transformed entries; preallocate to avoid growth copies.
+    let mut chain = Vec::with_capacity(270_000);
+    let mut entries = Vec::with_capacity(270_000);
+    let mut byte_pool = Vec::with_capacity(3 << 20);
 
     for word_length in 4..=24usize {
         let shift = SIZE_BITS_BY_LENGTH[word_length];
@@ -69,8 +70,11 @@ fn build_table() -> DictHashTable {
             }
             let word = &DICTIONARY_DATA[dict_offset..dict_offset + word_length];
 
+            // One reused buffer: a fresh Vec per (word, transform) meant
+            // ~260K mallocs in table build.
+            let mut transformed = Vec::with_capacity(word_length + 16);
             for transform_idx in 0..NUM_TRANSFORMS {
-                let mut transformed = Vec::with_capacity(word_length + 16);
+                transformed.clear();
                 let tlen = transform_dictionary_word(&mut transformed, word, transform_idx);
                 if tlen < 4 {
                     continue;
