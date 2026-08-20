@@ -63,6 +63,10 @@ pub struct HashChainConfig {
     /// Hash table size = `1 << hash_log`. Larger = fewer collisions
     /// but more memory and zero-init cost.
     pub hash_log: u32,
+    /// Bytes mixed into the bucket hash (default 4). A companion
+    /// finder with 6 keeps long-structure chains clean when 4-byte
+    /// buckets congest at scale (upstream H6's dual-bank idea).
+    pub hash_bytes: u32,
     /// Upper bound on `match_length` scan per candidate. 0 disables
     /// the cap (scans up to end-of-input). Set to the codec's max
     /// useful match length (e.g., brotli's MAX_COPY=271) to avoid
@@ -79,6 +83,7 @@ impl Default for HashChainConfig {
             max_chain_length: 128,
             nice_match: 32,
             hash_log: 16,
+            hash_bytes: 4,
             max_match_length: 0,
         }
     }
@@ -105,6 +110,7 @@ pub struct HashChainMatchFinder<'a> {
     prev: Vec<u32>,
     mask: u32,
     hash_log: u32,
+    hash_bytes: u32,
     cur: usize,
     max_distance: u32,
     max_chain_length: u32,
@@ -134,6 +140,7 @@ impl<'a> HashChainMatchFinder<'a> {
             prev: vec![SENTINEL; prev_size],
             mask,
             hash_log: config.hash_log,
+            hash_bytes: config.hash_bytes,
             cur: 0,
             max_distance: dict_size,
             max_chain_length: config.max_chain_length,
@@ -183,7 +190,7 @@ impl<'a> HashChainMatchFinder<'a> {
         if pos + 4 > self.data.len() {
             return None;
         }
-        let h = Self::hash(self.data, pos, self.hash_log);
+        let h = Self::hash_n(self.data, pos, self.hash_log, self.hash_bytes);
         let mut candidate = self.head[h];
         // If advance() already inserted pos, head[h] == pos and we'd
         // compute dist=0 (matching ourselves). Skip to the previous
@@ -265,7 +272,7 @@ impl<'a> HashChainMatchFinder<'a> {
         if pos + 4 > self.data.len() {
             return None;
         }
-        let h = Self::hash(self.data, pos, self.hash_log);
+        let h = Self::hash_n(self.data, pos, self.hash_log, self.hash_bytes);
         let mut candidate = self.head[h];
         if candidate == pos as u32 {
             candidate = self.prev[pos & self.mask as usize];
@@ -357,6 +364,17 @@ impl<'a> HashChainMatchFinder<'a> {
     /// cache misses on the prev[] walk; measured byte-identical on CSV
     /// and FITS at q5 with the cap at 8, but q10+ parses DO use them
     /// (100KB q11 regresses +6.55% at 8) — deep tiers pass 32.
+    #[must_use]
+    pub fn max_match_length(&self) -> u32 {
+        self.max_match_length
+    }
+
+    /// Cap compare length (upstream caps at nice_match; long compares
+    /// stream match-length bytes per chain node).
+    pub fn set_max_match_length(&mut self, cap: u32) {
+        self.max_match_length = cap;
+    }
+
     pub fn find_candidates_into_patience(
         &self,
         pos: usize,
@@ -369,7 +387,7 @@ impl<'a> HashChainMatchFinder<'a> {
         if pos + 4 > self.data.len() || max_count == 0 {
             return;
         }
-        let h = Self::hash(self.data, pos, self.hash_log);
+        let h = Self::hash_n(self.data, pos, self.hash_log, self.hash_bytes);
         let mut candidate = self.head[h];
         if candidate == pos as u32 {
             candidate = self.prev[pos & self.mask as usize];
@@ -443,20 +461,28 @@ impl<'a> HashChainMatchFinder<'a> {
 
     /// Hash 4 bytes at `data[pos..pos+4]` into `hash_log` bits.
     fn hash(data: &[u8], pos: usize, hash_log: u32) -> usize {
-        if pos + 4 > data.len() {
+        Self::hash_n(data, pos, hash_log, 4)
+    }
+
+    /// Hash `hash_bytes` at `data[pos..]` into `hash_log` bits.
+    fn hash_n(data: &[u8], pos: usize, hash_log: u32, hash_bytes: u32) -> usize {
+        if pos + hash_bytes as usize > data.len() {
             return 0;
         }
-        let word = u32::from_le_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]);
-        let h = word.wrapping_mul(HASH_PRIME) >> (32 - hash_log);
+        let mut acc = 0u32;
+        for k in 0..hash_bytes {
+            acc |= u32::from(data[pos + k as usize]) << (8 * k);
+        }
+        let h = acc.wrapping_mul(HASH_PRIME) >> (32 - hash_log);
         h as usize & ((1usize << hash_log) - 1)
     }
 
     /// Insert `pos` into the hash table + chain.
     fn insert_at(&mut self, pos: usize) {
-        if pos + 4 > self.data.len() {
+        if pos + self.hash_bytes as usize > self.data.len() {
             return;
         }
-        let h = Self::hash(self.data, pos, self.hash_log);
+        let h = Self::hash_n(self.data, pos, self.hash_log, self.hash_bytes);
         let prev_pos = self.head[h];
         self.prev[pos & self.mask as usize] = prev_pos;
         self.head[h] = pos as u32;

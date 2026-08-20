@@ -14,6 +14,7 @@ fn main() {
         let cfg = HashChainConfig {
             dict_size: 16 * 1024 * 1024,
             min_match: 4,
+            hash_bytes: 4,
             max_chain_length: if q >= 11 { 1024 } else { 64 },
             nice_match: if q >= 11 { 4096 } else { 256 },
             hash_log: 18,
