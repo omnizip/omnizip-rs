@@ -126,6 +126,17 @@ pub fn find_match(input: &[u8], pos: usize, max_distance: u32) -> Option<(u32, u
     let mut best_len: u32 = 0;
     let mut best_distance: u32 = 0;
     let mut best_word_len: u32 = 0;
+    // Common 4-byte prefixes chain dozens of transformed words; the
+    // reference's curated bucket lists hold only a handful. Cap the
+    // walk (BROTLI_DICT_CHAIN overrides).
+    static DICT_CHAIN: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    let max_chain: u32 = *DICT_CHAIN.get_or_init(|| {
+        std::env::var("BROTLI_DICT_CHAIN")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(32)
+    });
+    let mut walked: u32 = 0;
 
     while idx != u32::MAX {
         let entry = table.entries[idx as usize];
@@ -146,6 +157,10 @@ pub fn find_match(input: &[u8], pos: usize, max_distance: u32) -> Option<(u32, u
         }
 
         idx = table.chain[idx as usize];
+        walked += 1;
+        if walked >= max_chain {
+            break;
+        }
     }
 
     if best_len >= 4 {

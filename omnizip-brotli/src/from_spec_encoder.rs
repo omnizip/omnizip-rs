@@ -2284,33 +2284,63 @@ fn find_cmd_symbol_with_rep(
     find_cmd_symbol_impl(insert_len, copy_len, rep_code)
 }
 
-/// Precomputed (insert_len, copy_len) -> explicit symbol table for the
-/// DP hot path: find_cmd_symbol_impl's linear scan over the 704-entry
-/// kCmdLut runs per boundary per candidate per position and dominates
-/// refinement runtime. Covers insert 0..=64 x copy 2..=MAX_COPY (the
-/// ranges the parser generates); outside it the linear scan still
-/// applies.
-static CMD_SYM_EXPLICIT: std::sync::OnceLock<[[i16; 4166]; 65]> = std::sync::OnceLock::new();
+/// Precomputed (insert_len, copy_len) -> symbol tables for the hot
+/// paths: find_cmd_symbol_impl's per-cell linear scan over the
+/// 704-entry kCmdLut ran per command per boundary and dominated
+/// emission. Filled by STAMPING each kCmdLut entry's (insert,copy)
+/// range (O(704) ranges, exactly the covered cells) — the original
+/// per-cell scan initialization cost ~94M iterations as a fixed tax
+/// on every encode. Covers insert 0..=64 x copy 2..=4165; outside it
+/// the linear scan still applies. First match wins, matching the
+/// scan's first-hit semantics (stamp only empty cells).
+static CMD_SYM_TABLES: std::sync::OnceLock<(Vec<[i16; 4166]>, Vec<[i16; 4166]>)> =
+    std::sync::OnceLock::new();
 
-fn cmd_sym_explicit_table() -> &'static [[i16; 4166]; 65] {
-    CMD_SYM_EXPLICIT.get_or_init(|| {
-        let mut t = [[-1i16; 4166]; 65];
-        for ins in 0..65u32 {
-            for cpy in 2..=4165u32 {
-                if let Some(sym) = find_cmd_symbol_impl_slow(ins, cpy, None) {
-                    t[ins as usize][cpy as usize] = sym as i16;
+fn cmd_sym_tables() -> &'static (Vec<[i16; 4166]>, Vec<[i16; 4166]>) {
+    CMD_SYM_TABLES.get_or_init(|| {
+        // Vec rows: two 541KB stack arrays in this closure overflowed
+        // the 2MB test-thread stack.
+        let mut explicit = vec![[-1i16; 4166]; 65];
+        let mut rep0 = vec![[-1i16; 4166]; 65];
+        for (sym, entry) in kCmdLut.iter().enumerate() {
+            let ins_lo = u32::from(entry.insert_len_offset);
+            let ins_hi = ins_lo + ((1u32) << u32::from(entry.insert_len_extra_bits)) - 1;
+            let cpy_lo = u32::from(entry.copy_len_offset);
+            let cpy_hi = cpy_lo + ((1u32) << u32::from(entry.copy_len_extra_bits)) - 1;
+            let is_rep0 = entry.distance_code == 0;
+            // The explicit scan skips implicit-distance entries
+            // (distance_code >= 0).
+            let is_explicit = entry.distance_code < 0;
+            for ins in ins_lo..=ins_hi.min(64) {
+                for cpy in cpy_lo.max(2)..=cpy_hi.min(4165) {
+                    let (ie, ic) = (ins as usize, cpy as usize);
+                    if is_explicit && explicit[ie][ic] < 0 {
+                        explicit[ie][ic] = sym as i16;
+                    }
+                    if is_rep0 && rep0[ie][ic] < 0 {
+                        rep0[ie][ic] = sym as i16;
+                    }
                 }
             }
         }
-        t
+        (explicit, rep0)
     })
 }
 
 fn find_cmd_symbol_impl(insert_len: u32, copy_len: u32, rep_code: Option<i32>) -> Option<usize> {
-    if rep_code.is_none() && insert_len <= 64 && copy_len >= 2 && copy_len <= 4165 {
-        let sym = cmd_sym_explicit_table()[insert_len as usize][copy_len as usize];
-        if sym >= 0 {
-            return Some(sym as usize);
+    if insert_len <= 64 && copy_len >= 2 && copy_len <= 4165 {
+        let (explicit, rep0) = cmd_sym_tables();
+        let cell = match rep_code {
+            None => &explicit[insert_len as usize][copy_len as usize],
+            // No caller passes other rep codes today; stay exact via
+            // the scan if one ever does.
+            Some(dc) if dc != 0 => {
+                return find_cmd_symbol_impl_slow(insert_len, copy_len, rep_code)
+            }
+            Some(_) => &rep0[insert_len as usize][copy_len as usize],
+        };
+        if *cell >= 0 {
+            return Some(*cell as usize);
         }
         return None;
     }
@@ -5907,6 +5937,9 @@ fn parse_input_with_offset_impl(
     let mut last_dist_len = 0usize;
     // Reference CreateBackwardReferences: up to 4 lazy delays in a row.
     let mut delayed_in_row = 0i32;
+    // Candidate buffer hoisted out of the loop: a per-position Vec
+    // meant an alloc/free pair per position.
+    let mut cands_buf: Vec<omnizip_codecs::Lz77Match> = Vec::new();
     while pos < n {
         // Global output position (across metablocks) for max_distance.
         let global_pos = mlen_offset + pos;
@@ -5950,7 +5983,8 @@ fn parse_input_with_offset_impl(
                 } else {
                     (4, 16)
                 };
-                let mut cands: Vec<omnizip_codecs::Lz77Match> = Vec::new();
+                cands_buf.clear();
+                let cands = &mut cands_buf;
                 if bank_mf.is_some() {
                     // Binary bank path: bank hit is the sole candidate
                     // (chain walks are the cost we are eliminating).
@@ -5958,7 +5992,7 @@ fn parse_input_with_offset_impl(
                         cands.push(m);
                     }
                 } else {
-                    mf.find_candidates_into_patience(to_g(pos), ncand, nwalk, 8, &mut cands);
+                    mf.find_candidates_into_patience(to_g(pos), ncand, nwalk, 8, cands);
                 }
                 let mut bestc: Option<omnizip_codecs::Lz77Match> = None;
                 let mut best_score = f32::MIN;
