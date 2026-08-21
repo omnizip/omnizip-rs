@@ -539,7 +539,13 @@ pub fn compress_with_quality(input: &[u8], quality: i32) -> Vec<u8> {
                     let d = if q < 7 { 4 } else if q < 9 { 10 } else { 16 };
                     (b as u32, d)
                 } else {
-                    (6, if q < 7 { 4 } else if q < 9 { 10 } else { 16 })
+                    // Reference H5/H6 params (block = min(q-1,9)), not
+                    // the old block-6 tuning: the 64-slot banks cost 4x
+                    // the scan per lookup and blew the time bar.
+                    (
+                        if q >= 9 { 8 } else { (q - 1).min(9) + 1 } as u32,
+                        if q < 7 { 4 } else if q < 9 { 10 } else { 16 },
+                    )
                 };
                 let mut bank = omnizip_codecs::BankMatchFinder::new(
                     input,
@@ -6137,10 +6143,14 @@ fn parse_input_with_offset_impl(
                         let next_global = mlen_offset + next_pos;
                         if delayed_in_row < 4 && next_pos + 4 <= n {
                             let m2 = bank_mf.as_deref().and_then(|bank| {
-                                bank.find(
+                                // Reference pre-seeds the lazy re-search
+                                // at sr.len-1: most candidates then
+                                // reject on a single byte compare.
+                                bank.find_with_floor(
                                     next_global,
                                     &last_dists[..last_dist_len],
                                     (n - next_pos) as u32,
+                                    lz77.as_ref().map_or(3, |m| m.length - 1),
                                 )
                             });
                             if let Some((_, _, s2)) = m2 {
