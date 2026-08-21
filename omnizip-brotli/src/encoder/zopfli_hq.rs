@@ -138,8 +138,8 @@ impl Node {
 }
 
 fn init_nodes(nodes: &mut [Node]) {
-    for nd in nodes.iter_mut() {
-        *nd = Node {
+    for node in nodes.iter_mut() {
+        *node = Node {
             length: 1,
             distance: 0,
             dcode_insert: 0,
@@ -679,10 +679,10 @@ fn compute_distance_cache(pos: usize, starting: &[i32; 4], nodes: &[Node], gap: 
     let mut idx = 0usize;
     let mut p = nodes[pos].shortcut as usize;
     while idx < 4 && p > 0 {
-        let nd = &nodes[p];
-        cache[idx] = nd.distance as i32;
+        let node = &nodes[p];
+        cache[idx] = node.distance as i32;
         idx += 1;
-        p = nodes[p - nd.copy_len() - nd.insert_len()].shortcut as usize;
+        p = nodes[p - node.copy_len() - node.insert_len()].shortcut as usize;
     }
     while idx < 4 {
         cache[idx] = starting[idx];
