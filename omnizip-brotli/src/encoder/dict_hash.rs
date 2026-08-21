@@ -208,8 +208,7 @@ mod tests {
                 break;
             }
         }
-        let (_, word_len, tlen) =
-            found.expect("at least one dictionary word should be findable");
+        let (_, word_len, tlen) = found.expect("at least one dictionary word should be findable");
         assert!(tlen >= 8);
         assert!(word_len >= 8);
     }
