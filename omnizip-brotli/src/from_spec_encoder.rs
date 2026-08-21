@@ -554,7 +554,7 @@ pub fn compress_with_quality(input: &[u8], quality: i32) -> Vec<u8> {
                 // the old block-6 tuning: the 64-slot banks cost 4x
                 // the scan per lookup and blew the time bar.
                 (
-                    if q >= 9 { 8 } else { (q - 1).min(9) + 1 } as u32,
+                    if q >= 9 { 8 } else { (q - 1).min(9) } as u32,
                     if q < 7 {
                         4
                     } else if q < 9 {
@@ -566,7 +566,7 @@ pub fn compress_with_quality(input: &[u8], quality: i32) -> Vec<u8> {
             };
             let mut bank = omnizip_codecs::BankMatchFinder::new(
                 input,
-                if n <= 1 << 20 { 14 } else { 15 },
+                if n <= 1 << 20 { 14 } else { 16 },
                 block_bits,
                 dists,
             );
