@@ -6228,11 +6228,18 @@ fn parse_input_with_offset_impl(
                                 // Reference pre-seeds the lazy re-search
                                 // at sr.len-1: most candidates then
                                 // reject on a single byte compare.
+                                // Reference pre-seeds the lazy re-search
+                                // at sr.len-1 ONLY below q5; at q5+ the
+                                // re-search starts empty (sr2.len = 0).
                                 bank.find_with_floor(
                                     next_global,
                                     &last_dists[..last_dist_len],
                                     (n - next_pos) as u32,
-                                    lz77.as_ref().map_or(3, |m| m.length - 1),
+                                    if quality < 5 {
+                                        lz77.as_ref().map_or(3, |m| m.length - 1)
+                                    } else {
+                                        3
+                                    },
                                 )
                             });
                             if let Some((_, _, s2)) = m2 {
