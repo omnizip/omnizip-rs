@@ -5981,13 +5981,14 @@ fn parse_input_with_offset_impl(
             // Advance both finders when the bank is live so the chain
             // stays warm as a long-match secondary source.
             let bank_hit = if let Some(bank) = bank_mf.as_deref_mut() {
-                bank.advance();
-                // Full remaining length: the reference hashers do not
-                // cap match length at nice_len. Matches scoring at or
-                // below kMinScore (30*8*8 + 100) are rejected — the
+                // Find-AND-insert with one hash (upstream FindLongestMatch
+                // stores the searched position with the hash it just
+                // computed). Full remaining length: the reference hashers
+                // do not cap match length at nice_len. Matches scoring at
+                // or below kMinScore (30*8*8 + 100) are rejected — the
                 // reference emits literals for them instead.
                 let cap_len = (n - pos) as u32;
-                bank.find(global_pos, &last_dists[..last_dist_len], cap_len)
+                bank.find_insert(global_pos, &last_dists[..last_dist_len], cap_len, 3, true)
                     .filter(|&(_, _, s)| s > 2020)
                     .map(|(d, l, s)| {
                         bank_hit_score = s;
