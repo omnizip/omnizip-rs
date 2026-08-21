@@ -6127,9 +6127,17 @@ fn parse_input_with_offset_impl(
                 Some((m.distance, len, len))
             }
         } else if use_dict {
-            dict_hash::find_match(input, pos, max_dist)
-                .filter(|&(_, _, tl)| tl as usize <= n - pos)
-                .map(|(d, wl, tl)| (d, wl, tl))
+            // Reference greedy path: the two-probe static-dictionary
+            // search (no transformed-word chains). BROTLI_SLOW_DICT
+            // restores the pool-based finder for measurement.
+            if env_flag!("BROTLI_SLOW_DICT") {
+                dict_hash::find_match(input, pos, max_dist)
+                    .filter(|&(_, _, tl)| tl as usize <= n - pos)
+                    .map(|(d, wl, tl)| (d, wl, tl))
+            } else {
+                crate::encoder::dict_hash_lut::find_match_fast(input, pos, max_dist, 3)
+                    .filter(|&(_, _, tl)| tl as usize <= n - pos)
+            }
         } else {
             None
         };
