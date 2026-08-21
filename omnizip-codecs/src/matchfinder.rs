@@ -902,6 +902,19 @@ impl<'a> BankMatchFinder<'a> {
     /// must already be inserted (via [`advance`](Self::advance)).
     #[must_use]
     pub fn find(&self, pos: usize, last_dists: &[u32], max_len: u32) -> Option<(u32, u32, u64)> {
+        self.find_with_floor(pos, last_dists, max_len, 3)
+    }
+
+    /// Like [`find`](Self::find) with a starting reject length — the
+    /// reference pre-seeds the lazy re-search at sr.len-1 so most
+    /// candidates reject on one byte compare.
+    pub fn find_with_floor(
+        &self,
+        pos: usize,
+        last_dists: &[u32],
+        max_len: u32,
+        min_len_hint: u32,
+    ) -> Option<(u32, u32, u64)> {
         if pos + 4 > self.data.len() || max_len < 2 {
             return None;
         }
@@ -945,55 +958,79 @@ impl<'a> BankMatchFinder<'a> {
             }
         }
 
-        // Bucket scan, newest-first.
+        // Bucket scan, newest-first. The ring is walked as at most two
+        // CONTIGUOUS slice segments (newest→0, mask→oldest) so the
+        // per-entry loop runs on slice iterators without per-entry
+        // bounds checks. The entry body is a macro: a capturing
+        // closure defeated inlining and dominated the scan.
+        macro_rules! consider {
+            ($e:expr, $data:ident, $reject_limit:ident, $cur_best:ident, $pos_val:ident) => {{
+                let prev = $e as usize;
+                let backward = pos.wrapping_sub(prev);
+                // Uninitialized slots are u32::MAX (backward huge);
+                // skip them. Only break when a REAL position is beyond
+                // the window — older ring entries are then also beyond.
+                if prev != usize::MAX && backward != 0 {
+                    if backward as u32 > self.max_distance {
+                        break;
+                    }
+                    if prev < $reject_limit && $data[prev + $cur_best] != $pos_val {
+                        continue;
+                    }
+                    // Upstream requires len >= 4 from the bucket scan
+                    // (FindMatchLengthWithLimitMin4).
+                    let len = self.match_len(pos, prev, max_len);
+                    if len >= 4 {
+                        let score = 7680u64
+                            .wrapping_add(540u64.wrapping_mul(u64::from(len)))
+                            .wrapping_sub(120u64
+                                .wrapping_mul(u64::from(log2_floor(backward as u64))))
+                            >> 2;
+                        if score > best_score {
+                            best_score = score;
+                            best = Some((backward as u32, len));
+                            let nb = len as usize;
+                            if nb > $cur_best && pos + nb < $data.len() {
+                                $cur_best = nb;
+                                $pos_val = $data[pos + nb];
+                            }
+                        }
+                    }
+                }
+            }};
+        }
+
         let key = self.key(pos);
-        let mask = (1usize << self.block_bits) - 1;
+        let bank = 1usize << self.block_bits;
+        let mask = bank - 1;
         let count = self.num[key] as usize;
         let base = key << self.block_bits;
-        let bucket = &self.buckets[base..base + mask + 1];
-        let down = count.saturating_sub(mask + 1);
+        let bucket = &self.buckets[base..base + bank];
+        let data = self.data;
         // Reject byte at the current best length, loaded once and
         // refreshed only when best changes (upstream prev_best_val).
-        let mut cur_best = best.map_or(3, |(_, l)| l) as usize;
-        let mut pos_val = if pos + cur_best < self.data.len() {
-            self.data[pos + cur_best]
+        let mut cur_best = (best.map_or(3, |(_, l)| l)).max(min_len_hint) as usize;
+        let mut pos_val = if pos + cur_best < data.len() {
+            data[pos + cur_best]
         } else {
             0xFF
         };
-        let mut i = count;
-        while i > down {
-            i -= 1;
-            let prev = bucket[i & mask] as usize;
-            let backward = pos.wrapping_sub(prev);
-            // Uninitialized slots are u32::MAX (backward huge); skip
-            // them. Only break when a REAL position is beyond the
-            // window — older ring entries are then also beyond.
-            if prev == usize::MAX || backward == 0 {
-                continue;
+        let reject_limit = data.len().saturating_sub(cur_best);
+
+        let down = count.saturating_sub(bank);
+        if count <= bank {
+            // Ring not yet wrapped: entry i lives at slot i.
+            for &e in bucket[down..count].iter().rev() {
+                consider!(e, data, reject_limit, cur_best, pos_val);
             }
-            if backward as u32 > self.max_distance {
-                break;
+        } else {
+            // Wrapped: full ring, two segments newest→0 and mask→oldest.
+            let newest = (count - 1) & mask;
+            for &e in bucket[0..=newest].iter().rev() {
+                consider!(e, data, reject_limit, cur_best, pos_val);
             }
-            if prev + cur_best < self.data.len() && self.data[prev + cur_best] != pos_val {
-                continue;
-            }
-            // Upstream requires len >= 4 from the bucket scan
-            // (FindMatchLengthWithLimitMin4).
-            let len = self.match_len(pos, prev, max_len);
-            if len >= 4 {
-                let score = 7680u64
-                    .wrapping_add(540u64.wrapping_mul(u64::from(len)))
-                    .wrapping_sub(120u64.wrapping_mul(u64::from(log2_floor(backward as u64))))
-                    >> 2;
-                if score > best_score {
-                    best_score = score;
-                    best = Some((backward as u32, len));
-                    let nb = len as usize;
-                    if nb > cur_best && pos + nb < self.data.len() {
-                        cur_best = nb;
-                        pos_val = self.data[pos + nb];
-                    }
-                }
+            for &e in bucket[newest + 1..].iter().rev() {
+                consider!(e, data, reject_limit, cur_best, pos_val);
             }
         }
         best.map(|(d, l)| (d, l, best_score))
