@@ -893,9 +893,23 @@ fn emit_metablock_from_commands(
     };
 
     // --- Literal block splitting (BrotliBuildMetaBlock literal pass) ---
+    // Below q10 the literal-tree assignment is the decided static map
+    // (block-INdependent trees): literal block splits then only pay
+    // switch-code overhead — a single literal block is both smaller
+    // and faster. BROTLI_FORCE_LIT_SPLIT overrides.
+    let decided_early: Option<(usize, Vec<u8>)> = if quality >= 5
+        && use_context
+        && is_text_like(input)
+        && !env_flag!("BROTLI_FORCE_LIT_SPLIT")
+    {
+        decide_literal_contexts(input, quality, mlen_offset + input.len())
+    } else {
+        None
+    };
     let lit_split_on = quality >= 4
         && stream.literals.len() >= 4096
         && use_context
+        && decided_early.is_none()
         && !env_flag!("BROTLI_NO_LIT_SPLIT");
     // Scale the block budget with the literal count: small inputs
     // lose more to block/tree overhead than they gain from sharper
@@ -942,7 +956,7 @@ fn emit_metablock_from_commands(
     } else {
         0 // LSB6
     };
-    let mut decided_ctx: Option<(usize, Vec<u8>)> = None;
+    let mut decided_ctx: Option<(usize, Vec<u8>)> = decided_early.clone();
     let (mut ntrees_l, mut lit_ctx_map): (u32, Vec<u8>) = if use_block_switch {
         (2, (0..128u8).map(|i| i >> 6).collect())
     } else if use_context && context_mode == 2 && input.len() >= 1_048_576 && quality >= 10 {
@@ -959,7 +973,9 @@ fn emit_metablock_from_commands(
         // context map from sampled entropy instead of a fixed 4-tree
         // ctx>>4 split. The decided map participates in the A/B/C
         // assignment below as option C.
-        let decided = decide_literal_contexts(input, quality, mlen_offset + input.len());
+        let decided = decided_early
+            .clone()
+            .or_else(|| decide_literal_contexts(input, quality, mlen_offset + input.len()));
         if env_flag!("BROTLI_STATS") {
             eprintln!(
                 "STATS ctx_decide q{quality}: {} contexts",
