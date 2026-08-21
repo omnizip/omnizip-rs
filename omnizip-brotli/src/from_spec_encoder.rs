@@ -120,7 +120,11 @@ const NTREES_COMPLEX_UTF8: u32 = 13;
 /// complex UTF8 map for >= 1 MiB inputs when it pays, else the
 /// bigram-prefix-chosen 1/2/3-context maps. Returns None for a single
 /// context.
-fn decide_literal_contexts(input: &[u8], quality: i32, size_hint: usize) -> Option<(usize, Vec<u8>)> {
+fn decide_literal_contexts(
+    input: &[u8],
+    quality: i32,
+    size_hint: usize,
+) -> Option<(usize, Vec<u8>)> {
     if input.len() < 64 {
         return None;
     }
@@ -227,9 +231,9 @@ fn decide_literal_contexts(input: &[u8], quality: i32, size_hint: usize) -> Opti
 /// Sampled at copy-code group boundaries (the highest L in each group
 /// wins ties, since within a copy-length code the wire cost is flat).
 const COPY_BOUNDARIES: [u32; 54] = [
-    2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 22, 24, 26, 28, 30, 32,
-    34, 36, 40, 44, 48, 52, 60, 68, 76, 84, 100, 116, 132, 148, 164, 180, 196, 212, 228, 244, 260,
-    271, 432, 496, 752, 1264, 2288, 3040, 4096,
+    2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 22, 24, 26, 28, 30, 32, 34,
+    36, 40, 44, 48, 52, 60, 68, 76, 84, 100, 116, 132, 148, 164, 180, 196, 212, 228, 244, 260, 271,
+    432, 496, 752, 1264, 2288, 3040, 4096,
 ];
 
 /// A parsed LZ77 command: insert `insert_len` literals, then copy
@@ -525,38 +529,52 @@ pub fn compress_with_quality(input: &[u8], quality: i32) -> Vec<u8> {
         // bucket scans instead of prev[] chain walks, with the 16
         // short-code distance probes and BackwardReferenceScore
         // matching the reference hashers.
-        let mut shared_bank =
-            if q >= 4 && q < 10 && !env_flag!("BROTLI_NO_BANK") && !env_flag!("BROTLI_NO_TEXT_BANK")
-            {
-                let n = input.len();
-                // Text params mirror the reference hashers exactly
-                // (H5 at q4-8: block min(q-1,9); H9 at q9: block 8;
-                // num_last_dists 4/10/16). Binary keeps the measured
-                // block_bits=6 tuning that beats the reference.
-                let (block_bits, dists) = if is_text_like(input) {
-                    let b = if q >= 9 { 8 } else { (q - 1).min(9) };
-                    let d = if q < 7 { 4 } else if q < 9 { 10 } else { 16 };
-                    (b as u32, d)
+        let mut shared_bank = if q >= 4
+            && q < 10
+            && !env_flag!("BROTLI_NO_BANK")
+            && !env_flag!("BROTLI_NO_TEXT_BANK")
+        {
+            let n = input.len();
+            // Text params mirror the reference hashers exactly
+            // (H5 at q4-8: block min(q-1,9); H9 at q9: block 8;
+            // num_last_dists 4/10/16). Binary keeps the measured
+            // block_bits=6 tuning that beats the reference.
+            let (block_bits, dists) = if is_text_like(input) {
+                let b = if q >= 9 { 8 } else { (q - 1).min(9) };
+                let d = if q < 7 {
+                    4
+                } else if q < 9 {
+                    10
                 } else {
-                    // Reference H5/H6 params (block = min(q-1,9)), not
-                    // the old block-6 tuning: the 64-slot banks cost 4x
-                    // the scan per lookup and blew the time bar.
-                    (
-                        if q >= 9 { 8 } else { (q - 1).min(9) + 1 } as u32,
-                        if q < 7 { 4 } else if q < 9 { 10 } else { 16 },
-                    )
+                    16
                 };
-                let mut bank = omnizip_codecs::BankMatchFinder::new(
-                    input,
-                    if n <= 1 << 20 { 14 } else { 15 },
-                    block_bits,
-                    dists,
-                );
-                bank.set_max_distance(MAX_BACKWARD_DISTANCE);
-                Some(bank)
+                (b as u32, d)
             } else {
-                None
+                // Reference H5/H6 params (block = min(q-1,9)), not
+                // the old block-6 tuning: the 64-slot banks cost 4x
+                // the scan per lookup and blew the time bar.
+                (
+                    if q >= 9 { 8 } else { (q - 1).min(9) + 1 } as u32,
+                    if q < 7 {
+                        4
+                    } else if q < 9 {
+                        10
+                    } else {
+                        16
+                    },
+                )
             };
+            let mut bank = omnizip_codecs::BankMatchFinder::new(
+                input,
+                if n <= 1 << 20 { 14 } else { 15 },
+                block_bits,
+                dists,
+            );
+            bank.set_max_distance(MAX_BACKWARD_DISTANCE);
+            Some(bank)
+        } else {
+            None
+        };
 
         let mut offset = 0usize;
         while offset < input.len() {
@@ -941,8 +959,7 @@ fn emit_metablock_from_commands(
         // context map from sampled entropy instead of a fixed 4-tree
         // ctx>>4 split. The decided map participates in the A/B/C
         // assignment below as option C.
-        let decided =
-            decide_literal_contexts(input, quality, mlen_offset + input.len());
+        let decided = decide_literal_contexts(input, quality, mlen_offset + input.len());
         if env_flag!("BROTLI_STATS") {
             eprintln!(
                 "STATS ctx_decide q{quality}: {} contexts",
@@ -1134,7 +1151,7 @@ fn emit_metablock_from_commands(
             let t = std::time::Instant::now();
             let r = crate::encoder::context::cluster_contexts(&bc_hists, 4);
             eprintln!(
-                "STATS cluster_lit rows={} blocks_dbg={max_lit_blocks_dbg} nbltypes_l={} cap={max_lit_blocks} lits={} {:.2}s",
+                "STATS cluster_lit rows={} blocks_dbg={max_lit_blocks_dbg} nbltypes_l={} cap={max_lit_blocks} n_literals={} {:.2}s",
                 bc_hists.len(),
                 nbltypes_l_dbg,
                 stream.literals.len(),
@@ -1152,27 +1169,27 @@ fn emit_metablock_from_commands(
             count_b = 0;
             cost_b = f64::INFINITY;
         } else {
-        for (i, h) in bc_hists.iter().enumerate() {
-            for (b, &f) in h.iter().enumerate() {
-                hists_a[usize::from(cmap_a[i])][b] += f;
+            for (i, h) in bc_hists.iter().enumerate() {
+                for (b, &f) in h.iter().enumerate() {
+                    hists_a[usize::from(cmap_a[i])][b] += f;
+                }
             }
-        }
-        cost_a = hists_a.iter().map(|h| tree_bits(h)).sum::<f64>()
-            + 4.0 * 60.0
-            + bc_hists.len() as f64 * 2.0;
-        let (cmap_b_v, count_b_v) =
-            crate::encoder::context::assign_context_trees(&bc_hists, ntrees.max(4));
-        cmap_b = cmap_b_v;
-        count_b = count_b_v;
-        let mut hists_b: Vec<[u32; 256]> = vec![[0u32; 256]; count_b];
-        for (i, h) in bc_hists.iter().enumerate() {
-            for (b, &f) in h.iter().enumerate() {
-                hists_b[usize::from(cmap_b[i])][b] += f;
+            cost_a = hists_a.iter().map(|h| tree_bits(h)).sum::<f64>()
+                + 4.0 * 60.0
+                + bc_hists.len() as f64 * 2.0;
+            let (cmap_b_v, count_b_v) =
+                crate::encoder::context::assign_context_trees(&bc_hists, ntrees.max(4));
+            cmap_b = cmap_b_v;
+            count_b = count_b_v;
+            let mut hists_b: Vec<[u32; 256]> = vec![[0u32; 256]; count_b];
+            for (i, h) in bc_hists.iter().enumerate() {
+                for (b, &f) in h.iter().enumerate() {
+                    hists_b[usize::from(cmap_b[i])][b] += f;
+                }
             }
-        }
-        cost_b = hists_b.iter().map(|h| tree_bits(h)).sum::<f64>()
-            + count_b as f64 * 35.0
-            + bc_hists.len() as f64 * (count_b as f64).log2().max(1.0);
+            cost_b = hists_b.iter().map(|h| tree_bits(h)).sum::<f64>()
+                + count_b as f64 * 35.0
+                + bc_hists.len() as f64 * (count_b as f64).log2().max(1.0);
         }
         // Option C: the reference's decided static map (tree by ctx
         // only, independent of block).
@@ -1354,7 +1371,7 @@ fn emit_metablock_from_commands(
     }
 
     bw.write_bits(dist_cfg.npostfix as u32, 2); // NPOSTFIX
-    bw.write_bits(dist_cfg.ndmoem as u32, 4); // NDMOEM
+    bw.write_bits(dist_cfg.ndirect_code as u32, 4); // NDMOEM
 
     // Context mode fields: one PER literal block type (RFC 7932 §9.3).
     for _ in 0..nbltypes_l {
@@ -1444,7 +1461,11 @@ fn emit_metablock_from_commands(
     let cmap_bc = if env_flag!("BROTLI_STATS") {
         let t = std::time::Instant::now();
         let r = crate::encoder::context::cluster_contexts(&dist_bc_hists, shared_k);
-        eprintln!("STATS cluster_dist rows={} {:.2}s", dist_bc_hists.len(), t.elapsed().as_secs_f64());
+        eprintln!(
+            "STATS cluster_dist rows={} {:.2}s",
+            dist_bc_hists.len(),
+            t.elapsed().as_secs_f64()
+        );
         r
     } else {
         crate::encoder::context::cluster_contexts(&dist_bc_hists, shared_k)
@@ -6042,33 +6063,34 @@ fn parse_input_with_offset_impl(
                         }
                     }
                 } else {
-                for (ci, m) in cands.iter().enumerate() {
-                    if m.distance > max_dist || m.length < 2 {
-                        continue;
+                    for (ci, m) in cands.iter().enumerate() {
+                        if m.distance > max_dist || m.length < 2 {
+                            continue;
+                        }
+                        let is_rep =
+                            greedy_tier && last_dists[..last_dist_len].contains(&m.distance);
+                        // Upstream's lazy scoring: distance penalty is
+                        // 0.679 * log2(dist) (kBrotliLog2Table-scaled), not
+                        // a full log2 — softer penalties keep nearer (more
+                        // rep-friendly) matches in contention. A rep-distance
+                        // match rides a ~2-bit rep code instead.
+                        let pen = if is_rep {
+                            // Rep preference scales with the explicit cost
+                            // it displaces: a rep code saves ~10-25 bits at
+                            // far distances but only ~2-4 bits locally.
+                            (0.679 * (m.distance as f32).log2() - 2.0).max(1.0)
+                        } else if m.distance <= 4 {
+                            2.0
+                        } else {
+                            0.679 * (m.distance as f32).log2()
+                        };
+                        let score = m.length as f32 - pen;
+                        if score > best_score {
+                            best_score = score;
+                            bestc = cands.get(ci).copied();
+                            best_is_rep = is_rep;
+                        }
                     }
-                    let is_rep = greedy_tier && last_dists[..last_dist_len].contains(&m.distance);
-                    // Upstream's lazy scoring: distance penalty is
-                    // 0.679 * log2(dist) (kBrotliLog2Table-scaled), not
-                    // a full log2 — softer penalties keep nearer (more
-                    // rep-friendly) matches in contention. A rep-distance
-                    // match rides a ~2-bit rep code instead.
-                    let pen = if is_rep {
-                        // Rep preference scales with the explicit cost
-                        // it displaces: a rep code saves ~10-25 bits at
-                        // far distances but only ~2-4 bits locally.
-                        (0.679 * (m.distance as f32).log2() - 2.0).max(1.0)
-                    } else if m.distance <= 4 {
-                        2.0
-                    } else {
-                        0.679 * (m.distance as f32).log2()
-                    };
-                    let score = m.length as f32 - pen;
-                    if score > best_score {
-                        best_score = score;
-                        bestc = cands.get(ci).copied();
-                        best_is_rep = is_rep;
-                    }
-                }
                 }
                 // Probe the recent distances directly (upstream's
                 // last-distance check in FindLongestMatch): a rep
@@ -6216,8 +6238,7 @@ fn parse_input_with_offset_impl(
                             None
                         };
 
-                        let next_valid =
-                            next_lz77.as_ref().is_some_and(|m| m.distance <= next_max);
+                        let next_valid = next_lz77.as_ref().is_some_and(|m| m.distance <= next_max);
                         let next_best_len: Option<u32> = if next_valid {
                             let nm = next_lz77.as_ref().unwrap();
                             if nm.length >= 8 || !use_dict {
@@ -6242,39 +6263,35 @@ fn parse_input_with_offset_impl(
                                     let next2_global = mlen_offset + next2_pos;
                                     let next2_max =
                                         (next2_global as u32).min(MAX_BACKWARD_DISTANCE);
-                                    let next2_best_len: Option<u32> = if next2_pos
-                                        + MIN_MATCH as usize
-                                        <= n
-                                    {
-                                        mf.find_match_capped(to_g(next2_pos), 8)
-                                            .filter(|m| m.distance <= next2_max)
-                                            .map(|m| {
-                                                if m.length >= 8 || !use_dict {
-                                                    m.length
-                                                } else {
-                                                    match dict_hash::find_match(
-                                                        input, next2_pos, next2_max,
-                                                    ) {
-                                                        Some((_, _, tl)) if tl > m.length => tl,
-                                                        _ => m.length,
+                                    let next2_best_len: Option<u32> =
+                                        if next2_pos + MIN_MATCH as usize <= n {
+                                            mf.find_match_capped(to_g(next2_pos), 8)
+                                                .filter(|m| m.distance <= next2_max)
+                                                .map(|m| {
+                                                    if m.length >= 8 || !use_dict {
+                                                        m.length
+                                                    } else {
+                                                        match dict_hash::find_match(
+                                                            input, next2_pos, next2_max,
+                                                        ) {
+                                                            Some((_, _, tl)) if tl > m.length => tl,
+                                                            _ => m.length,
+                                                        }
                                                     }
-                                                }
-                                            })
-                                            .or_else(|| {
-                                                if use_dict {
-                                                    dict_hash::find_match(
-                                                        input,
-                                                        next2_pos,
-                                                        next2_max,
-                                                    )
-                                                    .map(|(_, _, tl)| tl)
-                                                } else {
-                                                    None
-                                                }
-                                            })
-                                    } else {
-                                        None
-                                    };
+                                                })
+                                                .or_else(|| {
+                                                    if use_dict {
+                                                        dict_hash::find_match(
+                                                            input, next2_pos, next2_max,
+                                                        )
+                                                        .map(|(_, _, tl)| tl)
+                                                    } else {
+                                                        None
+                                                    }
+                                                })
+                                        } else {
+                                            None
+                                        };
                                     if let Some(n2_len) = next2_best_len {
                                         if n2_len > next_len {
                                             pos += 2;
@@ -6708,9 +6725,13 @@ fn split_symbol_stream_optimal(
     // Reference params (BrotliBuildMetaBlockGreedyInternal): commands
     // min-block 1024 / threshold 500, distances 512 / 100.
     if alphabet == 704 {
-        greedy_split(symbols.len(), alphabet, 1024, 500.0, max_blocks, |i| symbols[i])
+        greedy_split(symbols.len(), alphabet, 1024, 500.0, max_blocks, |i| {
+            symbols[i]
+        })
     } else {
-        greedy_split(symbols.len(), alphabet, 512, 100.0, max_blocks, |i| symbols[i])
+        greedy_split(symbols.len(), alphabet, 512, 100.0, max_blocks, |i| {
+            symbols[i]
+        })
     }
 }
 
@@ -6883,11 +6904,7 @@ fn greedy_split(
 }
 
 /// Exact O(m²) cut DP (env: BROTLI_DP_SPLIT) — the pre-greedy splitter.
-fn split_symbol_stream_dp(
-    symbols: &[usize],
-    alphabet: usize,
-    max_blocks: usize,
-) -> Vec<usize> {
+fn split_symbol_stream_dp(symbols: &[usize], alphabet: usize, max_blocks: usize) -> Vec<usize> {
     let cmd_symbols = symbols;
     let n = cmd_symbols.len();
     if n < 1024 || max_blocks < 2 {

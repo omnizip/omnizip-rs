@@ -21,18 +21,21 @@ pub struct DistanceConfig {
     /// NPOSTFIX field (0-3): postfix bits for long-form distance codes.
     pub npostfix: u8,
     /// NDMOEM field (0-15): determines NDIRECT = NDMOEM << NPOSTFIX.
-    pub ndmoem: u8,
+    pub ndirect_code: u8,
 }
 
 impl DistanceConfig {
     /// Create a new config with the given parameters.
-    pub const fn new(npostfix: u8, ndmoem: u8) -> Self {
-        Self { npostfix, ndmoem }
+    pub const fn new(npostfix: u8, ndirect_code: u8) -> Self {
+        Self {
+            npostfix,
+            ndirect_code,
+        }
     }
 
     /// NDIRECT = NDMOEM << NPOSTFIX (RFC 7932 §9.4).
     pub const fn ndirect(&self) -> u32 {
-        (self.ndmoem as u32) << self.npostfix
+        (self.ndirect_code as u32) << self.npostfix
     }
 
     /// Total direct + short codes in the alphabet.
