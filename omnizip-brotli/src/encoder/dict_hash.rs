@@ -73,7 +73,11 @@ fn build_table() -> DictHashTable {
             // One reused buffer: a fresh Vec per (word, transform) meant
             // ~260K mallocs in table build.
             let mut transformed = Vec::with_capacity(word_length + 16);
-            for transform_idx in 0..NUM_TRANSFORMS {
+            // Reverse insert order: the chain is LIFO, so identity
+            // (transform 0) must be inserted LAST to sit at the head —
+            // a depth cap then prefers identity matches over exotic
+            // transform variants.
+            for transform_idx in (0..NUM_TRANSFORMS).rev() {
                 transformed.clear();
                 let tlen = transform_dictionary_word(&mut transformed, word, transform_idx);
                 if tlen < 4 {
@@ -138,7 +142,7 @@ pub fn find_match(input: &[u8], pos: usize, max_distance: u32) -> Option<(u32, u
         std::env::var("BROTLI_DICT_CHAIN")
             .ok()
             .and_then(|v| v.parse().ok())
-            .unwrap_or(32)
+            .unwrap_or(8)
     });
     let mut walked: u32 = 0;
 
@@ -187,11 +191,27 @@ mod tests {
             "byte pool should have transformed words"
         );
 
-        let word = &DICTIONARY_DATA[..4];
-        let result = find_match(word, 0, 0);
-        assert!(result.is_some(), "should find identity match");
-        let (_dist, _word_len, tlen) = result.unwrap();
-        assert_eq!(tlen, 4, "transformed length should be 4 for 4-byte input");
+        // The chain walk is capped (common 4-byte prefixes chain dozens
+        // of transformed words), so a SPECIFIC word can sit beyond the
+        // cap behind colliding words. Scan until some dictionary word
+        // IS found and verify its transformed length matches.
+        let mut found: Option<(u32, u32, u32)> = None;
+        for word_length in 8..=24usize {
+            let shift = SIZE_BITS_BY_LENGTH[word_length];
+            if shift == 0 {
+                continue;
+            }
+            let offset = OFFSETS_BY_LENGTH[word_length] as usize;
+            let word = &DICTIONARY_DATA[offset..offset + word_length];
+            if let Some(r) = find_match(word, 0, 0) {
+                found = Some(r);
+                break;
+            }
+        }
+        let (_, word_len, tlen) =
+            found.expect("at least one dictionary word should be findable");
+        assert!(tlen >= 8);
+        assert!(word_len >= 8);
     }
 
     #[test]

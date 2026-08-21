@@ -6105,9 +6105,11 @@ fn parse_input_with_offset_impl(
             let m = lz77.as_ref().unwrap();
             // Clamp to the chunk end (metablock boundary).
             let len = m.length.min((n - pos) as u32);
-            if m.length >= 8 || !use_dict {
-                Some((m.distance, len, len))
-            } else {
+            // Reference: the static dictionary is searched ONLY when
+            // FindLongestMatch found nothing — the mid-length dict
+            // probe below cost ~30% of q5 encode for a small ratio
+            // gain. BROTLI_MID_DICT restores it for measurement.
+            if m.length >= 8 && use_dict && env_flag!("BROTLI_MID_DICT") {
                 let dict = dict_hash::find_match(input, pos, max_dist);
                 match dict {
                     // Guard: the TRANSFORMED length may exceed the chunk
@@ -6121,6 +6123,8 @@ fn parse_input_with_offset_impl(
                     // 5 bytes remaining overran mlen by 2).
                     _ => Some((m.distance, len, len)),
                 }
+            } else {
+                Some((m.distance, len, len))
             }
         } else if use_dict {
             dict_hash::find_match(input, pos, max_dist)
