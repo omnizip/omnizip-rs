@@ -11,4 +11,5 @@
 pub mod bitwriter;
 pub mod context;
 pub mod dict_hash;
+pub mod dict_hash_lut;
 pub mod distance_config;
