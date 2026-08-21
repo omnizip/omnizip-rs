@@ -564,12 +564,33 @@ pub fn compress_with_quality(input: &[u8], quality: i32) -> Vec<u8> {
                     },
                 )
             };
-            let mut bank = omnizip_codecs::BankMatchFinder::new(
-                input,
-                if n <= 1 << 20 { 14 } else { 16 },
-                block_bits,
-                dists,
-            );
+            // Upstream ChooseHasher: bucket_bits = 14 only when
+            // quality < 7 AND size_hint <= 1 MiB, else 15 (H5/H6/H9
+            // all run 15). BROTLI_BUCKET_BITS overrides for sweeps.
+            let bucket_bits = std::env::var("BROTLI_BUCKET_BITS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(if q < 7 && n <= 1 << 20 { 14 } else { 15 });
+            let mut bank =
+                omnizip_codecs::BankMatchFinder::new(input, bucket_bits, block_bits, dists);
+            // Upstream 1.2.0 ChooseHasher: quality 5-9 with size_hint
+            // >= 1 MiB (and lgwin >= 19) runs H6 — the 5-byte 64-bit
+            // kHashMul64 hash — not H5's 4-byte kHashMul32. Smaller
+            // inputs run H5. Measured on real fixtures the 5-byte hash
+            // wins on text (longer matches per bucket) but LOSES ~4%
+            // on structured binary: a 4-byte-prefixed match with a
+            // differing 5th byte is excluded as a candidate even
+            // though a len-4 copy is legal. Content-split: text runs
+            // H6, binary keeps H5 (where our 4-byte bank beats the
+            // reference's own H6 on FITS). BROTLI_HASH5 overrides.
+            let hash5 = match std::env::var("BROTLI_HASH5").as_deref() {
+                Ok("0") | Ok("false") => false,
+                Ok("1") | Ok("true") => true,
+                _ => is_text && n >= 1 << 20 && q >= 5,
+            };
+            if hash5 {
+                bank.enable_hash5();
+            }
             bank.set_max_distance(MAX_BACKWARD_DISTANCE);
             Some(bank)
         } else {
@@ -6364,14 +6385,34 @@ fn parse_input_with_offset_impl(
                 } else {
                     (advance_len as usize).min(n - pos)
                 };
+                // Upstream StoreRange RLE guard ("avoid hash poisoning
+                // with RLE data"): when the copy overlaps heavily
+                // (distance < len/4), skip storing the early part of
+                // the covered range — those positions repeat the same
+                // hash window and would crowd the bank's 16 slots,
+                // evicting genuinely useful distant positions. The
+                // lazy-search position (pos+1) is always stored (the
+                // reference's FindLongestMatch inserts it during the
+                // sr2 search).
+                let rle_store_from = if distance < (advance as u32) >> 2 {
+                    (pos + advance - 4 * distance as usize).max(pos + 2)
+                } else {
+                    pos + 2
+                };
+                let mut skipped = 1usize;
                 for _ in 1..advance {
                     if pos + 1 < n {
                         pos += 1;
                         if let Some(bank) = bank_mf.as_deref_mut() {
-                            bank.advance();
+                            if skipped == 1 || pos >= rle_store_from {
+                                bank.advance();
+                            } else {
+                                bank.skip();
+                            }
                         } else {
                             mf.advance();
                         }
+                        skipped += 1;
                     }
                 }
                 pos += 1;

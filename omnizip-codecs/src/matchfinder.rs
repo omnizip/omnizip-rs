@@ -827,7 +827,21 @@ pub struct BankMatchFinder<'a> {
     /// Upstream num_last_distances_to_check: rep distances probed
     /// (with per-index penalty) before the bucket.
     num_last_dists: usize,
+    /// Upstream rep-scoring split: H9 (num_last_distances_to_check=16)
+    /// scores short codes via kDistanceShortCodeCost; H5/H6 (4/10)
+    /// use BackwardReferenceScoreUsingLastDistance (135·len + 1935 −
+    /// per-index penalty) — numerically near-identical systems that
+    /// differ by a few points at i ≥ 2.
+    h9_scoring: bool,
+    /// Upstream H6 mode (1.2.0 ChooseHasher: quality 5-9 with
+    /// size_hint >= 1 MiB and lgwin >= 19): hashes 5 bytes with the
+    /// 64-bit kHashMul64. H5/H58 hash 4 bytes with kHashMul32.
+    hash5: bool,
 }
+
+/// Upstream kMinScore = 30·8·8 + 100 (the baseline `out.score` that
+/// every candidate must strictly beat to count as a found match).
+const K_MIN_SCORE: u64 = 2020;
 
 impl<'a> BankMatchFinder<'a> {
     #[must_use]
@@ -842,6 +856,23 @@ impl<'a> BankMatchFinder<'a> {
             max_distance: u32::MAX,
             cur: 0,
             num_last_dists,
+            h9_scoring: num_last_dists >= 16,
+            hash5: false,
+        }
+    }
+
+    /// Switch to the H6 5-byte 64-bit hash (kHashMul64 << 24).
+    pub fn enable_hash5(&mut self) {
+        self.hash5 = true;
+    }
+
+    /// Positions a store/search needs within bounds: 8 for the H6
+    /// 5-byte hash (upstream HashTypeLength), 4 otherwise.
+    fn lookahead(&self) -> usize {
+        if self.hash5 {
+            8
+        } else {
+            4
         }
     }
 
@@ -856,20 +887,37 @@ impl<'a> BankMatchFinder<'a> {
 
     #[inline]
     fn key(&self, pos: usize) -> usize {
-        if pos + 4 > self.data.len() {
+        let look = self.lookahead();
+        if pos + look > self.data.len() {
             return 0;
         }
-        let word = u32::from_le_bytes([
-            self.data[pos],
-            self.data[pos + 1],
-            self.data[pos + 2],
-            self.data[pos + 3],
-        ]);
-        (word.wrapping_mul(0x1E35_A7BD) >> (32 - self.bucket_bits)) as usize // kHashMul32
+        if self.hash5 {
+            // Upstream H6 HashBytes: LOAD64LE * (kHashMul64 << 24),
+            // top bucket_bits bits. Bytes 5-7 contribute 0 mod 2^64
+            // (their product term shifts out), so only 5 bytes matter.
+            // Built from two u32 halves: an 8-byte slice copy_from_slice
+            // lowered to a memcpy call here (this runs once per stored
+            // position AND once per search).
+            let d = &self.data[pos..pos + 8];
+            let lo = u32::from_le_bytes([d[0], d[1], d[2], d[3]]);
+            let hi = u32::from_le_bytes([d[4], d[5], d[6], d[7]]);
+            let v = (u64::from(hi) << 32) | u64::from(lo);
+            let v = v.wrapping_mul(0x1FE3_5A7B_D357_9BD3u64 << 24);
+            (v >> (64 - self.bucket_bits)) as usize
+        } else {
+            let word = u32::from_le_bytes([
+                self.data[pos],
+                self.data[pos + 1],
+                self.data[pos + 2],
+                self.data[pos + 3],
+            ]);
+            (word.wrapping_mul(0x1E35_A7BD) >> (32 - self.bucket_bits)) as usize
+            // kHashMul32
+        }
     }
 
     fn insert(&mut self, pos: usize) {
-        if pos + 4 > self.data.len() {
+        if pos + self.lookahead() > self.data.len() {
             return;
         }
         let key = self.key(pos);
@@ -881,13 +929,19 @@ impl<'a> BankMatchFinder<'a> {
         self.num[key] = self.num[key].wrapping_add(1);
     }
 
-    /// Store the cursor's position and advance (our greedy loop calls
-    /// this once per position, including inside copies).
     /// Store the cursor position and step — used to backfill positions
     /// skipped over by a copy.
     pub fn advance(&mut self) {
         if self.cur < self.data.len() {
             self.insert(self.cur);
+            self.cur += 1;
+        }
+    }
+
+    /// Step the cursor WITHOUT storing (upstream StoreRange's RLE
+    /// guard skips storing the early part of overlapping copies).
+    pub fn skip(&mut self) {
+        if self.cur < self.data.len() {
             self.cur += 1;
         }
     }
@@ -909,7 +963,7 @@ impl<'a> BankMatchFinder<'a> {
         min_len_hint: u32,
         insert: bool,
     ) -> Option<(u32, u32, u64)> {
-        if pos + 4 > self.data.len() || max_len < 2 {
+        if pos + self.lookahead() > self.data.len() || max_len < 2 {
             return None;
         }
         let key = self.key(pos);
@@ -949,7 +1003,7 @@ impl<'a> BankMatchFinder<'a> {
         max_len: u32,
         min_len_hint: u32,
     ) -> Option<(u32, u32, u64)> {
-        if pos + 4 > self.data.len() || max_len < 2 {
+        if pos + self.lookahead() > self.data.len() || max_len < 2 {
             return None;
         }
         let key = self.key(pos);
@@ -969,11 +1023,14 @@ impl<'a> BankMatchFinder<'a> {
         const CACHE_INDEX: [u8; 16] = [0, 1, 2, 3, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1];
         const CACHE_OFFSET: [i8; 16] = [0, 0, 0, 0, -1, 1, -2, 2, -3, 3, -1, 1, -2, 2, -3, 3];
         // Short-code cost deltas from SCORE_BASE (upstream
-        // kDistanceShortCodeCost); the score is (BASE·4 + delta + 540·len) >> 2.
+        // kDistanceShortCodeCost); the H9 score is
+        // (SCORE_BASE + delta + 540·len) >> 2.
         const SHORT_CODE_DELTA: [i32; 16] = [
             60, -95, -117, -127, -93, -93, -96, -96, -99, -99, -105, -105, -115, -115, -125, -125,
         ];
-        let mut best_score = 0u64;
+        // Upstream seeds the search result with kMinScore: a candidate
+        // only "found" if it strictly beats it.
+        let mut best_score = K_MIN_SCORE;
         let mut best: Option<(u32, u32)> = None;
 
         // Exact-rep-only mode for shallow configs (upstream H5 probes
@@ -1005,7 +1062,19 @@ impl<'a> BankMatchFinder<'a> {
             if len < 3 && !(len == 2 && i < 2) {
                 continue;
             }
-            let score = (7680i64 * 4 + i64::from(SHORT_CODE_DELTA[i]) + 540 * i64::from(len)) >> 2;
+            let score = if self.h9_scoring {
+                (7680i64 + i64::from(SHORT_CODE_DELTA[i]) + 540 * i64::from(len)) >> 2
+            } else {
+                // H5/H6: BackwardReferenceScoreUsingLastDistance
+                // (135·len + 1935) − per-index penalty (0x1ca10-based)
+                // for i > 0.
+                let penalty = if i > 0 {
+                    39 + ((0x1c_a10u64 >> (i & 0x0e)) & 0x0e) as i64
+                } else {
+                    0
+                };
+                135 * i64::from(len) + 1935 - penalty
+            };
             if score > best_score as i64 {
                 best_score = score as u64;
                 best = Some((d, len));
