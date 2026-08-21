@@ -16,7 +16,7 @@ use std::cmp::min;
 // ── Constants ──
 
 const MAX_HUFFMAN_BITS: usize = 15;
-const kCompressFragmentTwoPassBlockSize: usize = 4 << 10;
+const kCompressFragmentTwoPassBlockSize: usize = 1 << 17;
 const K_HASH_MUL32: u64 = 0x1e35_a7bd;
 
 // ── HuffmanTree ──
@@ -1616,6 +1616,14 @@ fn RewindBitPosition(new_storage_ix: usize, storage_ix: &mut usize, storage: &mu
 
 // ── Public entry point ──
 
+/// The reference q1 path: two-pass fragment compression with reference
+/// table sizing (GetHashTable(q1): 256 doubling to min(1<<17, n)).
+/// Used by `compress_with_quality` for q0-1.
+#[must_use]
+pub fn compress_two_pass_q1(input: &[u8]) -> Vec<u8> {
+    vendored_compress(input)
+}
+
 #[must_use]
 pub fn vendored_compress(input: &[u8]) -> Vec<u8> {
     let n = input.len();
@@ -1635,8 +1643,14 @@ pub fn vendored_compress(input: &[u8]) -> Vec<u8> {
         return storage[..out_len].to_vec();
     }
 
-    let table_bits: usize = if n < 8192 { 9 } else { 15 };
-    let table_size = 1usize << table_bits;
+    // Reference GetHashTable(q1): double from 256 while below both
+    // 1<<17 and the input length; min_match 6 once table_bits >= 15.
+    let mut htsize: usize = 256;
+    while htsize < (1 << 17) && htsize < n {
+        htsize <<= 1;
+    }
+    let table_bits: usize = htsize.trailing_zeros() as usize;
+    let table_size = htsize;
     let mut table: Vec<i32> = vec![0; table_size];
     let mut command_buf: Vec<u32> = vec![0u32; n + 1];
     let mut literal_buf: Vec<u8> = vec![0u8; n];

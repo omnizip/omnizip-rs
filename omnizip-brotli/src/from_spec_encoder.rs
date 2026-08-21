@@ -435,6 +435,14 @@ pub fn compress_with_quality(input: &[u8], quality: i32) -> Vec<u8> {
         return empty_frame();
     }
 
+    // Q1: the reference's two-pass fragment compressor — an order of
+    // magnitude faster than the from-spec parse with a BETTER ratio
+    // on structured data (fresh per-128KB-block Huffman codes built
+    // from actual histograms). BROTLI_NO_TP forces the from-spec path.
+    if q == 1 && !env_flag!("BROTLI_NO_TP") {
+        return crate::fast_encoder::compress_two_pass_q1(input);
+    }
+
     // Inputs ≤ 1 MiB: single metablock, Huffman or uncompressed.
     // Larger metablocks reduce per-block Huffman table overhead.
     if input.len() < (1 << 20) {

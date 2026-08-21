@@ -595,7 +595,17 @@ fn compress_fragment_fast(
         return;
     }
 
-    let table_bits: usize = 15;
+    // Reference GetHashTable(q0): HashTableSize(1<<15, n) with the
+    // doubling trick (quality==0 && htsize & 0xaaaa == 0 -> <<=1) gives
+    // 1<<16 for large inputs.
+    let mut htsize: usize = 256;
+    while htsize < (1 << 15) && htsize < input_size {
+        htsize <<= 1;
+    }
+    if htsize & 0xaaaa == 0 {
+        htsize <<= 1;
+    }
+    let table_bits: usize = htsize.trailing_zeros() as usize;
     let shift = 64 - table_bits;
     let mut table = vec![0i32; 1 << table_bits];
 
