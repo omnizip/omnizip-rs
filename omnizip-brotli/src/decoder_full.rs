@@ -273,6 +273,9 @@ struct DecStats {
     // (pos_start, ins, copy, dist_sym (-1=implicit), dist, implicit, rb_before, rb_idx_before)
     trace: Vec<(usize, u32, u32, i32, u32, bool, [u32; 4], i32)>,
     at: u64,
+    // Full per-command dump (BROTLI_DEC_STATS + BROTLI_DEC_CMDDUMP):
+    // (out_pos, insert_len, copy_len, distance).
+    cmd_dump: Vec<(usize, u32, u32, u32)>,
 }
 
 static DEC_STATS: std::sync::Mutex<DecStats> = std::sync::Mutex::new(DecStats::empty());
@@ -300,6 +303,7 @@ impl DecStats {
             mb_bounds: Vec::new(),
             trace: Vec::new(),
             at: u64::MAX,
+            cmd_dump: Vec::new(),
         }
     }
 }
@@ -319,6 +323,11 @@ fn dec_stats_on() -> bool {
 static DBG_DC_ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 fn dbg_dc_on() -> bool {
     *DBG_DC_ON.get_or_init(|| std::env::var("BROTLI_DBG_DC").is_ok())
+}
+
+static CMD_DUMP_ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+fn cmd_dump_on() -> bool {
+    *CMD_DUMP_ON.get_or_init(|| std::env::var("BROTLI_DEC_CMDDUMP").is_ok())
 }
 
 static TRACE_ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -344,6 +353,14 @@ fn lz77_copy(output: &mut Vec<u8>, src: usize, len: usize) {
 #[doc(hidden)]
 pub fn _print_dec_stats(total_input: usize) {
     let st = dec_stats();
+    if let (Ok(path), true) = (std::env::var("BROTLI_DEC_CMDDUMP"), !st.cmd_dump.is_empty()) {
+        let mut body = String::with_capacity(st.cmd_dump.len() * 24);
+        for (pos, ins, cpy, dist) in &st.cmd_dump {
+            body.push_str(&format!("{pos} {ins} {cpy} {dist}\n"));
+        }
+        let _ = std::fs::write(&path, body);
+        eprintln!("DEC_STATS cmd dump: {} cmds -> {path}", st.cmd_dump.len());
+    }
     if std::env::var("BROTLI_DEC_CMDSYM").is_ok() {
         let mut agg = [0u64; 704];
         for (_bt, h) in st.cmd_hists.iter() {
@@ -1023,6 +1040,10 @@ fn finish_metablock_decode(
             st.ins_extra += u64::from(v.insert_len_extra_bits);
             st.cpy_extra += u64::from(v.copy_len_extra_bits);
             st.cmd_hists.entry(cmd_block_type).or_insert([0u32; 704])[cmd_code] += 1;
+            if cmd_dump_on() && copy_len > 0 {
+                st.cmd_dump
+                    .push((cmd_pos, insert_len as u32, copy_len as u32, distance));
+            }
             if copy_len > 0 {
                 st.copies += 1;
                 st.copy_bytes += copy_len as u64;
