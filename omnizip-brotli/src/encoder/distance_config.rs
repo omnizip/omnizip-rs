@@ -56,11 +56,11 @@ impl DistanceConfig {
     pub fn choose(commands: &[super::super::from_spec_encoder::Command]) -> Self {
         // BROTLI_NPOSTFIX forces a specific config (measurement).
         if let Ok(np) = std::env::var("BROTLI_NPOSTFIX") {
-            let nd = std::env::var("BROTLI_NDIRECT_CODE")
+            let ndc = std::env::var("BROTLI_NDIRECT_CODE")
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(3);
-            return Self::new(np.parse().unwrap_or(0), nd);
+            return Self::new(np.parse().unwrap_or(0), ndc);
         }
 
         // Entropy-based selection: estimate the Huffman cost of the
