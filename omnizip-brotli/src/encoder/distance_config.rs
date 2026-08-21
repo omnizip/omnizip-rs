@@ -14,13 +14,13 @@ pub const NUM_SHORT: u32 = 16;
 
 /// Distance-code configuration for a metablock.
 ///
-/// Encapsulates the NPOSTFIX and NDMOEM fields from the metablock
+/// Encapsulates the NPOSTFIX and NDIRECT_CODE fields from the metablock
 /// header, providing a clean API for distance encoding/decoding.
 #[derive(Clone, Copy, Debug)]
 pub struct DistanceConfig {
     /// NPOSTFIX field (0-3): postfix bits for long-form distance codes.
     pub npostfix: u8,
-    /// NDMOEM field (0-15): determines NDIRECT = NDMOEM << NPOSTFIX.
+    /// NDIRECT_CODE field (0-15): determines NDIRECT = NDIRECT_CODE << NPOSTFIX.
     pub ndirect_code: u8,
 }
 
@@ -33,7 +33,7 @@ impl DistanceConfig {
         }
     }
 
-    /// NDIRECT = NDMOEM << NPOSTFIX (RFC 7932 §9.4).
+    /// NDIRECT = NDIRECT_CODE << NPOSTFIX (RFC 7932 §9.4).
     pub const fn ndirect(&self) -> u32 {
         (self.ndirect_code as u32) << self.npostfix
     }
@@ -48,7 +48,7 @@ impl DistanceConfig {
         self.num_direct() as usize + (48usize << self.npostfix)
     }
 
-    /// Choose NPOSTFIX/NDMOEM heuristically from the distance distribution.
+    /// Choose NPOSTFIX/NDIRECT_CODE heuristically from the distance distribution.
     ///
     /// Fast O(N) scan: counts distances <= 15 and picks NDIRECT=12 if
     /// >=20% of distances are short (beneficial for direct codes).
@@ -56,7 +56,7 @@ impl DistanceConfig {
     pub fn choose(commands: &[super::super::from_spec_encoder::Command]) -> Self {
         // BROTLI_NPOSTFIX forces a specific config (measurement).
         if let Ok(np) = std::env::var("BROTLI_NPOSTFIX") {
-            let nd = std::env::var("BROTLI_NDMOEM")
+            let nd = std::env::var("BROTLI_NDIRECT_CODE")
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(3);

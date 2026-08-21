@@ -1344,15 +1344,13 @@ pub fn find_match_fast(
                     let cut = (len - matchlen) as u64;
                     let transform_id =
                         ((cut << 2) + ((K_CUTOFF_TRANSFORMS >> (cut * 6)) & 0x3f)) as u32;
-                    let address =
-                        dist as u32 + (transform_id << SIZE_BITS_BY_LENGTH[len]);
+                    let address = dist as u32 + (transform_id << SIZE_BITS_BY_LENGTH[len]);
                     let distance = max_distance + 1 + address;
                     // Upstream score gate (BackwardReferenceScore vs
                     // kMinScore): dict distances are far (~2^21-24), so
                     // short dict matches lose to literals.
-                    let score = (7680u64 + 540 * matchlen as u64
-                        - 120 * u64::from(31 - (distance as u64).leading_zeros() - 1))
-                        >> 2;
+                    let dist_log2 = u64::from((distance as u64).ilog2());
+                    let score = (7680u64 + 540 * matchlen as u64 - 120 * dist_log2) >> 2;
                     if distance <= 16_777_231 && score > 2020 {
                         // Wire copy_len = the WORD length (it selects the
                         // address bucket shift); the omit transform makes
