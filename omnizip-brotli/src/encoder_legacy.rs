@@ -126,9 +126,45 @@ impl BitWriter {
     }
 
     /// Write `nbits` bits of `value` LSB-first.
+    ///
+    /// Word-staged: tops up the partial byte, pushes whole bytes, and
+    /// leaves the tail partial — the previous per-bit loop (a
+    /// `last_mut` + branch + shift + modulo PER BIT) cost ~10-50x the
+    /// reference's single 8-byte store on every emitted symbol.
     pub(crate) fn write_bits(&mut self, value: u64, nbits: u32) {
-        for i in 0..nbits {
-            self.write_bit((value >> i) & 1 == 1);
+        if nbits == 0 {
+            return;
+        }
+        let nbits64 = u64::from(nbits);
+        let value = if nbits64 >= 64 {
+            value
+        } else {
+            value & ((1u64 << nbits64) - 1)
+        };
+        let mut rem = nbits64;
+        let mut v = value;
+        if self.bit_pos != 0 {
+            let take = (8 - self.bit_pos).min(nbits64 as u32) as u64;
+            let last = self
+                .out
+                .last_mut()
+                .expect("BitWriter invariant: byte exists when bit_pos > 0");
+            *last |= ((v & ((1u64 << take) - 1)) << self.bit_pos) as u8;
+            self.bit_pos += take as u32;
+            v >>= take;
+            rem -= take;
+            if self.bit_pos == 8 {
+                self.bit_pos = 0;
+            }
+        }
+        while rem >= 8 {
+            self.out.push(v as u8);
+            v >>= 8;
+            rem -= 8;
+        }
+        if rem > 0 {
+            self.out.push((v & ((1u64 << rem) - 1)) as u8);
+            self.bit_pos = rem as u32;
         }
     }
 
