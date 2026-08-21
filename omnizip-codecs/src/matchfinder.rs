@@ -883,12 +883,46 @@ impl<'a> BankMatchFinder<'a> {
 
     /// Store the cursor's position and advance (our greedy loop calls
     /// this once per position, including inside copies).
+    /// Store the cursor position and step — used to backfill positions
+    /// skipped over by a copy.
     pub fn advance(&mut self) {
-        if self.cur >= self.data.len() {
-            return;
+        if self.cur < self.data.len() {
+            self.insert(self.cur);
+            self.cur += 1;
         }
-        self.insert(self.cur);
-        self.cur += 1;
+    }
+
+    /// Find-AND-insert: the reference's FindLongestMatch stores the
+    /// searched position into its bucket using the ONE hash it already
+    /// computed for the scan. Our old split (advance + find) computed
+    /// the hash twice per position.
+    ///
+    /// Inserts `pos`, advances the cursor past it, then scans.
+    /// The lazy re-search (`insert: false`) probes WITHOUT inserting —
+    /// the position gets stored when the main loop reaches it.
+    #[must_use]
+    pub fn find_insert(
+        &mut self,
+        pos: usize,
+        last_dists: &[u32],
+        max_len: u32,
+        min_len_hint: u32,
+        insert: bool,
+    ) -> Option<(u32, u32, u64)> {
+        if pos + 4 > self.data.len() || max_len < 2 {
+            return None;
+        }
+        let key = self.key(pos);
+        if insert && pos < self.data.len() {
+            let mask = (1usize << self.block_bits) - 1;
+            let base = key << self.block_bits;
+            self.buckets[base | (self.num[key] as usize & mask)] = pos as u32;
+            self.num[key] = self.num[key].wrapping_add(1);
+            if self.cur <= pos {
+                self.cur = pos + 1;
+            }
+        }
+        self.scan_with_key(key, pos, last_dists, max_len, min_len_hint)
     }
 
     fn match_len(&self, a: usize, b: usize, limit: u32) -> u32 {
@@ -918,6 +952,18 @@ impl<'a> BankMatchFinder<'a> {
         if pos + 4 > self.data.len() || max_len < 2 {
             return None;
         }
+        let key = self.key(pos);
+        self.scan_with_key(key, pos, last_dists, max_len, min_len_hint)
+    }
+
+    fn scan_with_key(
+        &self,
+        key: usize,
+        pos: usize,
+        last_dists: &[u32],
+        max_len: u32,
+        min_len_hint: u32,
+    ) -> Option<(u32, u32, u64)> {
         // (distance-cache index, offset) per short code — upstream
         // kDistanceCacheIndex/kDistanceCacheOffset.
         const CACHE_INDEX: [u8; 16] = [0, 1, 2, 3, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1];
@@ -1000,7 +1046,6 @@ impl<'a> BankMatchFinder<'a> {
             }};
         }
 
-        let key = self.key(pos);
         let bank = 1usize << self.block_bits;
         let mask = bank - 1;
         let count = self.num[key] as usize;
