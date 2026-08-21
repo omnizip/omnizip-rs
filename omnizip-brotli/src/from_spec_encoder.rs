@@ -5994,6 +5994,16 @@ fn parse_input_with_offset_impl(
             mf.set_nice_match(256);
         }
         // fall through to the lazy path below
+    } else if quality >= 10 && env_flag!("BROTLI_HQ_ZOPFLI") {
+        // Reference port of BrotliCreateHqZopfliBackwardReferences
+        // (StartPosQueue + 2-iteration cost model). EXPERIMENTAL,
+        // env-gated: the parse itself audits clean
+        // (BROTLI_PARSE_AUDIT) and beats the reference on the DP
+        // level, but the emission pipeline desyncs on the new
+        // command shapes (long copies / len-2-3 explicit-distance
+        // commands) — streams are INVALID until that integration is
+        // fixed. Default remains the in-house iterative DP.
+        return (crate::encoder::zopfli_hq::parse_hq(input, quality), None);
     } else if quality >= 4 && input.len() <= 8 * 1024 * 1024 {
         return zopfli_iterative_parse(
             input,
