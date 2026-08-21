@@ -1124,7 +1124,14 @@ fn emit_metablock_from_commands(
             }
             e
         };
-        let cmap_a = if env_flag!("BROTLI_STATS") {
+        // The A/B clustering passes cost ~20% of q5-9 encode; at those
+        // qualities the reference uses ONLY its decided static map.
+        // Take C directly there (BROTLI_FULL_ASSIGN restores the A/B/C
+        // comparison); q10+ keeps the full machinery.
+        let skip_ab = quality < 10 && decided_ctx.is_some() && !env_flag!("BROTLI_FULL_ASSIGN");
+        let cmap_a = if skip_ab {
+            Vec::new()
+        } else if env_flag!("BROTLI_STATS") {
             let t = std::time::Instant::now();
             let r = crate::encoder::context::cluster_contexts(&bc_hists, 4);
             eprintln!(
@@ -1139,25 +1146,35 @@ fn emit_metablock_from_commands(
             crate::encoder::context::cluster_contexts(&bc_hists, 4)
         };
         let mut hists_a: Vec<[u32; 256]> = vec![[0u32; 256]; 4];
+        let (cost_a, cmap_b, count_b, cost_b);
+        if skip_ab {
+            cost_a = f64::INFINITY;
+            cmap_b = Vec::new();
+            count_b = 0;
+            cost_b = f64::INFINITY;
+        } else {
         for (i, h) in bc_hists.iter().enumerate() {
             for (b, &f) in h.iter().enumerate() {
                 hists_a[usize::from(cmap_a[i])][b] += f;
             }
         }
-        let cost_a: f64 = hists_a.iter().map(|h| tree_bits(h)).sum::<f64>()
+        cost_a = hists_a.iter().map(|h| tree_bits(h)).sum::<f64>()
             + 4.0 * 60.0
             + bc_hists.len() as f64 * 2.0;
-        let (cmap_b, count_b) =
+        let (cmap_b_v, count_b_v) =
             crate::encoder::context::assign_context_trees(&bc_hists, ntrees.max(4));
+        cmap_b = cmap_b_v;
+        count_b = count_b_v;
         let mut hists_b: Vec<[u32; 256]> = vec![[0u32; 256]; count_b];
         for (i, h) in bc_hists.iter().enumerate() {
             for (b, &f) in h.iter().enumerate() {
                 hists_b[usize::from(cmap_b[i])][b] += f;
             }
         }
-        let cost_b: f64 = hists_b.iter().map(|h| tree_bits(h)).sum::<f64>()
+        cost_b = hists_b.iter().map(|h| tree_bits(h)).sum::<f64>()
             + count_b as f64 * 35.0
             + bc_hists.len() as f64 * (count_b as f64).log2().max(1.0);
+        }
         // Option C: the reference's decided static map (tree by ctx
         // only, independent of block).
         let mut cost_c = f64::INFINITY;
@@ -6002,6 +6019,10 @@ fn parse_input_with_offset_impl(
                 if bank_mf.is_some() {
                     // Binary bank path: bank hit is the sole candidate
                     // (chain walks are the cost we are eliminating).
+                    // The bank's find already scored it H9-style — the
+                    // f32 rescoring loop below (a log2 per candidate per
+                    // position) only served the multi-candidate chain
+                    // path.
                     if let Some(m) = bank_hit {
                         cands.push(m);
                     }
@@ -6011,6 +6032,16 @@ fn parse_input_with_offset_impl(
                 let mut bestc: Option<omnizip_codecs::Lz77Match> = None;
                 let mut best_score = f32::MIN;
                 let mut best_is_rep = false;
+                if bank_mf.is_some() {
+                    if let Some(m) = cands.first() {
+                        if m.distance <= max_dist && m.length >= 2 {
+                            bestc = Some(*m);
+                            best_is_rep =
+                                greedy_tier && last_dists[..last_dist_len].contains(&m.distance);
+                            best_score = m.length as f32;
+                        }
+                    }
+                } else {
                 for (ci, m) in cands.iter().enumerate() {
                     if m.distance > max_dist || m.length < 2 {
                         continue;
@@ -6037,6 +6068,7 @@ fn parse_input_with_offset_impl(
                         bestc = cands.get(ci).copied();
                         best_is_rep = is_rep;
                     }
+                }
                 }
                 // Probe the recent distances directly (upstream's
                 // last-distance check in FindLongestMatch): a rep
