@@ -976,7 +976,15 @@ impl<'a> BankMatchFinder<'a> {
         let mut best_score = 0u64;
         let mut best: Option<(u32, u32)> = None;
 
+        // Exact-rep-only mode for shallow configs (upstream H5 probes
+        // only distance_cache[0]; we keep all 4 exact reps — they are
+        // worth 5.8pt on periodic data — but skip the ±1-3 offset
+        // variants, which add a command per drifting chain position).
+        let exact_only = self.num_last_dists <= 4;
         for i in 0..self.num_last_dists.min(16) {
+            if exact_only && CACHE_OFFSET[i] != 0 {
+                continue;
+            }
             let base = *last_dists.get(usize::from(CACHE_INDEX[i])).unwrap_or(&0);
             let v = i64::from(base) + i64::from(CACHE_OFFSET[i]);
             if v < 1 || v as usize > pos {
