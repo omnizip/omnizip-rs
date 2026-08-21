@@ -467,13 +467,12 @@ pub fn compress_with_quality(input: &[u8], quality: i32) -> Vec<u8> {
     {
         sz
     } else if q >= 4 {
-        // Measured optimum on the CSV benchmark at every scale tried
-        // (4MB input: 2MB chunks beat 1MB and 4MB by 10%+; 21MB:
-        // 878KB -> 797KB q11, 975KB -> 853KB q5). Larger chunks
-        // saturate the per-chunk tree caps and distance diversity
-        // explodes; smaller chunks pay repeated headers and lose
-        // cross-chunk rep warmth.
-        1 << 21 // 2 MiB
+        // Re-measured on the REAL-CSV/FITS benchmarks after the greedy
+        // parity work: 8 MiB chunks win on text (whole-file literal
+        // statistics: CSV q5 440,437 -> 437,956) and are neutral on
+        // binary; the old 2 MiB optimum was measured on the degenerate
+        // 1000-row-period synthetic CSV.
+        1 << 23 // 8 MiB
     } else {
         (1 << 20) - 1 // 1 MiB - 1
     };
