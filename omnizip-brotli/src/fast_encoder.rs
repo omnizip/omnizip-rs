@@ -50,10 +50,14 @@ fn memcpy<T: Clone>(dst: &mut [T], dst_offset: usize, src: &[T], src_offset: usi
 
 pub fn BrotliWriteBits(n_bits: usize, bits: u64, pos: &mut usize, array: &mut [u8]) {
     let p = &mut array[(*pos >> 3)..];
-    let mut v: u64 = u64::from(p[0]);
-    v |= bits << (*pos & 7);
-    for i in 0..p.len().min(8) {
-        p[i] = (v >> (8 * i)) as u8;
+    let v: u64 = u64::from(p[0]) | (bits << (*pos & 7));
+    // One 8-byte store (upstream BROTLI_UNALIGNED_STORE64) instead of
+    // a byte-shift loop — this runs per emitted symbol.
+    if p.len() >= 8 {
+        p[..8].copy_from_slice(&v.to_le_bytes());
+    } else {
+        let b = v.to_le_bytes();
+        p.copy_from_slice(&b[..p.len()]);
     }
     *pos = pos.wrapping_add(n_bits);
 }
@@ -62,15 +66,30 @@ pub(crate) fn BROTLI_UNALIGNED_LOAD32(p: &[u8]) -> u32 {
     u32::from_le_bytes([p[0], p[1], p[2], p[3]])
 }
 pub(crate) fn BROTLI_UNALIGNED_LOAD64(p: &[u8]) -> u64 {
-    let mut v = 0u64;
-    for i in 0..8.min(p.len()) {
-        v |= u64::from(p[i]) << (8 * i);
+    // One bounds check + single load; callers guarantee 8 readable
+    // bytes except at the stream tail, where the byte fallback applies.
+    if p.len() >= 8 {
+        u64::from_le_bytes([p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7]])
+    } else {
+        let mut v = 0u64;
+        for i in 0..p.len() {
+            v |= u64::from(p[i]) << (8 * i);
+        }
+        v
     }
-    v
 }
 pub(crate) fn FindMatchLengthWithLimit(s1: &[u8], s2: &[u8], limit: usize) -> usize {
-    let mut i = 0;
-    while i < limit && i < s1.len() && i < s2.len() && s1[i] == s2[i] {
+    // u64-at-a-time compare (upstream FindMatchLengthWithLimit); the
+    // per-byte loop with three bounds checks dominated match extension.
+    let limit = limit.min(s1.len()).min(s2.len());
+    let mut i = 0usize;
+    while i + 8 <= limit {
+        if s1[i..i + 8] != s2[i..i + 8] {
+            break;
+        }
+        i += 8;
+    }
+    while i < limit && s1[i] == s2[i] {
         i += 1;
     }
     i
