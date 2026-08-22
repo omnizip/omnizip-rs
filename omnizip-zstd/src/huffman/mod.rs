@@ -32,6 +32,7 @@ pub mod simd;
 pub mod weights;
 
 use crate::constants::HUFFMAN_MAX_BITS;
+use crate::fse::bitstream::ReloadStatus;
 use crate::fse::BitStream;
 use crate::ZstdError;
 
@@ -278,10 +279,17 @@ impl<'t, 'b> HuffmanDecoder<'t, 'b> {
             }
         }
 
-        // Scalar batching fallback (TODO 102 Phase 1). 8-deep unroll
-        // exposes ILP and lets the compiler sink the bitstream reload.
-        // The reload inside `decode_one` becomes a no-op when the
-        // bitstream still has ≥ MAX_BITS available.
+        // Scalar batching fallback (TODO 102 Phase 1). Matches C
+        // `HUF_decodeStreamX1`: decode at most FOUR symbols between
+        // reloads, and only while `reload` reports Unfinished. An
+        // unfinished reload leaves `bits_consumed <= 7`, so at least
+        // 57 fresh bits remain in the 64-bit container — enough for
+        // 4 codes of up to MAX_BITS each. Batching 8 (an earlier
+        // optimisation) over-consumed the container whenever the code
+        // lengths summed past 57: `read_bits`'s shifts then wrapped
+        // and the last symbol of the batch peeked stale bits,
+        // mis-decoding it (issue #315 residual: one wrong literal on
+        // a 163-byte all-literal block).
         let mut i = if cfg!(feature = "simd-huffman") {
             // SIMD path already processed the aligned 8-symbol groups;
             // fall through to the tail loop below.
@@ -290,17 +298,12 @@ impl<'t, 'b> HuffmanDecoder<'t, 'b> {
             0
         };
         if !cfg!(feature = "simd-huffman") {
-            while i + 8 <= out.len() {
+            while i + 4 <= out.len() && self.bitstream.reload_status() == ReloadStatus::Unfinished {
                 out[i] = self.table.decode(&mut self.bitstream)?;
                 out[i + 1] = self.table.decode(&mut self.bitstream)?;
                 out[i + 2] = self.table.decode(&mut self.bitstream)?;
                 out[i + 3] = self.table.decode(&mut self.bitstream)?;
-                out[i + 4] = self.table.decode(&mut self.bitstream)?;
-                out[i + 5] = self.table.decode(&mut self.bitstream)?;
-                out[i + 6] = self.table.decode(&mut self.bitstream)?;
-                out[i + 7] = self.table.decode(&mut self.bitstream)?;
-                self.bitstream.reload();
-                i += 8;
+                i += 4;
             }
         }
         while i < out.len() {
