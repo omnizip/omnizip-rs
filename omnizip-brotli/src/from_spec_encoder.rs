@@ -1182,11 +1182,18 @@ fn emit_metablock_from_commands(
         // Take C directly there (BROTLI_FULL_ASSIGN restores the A/B/C
         // comparison); q10+ keeps the full machinery.
         let skip_ab = quality < 10 && decided_ctx.is_some() && !env_flag!("BROTLI_FULL_ASSIGN");
+        // Literal-tree clustering cap: the reference's ContextBlockSplitter
+        // reaches >100 trees at q11 (FITS: 143); a cap of 4 forfeits ~360KB
+        // of literal entropy there. BROTLI_LIT_TREES overrides.
+        let lit_trees_cap: usize = std::env::var("BROTLI_LIT_TREES")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(if quality >= 10 { 64 } else { 4 });
         let cmap_a = if skip_ab {
             Vec::new()
         } else if env_flag!("BROTLI_STATS") {
             let t = std::time::Instant::now();
-            let r = crate::encoder::context::cluster_contexts(&bc_hists, 4);
+            let r = crate::encoder::context::cluster_contexts(&bc_hists, lit_trees_cap);
             eprintln!(
                 "STATS cluster_lit rows={} blocks_dbg={max_lit_blocks_dbg} nbltypes_l={} cap={max_lit_blocks} n_literals={} {:.2}s",
                 bc_hists.len(),
@@ -1196,9 +1203,9 @@ fn emit_metablock_from_commands(
             );
             r
         } else {
-            crate::encoder::context::cluster_contexts(&bc_hists, 4)
+            crate::encoder::context::cluster_contexts(&bc_hists, lit_trees_cap)
         };
-        let mut hists_a: Vec<[u32; 256]> = vec![[0u32; 256]; 4];
+        let mut hists_a: Vec<[u32; 256]> = vec![[0u32; 256]; lit_trees_cap];
         let (cost_a, cmap_b, count_b, cost_b);
         if skip_ab {
             cost_a = f64::INFINITY;
@@ -1268,7 +1275,14 @@ fn emit_metablock_from_commands(
         } else if cost_b < cost_a && !env_flag!("BROTLI_NO_SINGLETONS") {
             (cmap_b, count_b)
         } else {
-            (cmap_a, 4)
+            (
+                cmap_a.clone(),
+                cmap_a
+                    .iter()
+                    .copied()
+                    .max()
+                    .map_or(1, |m| usize::from(m) + 1),
+            )
         };
         if env_flag!("BROTLI_DBG_CTX") {
             eprintln!(
