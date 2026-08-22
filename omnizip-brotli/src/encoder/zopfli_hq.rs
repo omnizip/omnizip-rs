@@ -300,33 +300,32 @@ impl CostModel {
                 break;
             }
         }
-        // Command/dist symbols: recompute via the shared symbol
-        // helpers (the caller's stream builder uses the same tables).
-        let mut pos = 0usize;
-        for cmd in commands {
-            let ins = cmd.insert_len as usize;
-            let copy = if cmd.copy_len == 0 {
-                2
-            } else {
-                cmd.copy_len as usize
-            };
-            let effective_copy = if cmd.copy_len == 0 { 0 } else { copy };
-            let inscode = get_insert_length_code(ins);
-            let copycode = get_copy_length_code(copy);
-            let dist_code_short = 0; // placeholder, refined below
-            let _ = dist_code_short;
-            let cmdcode = combine_length_codes(inscode, copycode, false);
-            hist_cmd[usize::from(cmdcode)] += 1;
-            if cmdcode >= 128 && cmd.distance > 0 {
-                // Long-form distance symbol for this distance.
-                let sym = long_dist_symbol(cmd.distance);
-                if sym < MAX_EFFECTIVE_DISTANCE_ALPHABET_SIZE {
-                    hist_dist[sym] += 1;
+        // Command/dist symbols: derive through the SAME rep-conversion
+        // walk the emission uses (short codes 0-15 + implicit-rep0
+        // cmd folding). Upstream SetFromCommands histograms each
+        // command's stored dist_prefix_/cmd_prefix_, which encode rep
+        // usage — that feedback is what makes rep codes cheap in the
+        // next iteration's model. Deriving long-form symbols only (the
+        // old approximation) left short codes unseen in the histogram,
+        // so SetCost priced them as rare and the DP under-rode reps
+        // (~3x fewer implicit-rep0 commands than the reference on CSV).
+        let dist_cfg = crate::encoder::distance_config::DistanceConfig::choose(commands);
+        if let Some(stream) = crate::from_spec_encoder::build_symbol_stream(
+            commands,
+            data,
+            0,
+            &dist_cfg,
+        ) {
+            for &cs in &stream.cmd_symbols {
+                if cs < NUM_CMD_SYMBOLS {
+                    hist_cmd[cs] += 1;
                 }
             }
-            pos += ins + if cmd.copy_len == 0 { 0 } else { effective_copy };
-            if pos > n {
-                break;
+            for &ds in &stream.dist_symbols {
+                let s = ds as usize;
+                if s < MAX_EFFECTIVE_DISTANCE_ALPHABET_SIZE {
+                    hist_dist[s] += 1;
+                }
             }
         }
         let mut cost_literal = [0.0f32; 256];
@@ -623,9 +622,8 @@ fn collect_matches(
             num_matches[i] = 1;
             let skip = (last.1 as usize).saturating_sub(1).min(n - i - 1);
             let end = (i + 1 + skip).min(n);
-            let mut sink = Vec::new();
             for k in (i + 1)..end {
-                tree.store_and_find(k, &mut sink);
+                tree.store(k);
             }
             i = end;
         } else {
@@ -670,7 +668,12 @@ fn compute_distance_shortcut(mut pos: usize, nodes: &[Node], gap: usize) -> u32 
         let c_len = node.copy_len();
         let i_len = node.insert_len();
         let dist = node.distance as usize;
-        if dist + c_len <= pos + gap && node.short_code() == 0 && dist > 0 {
+        // Upstream: `ZopfliNodeDistanceCode(&nodes[pos]) > 0` — only
+        // implicit-rep0 (code 0) fails to update the distance cache.
+        // Untouched nodes (dist 0 → code 15) DO anchor; an extra
+        // `dist > 0` guard made them walk back one position at a time,
+        // turning long-repetitive input quadratic (task #312).
+        if dist + c_len <= pos + gap && node.dist_code() > 0 {
             return pos as u32;
         }
         pos -= c_len + i_len;

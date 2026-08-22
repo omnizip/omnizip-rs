@@ -723,7 +723,32 @@ impl<'a> BinaryTreeMatchFinder<'a> {
     /// Store `pos` into its tree, collecting matches of strictly
     /// increasing length into `out` (cleared first).
     pub fn store_and_find(&mut self, pos: usize, out: &mut Vec<Lz77Match>) {
-        out.clear();
+        let n = self.data.len();
+        self.store_and_find_capped(pos, n - pos, Some(out));
+    }
+
+    /// Upstream `Store`: insert + re-root with the compare capped at
+    /// `TREE_MAX_COMP_LEN`, no matches returned. Used for the tail of
+    /// long copies — a full-length compare there makes highly
+    /// repetitive input quadratic (task #312: 1MB all-zeros at q11
+    /// spent minutes in tail stores alone; the reference finishes in
+    /// 0.07s).
+    pub fn store(&mut self, pos: usize) {
+        self.store_and_find_capped(pos, TREE_MAX_COMP_LEN, None);
+    }
+
+    /// Shared walk body. `cap_len` bounds the byte compare (upstream
+    /// `max_length`; `Store` passes `MAX_TREE_COMP_LENGTH`), `out`
+    /// receives matches when present (upstream `matches != NULL`).
+    fn store_and_find_capped(
+        &mut self,
+        pos: usize,
+        cap_len: usize,
+        mut out: Option<&mut Vec<Lz77Match>>,
+    ) {
+        if let Some(o) = out.as_deref_mut() {
+            o.clear();
+        }
         let n = self.data.len();
         if pos + 4 > n {
             return;
@@ -736,6 +761,7 @@ impl<'a> BinaryTreeMatchFinder<'a> {
         let mut best_len_left = 0usize;
         let mut best_len_right = 0usize;
         let mut depth = TREE_DEPTH;
+        let max_len = cap_len.min(n - pos);
         loop {
             let backward = pos.wrapping_sub(prev_ix);
             if prev_ix == self.invalid as usize || backward == 0 || backward > n || depth == 0 {
@@ -744,14 +770,18 @@ impl<'a> BinaryTreeMatchFinder<'a> {
                 break;
             }
             let cur_len = best_len_left.min(best_len_right);
-            let len =
-                cur_len + self.match_len_from(pos + cur_len, prev_ix + cur_len, n - pos - cur_len);
-            let best_so_far = out.last().map_or(0, |m| m.length as usize);
+            let len = cur_len + self.match_len_from(pos + cur_len, prev_ix + cur_len, max_len - cur_len);
+            let best_so_far = out
+                .as_deref()
+                .and_then(|o| o.last().map(|m| m.length as usize))
+                .unwrap_or(0);
             if len > best_so_far && len >= 4 {
-                out.push(Lz77Match {
-                    distance: backward as u32,
-                    length: len as u32,
-                });
+                if let Some(o) = out.as_deref_mut() {
+                    o.push(Lz77Match {
+                        distance: backward as u32,
+                        length: len as u32,
+                    });
+                }
             }
             if len >= TREE_MAX_COMP_LEN || pos + len >= n || prev_ix + len >= n {
                 self.forest[node_left] = self.forest[prev_ix * 2];

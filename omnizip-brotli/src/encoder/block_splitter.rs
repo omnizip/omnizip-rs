@@ -678,8 +678,13 @@ fn build_block_histograms(data: &[u16], block_ids: &[u8], hists: &mut [Hist]) {
 
 /// Upstream `ClusterBlocks`: batched pre-clustering + final clustering,
 /// then per-block best-histogram assignment.
-fn cluster_blocks(data: &[u16], num_blocks: usize, block_ids: &[u8], split: &mut BlockSplit) {
-    let data_size = data.first().map_or(256, |_| 256);
+fn cluster_blocks(
+    data: &[u16],
+    data_size: usize,
+    num_blocks: usize,
+    block_ids: &[u8],
+    split: &mut BlockSplit,
+) {
     let mut histogram_symbols = vec![0u32; num_blocks];
     let expected_num_clusters =
         CLUSTERS_PER_BATCH * (num_blocks + HISTOGRAMS_PER_BATCH - 1) / HISTOGRAMS_PER_BATCH;
@@ -819,6 +824,7 @@ fn cluster_blocks(data: &[u16], num_blocks: usize, block_ids: &[u8], split: &mut
 /// Upstream `SplitByteVector` (literal flavor: u16-carried symbols).
 pub fn split_byte_vector(
     data: &[u16],
+    data_size: usize,
     symbols_per_histogram: usize,
     max_histograms: usize,
     sampling_stride_length: usize,
@@ -842,14 +848,14 @@ pub fn split_byte_vector(
         num_histograms = max_histograms;
     }
 
-    let mut histograms: Vec<Hist> = (0..num_histograms + 1).map(|_| Hist::new(256)).collect();
+    let mut histograms: Vec<Hist> = (0..num_histograms + 1).map(|_| Hist::new(data_size)).collect();
     let (hists, _tmp) = histograms.split_at_mut(num_histograms);
     initial_entropy_codes(data, num_histograms, sampling_stride_length, hists);
     refine_entropy_codes(data, sampling_stride_length, num_histograms, hists);
 
     let mut block_ids = vec![0u8; length];
     let mut num_blocks = 0usize;
-    let alphabet_size = 256usize;
+    let alphabet_size = data_size;
     let max_histograms_buf = num_histograms;
     let mut insert_cost = vec![0.0f64; alphabet_size * max_histograms_buf];
     let mut cost = vec![0.0f64; num_histograms];
@@ -876,6 +882,6 @@ pub fn split_byte_vector(
         types: Vec::new(),
         lengths: Vec::new(),
     };
-    cluster_blocks(data, num_blocks, &block_ids, &mut split);
+    cluster_blocks(data, data_size, num_blocks, &block_ids, &mut split);
     split
 }

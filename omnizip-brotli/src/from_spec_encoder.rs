@@ -881,12 +881,67 @@ fn emit_metablock_from_commands(
         } else {
             16
         });
-    let cmd_boundaries: Vec<usize> = if cmd_split_on {
-        split_cmd_symbols_optimal(&stream.cmd_symbols, max_blocks)
-    } else {
+    // Reference 1.2.0 command block split (SplitByteVector on the
+    // command-symbol stream, 704-wide histograms). Default at q10+
+    // (BROTLI_OLD_CSPLIT restores the in-house DP); the reference
+    // emits ~5 cost-chosen blocks where the in-house K<=64 DP put 15+
+    // on CSV q11, paying switch codes and tree headers.
+    let ref_cmd_split = quality >= 10 && !env_flag!("BROTLI_OLD_CSPLIT")
+        || env_flag!("BROTLI_REF_CSPLIT");
+    let mut cmd_block_types: Vec<u8> = Vec::new();
+    let cmd_boundaries: Vec<usize> = if !cmd_split_on {
+        cmd_block_types.push(0);
         vec![0]
+    } else if ref_cmd_split {
+        let syms: Vec<u16> = stream.cmd_symbols.iter().map(|&s| s as u16).collect();
+        let iters = if quality >= 11 { 10 } else { 3 };
+        let split = crate::encoder::block_splitter::split_byte_vector(
+            &syms,
+            704,
+            crate::encoder::block_splitter::SYMBOLS_PER_COMMAND_HISTOGRAM,
+            crate::encoder::block_splitter::MAX_COMMAND_HISTOGRAMS,
+            crate::encoder::block_splitter::COMMAND_STRIDE_LENGTH,
+            crate::encoder::block_splitter::COMMAND_BLOCK_SWITCH_COST,
+            iters,
+        );
+        let mut boundaries = vec![0usize];
+        let mut pos = 0usize;
+        for (&len, &ty) in split.lengths.iter().zip(split.types.iter()) {
+            if len == 0 {
+                continue;
+            }
+            pos += len as usize;
+            cmd_block_types.push(ty);
+            if pos < stream.cmd_symbols.len() {
+                boundaries.push(pos);
+            }
+        }
+        while cmd_block_types.len() > boundaries.len() {
+            cmd_block_types.pop();
+        }
+        while cmd_block_types.len() < boundaries.len() {
+            let next = cmd_block_types.len() as u8;
+            cmd_block_types.push(next);
+        }
+        if env_flag!("BROTLI_DBG_CTX") {
+            eprintln!(
+                "CMDSPLIT ref blocks={} types={:?} n={}",
+                boundaries.len(),
+                &cmd_block_types,
+                stream.cmd_symbols.len()
+            );
+        }
+        boundaries
+    } else {
+        let b = split_cmd_symbols_optimal(&stream.cmd_symbols, max_blocks);
+        cmd_block_types = (0..b.len() as u8).collect();
+        b
     };
-    let nbltypes_c = cmd_boundaries.len() as u32;
+    let nbltypes_c: u32 = if cmd_boundaries.len() <= 1 {
+        1
+    } else {
+        usize::from(cmd_block_types.iter().copied().max().unwrap_or(0)) as u32 + 1
+    };
     let cmd_block_len: Vec<u32> = cmd_boundaries
         .iter()
         .enumerate()
@@ -898,7 +953,8 @@ fn emit_metablock_from_commands(
             (end - b) as u32
         })
         .collect();
-    // Per-command block-type assignment.
+    // Per-command block-TYPE assignment (types, not ordinals — blocks
+    // can reuse type ids).
     let cmd_block_of: Vec<u8> = {
         let mut a = vec![0u8; stream.cmd_symbols.len()];
         for (k, &b) in cmd_boundaries.iter().enumerate() {
@@ -906,8 +962,9 @@ fn emit_metablock_from_commands(
                 .get(k + 1)
                 .copied()
                 .unwrap_or(stream.cmd_symbols.len());
+            let ty = *cmd_block_types.get(k).unwrap_or(&(k as u8));
             for x in a.iter_mut().take(end).skip(b) {
-                *x = k as u8;
+                *x = ty;
             }
         }
         a
@@ -972,6 +1029,7 @@ fn emit_metablock_from_commands(
         let iters = if quality >= 11 { 10 } else { 3 };
         let split = crate::encoder::block_splitter::split_byte_vector(
             &syms,
+            256,
             crate::encoder::block_splitter::SYMBOLS_PER_LITERAL_HISTOGRAM,
             crate::encoder::block_splitter::MAX_LITERAL_HISTOGRAMS,
             crate::encoder::block_splitter::LITERAL_STRIDE_LENGTH,
@@ -1471,37 +1529,15 @@ fn emit_metablock_from_commands(
     let mut cmd_bt_wire: Vec<(u32, u8)> = Vec::new();
     let mut cmd_bl_wire: Vec<(u32, u8)> = Vec::new();
     if nbltypes_c > 1 {
-        // Block-type code tree over alphabet 2 + nbltypes_c. Switches
-        // always use explicit codes (type + 2).
-        let bt_alphabet = 2 + nbltypes_c as usize;
-        let mut bt_freq = vec![0u32; bt_alphabet];
-        for k in 1..nbltypes_c as usize {
-            bt_freq[k + 2] += 1;
-        }
-        let bt_lengths = omnizip_codecs::HuffmanLengths::build(&bt_freq, 15);
-        write_huffman_table(bw, &bt_lengths, bt_alphabet);
-
-        // Block-length code tree over the 26-symbol alphabet, from the
-        // actual block length distribution.
-        let mut bl_freq = [0u32; 26];
-        let bl_codes: Vec<(usize, u32, u32)> = cmd_block_len
+        let cmd_switch_types: Vec<u8> = cmd_block_types
             .iter()
-            .map(|&l| block_length_code(l))
+            .enumerate()
+            .filter(|(i, _)| *i > 0)
+            .map(|(_, &t)| t)
             .collect();
-        for &(c, _, _) in &bl_codes {
-            bl_freq[c] += 1;
-        }
-        let bl_lengths = omnizip_codecs::HuffmanLengths::build(&bl_freq, 15);
-        write_huffman_table(bw, &bl_lengths, 26);
-
-        cmd_bt_wire = canonical_with_reverse(&bt_lengths);
-        cmd_bl_wire = canonical_with_reverse(&bl_lengths);
-
-        // Initial block length (block 0) via the block-length tree.
-        let (c0, extra0, nbits0) = bl_codes[0];
-        let (code, len) = cmd_bl_wire[c0];
-        bw.write_bits(code, u32::from(len));
-        bw.write_bits(extra0, nbits0);
+        let (bt, bl) = write_block_switch_header(bw, nbltypes_c, &cmd_block_len, &cmd_switch_types);
+        cmd_bt_wire = bt;
+        cmd_bl_wire = bl;
     }
     // --- Distance block splitting: NBLTYPES_D > 1 with per-block-type
     // context maps (before NPOSTFIX per the wire order). ---
@@ -1510,13 +1546,81 @@ fn emit_metablock_from_commands(
         && dist_cfg.alphabet_size() <= 256
         && !env_flag!("BROTLI_NO_DSPLIT")
         && (quality >= 8 || is_text_like(input));
-    let dist_boundaries: Vec<usize> = if dist_split_on {
-        let syms: Vec<usize> = stream.dist_symbols.iter().map(|&s| s as usize).collect();
-        split_symbol_stream_optimal(&syms, dist_cfg.alphabet_size(), 4)
-    } else {
+    // Reference 1.2.0 distance block split (SplitByteVector on the
+    // distance-symbol stream). The in-house DP capped blocks at 4 and
+    // trees at 4; the reference clusters its histograms freely and
+    // routinely emits 10-20 distance trees on text (ours was stuck at
+    // 4, costing ~30K bits of dist_sym entropy on the CSV fixture).
+    // Default at q10+ (BROTLI_OLD_DSPLIT restores the in-house DP);
+    // BROTLI_REF_DSPLIT forces it at any level.
+    let ref_dist_split = quality >= 10 && !env_flag!("BROTLI_OLD_DSPLIT")
+        || env_flag!("BROTLI_REF_DSPLIT");
+    let mut dist_block_types: Vec<u8> = Vec::new();
+    let dist_boundaries: Vec<usize> = if !dist_split_on {
+        dist_block_types.push(0);
         vec![0]
+    } else if ref_dist_split {
+        let syms: Vec<u16> = stream.dist_symbols.iter().map(|&s| s as u16).collect();
+        let iters = if quality >= 11 { 10 } else { 3 };
+        let split = crate::encoder::block_splitter::split_byte_vector(
+            &syms,
+            256,
+            crate::encoder::block_splitter::SYMBOLS_PER_DISTANCE_HISTOGRAM,
+            crate::encoder::block_splitter::MAX_COMMAND_HISTOGRAMS,
+            crate::encoder::block_splitter::DISTANCE_STRIDE_LENGTH,
+            crate::encoder::block_splitter::DISTANCE_BLOCK_SWITCH_COST,
+            iters,
+        );
+        // Boundaries from lengths; keep the per-block TYPE (blocks
+        // sharing a type share trees — the cmap is type-major).
+        let mut boundaries = vec![0usize];
+        let mut pos = 0usize;
+        for (&len, &ty) in split.lengths.iter().zip(split.types.iter()) {
+            if len == 0 {
+                continue;
+            }
+            pos += len as usize;
+            dist_block_types.push(ty);
+            if pos < stream.dist_symbols.len() {
+                boundaries.push(pos);
+            }
+        }
+        while dist_block_types.len() > boundaries.len() {
+            dist_block_types.pop();
+        }
+        while dist_block_types.len() < boundaries.len() {
+            let next = dist_block_types.len() as u8;
+            dist_block_types.push(next);
+        }
+        if env_flag!("BROTLI_DBG_CTX") {
+            eprintln!(
+                "DISTSPLIT ref blocks={} types={:?} n={}",
+                boundaries.len(),
+                &dist_block_types,
+                stream.dist_symbols.len()
+            );
+        }
+        boundaries
+    } else {
+        let b = split_symbol_stream_optimal(
+            &stream
+                .dist_symbols
+                .iter()
+                .map(|&s| s as usize)
+                .collect::<Vec<_>>(),
+            dist_cfg.alphabet_size(),
+            4,
+        );
+        dist_block_types = (0..b.len() as u8).collect();
+        b
     };
-    let nbltypes_d = dist_boundaries.len() as u32;
+    // NBLTYPESD counts DISTINCT type ids, not blocks (the reference
+    // ClusterBlocks reuses ids across non-adjacent blocks).
+    let nbltypes_d: u32 = if dist_boundaries.len() <= 1 {
+        1
+    } else {
+        usize::from(dist_block_types.iter().copied().max().unwrap_or(0)) as u32 + 1
+    };
     let dist_block_len: Vec<u32> = dist_boundaries
         .iter()
         .enumerate()
@@ -1532,7 +1636,13 @@ fn emit_metablock_from_commands(
     let mut dist_bt_wire: Vec<(u32, u8)> = Vec::new();
     let mut dist_bl_wire: Vec<(u32, u8)> = Vec::new();
     if nbltypes_d > 1 {
-        let (bt, bl) = write_block_switch_header(bw, nbltypes_d, &dist_block_len, &[]);
+        let dist_switch_types: Vec<u8> = dist_block_types
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| *i > 0)
+            .map(|(_, &t)| t)
+            .collect();
+        let (bt, bl) = write_block_switch_header(bw, nbltypes_d, &dist_block_len, &dist_switch_types);
         dist_bt_wire = bt;
         dist_bl_wire = bl;
     }
@@ -1587,7 +1697,10 @@ fn emit_metablock_from_commands(
             while blk + 1 < dist_boundaries.len() && idx >= dist_boundaries[blk + 1] {
                 blk += 1;
             }
-            dist_bc_hists[(blk << 2) + ctx as usize][sym as usize] += 1;
+            let ty = *dist_block_types
+                .get(blk)
+                .unwrap_or(&(blk as u8)) as usize;
+            dist_bc_hists[(ty << 2) + ctx as usize][sym as usize] += 1;
         }
     }
     let ent = |h: &[u32; 256]| -> f64 {
@@ -1624,7 +1737,13 @@ fn emit_metablock_from_commands(
         g
     };
     let cost_a = ent(&global_hist) + 70.0 + if dist_bc_ok { 0.0 } else { 1.0e9 };
-    let shared_k = ntrees_d.min(4) as usize;
+    // Reference split clusters freely; the in-house DP's 4-tree cap
+    // was tuned to its 4 blocks.
+    let shared_k = if ref_dist_split && quality >= 10 {
+        (nb_d * 4).clamp(2, 32)
+    } else {
+        ntrees_d.min(4) as usize
+    };
     let cmap_bc = if env_flag!("BROTLI_STATS") {
         let t = std::time::Instant::now();
         let r = crate::encoder::context::cluster_contexts(&dist_bc_hists, shared_k);
@@ -1634,6 +1753,24 @@ fn emit_metablock_from_commands(
             t.elapsed().as_secs_f64()
         );
         r
+    } else if ref_dist_split && quality >= 10 {
+        // Cost-driven clustering (the reference ClusterHistograms PQ
+        // combiner) picks the tree count by PopulationCost instead of a
+        // fixed k — the greedy k=32 produced 31 trees where the
+        // reference emits ~8, paying the difference back in headers.
+        let mut hists: Vec<crate::encoder::block_splitter::Hist> = dist_bc_hists
+            .iter()
+            .map(|h| {
+                let mut x = crate::encoder::block_splitter::Hist::new(256);
+                x.data.copy_from_slice(h);
+                x.total = h.iter().map(|&v| u64::from(v)).sum();
+                x.recompute_cost();
+                x
+            })
+            .collect();
+        let (_merged, assign) =
+            crate::encoder::block_splitter::cluster_histograms(&hists, shared_k);
+        assign.iter().map(|&a| a as u8).collect()
     } else {
         crate::encoder::context::cluster_contexts(&dist_bc_hists, shared_k)
     };
@@ -1662,6 +1799,12 @@ fn emit_metablock_from_commands(
     let mut dist_freqs_per_ctx: Vec<Vec<u32>>;
     let mut ntrees_d_out: u32;
     let mut dist_cmap_full: Vec<u8>;
+    if env_flag!("BROTLI_DBG_DCLUST") {
+        eprintln!(
+            "DCLUST cost_a={cost_a:.1} cost_b={cost_b:.1} used={used_count} rows={} k={shared_k} nb_d={nb_d} ref={ref_dist_split}",
+            dist_bc_hists.len()
+        );
+    }
     if cost_b < cost_a {
         dist_freqs_per_ctx = vec![vec![0u32; dist_alphabet]; shared_k];
         for (i, h) in dist_bc_hists.iter().enumerate() {
@@ -1707,8 +1850,12 @@ fn emit_metablock_from_commands(
         write_context_map(bw, &dist_cmap_full, ntrees_d_out);
     }
     ntrees_d = ntrees_d_out;
-    let dist_ctx_tree_of =
-        |blk: usize, ctx: u8| -> usize { usize::from(dist_cmap_full[(blk << 2) + ctx as usize]) };
+    let dist_ctx_tree_of = |blk: usize, ctx: u8| -> usize {
+        let ty = *dist_block_types
+            .get(blk)
+            .unwrap_or(&(blk as u8)) as usize;
+        usize::from(dist_cmap_full[(ty << 2) + ctx as usize])
+    };
 
     // --- Context modeling: per-tree literal frequencies ---
     // For NTREES_L > 1, partition literals by their LSB6 context.
@@ -1994,7 +2141,9 @@ fn emit_metablock_from_commands(
     for (cmd_idx, (&cmd_sym, cmd)) in stream.cmd_symbols.iter().zip(commands.iter()).enumerate() {
         if cmd_idx > 0 && cmd_block_remaining == 0 && next_switch < cmd_boundaries.len() {
             // Block switch: explicit type code (type + 2), then block length.
-            let new_type = next_switch; // blocks are numbered in order
+            let new_type = *cmd_block_types
+                .get(next_switch)
+                .unwrap_or(&(next_switch as u8)) as usize;
             let (bt_code, bt_len) = cmd_bt_wire[new_type + 2];
             bw.write_bits(bt_code, u32::from(bt_len));
             let (c, extra, nbits) = block_length_code(cmd_block_len[next_switch]);
@@ -2011,7 +2160,11 @@ fn emit_metablock_from_commands(
             next_switch += 1;
         }
         let block = if nbltypes_c > 1 {
-            let cd_block = next_switch.saturating_sub(1);
+            let cd_block = usize::from(
+                *cmd_block_types
+                    .get(next_switch.saturating_sub(1))
+                    .unwrap_or(&(next_switch.saturating_sub(1) as u8)),
+            );
             let arr_block = usize::from(cmd_block_of[cmd_idx]);
             if arr_block != cd_block && std::env::var("BROTLI_CMDBLK_DBG").is_ok() {
                 eprintln!("CMDBLK-DIVERGE cmd={cmd_idx} arr={arr_block} countdown={cd_block}");
@@ -2137,7 +2290,9 @@ fn emit_metablock_from_commands(
                 if nbltypes_d > 1 {
                     dist_sym_idx += 1;
                     if dist_block_remaining == 0 && dist_next_switch < dist_boundaries.len() {
-                        let new_type = dist_next_switch;
+                        let new_type = *dist_block_types
+                            .get(dist_next_switch)
+                            .unwrap_or(&(dist_next_switch as u8)) as usize;
                         let (bt_code, bt_len) = dist_bt_wire[new_type + 2];
                         bw.write_bits(bt_code, u32::from(bt_len));
                         let (c, extra, nbits) = block_length_code(dist_block_len[dist_next_switch]);
@@ -2146,7 +2301,7 @@ fn emit_metablock_from_commands(
                         bw.write_bits(extra, nbits);
                         if env_flag!("BROTLI_SWITCH_LOG") {
                             eprintln!(
-                                "SW-DIST pos={mlen_offset}+{out_pos} type={dist_next_switch} len={}",
+                                "SW-DIST pos={mlen_offset}+{out_pos} type={new_type} len={}",
                                 dist_block_len[dist_next_switch]
                             );
                         }
@@ -2359,19 +2514,19 @@ fn encode_huffman_chunk_with_shared_mf(
 }
 
 /// A parsed symbol stream ready for entropy coding.
-struct SymbolStream {
+pub(crate) struct SymbolStream {
     /// Literal bytes in insertion order.
-    literals: Vec<u8>,
+    pub(crate) literals: Vec<u8>,
     /// Command symbols (indices into kCmdLut, 0..704).
-    cmd_symbols: Vec<usize>,
+    pub(crate) cmd_symbols: Vec<usize>,
     /// Distance symbols (0..63) — one per command with `copy_len` > 0.
-    dist_symbols: Vec<u32>,
+    pub(crate) dist_symbols: Vec<u32>,
     /// Distance extra-bit values, parallel to `dist_symbols`.
-    dist_extras: Vec<u32>,
+    pub(crate) dist_extras: Vec<u32>,
     /// Copy-length context (kCmdLut.context) for each distance symbol,
     /// parallel to `dist_symbols`. Used to split distance frequencies
     /// across NTREES_D context trees exactly as emitted.
-    dist_ctxs: Vec<u8>,
+    pub(crate) dist_ctxs: Vec<u8>,
 }
 
 /// Build the entropy-coded symbol stream from commands.
@@ -2381,7 +2536,7 @@ struct SymbolStream {
 ///   distance; we never emit implicit-distance commands).
 /// - Compute the distance symbol + extra bits via the long-code formula
 ///   (RFC 7932 §10.4).
-fn build_symbol_stream(
+pub(crate) fn build_symbol_stream(
     commands: &[Command],
     input: &[u8],
     mlen_offset: usize,
