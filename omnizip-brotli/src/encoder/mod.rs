@@ -9,6 +9,7 @@
 //! - [`context`]: Literal context computation (LSB6, UTF8, etc.)
 
 pub mod bitwriter;
+pub mod block_splitter;
 pub mod context;
 pub mod dict_hash;
 pub mod dict_hash_lut;
