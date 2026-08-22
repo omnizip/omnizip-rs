@@ -967,6 +967,7 @@ impl<'a> BankMatchFinder<'a> {
             return None;
         }
         let key = self.key(pos);
+        let result = self.scan_with_key(key, pos, last_dists, max_len, min_len_hint);
         if insert && pos < self.data.len() {
             let mask = (1usize << self.block_bits) - 1;
             let base = key << self.block_bits;
@@ -976,7 +977,7 @@ impl<'a> BankMatchFinder<'a> {
                 self.cur = pos + 1;
             }
         }
-        self.scan_with_key(key, pos, last_dists, max_len, min_len_hint)
+        result
     }
 
     fn match_len(&self, a: usize, b: usize, limit: u32) -> u32 {
@@ -1090,13 +1091,10 @@ impl<'a> BankMatchFinder<'a> {
             ($e:expr, $data:ident, $reject_limit:ident, $cur_best:ident, $pos_val:ident) => {{
                 let prev = $e as usize;
                 let backward = pos.wrapping_sub(prev);
-                // Uninitialized slots are u32::MAX (backward huge);
-                // skip them. Only break when a REAL position is beyond
-                // the window — older ring entries are then also beyond.
-                if prev != usize::MAX && backward != 0 {
-                    if backward as u32 > self.max_distance {
-                        break;
-                    }
+                // Entries beyond the window: older ring entries are
+                // then also beyond (positions are stored in arrival
+                // order, scanned newest-first).
+                if backward as u32 <= self.max_distance {
                     if prev < $reject_limit && $data[prev + $cur_best] != $pos_val {
                         continue;
                     }
