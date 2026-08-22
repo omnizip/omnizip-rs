@@ -957,13 +957,13 @@ fn emit_metablock_from_commands(
     // FindBlocks DP over sampled entropy codes + batched HistogramPair
     // clustering. Default at q10+ (BROTLI_OLD_LIT_SPLIT restores the
     // in-house DP); BROTLI_REF_LIT_SPLIT forces it at any level.
-    // EXPERIMENTAL (default off, BROTLI_REF_LIT_SPLIT to enable): the
-    // last switch of the reference split desyncs the decoder near the
-    // stream tail (encoder emits switch N where the decoder reads a
-    // different symbol — trace: ENCSW n=68 type=0 len=50 vs DECSW
-    // type=15 len=115 at out=32577 of 32768). Size impact when it
-    // lands: FITS q11 1,878,615 -> 1,382,102 (0.976x ref).
-    let ref_lit_split = env_flag!("BROTLI_REF_LIT_SPLIT") && !env_flag!("BROTLI_OLD_LIT_SPLIT");
+    // Default at q10+ (BROTLI_OLD_LIT_SPLIT restores the in-house DP).
+    // The stream-corruption bug is fixed: reused block-type ids got
+    // zero-frequency codes in the block-type tree (zero-length code =
+    // no bits written on switch, desyncing the decoder); the bt
+    // histogram now counts the actually emitted types.
+    let ref_lit_split =
+        quality >= 10 && !env_flag!("BROTLI_OLD_LIT_SPLIT") || env_flag!("BROTLI_REF_LIT_SPLIT");
     let mut lit_block_types: Vec<u8> = Vec::new();
     let lit_boundaries: Vec<usize> = if !lit_split_on {
         vec![]
@@ -1457,7 +1457,13 @@ fn emit_metablock_from_commands(
     let mut lit_bt_wire: Vec<(u32, u8)> = Vec::new();
     let mut lit_bl_wire: Vec<(u32, u8)> = Vec::new();
     if nbltypes_l > 1 {
-        let (bt, bl) = write_block_switch_header(bw, nbltypes_l, &lit_block_len);
+        let lit_switch_types: Vec<u8> = lit_block_types
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| *i > 0)
+            .map(|(_, &t)| t)
+            .collect();
+        let (bt, bl) = write_block_switch_header(bw, nbltypes_l, &lit_block_len, &lit_switch_types);
         lit_bt_wire = bt;
         lit_bl_wire = bl;
     }
@@ -1526,7 +1532,7 @@ fn emit_metablock_from_commands(
     let mut dist_bt_wire: Vec<(u32, u8)> = Vec::new();
     let mut dist_bl_wire: Vec<(u32, u8)> = Vec::new();
     if nbltypes_d > 1 {
-        let (bt, bl) = write_block_switch_header(bw, nbltypes_d, &dist_block_len);
+        let (bt, bl) = write_block_switch_header(bw, nbltypes_d, &dist_block_len, &[]);
         dist_bt_wire = bt;
         dist_bl_wire = bl;
     }
@@ -1922,6 +1928,19 @@ fn emit_metablock_from_commands(
     let dist_codes = canonical_with_reverse(&dist_lengths);
 
     // Write literal tree group (one table per tree).
+    if env_flag!("BROTLI_DUMP_LITTREE") {
+        for (ti, tree) in lit_lengths_per_tree.iter().enumerate() {
+            let lens: Vec<String> = tree
+                .lengths
+                .iter()
+                .enumerate()
+                .filter(|(_, &l)| l > 0)
+                .map(|(s2, &l)| format!("{s2}:{l}"))
+                .collect();
+            eprintln!("LITTREE {ti} {}", lens.join(","));
+        }
+        eprintln!("LITCMAP ntrees={ntrees_l} map={:?}", lit_ctx_map);
+    }
     for tree in &lit_lengths_per_tree {
         write_huffman_table(bw, tree, 256);
     }
@@ -2085,7 +2104,7 @@ fn emit_metablock_from_commands(
                 LIT0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
             let _trace_lit = env_flag!("BROTLI_LIT_TRACE");
-            if _trace_lit && lit_idx >= 6890 {
+            if _trace_lit {
                 eprintln!(
                     "ENCLIT {lit_idx} bit={} tree={tree} len={ll} byte={b} p1={p1} p2={p2} blk={lit_blk}",
                     bw.out.len() * 8 + bw.nbits as usize
@@ -2148,6 +2167,18 @@ fn emit_metablock_from_commands(
                     &dist_codes
                 };
                 let (dc, dl) = table[d_sym as usize];
+                if env_flag!("BROTLI_DIST_TRACE") && cmd_idx >= 230 && cmd_idx <= 240 {
+                    let ctx = if cmd.copy_len > 4 {
+                        3u8
+                    } else {
+                        (cmd.copy_len - 2) as u8
+                    };
+                    eprintln!(
+                        "ENCDIST {cmd_idx} val={} sym={d_sym} extra={d_extra} ctx={ctx} code={dc} len={dl} bit={}",
+                        cmd.distance,
+                        bw.out.len() * 8 + bw.nbits as usize
+                    );
+                }
                 if env_flag!("BROTLI_DBG_DC") {
                     eprintln!(
                         "DCWRITE sym={d_sym} code={dc:0b} len={dl} tree_idx={}",
@@ -2615,6 +2646,109 @@ fn cmd_sym_tables() -> &'static (Vec<[i16; 4166]>, Vec<[i16; 4166]>) {
         }
         (explicit, rep0)
     })
+}
+
+#[test]
+fn littree_roundtrip_repro() {
+    let lengths: Vec<u8> = vec![
+        0, 6, 6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4, 4, 6, 3, 4, 4, 5, 6, 4, 4, 5, 4,
+        4, 4, 6, 3, 0, 0, 0, 6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 5, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    ];
+    let hl = omnizip_codecs::HuffmanLengths {
+        lengths: lengths.clone(),
+        max_length: 15,
+    };
+    let mut bw = BitWriter::new();
+    write_huffman_table(&mut bw, &hl, 256);
+    bw.byte_align();
+    let bytes = bw.flush();
+    let (tree, consumed) = crate::decoder::read_huffman_table(&bytes, 0, 256).expect("read");
+    assert!(consumed <= bytes.len() * 8, "reader overran");
+    let codes = canonical_with_reverse(&hl);
+    for (sym, &(code, len)) in codes.iter().enumerate() {
+        if len == 0 {
+            continue;
+        }
+        let mut bw2 = BitWriter::new();
+        bw2.write_bits(code, u32::from(len));
+        bw2.byte_align();
+        let b2 = bw2.flush();
+        let mut br = crate::decoder::BitReader::new(&b2);
+        let got = tree.read_symbol(&mut br).expect("decode");
+        assert_eq!(
+            got as usize, sym,
+            "symbol {sym}: encoder code {code}/{len} decodes as {got}"
+        );
+    }
+}
+
+#[test]
+fn cmap_roundtrip_repro() {
+    let map: Vec<u8> = vec![
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 2, 3, 4, 5, 2, 3, 4, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 1, 1, 1, 1, 1,
+        1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 0, 0, 1, 0,
+        0, 0, 0, 0, 0, 0, 0, 1, 6, 7, 6, 6, 7, 6, 8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 10, 11, 12, 11, 13, 12, 13, 9, 9, 9, 9, 9, 9, 9, 9, 9,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 9, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 14, 15, 15, 14, 14, 15, 15, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 9, 9, 9, 9, 9, 9, 9, 16, 17, 0, 16, 16, 16, 16, 17, 16, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 18, 19, 18,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 20,
+        17, 0, 20, 17, 20, 17, 20, 20, 20, 20, 17, 20, 17, 17, 17, 17, 20, 17, 20, 17, 17, 0, 20,
+        17, 20, 0, 20, 20, 17, 20, 20, 21, 22, 23, 17, 17, 17, 20, 17, 20, 20, 17, 0, 17, 0, 17,
+        17, 20, 20, 17, 0, 17, 17, 17, 17, 20, 17, 20, 24, 24, 24, 24, 24, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 25, 25, 25, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 24, 24,
+        24, 24, 24, 24, 0, 24, 24, 24, 24, 24, 24, 24, 24, 24, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 26, 26, 26, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 24, 24, 24, 24, 0, 24,
+        24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24, 27, 0, 0, 0, 0, 24, 0, 24, 24, 24, 24, 24, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 28, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 24, 24, 0, 0, 0, 0, 0, 0, 0, 0, 24, 24, 24, 24, 0, 24, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 29, 29,
+        30, 30, 31, 31, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 24, 32, 33, 32, 32, 33, 0, 32, 32, 33, 32, 32, 33, 33, 33, 34, 32, 32, 33, 32, 32, 32,
+        33, 33, 32, 32, 33, 32, 32, 33, 32, 33, 32, 35, 36, 37, 36, 35, 33, 32, 32, 32, 33, 32, 32,
+        33, 34, 34, 33, 32, 32, 33, 32, 33, 32, 34, 32, 33, 34, 32, 32, 34, 32, 32, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        38, 39, 40, 41, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        42, 42, 0, 42, 42, 42, 42, 0, 42, 42, 42, 42, 42, 0, 42, 42, 42, 42, 42, 42, 42, 42, 42, 0,
+        42, 42, 0, 42, 42, 42, 42, 42, 42, 0, 42, 43, 44, 45, 44, 42, 42, 42, 42, 42, 42, 42, 42,
+        42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 42, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 46, 46,
+        47, 48, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 49, 49,
+        50, 51, 49, 52, 51, 52, 52, 50, 52, 50, 50, 52, 51, 50, 0, 0, 0, 51, 0, 0, 0, 0, 0, 0, 0,
+        51, 51, 0, 51, 51, 0, 0, 0, 53, 54, 55, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 52, 52, 52, 49,
+        52, 50, 49, 52, 0, 49, 52, 49, 49, 49, 49, 50,
+    ];
+    let ntrees: u32 = 56;
+    let mut bw = BitWriter::new();
+    write_context_map(&mut bw, &map, ntrees);
+    bw.byte_align();
+    let bytes = bw.flush();
+    // read_context_map(data, bit_pos, size, num_htrees, max_rle)
+    let (got, consumed) =
+        crate::decoder_full::read_context_map(&bytes, 0, map.len(), ntrees, 0).expect("read");
+    assert!(
+        consumed <= bytes.len() * 8,
+        "reader overran: {consumed} > {}",
+        bytes.len() * 8
+    );
+    for (i, (&a, &b)) in map.iter().zip(got.iter()).enumerate() {
+        assert_eq!(a, b, "cmap entry {i}: wrote {a}, read {b}");
+    }
 }
 
 #[test]
@@ -7589,13 +7723,24 @@ fn write_block_switch_header(
     bw: &mut BitWriter,
     nbltypes: u32,
     block_lens: &[u32],
+    block_types: &[u8],
 ) -> (Vec<(u32, u8)>, Vec<(u32, u8)>) {
     // Block-type code tree over alphabet 2 + nbltypes; switches use
-    // explicit codes (type + 2).
+    // explicit codes (type + 2). Frequencies must count the ACTUAL
+    // emitted types: block splitting can REUSE type ids (the reference
+    // ClusterBlocks output does), and a zero-frequency type gets a
+    // zero-length code — emitting it writes no bits and desyncs the
+    // decoder (it then parses the block-length code as a type).
     let bt_alphabet = 2 + nbltypes as usize;
     let mut bt_freq = vec![0u32; bt_alphabet];
-    for k in 1..nbltypes as usize {
-        bt_freq[k + 2] += 1;
+    let fallback: Vec<u8> = (1..nbltypes as u8).collect();
+    let types: &[u8] = if block_types.is_empty() {
+        &fallback
+    } else {
+        block_types
+    };
+    for &ty in types {
+        bt_freq[usize::from(ty) + 2] += 1;
     }
     let bt_lengths = omnizip_codecs::HuffmanLengths::build(&bt_freq, 15);
     write_huffman_table(bw, &bt_lengths, bt_alphabet);

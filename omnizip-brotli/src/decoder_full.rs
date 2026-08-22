@@ -901,7 +901,7 @@ fn finish_metablock_decode(
                 as usize;
             let lit_tree = &lit_trees[lit_tree_idx];
             let lit = lit_tree.read_symbol(br).ok_or("invalid literal")?;
-            if std::env::var("BROTLI_LIT_TRACE").is_ok() && lits_total >= 6890 {
+            if std::env::var("BROTLI_LIT_TRACE").is_ok() {
                 eprintln!(
                     "DECLIT {lits_total} bit={} tree={lit_tree_idx} byte={lit} p1={} p2={} blk={lit_block_type}",
                     br.bit_pos(),
@@ -961,6 +961,12 @@ fn finish_metablock_decode(
                 as usize;
             let dist_tree = &dist_trees[dist_tree_idx];
             let dist_code = dist_tree.read_symbol(br).ok_or("invalid distance symbol")? as i32;
+            if std::env::var("BROTLI_DIST_TRACE").is_ok() {
+                eprintln!(
+                    "DECDIST n={dec_cmd_n} sym={dist_code} ctx={dist_context} tree={dist_tree_idx} bit={}",
+                    br.bit_pos()
+                );
+            }
             if dbg_dc_flag {
                 eprintln!(
                     "DCREAD pos={} ctx={} tree={} sym={} rb={:?}",
