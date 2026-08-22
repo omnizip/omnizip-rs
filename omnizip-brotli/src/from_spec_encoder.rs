@@ -1946,6 +1946,7 @@ fn emit_metablock_from_commands(
     let mut lit_blk = 0usize;
     let mut lit_block_remaining: usize =
         lit_block_len.first().copied().unwrap_or(u32::MAX) as usize;
+    let mut enc_cmd_n = 0usize;
     let mut lit_next_switch = 1usize;
     let mut cmd_block_remaining: usize =
         cmd_block_len.first().copied().unwrap_or(u32::MAX) as usize;
@@ -1975,7 +1976,12 @@ fn emit_metablock_from_commands(
             next_switch += 1;
         }
         let block = if nbltypes_c > 1 {
-            usize::from(cmd_block_of[cmd_idx])
+            let cd_block = next_switch.saturating_sub(1);
+            let arr_block = usize::from(cmd_block_of[cmd_idx]);
+            if arr_block != cd_block && std::env::var("BROTLI_CMDBLK_DBG").is_ok() {
+                eprintln!("CMDBLK-DIVERGE cmd={cmd_idx} arr={arr_block} countdown={cd_block}");
+            }
+            arr_block
         } else {
             0
         };
@@ -2010,8 +2016,9 @@ fn emit_metablock_from_commands(
                     .unwrap_or(&(lit_next_switch as u8)) as usize;
                 if env_flag!("BROTLI_SW_TRACE") {
                     eprintln!(
-                        "ENCSW n={lit_next_switch} type={new_type} len={} litpos={lit_idx}",
-                        lit_block_len[lit_next_switch]
+                        "ENCSW n={lit_next_switch} type={new_type} len={} litpos={lit_idx} bit={}",
+                        lit_block_len[lit_next_switch],
+                        bw.out.len() * 8 + bw.nbits as usize
                     );
                 }
                 let (bt_code, bt_len) = lit_bt_wire[new_type + 2];
@@ -2040,6 +2047,13 @@ fn emit_metablock_from_commands(
             if env_flag!("BROTLI_DBG_CTX") && u32::from(ll) == 0 {
                 LIT0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
+            let _trace_lit = env_flag!("BROTLI_LIT_TRACE");
+            if _trace_lit && lit_idx >= 6890 {
+                eprintln!(
+                    "ENCLIT {lit_idx} bit={} tree={tree} len={ll} byte={b} p1={p1} p2={p2} blk={lit_blk}",
+                    bw.out.len() * 8 + bw.nbits as usize
+                );
+            }
             bw.write_bits(lc, u32::from(ll));
             p2 = p1;
             p1 = b;
@@ -2051,6 +2065,13 @@ fn emit_metablock_from_commands(
             }
         }
 
+        if env_flag!("BROTLI_CMD_TRACE") {
+            eprintln!(
+                "ENCCMD {enc_cmd_n} ins={} cpy={} dist={} outpos={out_pos} lit={lit_idx}",
+                cmd.insert_len, cmd.copy_len, cmd.distance
+            );
+        }
+        enc_cmd_n += 1;
         if cmd.copy_len > 0 {
             // Check if this command uses implicit distance (rep code).
             // Implicit commands don't have a distance symbol in the stream.
@@ -2542,6 +2563,27 @@ fn cmd_sym_tables() -> &'static (Vec<[i16; 4166]>, Vec<[i16; 4166]>) {
         }
         (explicit, rep0)
     })
+}
+
+#[test]
+fn fcs_audit() {
+    for ins in 0..70u32 {
+        for cpy in 2..200u32 {
+            if let Some(sym) = find_cmd_symbol(ins, cpy) {
+                let e = &kCmdLut[sym];
+                let ins_ok = u32::from(e.insert_len_offset) <= ins
+                    && ins < u32::from(e.insert_len_offset) + (1u32 << e.insert_len_extra_bits);
+                let cpy_ok = u32::from(e.copy_len_offset) <= cpy
+                    && cpy < u32::from(e.copy_len_offset) + (1u32 << e.copy_len_extra_bits);
+                if !ins_ok || !cpy_ok || e.distance_code >= 0 {
+                    panic!(
+                        "BAD ({ins},{cpy}) -> {sym} off=({},{}) d={}",
+                        e.insert_len_offset, e.copy_len_offset, e.distance_code
+                    );
+                }
+            }
+        }
+    }
 }
 
 fn find_cmd_symbol_impl(insert_len: u32, copy_len: u32, rep_code: Option<i32>) -> Option<usize> {
