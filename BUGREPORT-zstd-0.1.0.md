@@ -246,3 +246,25 @@ These paths are correct in the published 0.1.0:
 - Offset code tables (OF_BASE / OF_BITS — fixed during validation)
 - FSE decode ordering (extra bits before state transitions — fixed during validation)
 - All golden fixtures from `facebook/zstd/tests/golden-decompression/`
+
+
+---
+
+## Resolution (2026-08-22, omnizip-zstd post-0.16.77)
+
+- **BUG 1 (block_type bits)** and **BUG 2 (size_format)**: fixed earlier —
+  the current code reads `header0 & 0x03` and uses the `lhlCode` switch
+  exactly as specified above.
+- **BUG 3 (compressed literals)**: fully implemented since (FSE-compressed
+  weights + single/four-stream Huffman decode).
+- **Follow-on bug found while validating this report's repro** (the
+  checksum-mismatch symptom it predicted): the offset-code tables
+  `OF_BASE`/`OF_BITS` did not match the C reference
+  (`zstd_decompress_internal.h`). The wrong table made every
+  FSE-compressed offset decode as a repeat code — a `zstd -1` CLI frame of
+  a 1 MB CSV decoded to 962 KB of garbage (94% of bytes wrong) while our
+  own round-trips kept passing (both sides shared the wrong table).
+  Fixed with the reference values (`OF_BASE = [0,1,1,5,13,29,...]`,
+  `OF_BITS = [0,1,2,...,31]`); verified against `zstd -1` CLI frames with
+  and without content checksum, and covered by the embedded-frame
+  regression test `decodes_reference_cli_frames`.
