@@ -1007,7 +1007,7 @@ fn emit_metablock_from_commands(
         }
         if env_flag!("BROTLI_DBG_CTX") {
             eprintln!(
-                "LITSPLIT ref blocks={} types={:?} boundaries={:?} lits={}",
+                "LITSPLIT ref blocks={} types={:?} boundaries={:?} litcount={}",
                 boundaries.len(),
                 lit_block_types,
                 boundaries,
@@ -2010,7 +2010,7 @@ fn emit_metablock_from_commands(
         if env_flag!("BROTLI_SYM_TRACE") && cmd_idx >= 230 && cmd_idx <= 240 {
             let hist_val = cmd_freqs_per_block.get(block).map_or(0, |h| h[cmd_sym]);
             eprintln!(
-                "ENCCODE {cmd_idx} sym={cmd_sym} code={code} len={len} block={block} freq={hist_val}"
+                "ENCSYM-CODE {cmd_idx} sym={cmd_sym} code={code} len={len} block={block} freq={hist_val}"
             );
         }
         bw.write_bits(code, u32::from(len));
