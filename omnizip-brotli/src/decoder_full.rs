@@ -804,6 +804,7 @@ fn finish_metablock_decode(
 
     let mut lit_block_type = lit_bt.block_type_rb[1] as usize;
     let mut lits_total = 0usize;
+    let mut dec_cmd_n = 0usize;
     let mut cmd_block_type = cmd_bt.block_type_rb[1] as usize;
     let mut dist_block_type = dist_bt.block_type_rb[1] as usize;
 
@@ -819,7 +820,8 @@ fn finish_metablock_decode(
                 cmd_block_type = cmd_bt.decode_switch(br)? as usize;
                 if std::env::var("BROTLI_SWITCH_LOG").is_ok() {
                     eprintln!(
-                        "SW-CMD pos={} type={} len={}",
+                        "DECSW-CMD n={} pos={} type={} len={}",
+                        dec_cmd_n,
                         output_base + output.len(),
                         cmd_block_type,
                         cmd_bt.block_length
@@ -829,9 +831,17 @@ fn finish_metablock_decode(
             cmd_bt.block_length -= 1;
         }
 
+        dec_cmd_n += 1;
         // Read command symbol from the current command tree.
         let cmd_tree = &cmd_trees[cmd_block_type];
         let cmd_code = cmd_tree.read_symbol(br).ok_or("invalid command symbol")? as usize;
+        if std::env::var("BROTLI_SYM_TRACE").is_ok() {
+            static SYM_N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+            let n = SYM_N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if (230..=240).contains(&n) {
+                eprintln!("DECSYM {n} -> sym={cmd_code}");
+            }
+        }
         let v = &crate::prefix::kCmdLut[cmd_code];
 
         let insert_len_extra = if v.insert_len_extra_bits > 0 {
