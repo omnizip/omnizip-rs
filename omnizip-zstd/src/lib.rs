@@ -409,6 +409,105 @@ mod tests {
         assert_eq!(decompressed, input);
     }
 
+    /// Regression (BUGREPORT-zstd-315-residual, issue #315): the
+    /// 8-symbol batching in `HuffmanDecoder::decode_into` over-consumed
+    /// the 64-bit container — when eight code lengths summed past the
+    /// bits available after a reload, the trailing symbols of the batch
+    /// peeked stale (shift-wrapped) bits and mis-decoded. This 163-byte
+    /// input (binary header + long literal text + binary tail, zero
+    /// sequences, all-literal block at Fastest..Better) produced exactly
+    /// one wrong literal at index 143 while the system zstd CLI decoded
+    /// the frame correctly. Fixed by matching C `HUF_decodeStreamX1`:
+    /// at most 4 symbols between reloads, and only while reload reports
+    /// Unfinished.
+    #[test]
+    fn issue_315_residual_round_trips_all_levels() {
+        let input: Vec<u8> = vec![
+            47, 8, 206, 24, 1, 0, 0, 0, 4, 165, 0, 0, 0, 100, 117, 112, 108, 105, 99, 97, 116, 101,
+            32, 105, 110, 108, 105, 110, 101, 32, 99, 111, 110, 116, 101, 110, 104, 101, 32, 115,
+            97, 109, 101, 32, 50, 48, 48, 45, 105, 115, 104, 32, 98, 121, 116, 101, 115, 32, 105,
+            110, 32, 116, 104, 114, 101, 101, 32, 102, 105, 108, 101, 115, 44, 32, 115, 111, 32,
+            116, 104, 101, 32, 119, 114, 105, 116, 101, 114, 39, 101, 115, 32, 111, 110, 32, 101,
+            118, 101, 114, 121, 32, 114, 101, 97, 108, 105, 115, 116, 105, 99, 32, 116, 114, 101,
+            101, 46, 32, 80, 97, 100, 0, 0, 0, 5, 233, 64, 129, 47, 8, 206, 1, 0, 0, 0, 0, 210,
+            127, 239, 79, 204, 13, 133, 191, 196, 106, 114, 104, 141, 228, 107, 113, 253, 249, 246,
+            166, 238, 75, 8, 35, 98, 41, 201, 222, 1,
+        ];
+        for level in [
+            ZstdLevel::Fastest,
+            ZstdLevel::Fast,
+            ZstdLevel::Default,
+            ZstdLevel::Better,
+            ZstdLevel::Best,
+        ] {
+            let compressed = compress(&input, level).expect("encode");
+            let decompressed = decompress(&compressed, input.len() as u32).expect("decode");
+            assert_eq!(decompressed, input, "round-trip mismatch at {level:?}");
+        }
+    }
+
+    /// Self-round-trip over deterministic mixed text+binary corpora at
+    /// every level. Size sweeps over uniform inputs don't exercise the
+    /// regime where matches/reps fire mid-literal; these shapes (binary
+    /// head + literal text + binary tail, random byte soup, text with
+    /// scattered high bytes) do.
+    #[test]
+    fn mixed_content_self_round_trips_all_levels() {
+        // xorshift32 — deterministic, no RNG crate, stable across runs.
+        fn next(state: &mut u32) -> u32 {
+            *state ^= *state << 13;
+            *state ^= *state >> 17;
+            *state ^= *state << 5;
+            *state
+        }
+        let mut state = 0xC0FFEE_u32;
+        let mut corpus: Vec<Vec<u8>> = Vec::new();
+        for len in [20_usize, 63, 100, 163, 200, 333, 512, 1024, 4096] {
+            // Shape 1: binary head + literal text + binary tail.
+            let head = (0..8).map(|_| next(&mut state) as u8).collect::<Vec<_>>();
+            const TEXT: &[u8] =
+                b"duplicate inline content same 200-ish bytes in three files, so the writer's on every realistic tree. Pad ";
+            let text = (0..len).map(|i| TEXT[i % TEXT.len()]).collect::<Vec<_>>();
+            let tail = (0..16).map(|_| next(&mut state) as u8).collect::<Vec<_>>();
+            corpus.push([head, text, tail].concat());
+            // Shape 2: pure random bytes (high-entropy literals).
+            corpus.push((0..len).map(|_| next(&mut state) as u8).collect());
+            // Shape 3: mostly-text with scattered high bytes.
+            corpus.push(
+                (0..len)
+                    .map(|i| {
+                        const T: &[u8] = b"abcdef ghijkl mnopqr stuvwx yz0123 456789 ABCDEF GHIJKL";
+                        if next(&mut state) % 16 == 0 {
+                            0x80 | (next(&mut state) as u8 & 0x7F)
+                        } else {
+                            T[i % T.len()]
+                        }
+                    })
+                    .collect(),
+            );
+        }
+        for input in &corpus {
+            for level in [
+                ZstdLevel::Fastest,
+                ZstdLevel::Fast,
+                ZstdLevel::Default,
+                ZstdLevel::Better,
+                ZstdLevel::Best,
+            ] {
+                let compressed = compress(input, level)
+                    .unwrap_or_else(|e| panic!("encode {level:?} len {}: {e}", input.len()));
+                let decompressed = decompress(&compressed, input.len() as u32)
+                    .unwrap_or_else(|e| panic!("decode {level:?} len {}: {e}", input.len()));
+                assert_eq!(
+                    decompressed,
+                    *input,
+                    "round-trip mismatch at {level:?} len {}",
+                    input.len()
+                );
+            }
+        }
+    }
+
     /// ZstdCompressor: reuses MatchState across calls. Output must be
     /// byte-identical to the free-function `compress` (same encoder,
     /// same input ⇒ same output, regardless of state caching).

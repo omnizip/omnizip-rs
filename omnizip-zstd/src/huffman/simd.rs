@@ -63,9 +63,17 @@ pub fn decode_eight_symbols(
     // Look up the lookup slice once.
     let lookup = table.lookup_for_test();
 
-    // Decode 8 symbols, tracking each code length.
+    // Decode 8 symbols, tracking each code length. Reload after the
+    // first 4: a reload leaves at most 7 bits consumed in the 64-bit
+    // container (57 fresh bits), and 4 codes of up to 11 bits fit —
+    // 8 do not. Without the mid-way reload, `read_bits`'s shifts wrap
+    // once the code lengths sum past the container and the trailing
+    // symbols of the batch peek stale bits (issue #315 residual).
     let mut lengths = [0u8; 8];
     for i in 0..8 {
+        if i == 4 {
+            bitstream.reload();
+        }
         let peek = bitstream.peek_bits(u32::from(crate::huffman::MAX_BITS));
         let entry = lookup
             .get(peek as usize)
@@ -80,9 +88,7 @@ pub fn decode_eight_symbols(
         }
         out[i] = entry.symbol;
         lengths[i] = entry.length;
-        // Consume the bits. We don't reload between symbols — the SIMD
-        // sum-of-lengths below tells the caller how much we consumed
-        // in total, and the caller reloads once.
+        // Consume the bits. The caller reloads once after the batch.
         let _ = bitstream.read_bits(u32::from(entry.length));
     }
 
