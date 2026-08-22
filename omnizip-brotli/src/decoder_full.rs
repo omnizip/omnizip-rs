@@ -803,6 +803,7 @@ fn finish_metablock_decode(
     }
 
     let mut lit_block_type = lit_bt.block_type_rb[1] as usize;
+    let mut lits_total = 0usize;
     let mut cmd_block_type = cmd_bt.block_type_rb[1] as usize;
     let mut dist_block_type = dist_bt.block_type_rb[1] as usize;
 
@@ -847,6 +848,12 @@ fn finish_metablock_decode(
         let copy_len = usize::from(v.copy_len_offset) + copy_extra as usize;
 
         let cmd_start_outlen = output.len();
+        if std::env::var("BROTLI_CMD_TRACE").is_ok() {
+            eprintln!(
+                "DECCMD ins={insert_len} cpy={copy_len} outlen={}",
+                output.len()
+            );
+        }
         // Read literals.
         for _ in 0..insert_len {
             // Metablock boundary: per upstream `ProcessCommandsInternal`,
@@ -859,14 +866,18 @@ fn finish_metablock_decode(
 
             // Block-switch on literal block length (BEFORE reading the
             // literal, per upstream `ProcessCommandsInternal`).
+            if std::env::var("BROTLI_SW_TRACE").is_ok() {
+                lits_total += 1;
+            }
             if lit_bt.num_block_types > 1 {
                 if lit_bt.block_length == 0 {
                     lit_block_type = lit_bt.decode_switch(br)? as usize;
                     if std::env::var("BROTLI_SW_TRACE").is_ok() {
                         eprintln!(
-                            "DECSW out={} type={lit_block_type} len={}",
+                            "DECSW out={} type={lit_block_type} len={} lit={lits_total} bit={}",
                             output.len(),
-                            lit_bt.block_length
+                            lit_bt.block_length,
+                            br.bit_pos()
                         );
                     }
                 }
@@ -880,6 +891,14 @@ fn finish_metablock_decode(
                 as usize;
             let lit_tree = &lit_trees[lit_tree_idx];
             let lit = lit_tree.read_symbol(br).ok_or("invalid literal")?;
+            if std::env::var("BROTLI_LIT_TRACE").is_ok() && lits_total >= 6890 {
+                eprintln!(
+                    "DECLIT {lits_total} bit={} tree={lit_tree_idx} byte={lit} p1={} p2={} blk={lit_block_type}",
+                    br.bit_pos(),
+                    u8::from(p1),
+                    u8::from(p2)
+                );
+            }
             if stats_flag {
                 let mut st = dec_stats();
                 st.lit_hists.entry(lit_tree_idx).or_insert([0u32; 256])[lit as usize] += 1;
