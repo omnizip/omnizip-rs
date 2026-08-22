@@ -256,6 +256,7 @@ struct DecStats {
     literal_count: u64,
     ins_extra: u64,
     cpy_extra: u64,
+    dist_extra: u64,
     cmd_hists: std::collections::BTreeMap<usize, [u32; 704]>,
     lit_hists: std::collections::BTreeMap<usize, [u32; 256]>,
     dist_hists: std::collections::BTreeMap<usize, std::collections::BTreeMap<u32, u32>>,
@@ -287,6 +288,7 @@ impl DecStats {
             literal_count: 0,
             ins_extra: 0,
             cpy_extra: 0,
+            dist_extra: 0,
             cmd_hists: std::collections::BTreeMap::new(),
             lit_hists: std::collections::BTreeMap::new(),
             dist_hists: std::collections::BTreeMap::new(),
@@ -397,8 +399,10 @@ pub fn _print_dec_stats(total_input: usize) {
         st.copy_bytes as f64 * 100.0 / total_input as f64,
     );
     eprintln!(
-        "DEC_STATS extras: ins_extra={} cpy_extra={}",
-        st.ins_extra, st.cpy_extra
+        "DEC_STATS extras: ins_extra={} cpy_extra={} dist_extra={}",
+        st.ins_extra,
+        st.cpy_extra,
+        st.dist_extra
     );
     {
         let mut bits = 0.0f64;
@@ -986,6 +990,10 @@ fn finish_metablock_decode(
                     .or_default()
                     .entry(dist_code.unsigned_abs())
                     .or_insert(0) += 1;
+                if dist_code >= num_direct_distance_codes as i32 {
+                    let dv = (dist_code - num_direct_distance_codes as i32) >> npostfix;
+                    st.dist_extra += u64::from((dv as u32) >> 1) + 1;
+                }
             }
             crate::decoder::decode_distance_from_code(
                 dist_code,
