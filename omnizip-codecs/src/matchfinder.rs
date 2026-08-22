@@ -1091,10 +1091,12 @@ impl<'a> BankMatchFinder<'a> {
             ($e:expr, $data:ident, $reject_limit:ident, $cur_best:ident, $pos_val:ident) => {{
                 let prev = $e as usize;
                 let backward = pos.wrapping_sub(prev);
-                // Entries beyond the window: older ring entries are
-                // then also beyond (positions are stored in arrival
-                // order, scanned newest-first).
-                if backward as u32 <= self.max_distance {
+                // Skip the self-entry (find_insert scans before
+                // inserting, but the advance()+find() callers insert
+                // first) and entries beyond the window — older ring
+                // entries are then also beyond (arrival order,
+                // scanned newest-first).
+                if backward != 0 && backward as u32 <= self.max_distance {
                     if prev < $reject_limit && $data[prev + $cur_best] != $pos_val {
                         continue;
                     }
