@@ -2135,6 +2135,12 @@ fn emit_metablock_from_commands(
                     bw.write_bits(d_extra, nbits);
                 }
             }
+            if env_flag!("BROTLI_ADV_DBG") && cmd_copy_advances[cmd_idx] != cmd.copy_len as usize {
+                eprintln!(
+                    "ADV-DIFF cmd={cmd_idx} copy_len={} advance={}",
+                    cmd.copy_len, cmd_copy_advances[cmd_idx]
+                );
+            }
             out_pos += cmd_copy_advances[cmd_idx];
             if out_pos > 0 && out_pos <= input.len() {
                 // Mirror the decoder exactly (see frequency-collection
