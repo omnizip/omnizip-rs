@@ -1155,6 +1155,7 @@ fn emit_metablock_from_commands(
     let (mut p1, mut p2) = ctx_in;
     let mut out_pos = 0usize;
     let mut lit_block_type: usize = 0;
+    let mut walk_assign: Vec<(usize, u8)> = Vec::new();
     // Per-(block, context) literal histograms. With literal block
     // splitting (nbltypes_l > 1), each block gets its own context→tree
     // mapping; trees are shared across blocks (NTREES_L total).
@@ -1180,6 +1181,9 @@ fn emit_metablock_from_commands(
                 let ctx_id = compute_context_id(p1, p2, context_mode) as usize;
                 let blk_ty = *lit_block_types.get(lit_blk).unwrap_or(&(lit_blk as u8)) as usize;
                 bc_hists[(blk_ty << 6) + ctx_id][b as usize] += 1;
+                if env_flag!("BROTLI_WALK_TRACE") {
+                    walk_assign.push(((blk_ty << 6) + ctx_id, b));
+                }
                 p2 = p1;
                 p1 = b;
                 out_pos += 1;
@@ -1921,6 +1925,18 @@ fn emit_metablock_from_commands(
     for tree in &lit_lengths_per_tree {
         write_huffman_table(bw, tree, 256);
     }
+    if env_flag!("BROTLI_DUMP_CMDTREE") {
+        for tree in &cmd_lengths_per_block {
+            let lens: Vec<String> = tree
+                .lengths
+                .iter()
+                .enumerate()
+                .filter(|(_, &l)| l > 0)
+                .map(|(s, &l)| format!("{s}:{l}"))
+                .collect();
+            eprintln!("CMDTREE {}", lens.join(","));
+        }
+    }
     for tree in &cmd_lengths_per_block {
         write_huffman_table(bw, tree, 704);
     }
@@ -1968,7 +1984,7 @@ fn emit_metablock_from_commands(
             bw.write_bits(extra, nbits);
             if env_flag!("BROTLI_SWITCH_LOG") {
                 eprintln!(
-                    "SW-CMD pos={mlen_offset}+{out_pos} type={new_type} len={}",
+                    "ENCSW-CMD n={cmd_idx} pos={mlen_offset}+{out_pos} type={new_type} len={}",
                     cmd_block_len[next_switch]
                 );
             }
@@ -1991,6 +2007,12 @@ fn emit_metablock_from_commands(
             &cmd_codes
         };
         let (code, len) = cmd_table[cmd_sym];
+        if env_flag!("BROTLI_SYM_TRACE") && cmd_idx >= 230 && cmd_idx <= 240 {
+            let hist_val = cmd_freqs_per_block.get(block).map_or(0, |h| h[cmd_sym]);
+            eprintln!(
+                "ENCCODE {cmd_idx} sym={cmd_sym} code={code} len={len} block={block} freq={hist_val}"
+            );
+        }
         bw.write_bits(code, u32::from(len));
         if nbltypes_c > 1 {
             cmd_block_remaining = cmd_block_remaining.saturating_sub(1);
@@ -2033,6 +2055,21 @@ fn emit_metablock_from_commands(
             }
 
             let b = stream.literals[lit_idx];
+            if env_flag!("BROTLI_WALK_TRACE") {
+                let w = walk_assign.get(lit_idx);
+                let ctx = compute_context_id(p1, p2, context_mode) as usize;
+                let blk_ty = *lit_block_types.get(lit_blk).unwrap_or(&(lit_blk as u8)) as usize;
+                match w {
+                    Some(&(wrow, wbyte)) if wrow != (blk_ty << 6) + ctx || wbyte != b => {
+                        eprintln!(
+                            "WALK-DIVERGE lit={lit_idx} walk_row={wrow} walk_byte={wbyte} emit_row={} emit_byte={b}",
+                            (blk_ty << 6) + ctx
+                        );
+                    }
+                    None => eprintln!("WALK-MISS lit={lit_idx}"),
+                    _ => {}
+                }
+            }
             let tree = if nbltypes_l > 1 {
                 let ctx = compute_context_id(p1, p2, context_mode) as usize;
                 let blk_ty = *lit_block_types.get(lit_blk).unwrap_or(&(lit_blk as u8)) as usize;
@@ -2388,6 +2425,15 @@ fn build_symbol_stream(
             find_cmd_symbol(cmd.insert_len, cmd.copy_len)
         }?;
 
+        if env_flag!("BROTLI_SYM_TRACE") && cmd_symbols.len() >= 230 && cmd_symbols.len() <= 240 {
+            eprintln!(
+                "ENCSYM {} ins={} cpy={} d={} -> sym={cmd_sym}",
+                cmd_symbols.len(),
+                cmd.insert_len,
+                cmd.copy_len,
+                cmd.distance
+            );
+        }
         cmd_symbols.push(cmd_sym);
 
         let entry = &kCmdLut[cmd_sym];
@@ -2569,6 +2615,83 @@ fn cmd_sym_tables() -> &'static (Vec<[i16; 4166]>, Vec<[i16; 4166]>) {
         }
         (explicit, rep0)
     })
+}
+
+#[test]
+fn cmdtree_roundtrip_repro() {
+    let lengths: Vec<u8> = vec![
+        0, 0, 0, 11, 0, 0, 0, 0, 0, 6, 0, 7, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 8, 0, 11, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 10, 0, 0, 0, 0, 0, 0, 0, 0, 10, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 9, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 3, 8, 3, 7, 10, 0, 0, 0, 0, 1, 0, 3, 0, 7, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 10, 5, 0, 7, 0, 10, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 7, 0, 10, 0, 0, 0, 0, 0, 8, 10,
+        0, 0, 0, 0, 0, 0, 7, 0, 10, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 8, 0, 0, 0, 0, 0, 0, 0, 10, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 10, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 10, 0, 0, 0, 0,
+        0, 0, 0, 10, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 10, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    ];
+    let hl = omnizip_codecs::HuffmanLengths {
+        lengths: lengths.clone(),
+        max_length: 15,
+    };
+    let mut bw = BitWriter::new();
+    write_huffman_table(&mut bw, &hl, 704);
+    bw.byte_align();
+    let bytes = bw.flush();
+    let (tree, consumed) = crate::decoder::read_huffman_table(&bytes, 0, 704).expect("read");
+    assert!(consumed <= bytes.len() * 8, "reader overran buffer");
+    let codes = canonical_with_reverse(&hl);
+    for (sym, &(code, len)) in codes.iter().enumerate() {
+        if len == 0 {
+            continue;
+        }
+        let mut bw2 = BitWriter::new();
+        bw2.write_bits(code, u32::from(len));
+        bw2.byte_align();
+        let b2 = bw2.flush();
+        let mut br = crate::decoder::BitReader::new(&b2);
+        let got = tree.read_symbol(&mut br).expect("decode");
+        assert_eq!(
+            got as usize, sym,
+            "symbol {sym}: encoder code {code}/{len} decodes as {got}"
+        );
+    }
+}
+
+#[test]
+fn fcs_rep0_audit() {
+    for ins in 0..10u32 {
+        for cpy in 2..200u32 {
+            if let Some(sym) = find_cmd_symbol_with_rep(ins, cpy, Some(0)) {
+                let e = &kCmdLut[sym];
+                let ins_ok = u32::from(e.insert_len_offset) <= ins
+                    && ins < u32::from(e.insert_len_offset) + (1u32 << e.insert_len_extra_bits);
+                let cpy_ok = u32::from(e.copy_len_offset) <= cpy
+                    && cpy < u32::from(e.copy_len_offset) + (1u32 << e.copy_len_extra_bits);
+                if !ins_ok || !cpy_ok || e.distance_code != 0 {
+                    panic!(
+                        "BAD rep0 ({ins},{cpy}) -> {sym} off=({},{}) d={}",
+                        e.insert_len_offset, e.copy_len_offset, e.distance_code
+                    );
+                }
+            }
+        }
+    }
 }
 
 #[test]
@@ -6747,9 +6870,12 @@ fn write_huffman_table(
     // code's space is fully consumed (mirrors the decoder's break).
     let mut space: u32 = 32;
     let mut num_codes: u32 = 0;
-    for &sym in &CODE_LENGTH_CODE_ORDER {
+    for (i, &sym) in CODE_LENGTH_CODE_ORDER.iter().enumerate() {
         let len = cl_lengths.lengths[usize::from(sym)];
         let (wire, nbits) = CL_CODE_TO_WIRE[usize::from(len)];
+        if env_flag!("BROTLI_TREEDBG") {
+            eprintln!("WRHD i={i} v={len} bits={wire}/{nbits}");
+        }
         bw.write_bits(wire, u32::from(nbits));
 
         if len != 0 {
@@ -6771,7 +6897,11 @@ fn write_huffman_table(
     // break here so the bit position after this table matches.
     let mut main_space: u32 = 32768;
     let mut prev_code_len: u8 = 8;
+    let tdbg = env_flag!("BROTLI_TREEDBG");
     for &(sym, extra) in &rle {
+        if tdbg {
+            eprintln!("WRCL sym={sym} extra={extra} space={main_space}");
+        }
         let (val, count) = match sym {
             16 => (prev_code_len, 3 + extra as usize),
             17 => (0u8, 3 + extra as usize),

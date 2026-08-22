@@ -890,6 +890,9 @@ fn read_complex_form(
         let consumed = K_CL_PREFIX_LENGTH[ix] as usize;
         br.set_bit_pos(br.bit_pos() - (4 - consumed));
         cl_code_lengths[usize::from(sym)] = v;
+        if std::env::var("BROTLI_TREEDBG").is_ok() {
+            eprintln!("RDHD i={i} v={v} bit={}", br.bit_pos());
+        }
         if v != 0 {
             space = space.wrapping_sub(32u32 >> v);
             num_codes += 1;
@@ -915,10 +918,14 @@ fn read_complex_form(
     let mut repeat: u32 = 0;
     let mut repeat_code_len: u32 = 0;
     let mut space: u32 = 32768;
+    let dbg = std::env::var("BROTLI_TREEDBG").is_ok();
     while i < alphabet_size && space > 0 {
         let sym = cl_table
             .read_symbol(br)
             .ok_or("invalid code-length symbol")? as u8;
+        if dbg {
+            eprintln!("RDCL sym={sym} bit={} i={i} space={space}", br.bit_pos());
+        }
         if sym < 16 {
             // Mirrors upstream `ProcessSingleCodeLength`:
             // - Always reset `repeat = 0` (single symbol breaks any
