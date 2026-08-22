@@ -953,12 +953,78 @@ fn emit_metablock_from_commands(
                 (stream.literals.len() / 1024).clamp(8, 48)
             }
         });
-    let lit_boundaries: Vec<usize> = if lit_split_on {
-        split_literals(&stream.literals, max_lit_blocks)
+    // Reference 1.2.0 literal block split (SplitByteVector port):
+    // FindBlocks DP over sampled entropy codes + batched HistogramPair
+    // clustering. Default at q10+ (BROTLI_OLD_LIT_SPLIT restores the
+    // in-house DP); BROTLI_REF_LIT_SPLIT forces it at any level.
+    // EXPERIMENTAL (default off, BROTLI_REF_LIT_SPLIT to enable): the
+    // last switch of the reference split desyncs the decoder near the
+    // stream tail (encoder emits switch N where the decoder reads a
+    // different symbol — trace: ENCSW n=68 type=0 len=50 vs DECSW
+    // type=15 len=115 at out=32577 of 32768). Size impact when it
+    // lands: FITS q11 1,878,615 -> 1,382,102 (0.976x ref).
+    let ref_lit_split = env_flag!("BROTLI_REF_LIT_SPLIT") && !env_flag!("BROTLI_OLD_LIT_SPLIT");
+    let mut lit_block_types: Vec<u8> = Vec::new();
+    let lit_boundaries: Vec<usize> = if !lit_split_on {
+        vec![]
+    } else if ref_lit_split {
+        let syms: Vec<u16> = stream.literals.iter().map(|&b| u16::from(b)).collect();
+        let iters = if quality >= 11 { 10 } else { 3 };
+        let split = crate::encoder::block_splitter::split_byte_vector(
+            &syms,
+            crate::encoder::block_splitter::SYMBOLS_PER_LITERAL_HISTOGRAM,
+            crate::encoder::block_splitter::MAX_LITERAL_HISTOGRAMS,
+            crate::encoder::block_splitter::LITERAL_STRIDE_LENGTH,
+            crate::encoder::block_splitter::LITERAL_BLOCK_SWITCH_COST,
+            iters,
+        );
+        // Boundaries from lengths; keep the per-boundary TYPE so the
+        // context map stays type-major (blocks sharing a type must
+        // share trees — decoder semantics).
+        // Old boundary format: [0, cut1, ...] EXCLUDING the final
+        // total (lit_block_len derives the last block via len).
+        // Block i has split length Li and type Ti; the boundary list
+        // is [0] + end positions of every block except the last, and
+        // lit_block_types[i] is block i's type (cmap is type-major).
+        let mut boundaries = vec![0usize];
+        let mut pos = 0usize;
+        for (i, (len, &ty)) in split.lengths.iter().zip(split.types.iter()).enumerate() {
+            if *len == 0 {
+                continue;
+            }
+            pos += *len as usize;
+            lit_block_types.push(ty);
+            if pos < stream.literals.len() {
+                boundaries.push(pos);
+            }
+        }
+        while lit_block_types.len() > boundaries.len() {
+            lit_block_types.pop();
+        }
+        while lit_block_types.len() < boundaries.len() {
+            let next = lit_block_types.len() as u8;
+            lit_block_types.push(next);
+        }
+        if env_flag!("BROTLI_DBG_CTX") {
+            eprintln!(
+                "LITSPLIT ref blocks={} types={:?} boundaries={:?} lits={}",
+                boundaries.len(),
+                lit_block_types,
+                boundaries,
+                stream.literals.len()
+            );
+        }
+        boundaries
     } else {
-        vec![0]
+        lit_block_types = (0..max_lit_blocks).map(|i| i as u8).collect();
+        split_literals(&stream.literals, max_lit_blocks)
     };
-    let nbltypes_l: u32 = lit_boundaries.len() as u32;
+    let nbltypes_l: u32 = if lit_boundaries.is_empty() {
+        1
+    } else {
+        usize::from(lit_block_types.iter().copied().max().unwrap_or(0)) as u32 + 1
+    };
+    let _ = &max_lit_blocks;
     let lit_block_len: Vec<u32> = lit_boundaries
         .iter()
         .enumerate()
@@ -1112,7 +1178,8 @@ fn emit_metablock_from_commands(
                 let _ = next_b;
                 let b = input[out_pos];
                 let ctx_id = compute_context_id(p1, p2, context_mode) as usize;
-                bc_hists[(lit_blk << 6) + ctx_id][b as usize] += 1;
+                let blk_ty = *lit_block_types.get(lit_blk).unwrap_or(&(lit_blk as u8)) as usize;
+                bc_hists[(blk_ty << 6) + ctx_id][b as usize] += 1;
                 p2 = p1;
                 p1 = b;
                 out_pos += 1;
@@ -1270,7 +1337,46 @@ fn emit_metablock_from_commands(
                     .collect();
             }
         }
-        let (cmap, tree_count) = if cost_c < cost_a && cost_c < cost_b {
+        // Option R: reference 1.2.0 histogram clustering (cluster_inc.h
+        // port) over the per-(block,context) histograms — the machinery
+        // behind the reference's 143-tree literal modeling at q11.
+        // Opt-in (BROTLI_REF_CLUST): on current fixtures it TIES option
+        // A within 0.5% (the reference's edge comes from its literal
+        // BLOCK SPLITTING, not finer context clustering) while costing
+        // ~3s on FITS q11.
+        let mut cost_r = f64::INFINITY;
+        let mut cmap_r: Vec<u8> = Vec::new();
+        let mut count_r = 0usize;
+        if env_flag!("BROTLI_REF_CLUST") {
+            let hists: Vec<crate::encoder::block_splitter::Hist> = bc_hists
+                .iter()
+                .map(|h| {
+                    let mut x = crate::encoder::block_splitter::Hist::new(256);
+                    x.data.copy_from_slice(h);
+                    x.total = h.iter().map(|&v| u64::from(v)).sum();
+                    x
+                })
+                .collect();
+            let (trees, symbols) = crate::encoder::block_splitter::cluster_histograms(&hists, 256);
+            count_r = trees.len();
+            if count_r > 0 {
+                let hists_r: Vec<[u32; 256]> = trees
+                    .iter()
+                    .map(|t| {
+                        let mut a = [0u32; 256];
+                        a.copy_from_slice(&t.data);
+                        a
+                    })
+                    .collect();
+                cost_r = hists_r.iter().map(|h| tree_bits(h)).sum::<f64>()
+                    + count_r as f64 * 60.0
+                    + bc_hists.len() as f64 * (count_r as f64).log2().max(1.0);
+                cmap_r = symbols.iter().map(|&sy| sy as u8).collect();
+            }
+        }
+        let (cmap, tree_count) = if cost_r < cost_a && cost_r < cost_b && cost_r < cost_c {
+            (cmap_r, count_r)
+        } else if cost_c < cost_a && cost_c < cost_b {
             (cmap_c, count_c)
         } else if cost_b < cost_a && !env_flag!("BROTLI_NO_SINGLETONS") {
             (cmap_b, count_b)
@@ -1286,7 +1392,7 @@ fn emit_metablock_from_commands(
         };
         if env_flag!("BROTLI_DBG_CTX") {
             eprintln!(
-                "ASSIGN cost_a={cost_a:.0} cost_b={cost_b:.0} cost_c={cost_c:.0} trees={tree_count}"
+                "ASSIGN cost_a={cost_a:.0} cost_b={cost_b:.0} cost_c={cost_c:.0} cost_r={cost_r:.0} trees={tree_count}"
             );
         }
         lit_ctx_map.clear();
@@ -1899,7 +2005,15 @@ fn emit_metablock_from_commands(
             // block_length == 0 at the start of each literal read).
             if nbltypes_l > 1 && lit_block_remaining == 0 && lit_next_switch < lit_boundaries.len()
             {
-                let new_type = lit_next_switch;
+                let new_type = *lit_block_types
+                    .get(lit_next_switch)
+                    .unwrap_or(&(lit_next_switch as u8)) as usize;
+                if env_flag!("BROTLI_SW_TRACE") {
+                    eprintln!(
+                        "ENCSW n={lit_next_switch} type={new_type} len={} litpos={lit_idx}",
+                        lit_block_len[lit_next_switch]
+                    );
+                }
                 let (bt_code, bt_len) = lit_bt_wire[new_type + 2];
                 bw.write_bits(bt_code, u32::from(bt_len));
                 let (c, extra, nbits) = block_length_code(lit_block_len[lit_next_switch]);
@@ -1914,7 +2028,8 @@ fn emit_metablock_from_commands(
             let b = stream.literals[lit_idx];
             let tree = if nbltypes_l > 1 {
                 let ctx = compute_context_id(p1, p2, context_mode) as usize;
-                lit_ctx_map[(lit_blk << 6) + ctx] as usize
+                let blk_ty = *lit_block_types.get(lit_blk).unwrap_or(&(lit_blk as u8)) as usize;
+                lit_ctx_map[(blk_ty << 6) + ctx] as usize
             } else if ntrees > 1 {
                 let ctx = compute_context_id(p1, p2, context_mode) as usize;
                 lit_ctx_map[ctx] as usize

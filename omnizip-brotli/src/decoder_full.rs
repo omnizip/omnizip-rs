@@ -862,6 +862,13 @@ fn finish_metablock_decode(
             if lit_bt.num_block_types > 1 {
                 if lit_bt.block_length == 0 {
                     lit_block_type = lit_bt.decode_switch(br)? as usize;
+                    if std::env::var("BROTLI_SW_TRACE").is_ok() {
+                        eprintln!(
+                            "DECSW out={} type={lit_block_type} len={}",
+                            output.len(),
+                            lit_bt.block_length
+                        );
+                    }
                 }
                 lit_bt.block_length -= 1;
             }
