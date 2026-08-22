@@ -79,10 +79,12 @@ const NUM_CMD_SYMBOLS: usize = 704;
 /// BrotliCalculateDistanceCodeLimit(MAX_ALLOWED_DISTANCE, 3, 120).
 const MAX_EFFECTIVE_DISTANCE_ALPHABET_SIZE: usize = 544;
 const LONG_COPY_QUICK_STEP: usize = 16384;
-const MAX_ZOPFLI_LEN: usize = 325;
+/// MAX_ZOPFLI_LEN_QUALITY_10 / _11 (quality.h).
+const MAX_ZOPFLI_LEN: [usize; 2] = [150, 325];
 /// StartPosQueue depth (1.2.0: `q_[8]`; 1.1 had 5).
 const SPQ_SIZE: usize = 8;
-const MAX_ZOPFLI_CANDIDATES: usize = 5;
+/// MaxZopfliCandidates: q10 = 1, q11 = 5.
+const MAX_ZOPFLI_CANDIDATES: [usize; 2] = [1, 5];
 
 const CACHE_INDEX: [usize; 16] = [0, 1, 2, 3, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1];
 const CACHE_OFFSET: [i32; 16] = [0, 0, 0, 0, -1, 1, -2, 2, -3, 3, -1, 1, -2, 2, -3, 3];
@@ -576,8 +578,12 @@ fn collect_matches(
     let mut matches: Vec<(u32, u32)> = Vec::new();
     let mut cur: Vec<omnizip_codecs::Lz77Match> = Vec::new();
     let short_max_backward: usize = if quality != 11 { 16 } else { 64 };
+    let max_zopfli_len = MAX_ZOPFLI_LEN[if quality >= 11 { 1 } else { 0 }];
     let mut i = 0usize;
     while i + 4 < n {
+        // Per-position base of the flat list, captured BEFORE the
+        // short-match scan pushes its entries (they count too).
+        let prior = matches.len();
         let mut best_len = 1usize;
         let mut stop = i.saturating_sub(short_max_backward);
         // Short-match scan: only while nothing longer than 2 found.
@@ -600,7 +606,6 @@ fn collect_matches(
         }
         let _ = &mut stop;
         tree.store_and_find(i, &mut cur);
-        let prior = matches.len();
         if best_len < n - i {
             for m in cur.drain(..) {
                 if (m.length as usize) > best_len {
@@ -609,7 +614,7 @@ fn collect_matches(
                 }
             }
         }
-        if best_len > MAX_ZOPFLI_LEN {
+        if best_len > max_zopfli_len {
             // Keep only the longest match, skip its tail positions
             // (they were stored into the tree above).
             let last = *matches.last().unwrap_or(&(0, 0));
@@ -657,19 +662,20 @@ fn compute_minimum_copy_length(
 
 /// Upstream `ComputeDistanceShortcut`: whether the command ENDING at
 /// `pos` is a normal-distance command usable to rebuild caches.
-fn compute_distance_shortcut(pos: usize, nodes: &[Node], gap: usize) -> u32 {
-    if pos == 0 {
-        return 0;
+/// Iterative — the C tail recursion overflows Rust stacks on command
+/// chains thousands deep (all-zeros inputs).
+fn compute_distance_shortcut(mut pos: usize, nodes: &[Node], gap: usize) -> u32 {
+    while pos != 0 {
+        let node = &nodes[pos];
+        let c_len = node.copy_len();
+        let i_len = node.insert_len();
+        let dist = node.distance as usize;
+        if dist + c_len <= pos + gap && node.short_code() == 0 && dist > 0 {
+            return pos as u32;
+        }
+        pos -= c_len + i_len;
     }
-    let node = &nodes[pos];
-    let c_len = node.copy_len();
-    let i_len = node.insert_len();
-    let dist = node.distance as usize;
-    if dist + c_len <= pos + gap && node.short_code() == 0 && dist > 0 {
-        pos as u32
-    } else {
-        compute_distance_shortcut(pos - c_len - i_len, nodes, gap)
-    }
+    0
 }
 
 /// Upstream `ComputeDistanceCache`: rebuild the 4-slot cache by
@@ -703,6 +709,8 @@ fn update_nodes(
     num_matches: u32,
     matches: &[(u32, u32)],
     starting_cache: &[i32; 4],
+    max_candidates: usize,
+    max_zopfli_len: usize,
 ) -> usize {
     let n = data.len();
     let max_len = n - pos;
@@ -726,7 +734,7 @@ fn update_nodes(
         compute_minimum_copy_length(min_cost, nodes, n, pos)
     };
 
-    for k in 0..MAX_ZOPFLI_CANDIDATES.min(queue.size()) {
+    for k in 0..max_candidates.min(queue.size()) {
         let posdata = queue.at(k);
         let start = posdata.pos;
         let inscode = get_insert_length_code(pos - start);
@@ -788,13 +796,17 @@ fn update_nodes(
             continue;
         }
 
-        // H10 match list relaxation (normal distance codes).
+        // H10 match list relaxation (normal distance codes). The cost
+        // includes the distance extra bits (upstream distnumextra) —
+        // long-form distances pay their 10-24 extra bits, without
+        // which the DP over-copies massively.
         let mut len = min_len;
         for &(dist, mlen) in matches.iter().take(num_matches as usize) {
             let max_match_len = (mlen as usize).min(max_len).min(1951);
             let sym = long_dist_symbol(dist);
-            let dist_cost = base_cost + model.dist_cost(sym);
-            if len < max_match_len && max_match_len > MAX_ZOPFLI_LEN {
+            let dist_extra_bits = ((sym as u32 - 16) >> 1) + 1;
+            let dist_cost = base_cost + dist_extra_bits as f32 + model.dist_cost(sym);
+            if len < max_match_len && max_match_len > max_zopfli_len {
                 len = max_match_len;
             }
             while len <= max_match_len {
@@ -904,6 +916,10 @@ pub fn parse_hq(input: &[u8], quality: i32) -> Vec<Command> {
     if n < 8 {
         return Vec::new();
     }
+    let tier = if quality >= 11 { 1 } else { 0 };
+    let max_zopfli_len = MAX_ZOPFLI_LEN[tier];
+    let max_candidates = MAX_ZOPFLI_CANDIDATES[tier];
+    let num_passes = if quality >= 11 { 2 } else { 1 };
     let mut tree = omnizip_codecs::BinaryTreeMatchFinder::new(input);
     let (num_matches, matches) = collect_matches(input, &mut tree, quality);
     // Prefix-sum offsets into the flat match list.
@@ -925,7 +941,7 @@ pub fn parse_hq(input: &[u8], quality: i32) -> Vec<Command> {
         n + 1
     ];
     let mut prev_commands: Vec<Command> = Vec::new();
-    for pass in 0..2 {
+    for pass in 0..num_passes {
         let model = if pass == 0 {
             CostModel::from_literal_costs(input)
         } else {
@@ -939,6 +955,9 @@ pub fn parse_hq(input: &[u8], quality: i32) -> Vec<Command> {
         while i + 3 < n {
             let mstart = offsets[i] as usize;
             let mend = mstart + num_matches[i] as usize;
+            if std::env::var("BROTLI_HQ_AT").is_ok_and(|v| v.parse::<usize>() == Ok(i)) {
+                eprintln!("HQAT pos={i} matches={:?}", &matches[mstart..mend]);
+            }
             let skip = update_nodes(
                 i,
                 input,
@@ -948,11 +967,13 @@ pub fn parse_hq(input: &[u8], quality: i32) -> Vec<Command> {
                 num_matches[i],
                 &matches[mstart..mend],
                 &starting_cache,
+                max_candidates,
+                max_zopfli_len,
             );
             let mut skip = if skip < LONG_COPY_QUICK_STEP { 0 } else { skip };
             if num_matches[i] == 1 {
                 let mlen = matches[mstart].1 as usize;
-                if mlen > MAX_ZOPFLI_LEN {
+                if mlen > max_zopfli_len {
                     skip = skip.max(mlen);
                 }
             }
