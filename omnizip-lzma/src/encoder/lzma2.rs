@@ -227,14 +227,7 @@ pub fn encode_lzma2_stream_with_options(
         } else {
             128
         };
-        let chain = if options.max_chain_length > 0 {
-            options.max_chain_length
-        } else {
-            256
-        };
-        let mut mf = crate::encoder::match_finder::new_lzma_match_finder(input, options.dict_size);
-        mf.set_max_chain_length(chain);
-        mf.set_nice_match(nice_len);
+        let mut mf = omnizip_codecs::Bt4MatchFinder::new(input, options.dict_size, nice_len, 0);
         let mut st = OptimumState::new(nice_len, options.dict_size, pb);
         let mut encoder =
             crate::encoder::Lzma1Encoder::with_dict_size(lc, lp, pb, options.dict_size)

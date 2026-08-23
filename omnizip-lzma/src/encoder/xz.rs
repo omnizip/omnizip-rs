@@ -68,23 +68,28 @@ pub fn xz_compress_with_options(input: &[u8], options: &LzmaOptions) -> Result<V
     // rows, growing keys) per-block retraining beats one continuously
     // adapted model set by ~30%. Match that layout.
     let block_size = 3 * options.dict_size as usize;
-    let mut records: Vec<(u64, u64)> = Vec::new();
+    let mut blocks: Vec<&[u8]> = Vec::new();
     let mut offset = 0usize;
     while offset < input.len() {
         let end = (offset + block_size).min(input.len());
-        let chunk = &input[offset..end];
-        let lzma2_payload =
-            crate::encoder::lzma2::encode_lzma2_stream_with_options(chunk, options)?;
-        let unpadded = write_xz_block(&mut out, &lzma2_payload, options.dict_size, chunk);
-        records.push((unpadded, chunk.len() as u64));
+        blocks.push(&input[offset..end]);
         offset = end;
     }
-    if records.is_empty() {
-        // Empty input: LZMA2 end-marker only, no blocks.
-        let lzma2_payload =
-            crate::encoder::lzma2::encode_lzma2_stream_with_options(input, options)?;
-        let unpadded = write_xz_block(&mut out, &lzma2_payload, options.dict_size, input);
-        records.push((unpadded, 0));
+    if blocks.is_empty() {
+        blocks.push(input);
+    }
+
+    // Blocks are independent (own finder, own models) and reassembled
+    // in input order, so the container bytes are identical however
+    // the payloads are produced. Encode them on scoped worker threads
+    // when available — matching reference xz's default multithreaded
+    // behavior — and sequentially on wasm/single-block inputs.
+    let payloads = encode_blocks(&blocks, options)?;
+
+    let mut records: Vec<(u64, u64)> = Vec::new();
+    for (chunk, lzma2_payload) in blocks.iter().zip(payloads) {
+        let unpadded = write_xz_block(&mut out, &lzma2_payload, options.dict_size, chunk);
+        records.push((unpadded, chunk.len() as u64));
     }
 
     // 3. Index.
@@ -118,6 +123,58 @@ pub fn xz_compress_with_options(input: &[u8], options: &LzmaOptions) -> Result<V
     out.extend_from_slice(&XZ_FOOTER_MAGIC);
 
     Ok(out)
+}
+
+/// Encode each block's LZMA2 payload. Multi-block inputs are fanned
+/// out across scoped worker threads (capped at the CPU count and 4 —
+/// each worker holds its own match finder, so memory scales with
+/// workers, exactly like reference xz's threaded mode). Output is
+/// byte-identical to sequential encoding: blocks never share state
+/// and results are reassembled in input order.
+fn encode_blocks(blocks: &[&[u8]], options: &LzmaOptions) -> Result<Vec<Vec<u8>>, LzmaError> {
+    let encode =
+        |chunk: &&[u8]| crate::encoder::lzma2::encode_lzma2_stream_with_options(chunk, options);
+
+    #[cfg(target_arch = "wasm32")]
+    {
+        blocks.iter().map(encode).collect()
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let workers = std::thread::available_parallelism()
+            .map_or(1, std::num::NonZeroUsize::get)
+            .min(blocks.len())
+            .min(4);
+        if workers <= 1 {
+            return blocks.iter().map(encode).collect();
+        }
+
+        let mut results: Vec<Option<Result<Vec<u8>, LzmaError>>> =
+            (0..blocks.len()).map(|_| None).collect();
+        let per = blocks.len().div_ceil(workers);
+        let block_chunks: Vec<&[&[u8]]> = blocks.chunks(per).collect();
+        std::thread::scope(|scope| {
+            let handles: Vec<_> = block_chunks
+                .into_iter()
+                .zip(results.chunks_mut(per))
+                .map(|(block_chunk, result_chunk)| {
+                    scope.spawn(move || {
+                        for (slot, block) in result_chunk.iter_mut().zip(block_chunk) {
+                            *slot = Some(encode(block));
+                        }
+                    })
+                })
+                .collect();
+            for h in handles {
+                h.join().expect("block encoder panicked");
+            }
+        });
+        results
+            .into_iter()
+            .map(|r| r.expect("every block encoded"))
+            .collect()
+    }
 }
 
 /// Write one XZ block (header + LZMA2 payload + padding + CRC32
