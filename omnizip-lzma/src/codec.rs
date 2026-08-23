@@ -52,8 +52,9 @@ fn map_encode_error(e: LzmaError) -> OmnizipError {
 /// Level threshold above which the optimal (DP) parser is used.
 /// Below this, the faster lazy parser is selected.
 ///
-/// Matches liblzma's convention where level ≥ 6 uses optimal parsing.
-const OPTIMAL_PARSER_LEVEL_THRESHOLD: u8 = 6;
+/// Matches liblzma's convention where level ≥ 4 uses NORMAL mode
+/// (optimal parsing); levels 1-3 are FAST mode.
+const OPTIMAL_PARSER_LEVEL_THRESHOLD: u8 = 4;
 
 /// Map a compression level to match-finder tuning knobs.
 ///
@@ -67,20 +68,17 @@ const OPTIMAL_PARSER_LEVEL_THRESHOLD: u8 = 6;
 #[must_use]
 pub const fn match_finder_tuning(level: u8) -> (u32, u32) {
     match level {
-        // Fast: minimal chain walk, low nice_match.
-        1 => (4, 8),
-        2 => (8, 16),
-        3 => (32, 32),
-        4 => (64, 64),
-        5 => (128, 128),
-        // Default-ish optimal parsing.
-        6 => (256, 128),
-        7 => (1024, 273),
-        // Highest compression: full chain (capped at 4096 to bound
-        // worst-case encode time on adversarial inputs), max nice_match
-        // (273 = LZMA max match length).
-        8 => (4096, 273),
-        9 | _ => (4096, 273),
+        // xz presets (lzma_encoder_presets.c): levels 1-3 are FAST
+        // mode on HC3/HC4 with depths {4, 8, 24, 48} and nice_len
+        // 128 (level 1) or 273 (levels 2-3).
+        1 => (4, 128),
+        2 => (8, 273),
+        3 => (24, 273),
+        // Levels 4-9 are NORMAL mode (optimal parser); with a hash
+        // chain, auto depth is 16 + nice_len / 2 (16/32/64 -> 24/32/48).
+        4 => (24, 16),
+        5 => (32, 32),
+        6 | 7 | 8 | 9 | _ => (48, 64),
     }
 }
 
@@ -97,11 +95,24 @@ impl Codec for LzmaCodec {
         let lv = level.as_u8();
         let use_optimal = lv >= OPTIMAL_PARSER_LEVEL_THRESHOLD;
         let (max_chain_length, nice_match) = match_finder_tuning(lv);
+        let dict_size: u32 = [
+            1 << 18,
+            1 << 20,
+            1 << 21,
+            1 << 22,
+            1 << 22,
+            1 << 23,
+            1 << 23,
+            1 << 24,
+            1 << 25,
+            1 << 26,
+        ][usize::from(lv.min(9))];
         let opts = LzmaOptions {
             use_optimal_parser: use_optimal,
             max_chain_length,
             nice_match,
-            use_bt4: lv >= 7,
+            dict_size,
+            use_bt4: false,
             ..Default::default()
         };
         xz_compress_with_options(plaintext, &opts).map_err(map_encode_error)

@@ -7,6 +7,7 @@ pub mod lzma1;
 pub mod lzma2;
 pub mod match_finder;
 pub mod optimal;
+pub(crate) mod optimum;
 pub mod prob_state;
 pub mod xz;
 

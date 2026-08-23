@@ -8,6 +8,7 @@
 #![forbid(unsafe_code)]
 
 use super::alone::LzmaOptions;
+use crate::constants::MATCH_LEN_MAX;
 use crate::LzmaError;
 
 /// Default LZMA parameters (matches lzip/xz-utils defaults).
@@ -213,6 +214,190 @@ pub fn encode_lzma2_stream_with_options(
     let mut offset = 0;
     let mut first_chunk = true;
     let mut props_pending = false;
+
+    // Optimal-parser configuration: the reference's price-based parse
+    // (encoder/optimum.rs, ported from lzma_encoder_optimum_normal.c)
+    // with one shared match finder, carried probability models, and
+    // command-boundary chunk cutting.
+    if use_optimal && !options.use_bt4 {
+        use crate::encoder::optimum::OptimumState;
+
+        let nice_len = if options.nice_match > 0 {
+            options.nice_match
+        } else {
+            128
+        };
+        let chain = if options.max_chain_length > 0 {
+            options.max_chain_length
+        } else {
+            256
+        };
+        let mut mf = crate::encoder::match_finder::new_lzma_match_finder(input, options.dict_size);
+        mf.set_max_chain_length(chain);
+        mf.set_nice_match(nice_len);
+        let mut st = OptimumState::new(nice_len, options.dict_size, pb);
+        let mut encoder =
+            crate::encoder::Lzma1Encoder::with_dict_size(lc, lp, pb, options.dict_size)
+                .without_eopm();
+        encoder.length_encoder.set_table_size(nice_len);
+        encoder.rep_length_encoder.set_table_size(nice_len);
+        for ps in 0..(1usize << pb as usize) {
+            encoder.length_encoder.update_prices(ps);
+            encoder.rep_length_encoder.update_prices(ps);
+        }
+        encoder.optimum_fill_dist_prices(&mut st);
+        encoder.optimum_fill_align_prices(&mut st);
+
+        let budget = MAX_CHUNK_UNCOMPRESSED.saturating_sub(MATCH_LEN_MAX as usize + 1);
+        let max_compressed = (u16::MAX as usize + 1).saturating_sub(32);
+
+        encoder.optimum_init(&mut st, input, &mut mf);
+        offset = 1.min(input.len());
+        // The init literal belongs to the first chunk even when it is
+        // the entire input (single-byte streams).
+        let mut emitted_any = false;
+
+        while offset < input.len() || !emitted_any {
+            let chunk_start = if emitted_any { offset } else { 0 };
+            while offset < input.len() {
+                let (back, len) =
+                    encoder.optimum_next_symbol(&mut st, input, &mut mf, offset as u32);
+                encoder.optimum_emit_symbol(input, back, len, offset, &mut st);
+                offset += len as usize;
+                if offset - chunk_start >= budget
+                    || encoder.range_encoder_bytes() >= max_compressed
+                    || offset >= input.len()
+                {
+                    break;
+                }
+            }
+            let chunk_size = offset - chunk_start;
+            let compressed = encoder.take_range_encoder();
+            debug_assert!(chunk_size >= 1);
+            let u_size = chunk_size - 1;
+            let c_size = compressed.len() - 1;
+            let reset_level: u8 = if first_chunk {
+                3
+            } else if props_pending {
+                2
+            } else {
+                0
+            };
+            let control: u8 = 0x80 | (reset_level << 5) | ((u_size >> 16) as u8 & 0x1F);
+            out.push(control);
+            out.extend_from_slice(&((u_size & 0xFFFF) as u16).to_be_bytes());
+            out.extend_from_slice(&((c_size & 0xFFFF) as u16).to_be_bytes());
+            if reset_level >= 2 {
+                let props = (lc + 9 * lp + 45 * pb) as u8;
+                out.push(props);
+            }
+            out.extend_from_slice(&compressed);
+            first_chunk = false;
+            props_pending = false;
+            emitted_any = true;
+        }
+
+        out.push(0x00);
+        return Ok(out);
+    }
+
+    // Lazy-parser configuration: dictionary-carry streaming. One
+    // shared match finder spans the whole input, so every chunk's
+    // matches may reference earlier chunks (within dict_size) — the
+    // decode is legal because only the first chunk resets the
+    // dictionary. This is where nearly all of the reference's ratio
+    // on repetitive data comes from (measured without it: 100 MB
+    // repetitive fixture compressed 4.9x larger than `xz -6`).
+    if !use_optimal && !options.use_bt4 {
+        let mut mf = crate::encoder::match_finder::new_lzma_match_finder(input, options.dict_size);
+        let mut encoder: Option<crate::encoder::Lzma1Encoder> = None;
+        // Force a state reset (reset level >= 2) on the next shared
+        // chunk after the bisect/raw fallback path, because those
+        // chunks encode with fresh probability models while the
+        // carried encoder would have kept its trained ones.
+        let mut force_state_reset = false;
+        // Leave headroom so a match accepted at the budget edge cannot
+        // push the chunk past the 21-bit uncompressed-size field: the
+        // stop check runs after the command, and one command adds at
+        // most MATCH_LEN_MAX (273) positions.
+        let budget = MAX_CHUNK_UNCOMPRESSED.saturating_sub(MATCH_LEN_MAX as usize + 1);
+        while offset < input.len() {
+            if encoder.is_none() {
+                encoder = Some(
+                    crate::encoder::Lzma1Encoder::with_dict_size(lc, lp, pb, options.dict_size)
+                        .without_eopm(),
+                );
+            }
+            let enc = encoder.as_mut().expect("encoder initialized");
+            let (compressed, end) = enc.encode_lazy_range(
+                input,
+                &mut mf,
+                offset,
+                budget,
+                (u16::MAX as usize + 1).saturating_sub(32),
+                options.max_chain_length,
+                options.nice_match,
+            );
+            let chunk_size = end - offset;
+            if compressed.len() <= u16::MAX as usize && chunk_size <= MAX_CHUNK_UNCOMPRESSED {
+                let u_size = chunk_size - 1;
+                let c_size = compressed.len() - 1;
+                let reset_level: u8 = if first_chunk {
+                    3
+                } else if props_pending || force_state_reset {
+                    2
+                } else {
+                    // Continue with trained probability models,
+                    // state, and rep distances across the chunk
+                    // boundary — the decode-side counterpart of
+                    // keeping one `Lzma1Encoder` alive per stream.
+                    0
+                };
+                let control: u8 = 0x80 | (reset_level << 5) | ((u_size >> 16) as u8 & 0x1F);
+                out.push(control);
+                out.extend_from_slice(&((u_size & 0xFFFF) as u16).to_be_bytes());
+                out.extend_from_slice(&((c_size & 0xFFFF) as u16).to_be_bytes());
+                if reset_level >= 2 {
+                    let props = (lc + 9 * lp + 45 * pb) as u8;
+                    out.push(props);
+                }
+                out.extend_from_slice(&compressed);
+                first_chunk = false;
+                props_pending = false;
+                force_state_reset = false;
+                offset = end;
+            } else {
+                // Over-budget (incompressible): fall back to the
+                // chunk-local bisect/raw path for this range.
+                let chunk = &input[offset..end.min(input.len())];
+                emit_lzma2_chunk(
+                    chunk,
+                    offset,
+                    input,
+                    &mut first_chunk,
+                    &mut props_pending,
+                    &mut out,
+                    lc,
+                    lp,
+                    pb,
+                    use_optimal,
+                    options,
+                )?;
+                // The fallback's chunks encode with fresh models at
+                // reset level >= 1, so the decoder ends up fully
+                // reset; drop the carried encoder and mark the next
+                // shared chunk as a state reset.
+                encoder = None;
+                force_state_reset = true;
+                offset = end.min(input.len());
+            }
+        }
+
+        // End-of-stream marker.
+        out.push(0x00);
+        return Ok(out);
+    }
+
     while offset < input.len() {
         let remaining = input.len() - offset;
         let chunk_size = remaining.min(MAX_CHUNK_UNCOMPRESSED);
@@ -263,7 +448,8 @@ mod tests {
         while stream[cursor] != 0 {
             let control = stream[cursor];
             if control <= 2 {
-                let size = u16::from_be_bytes([stream[cursor + 1], stream[cursor + 2]]) as usize + 1;
+                let size =
+                    u16::from_be_bytes([stream[cursor + 1], stream[cursor + 2]]) as usize + 1;
                 cursor += 3 + size;
             } else {
                 let reset = (control >> 5) & 3;

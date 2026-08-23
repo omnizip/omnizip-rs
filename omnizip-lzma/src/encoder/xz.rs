@@ -62,62 +62,41 @@ pub fn xz_compress_with_options(input: &[u8], options: &LzmaOptions) -> Result<V
     let flags_crc = crc32(&flags);
     out.extend_from_slice(&flags_crc.to_le_bytes());
 
-    // 2. Block.
-    let block_start = out.len();
-
-    let lzma2_payload = crate::encoder::lzma2::encode_lzma2_stream_with_options(input, options)?;
-    let block_header_start = out.len();
-
-    out.push(0); // size byte, patched later
-    out.push(0x00); // block flags: 1 filter
-
-    out.push(0x21); // Filter ID: LZMA2
-    out.push(0x01); // Properties size: 1 byte
-                    // Dict size code: derived from options.dict_size, clamped to LZMA2's
-                    // 40..=40 range. (Real spec uses a complex mapping; we use 40 = max.)
-    let dict_code = dict_size_to_lzma2_code(options.dict_size);
-    out.push(dict_code);
-
-    // Pad block header to multiple of 4 (minus 4 for CRC32).
-    let header_so_far = out.len() - block_header_start;
-    let needed = ((header_so_far + 3) & !3) + 4;
-    while out.len() - block_header_start < needed - 4 {
-        out.push(0x00);
+    // 2. Blocks. Reference xz in its default (multithreaded) mode
+    // splits the input into blocks of 3 x dict_size, each with fresh
+    // encoder state — on data whose statistics drift (numbered CSV
+    // rows, growing keys) per-block retraining beats one continuously
+    // adapted model set by ~30%. Match that layout.
+    let block_size = 3 * options.dict_size as usize;
+    let mut records: Vec<(u64, u64)> = Vec::new();
+    let mut offset = 0usize;
+    while offset < input.len() {
+        let end = (offset + block_size).min(input.len());
+        let chunk = &input[offset..end];
+        let lzma2_payload =
+            crate::encoder::lzma2::encode_lzma2_stream_with_options(chunk, options)?;
+        let unpadded = write_xz_block(&mut out, &lzma2_payload, options.dict_size, chunk);
+        records.push((unpadded, chunk.len() as u64));
+        offset = end;
     }
-    let real_size = out.len() - block_header_start + 4;
-    out[block_header_start] = ((real_size / 4) - 1) as u8;
-    let bh_crc = crc32(&out[block_header_start..]);
-    out.extend_from_slice(&bh_crc.to_le_bytes());
-
-    let block_data_start = out.len();
-    out.extend_from_slice(&lzma2_payload);
-
-    while out.len() % 4 != 0 {
-        out.push(0x00);
+    if records.is_empty() {
+        // Empty input: LZMA2 end-marker only, no blocks.
+        let lzma2_payload =
+            crate::encoder::lzma2::encode_lzma2_stream_with_options(input, options)?;
+        let unpadded = write_xz_block(&mut out, &lzma2_payload, options.dict_size, input);
+        records.push((unpadded, 0));
     }
-    let block_data_end = out.len();
-
-    let check = crc32(input);
-    out.extend_from_slice(&check.to_le_bytes());
-
-    let block_end = out.len();
-    let _ = (block_start, block_data_start, block_data_end, block_end);
 
     // 3. Index.
     let index_start = out.len();
     out.push(0x00);
-    out.push(0x01);
-    // Per the .xz spec, Unpadded Size = Block Header size + Compressed
-    // Data size + Check size — padding EXCLUDED. The previous value
-    // (lzma2 payload + padding) made every stream fail `xz -t`'s index
-    // validation; small-fixture tests only round-tripped through our
-    // own decoder, which does not verify the index sizes.
-    let unpadded_size = (block_data_start - block_header_start) as u64
-        + lzma2_payload.len() as u64
-        + 4;
-    let total_uncompressed = input.len() as u64;
-    write_vli(&mut out, unpadded_size);
-    write_vli(&mut out, total_uncompressed);
+    write_vli(&mut out, records.len() as u64);
+    for (unpadded_size, uncompressed) in &records {
+        // Per the .xz spec, Unpadded Size = Block Header size +
+        // Compressed Data size + Check size — padding EXCLUDED.
+        write_vli(&mut out, *unpadded_size);
+        write_vli(&mut out, *uncompressed);
+    }
 
     while (out.len() - index_start) % 4 != 0 {
         out.push(0x00);
@@ -141,7 +120,44 @@ pub fn xz_compress_with_options(input: &[u8], options: &LzmaOptions) -> Result<V
     Ok(out)
 }
 
-/// Map a `dict_size` in bytes to the LZMA2 1-byte dictionary code.
+/// Write one XZ block (header + LZMA2 payload + padding + CRC32
+/// check). Returns the block's Unpadded Size for the index.
+fn write_xz_block(out: &mut Vec<u8>, lzma2_payload: &[u8], dict_size: u32, plain: &[u8]) -> u64 {
+    let block_header_start = out.len();
+
+    out.push(0); // size byte, patched later
+    out.push(0x00); // block flags: 1 filter
+
+    out.push(0x21); // Filter ID: LZMA2
+    out.push(0x01); // Properties size: 1 byte
+    let dict_code = dict_size_to_lzma2_code(dict_size);
+    out.push(dict_code);
+
+    // Pad block header to multiple of 4 (minus 4 for CRC32).
+    let header_so_far = out.len() - block_header_start;
+    let needed = ((header_so_far + 3) & !3) + 4;
+    while out.len() - block_header_start < needed - 4 {
+        out.push(0x00);
+    }
+    let real_size = out.len() - block_header_start + 4;
+    out[block_header_start] = ((real_size / 4) - 1) as u8;
+    let bh_crc = crc32(&out[block_header_start..]);
+    out.extend_from_slice(&bh_crc.to_le_bytes());
+
+    let block_header_len = (out.len() - block_header_start) as u64;
+    out.extend_from_slice(lzma2_payload);
+
+    while out.len() % 4 != 0 {
+        out.push(0x00);
+    }
+
+    let check = crc32(plain);
+    out.extend_from_slice(&check.to_le_bytes());
+
+    block_header_len + lzma2_payload.len() as u64 + 4
+}
+
+/// Map a `dict_size` in bytes to the LZMA2 1-byte dictionary code./// Map a `dict_size` in bytes to the LZMA2 1-byte dictionary code.
 ///
 /// Per the LZMA2 spec: the code is `ceil(log2(dict_size)) - 16` for
 /// dicts >= 4 KB, with code 40 reserved for "4 GiB - 1". Codes 41+ are
