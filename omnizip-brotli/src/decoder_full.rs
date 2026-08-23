@@ -323,6 +323,10 @@ fn dec_stats_on() -> bool {
 }
 
 static DBG_DC_ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+fn env_hoist(name: &str) -> bool {
+    std::env::var(name).is_ok()
+}
+
 fn dbg_dc_on() -> bool {
     *DBG_DC_ON.get_or_init(|| std::env::var("BROTLI_DBG_DC").is_ok())
 }
@@ -744,7 +748,7 @@ fn finish_metablock_decode(
     if npostfix > 3 {
         return Err("invalid metablock: NPOSTFIX > 3");
     }
-    if std::env::var("BROTLI_DICT_DEBUG").is_ok() {
+    if env_hoist("BROTLI_DICT_DEBUG") {
         eprintln!(
             "MB output_base={output_base} mlen={mlen} nbltypesl={} nbltypesc={} nbltypesd={}",
             lit_bt.num_block_types, cmd_bt.num_block_types, dist_bt.num_block_types
@@ -817,12 +821,19 @@ fn finish_metablock_decode(
     let stats_flag = dec_stats_on();
     let dbg_dc_flag = dbg_dc_on();
     let trace_flag = trace_on();
+    let switch_log = env_hoist("BROTLI_SWITCH_LOG");
+    let sym_trace = env_hoist("BROTLI_SYM_TRACE");
+    let cmd_trace = env_hoist("BROTLI_CMD_TRACE");
+    let sw_trace = env_hoist("BROTLI_SW_TRACE");
+    let lit_trace = env_hoist("BROTLI_LIT_TRACE");
+    let dist_trace = env_hoist("BROTLI_DIST_TRACE");
+    let dict_debug = env_hoist("BROTLI_DICT_DEBUG");
     while output.len() < mlen {
         // Block-switch handling for insert-copy category.
         if cmd_bt.num_block_types > 1 {
             if cmd_bt.block_length == 0 {
                 cmd_block_type = cmd_bt.decode_switch(br)? as usize;
-                if std::env::var("BROTLI_SWITCH_LOG").is_ok() {
+                if switch_log {
                     eprintln!(
                         "DECSW-CMD n={} pos={} type={} len={}",
                         dec_cmd_n,
@@ -839,7 +850,7 @@ fn finish_metablock_decode(
         // Read command symbol from the current command tree.
         let cmd_tree = &cmd_trees[cmd_block_type];
         let cmd_code = cmd_tree.read_symbol(br).ok_or("invalid command symbol")? as usize;
-        if std::env::var("BROTLI_SYM_TRACE").is_ok() {
+        if sym_trace {
             static SYM_N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
             let n = SYM_N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             if (230..=240).contains(&n) {
@@ -862,7 +873,7 @@ fn finish_metablock_decode(
         let copy_len = usize::from(v.copy_len_offset) + copy_extra as usize;
 
         let cmd_start_outlen = output.len();
-        if std::env::var("BROTLI_CMD_TRACE").is_ok() {
+        if cmd_trace {
             eprintln!(
                 "DECCMD ins={insert_len} cpy={copy_len} outlen={}",
                 output.len()
@@ -880,13 +891,13 @@ fn finish_metablock_decode(
 
             // Block-switch on literal block length (BEFORE reading the
             // literal, per upstream `ProcessCommandsInternal`).
-            if std::env::var("BROTLI_SW_TRACE").is_ok() {
+            if sw_trace {
                 lit_count_total += 1;
             }
             if lit_bt.num_block_types > 1 {
                 if lit_bt.block_length == 0 {
                     lit_block_type = lit_bt.decode_switch(br)? as usize;
-                    if std::env::var("BROTLI_SW_TRACE").is_ok() {
+                    if sw_trace {
                         eprintln!(
                             "DECSW out={} type={lit_block_type} len={} lit={lit_count_total} bit={}",
                             output.len(),
@@ -905,7 +916,7 @@ fn finish_metablock_decode(
                 as usize;
             let lit_tree = &lit_trees[lit_tree_idx];
             let lit = lit_tree.read_symbol(br).ok_or("invalid literal")?;
-            if std::env::var("BROTLI_LIT_TRACE").is_ok() {
+            if lit_trace {
                 eprintln!(
                     "DECLIT {lit_count_total} bit={} tree={lit_tree_idx} byte={lit} p1={} p2={} blk={lit_block_type}",
                     br.bit_pos(),
@@ -945,7 +956,7 @@ fn finish_metablock_decode(
             if dist_bt.num_block_types > 1 {
                 if dist_bt.block_length == 0 {
                     dist_block_type = dist_bt.decode_switch(br)? as usize;
-                    if std::env::var("BROTLI_SWITCH_LOG").is_ok() {
+                    if switch_log {
                         eprintln!(
                             "SW-DIST pos={} type={} len={}",
                             output_base + output.len(),
@@ -965,7 +976,7 @@ fn finish_metablock_decode(
                 as usize;
             let dist_tree = &dist_trees[dist_tree_idx];
             let dist_code = dist_tree.read_symbol(br).ok_or("invalid distance symbol")? as i32;
-            if std::env::var("BROTLI_DIST_TRACE").is_ok() {
+            if dist_trace {
                 eprintln!(
                     "DECDIST n={dec_cmd_n} sym={dist_code} ctx={dist_context} tree={dist_tree_idx} bit={}",
                     br.bit_pos()
@@ -1019,7 +1030,7 @@ fn finish_metablock_decode(
             if dictionary_lookup(&mut output, copy_len as u32, distance as i32, max_distance)
                 .is_none()
             {
-                if std::env::var("BROTLI_DICT_DEBUG").is_ok() {
+                if dict_debug {
                     eprintln!(
                         "DICT-FAIL copy_len={copy_len} distance={distance} max_distance={max_distance} pos={} wbits_max={max_backward_distance}",
                         output_base + output.len()
