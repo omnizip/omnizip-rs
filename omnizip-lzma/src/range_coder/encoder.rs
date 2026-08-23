@@ -42,6 +42,8 @@ pub struct RangeEncoder {
     /// Position in `out` before the 5-byte flush padding. For LZMA2,
     /// the decoder only consumes bytes up to this point.
     pre_flush_pos: Option<usize>,
+    /// Pad the flush with zeros to ≥5 output bytes (LZMA2 chunks).
+    pub(crate) pad_flush: bool,
 }
 
 impl Default for RangeEncoder {
@@ -61,6 +63,7 @@ impl RangeEncoder {
             cache: 0,
             cache_size: 1,
             pre_flush_pos: None,
+            pad_flush: false,
         }
     }
 
@@ -106,13 +109,42 @@ impl RangeEncoder {
     }
 
     /// Flush remaining bytes to the output (5-byte padding).
+    ///
+    /// With `pad_flush` (LZMA2 chunks), the flush is topped up with
+    /// explicit zero bytes until at least 5 bytes have been emitted.
+    /// The 5 shift-lows can emit fewer when the first takes the
+    /// 0xFF-deferral branch; a size-bounded decoder (xz) then fails
+    /// its `rc_is_finished` check — measured: exactly one missing
+    /// byte on certain rc states ("works on fixtures, fails at
+    /// scale" was luck of the states). Trailing zeros only drive the
+    /// decoder's code toward zero, so the padding is always safe.
     pub fn flush(&mut self) {
+        let before = self.out.len();
+        // The size-bounded decoder (xz LZMA2) performs ONE final
+        // range-normalize when it reaches the chunk's uncompressed
+        // size — and that fires exactly when the encoder's range was
+        // below TOP after the last symbol. The normalize consumes one
+        // more byte, which must exist and read as 0x00 for the
+        // decoder's `rc_is_finished` check to pass. Without this
+        // conditional tail byte the chunk ends one byte short on
+        // those rc states (xz: "Compressed data is corrupt").
+        let needs_tail_byte = self.pad_flush && self.range < TOP;
         self.pre_flush_pos = Some(self.out.len());
         // Prevent further normalisations.
         self.range = INITIAL_RANGE;
         for _ in 0..5 {
             self.shift_low();
         }
+        let _ = before;
+        if needs_tail_byte {
+            self.out.push(0);
+        }
+    }
+
+    /// Enable zero-padding of the flush to ≥5 output bytes (LZMA2
+    /// chunk mode; see [`Self::flush`]).
+    pub(crate) fn set_pad_flush(&mut self) {
+        self.pad_flush = true;
     }
 
     /// Number of bytes the decoder will consume (excludes the 5-byte
@@ -132,10 +164,14 @@ impl RangeEncoder {
     }
 
     /// Normalize the range when it becomes too small. Matches XZ
-    /// Utils' `rc_normalize` — `shift_low` is called BEFORE `range` is
-    /// shifted.
+    /// Utils' `rc_encode`: a SINGLE shift per symbol (`if`, not
+    /// `while`) — the reference relies on one 8-bit renormalization
+    /// per encoded bit. A while-loop here produces a different byte
+    /// schedule that decodes correctly mid-stream but terminates with
+    /// the wrong consumed-byte count, so size-bounded decoders (xz
+    /// LZMA2 chunks) reject the chunk ending on certain rc states.
     pub fn normalize(&mut self) {
-        while self.range < TOP {
+        if self.range < TOP {
             self.shift_low();
             self.range <<= 8;
         }

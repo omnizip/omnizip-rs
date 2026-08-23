@@ -27,7 +27,13 @@ use crate::encoder::ldm::LdmHashTable;
 const PRIME4_BYTES: u32 = 2_654_435_761;
 
 /// Minimum match length for ZSTD fast mode.
-const MIN_MATCH: usize = 4;
+/// Cost-effective minimum match length. The reference's optimal
+/// parsers (levels 17-22) can profit from 3-4 byte matches; our
+/// greedy/lazy parser cannot price them, and emitting them in bulk
+/// costs more than the literals they replace (measured: level 19 at
+/// min_match 3 regressed ~20% vs 5 — worse than level 1). All match
+/// finders floor the configured minimum at this value.
+const MIN_MATCH: usize = 5;
 
 /// Number of repeat offsets ZSTD tracks.
 pub const REP_NUM: usize = 3;
@@ -261,7 +267,7 @@ pub fn compress_block_with_min_match(
     ms: &mut MatchState,
     min_match: usize,
 ) -> usize {
-    if src.len() < min_match.max(4) + 1 {
+    if src.len() < min_match.max(MIN_MATCH) + 1 {
         // Too short for any matches; emit all as literals.
         seq_store.literals.extend_from_slice(src);
         return src.len();
@@ -270,7 +276,7 @@ pub fn compress_block_with_min_match(
     let h_bits = ms.hash_log;
     let mut anchor: usize = 0;
     let mut ip: usize = 0;
-    let limit = src.len().saturating_sub(min_match.max(4));
+    let limit = src.len().saturating_sub(min_match.max(MIN_MATCH));
 
     // Initial position skip: ZSTD skips the first position if it's
     // the start of the window.
@@ -423,7 +429,7 @@ pub fn compress_block_lazy(
     ms: &mut MatchState,
     min_match: usize,
 ) -> usize {
-    if src.len() < min_match.max(4) + 1 {
+    if src.len() < min_match.max(MIN_MATCH) + 1 {
         seq_store.literals.extend_from_slice(src);
         return src.len();
     }
@@ -431,7 +437,7 @@ pub fn compress_block_lazy(
     let h_bits = ms.hash_log;
     let mut anchor: usize = 0;
     let mut ip: usize = 1;
-    let limit = src.len().saturating_sub(min_match.max(4));
+    let limit = src.len().saturating_sub(min_match.max(MIN_MATCH));
 
     while ip < limit {
         let m1 = find_best_match(src, ip, h_bits, ms, min_match, limit);
@@ -487,7 +493,7 @@ pub fn compress_block_lazy2(
     ms: &mut MatchState,
     min_match: usize,
 ) -> usize {
-    if src.len() < min_match.max(4) + 1 {
+    if src.len() < min_match.max(MIN_MATCH) + 1 {
         seq_store.literals.extend_from_slice(src);
         return src.len();
     }
@@ -495,7 +501,7 @@ pub fn compress_block_lazy2(
     let h_bits = ms.hash_log;
     let mut anchor: usize = 0;
     let mut ip: usize = 1;
-    let limit = src.len().saturating_sub(min_match.max(4));
+    let limit = src.len().saturating_sub(min_match.max(MIN_MATCH));
 
     while ip < limit {
         let m1 = find_best_match(src, ip, h_bits, ms, min_match, limit);
@@ -802,7 +808,7 @@ pub fn compress_block_fast_with_prefix(
     ms: &mut MatchState,
     min_match: usize,
 ) -> usize {
-    let mm = min_match.max(4);
+    let mm = min_match.max(MIN_MATCH);
     if src.len() < prefix_len + mm + 1 {
         seq_store.literals.extend_from_slice(&src[prefix_len..]);
         return src.len() - prefix_len;
@@ -932,7 +938,7 @@ pub fn compress_block_lazy_with_prefix(
     ms: &mut MatchState,
     min_match: usize,
 ) -> usize {
-    let mm = min_match.max(4);
+    let mm = min_match.max(MIN_MATCH);
     if src.len() < prefix_len + mm + 1 {
         seq_store.literals.extend_from_slice(&src[prefix_len..]);
         return src.len() - prefix_len;
@@ -993,7 +999,7 @@ pub fn compress_block_lazy2_with_prefix(
     ms: &mut MatchState,
     min_match: usize,
 ) -> usize {
-    let mm = min_match.max(4);
+    let mm = min_match.max(MIN_MATCH);
     if src.len() < prefix_len + mm + 1 {
         seq_store.literals.extend_from_slice(&src[prefix_len..]);
         return src.len() - prefix_len;
@@ -1186,7 +1192,7 @@ pub fn compress_block_lazy2_with_ldm(
     min_match: usize,
     max_distance: usize,
 ) -> usize {
-    let mm = min_match.max(4);
+    let mm = min_match.max(MIN_MATCH);
     if src.len() < block_start + mm + 1 {
         seq_store.literals.extend_from_slice(&src[block_start..]);
         return src.len() - block_start;
