@@ -57,6 +57,7 @@ fn emit_lzma2_chunk(
     offset: usize,
     input: &[u8],
     first_chunk: &mut bool,
+    props_pending: &mut bool,
     out: &mut Vec<u8>,
     lc: u32,
     lp: u32,
@@ -93,6 +94,7 @@ fn emit_lzma2_chunk(
                 offset,
                 input,
                 first_chunk,
+                props_pending,
                 out,
                 lc,
                 lp,
@@ -105,6 +107,7 @@ fn emit_lzma2_chunk(
                 offset + mid,
                 input,
                 first_chunk,
+                props_pending,
                 out,
                 lc,
                 lp,
@@ -116,9 +119,27 @@ fn emit_lzma2_chunk(
         }
         // Incompressible: store raw (control 0x01, size-1 in u16).
         // chunk.len() <= 64 KiB here, so the field always fits.
-        out.push(0x01);
+        // Control 0x01 = raw + DICTIONARY RESET; 0x02 = raw, dict
+        // carries. Mid-stream raws MUST NOT reset the dictionary:
+        // subsequent compressed chunks are encoded with distances that
+        // reference data across the raw stretch (our match finders
+        // treat the input as one continuous dictionary). Emitting 0x01
+        // here made conformant decoders (xz) drop the dictionary and
+        // then reject the next chunk's cross-boundary match — while
+        // our own decoder (no reset concept) round-tripped happily
+        // (omnizip#329).
+        let control = if *first_chunk { 0x01 } else { 0x02 };
+        out.push(control);
         out.extend_from_slice(&((chunk.len() - 1) as u16).to_be_bytes());
         out.extend_from_slice(chunk);
+        // A dictionary-resetting raw chunk (0x01, only ever the first)
+        // obliges the NEXT LZMA chunk to carry new properties
+        // (lzma2_decoder.c: control >= 0xE0 || control == 1 sets
+        // need_properties). Set-only: subsequent non-resetting raws
+        // must not clear a pending obligation.
+        if *first_chunk {
+            *props_pending = true;
+        }
         *first_chunk = false;
         return Ok(());
     }
@@ -141,7 +162,17 @@ fn emit_lzma2_chunk(
     // the decoder's reset_state matches the encoder's fresh LZMA
     // state per chunk. True model carry (reset_level=0 + decoder
     // also carrying models) is TODO and requires more work.
-    let reset_level: u8 = if *first_chunk { 3 } else { 1 };
+    let reset_level: u8 = if *first_chunk {
+        3
+    } else if *props_pending {
+        // 2 = state reset + NEW PROPERTIES, dictionary carries — the
+        // minimum a conformant decoder accepts after a dict-reset
+        // chunk.
+        2
+    } else {
+        1
+    };
+    *props_pending = false;
     let control: u8 = 0x80 | (reset_level << 5) | ((u_size >> 16) as u8 & 0x1F);
     out.push(control);
     out.extend_from_slice(&((u_size & 0xFFFF) as u16).to_be_bytes());
@@ -181,6 +212,7 @@ pub fn encode_lzma2_stream_with_options(
     // (see TODO 176 item A — requires decoder-side state-carry too).
     let mut offset = 0;
     let mut first_chunk = true;
+    let mut props_pending = false;
     while offset < input.len() {
         let remaining = input.len() - offset;
         let chunk_size = remaining.min(MAX_CHUNK_UNCOMPRESSED);
@@ -190,6 +222,7 @@ pub fn encode_lzma2_stream_with_options(
             offset,
             input,
             &mut first_chunk,
+            &mut props_pending,
             &mut out,
             lc,
             lp,
