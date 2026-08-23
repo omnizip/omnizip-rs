@@ -867,6 +867,12 @@ pub struct BankMatchFinder<'a> {
     /// size_hint >= 1 MiB and lgwin >= 19): hashes 5 bytes with the
     /// 64-bit kHashMul64. H5/H58 hash 4 bytes with kHashMul32.
     hash5: bool,
+    /// H68 tag bank: per-slot 8-bit hash tags.
+    tags: Vec<u8>,
+    /// H68 per-bucket DOWN-counter (0xFFFF − used), mirroring
+    /// upstream's num_[] semantics for the head rotation math.
+    tnum: Vec<u16>,
+    use_tags: bool,
 }
 
 /// Upstream kMinScore = 30·8·8 + 100 (the baseline `out.score` that
@@ -888,7 +894,24 @@ impl<'a> BankMatchFinder<'a> {
             num_last_dists,
             h9_scoring: num_last_dists >= 16,
             hash5: false,
+            tags: Vec::new(),
+            tnum: Vec::new(),
+            use_tags: false,
         }
+    }
+
+    /// Switch to the reference's SIMD-shape H68 tag-bank mode
+    /// (hash_longest_match64_simd_inc.h): an 8-byte kHashMul64 hash
+    /// split into a 15-bit key plus an 8-bit tag stored per entry.
+    /// The scan compares the 16-entry tag array once and only visits
+    /// tag-matching slots — the bitmask rejection is what makes the
+    /// reference's q4-6 hashers several times faster than a full
+    /// bank walk.
+    pub fn enable_tag_mode(&mut self) {
+        let bucket_count = 1usize << self.bucket_bits;
+        self.tags = vec![0u8; bucket_count << self.block_bits];
+        self.tnum = vec![0xFFFFu16; bucket_count];
+        self.use_tags = true;
     }
 
     /// Switch to the H6 5-byte 64-bit hash (kHashMul64 << 24).
@@ -899,7 +922,7 @@ impl<'a> BankMatchFinder<'a> {
     /// Positions a store/search needs within bounds: 8 for the H6
     /// 5-byte hash (upstream HashTypeLength), 4 otherwise.
     fn lookahead(&self) -> usize {
-        if self.hash5 {
+        if self.hash5 || self.use_tags {
             8
         } else {
             4
@@ -917,11 +940,25 @@ impl<'a> BankMatchFinder<'a> {
 
     #[inline]
     fn key(&self, pos: usize) -> usize {
+        self.key_tag(pos).0
+    }
+
+    /// H68 8-byte hash: LOAD64LE * (kHashMul64 << 24) >> 41 gives 23
+    /// bits: a 15-bit key (hash >> 8) plus an 8-bit tag (hash & 0xFF).
+    fn key_tag(&self, pos: usize) -> (usize, u8) {
         let look = self.lookahead();
         if pos + look > self.data.len() {
-            return 0;
+            return (0, 0);
         }
-        if self.hash5 {
+        if self.use_tags {
+            let d = &self.data[pos..pos + 8];
+            let lo = u32::from_le_bytes([d[0], d[1], d[2], d[3]]);
+            let hi = u32::from_le_bytes([d[4], d[5], d[6], d[7]]);
+            let v = (u64::from(hi) << 32) | u64::from(lo);
+            let v = v.wrapping_mul(0x1FE3_5A7B_D357_9BD3u64 << 24);
+            let hash = (v >> 41) as usize;
+            (hash >> 8, (hash & 0xFF) as u8)
+        } else if self.hash5 {
             // Upstream H6 HashBytes: LOAD64LE * (kHashMul64 << 24),
             // top bucket_bits bits. Bytes 5-7 contribute 0 mod 2^64
             // (their product term shifts out), so only 5 bytes matter.
@@ -933,7 +970,7 @@ impl<'a> BankMatchFinder<'a> {
             let hi = u32::from_le_bytes([d[4], d[5], d[6], d[7]]);
             let v = (u64::from(hi) << 32) | u64::from(lo);
             let v = v.wrapping_mul(0x1FE3_5A7B_D357_9BD3u64 << 24);
-            (v >> (64 - self.bucket_bits)) as usize
+            ((v >> (64 - self.bucket_bits)) as usize, 0)
         } else {
             let word = u32::from_le_bytes([
                 self.data[pos],
@@ -941,7 +978,10 @@ impl<'a> BankMatchFinder<'a> {
                 self.data[pos + 2],
                 self.data[pos + 3],
             ]);
-            (word.wrapping_mul(0x1E35_A7BD) >> (32 - self.bucket_bits)) as usize
+            (
+                (word.wrapping_mul(0x1E35_A7BD) >> (32 - self.bucket_bits)) as usize,
+                0,
+            )
             // kHashMul32
         }
     }
@@ -950,10 +990,18 @@ impl<'a> BankMatchFinder<'a> {
         if pos + self.lookahead() > self.data.len() {
             return;
         }
-        let key = self.key(pos);
         let mask = (1usize << self.block_bits) - 1;
-        let slot = (self.num[key] as usize & mask) << self.block_bits;
-        let _ = slot;
+        if self.use_tags {
+            let (key, tag) = self.key_tag(pos);
+            let base = key << self.block_bits;
+            let slot = usize::from(self.tnum[key]) & mask;
+            self.buckets[base | slot] = pos as u32;
+            self.tags[base | slot] = tag;
+            self.tnum[key] = self.tnum[key].wrapping_sub(1);
+            self.num[key] = self.num[key].wrapping_add(1);
+            return;
+        }
+        let key = self.key(pos);
         let base = key << self.block_bits;
         self.buckets[base | (self.num[key] as usize & mask)] = pos as u32;
         self.num[key] = self.num[key].wrapping_add(1);
@@ -995,6 +1043,16 @@ impl<'a> BankMatchFinder<'a> {
     ) -> Option<(u32, u32, u64)> {
         if pos + self.lookahead() > self.data.len() || max_len < 2 {
             return None;
+        }
+        if self.use_tags {
+            let result = self.scan_with_tags(pos, last_dists, max_len, min_len_hint);
+            if insert && pos < self.data.len() {
+                self.insert(pos);
+                if self.cur <= pos {
+                    self.cur = pos + 1;
+                }
+            }
+            return result;
         }
         let key = self.key(pos);
         let result = self.scan_with_key(key, pos, last_dists, max_len, min_len_hint);
@@ -1071,8 +1129,141 @@ impl<'a> BankMatchFinder<'a> {
         if pos + self.lookahead() > self.data.len() || max_len < 2 {
             return None;
         }
+        if self.use_tags {
+            return self.scan_with_tags(pos, last_dists, max_len, min_len_hint);
+        }
         let key = self.key(pos);
         self.scan_with_key(key, pos, last_dists, max_len, min_len_hint)
+    }
+
+    /// H68 scan (hash_longest_match64_simd_inc.h FindLongestMatch):
+    /// rep probes first (identical semantics to the plain scan), then
+    /// ONE pass over the bucket's 16-entry tag array builds a bitmask
+    /// and only tag-matching slots are visited — the bitmask rejection
+    /// replaces the full bank walk.
+    fn scan_with_tags(
+        &self,
+        pos: usize,
+        last_dists: &[u32],
+        max_len: u32,
+        min_len_hint: u32,
+    ) -> Option<(u32, u32, u64)> {
+        const CACHE_INDEX: [u8; 16] = [0, 1, 2, 3, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1];
+        const CACHE_OFFSET: [i8; 16] = [0, 0, 0, 0, -1, 1, -2, 2, -3, 3, -1, 1, -2, 2, -3, 3];
+        const SHORT_CODE_DELTA: [i32; 16] = [
+            60, -95, -117, -127, -93, -93, -96, -96, -99, -99, -105, -105, -115, -115, -125, -125,
+        ];
+        let mut best_score = K_MIN_SCORE;
+        let mut best: Option<(u32, u32)> = None;
+        let exact_only = self.num_last_dists <= 4;
+
+        // Rep probes (same as scan_with_key).
+        for i in 0..self.num_last_dists.min(16) {
+            if exact_only && CACHE_OFFSET[i] != 0 {
+                continue;
+            }
+            let base = *last_dists.get(usize::from(CACHE_INDEX[i])).unwrap_or(&0);
+            let v = i64::from(base) + i64::from(CACHE_OFFSET[i]);
+            if v < 1 || v as usize > pos {
+                continue;
+            }
+            let d = v as u32;
+            let prev = pos - v as usize;
+            let cur_best = best.map_or(2, |(_, l)| l) as usize;
+            if pos + cur_best < self.data.len()
+                && prev + cur_best < self.data.len()
+                && self.data[pos + cur_best] != self.data[prev + cur_best]
+            {
+                continue;
+            }
+            let len = self.match_len_scan(pos, prev, max_len);
+            if len < 3 && !(len == 2 && i < 2) {
+                continue;
+            }
+            let score = if self.h9_scoring {
+                (7680i64 + i64::from(SHORT_CODE_DELTA[i]) + 540 * i64::from(len)) >> 2
+            } else {
+                let penalty = if i > 0 {
+                    39 + ((0x1c_a10u64 >> (i & 0x0e)) & 0x0e) as i64
+                } else {
+                    0
+                };
+                135 * i64::from(len) + 1935 - penalty
+            };
+            if score > best_score as i64 {
+                best_score = score as u64;
+                best = Some((d, len));
+            }
+        }
+
+        // Tag-bank scan.
+        let (key, tag) = self.key_tag(pos);
+        let mask = (1usize << self.block_bits) - 1;
+        let bank = 1usize << self.block_bits;
+        let base = key << self.block_bits;
+        let bucket = &self.buckets[base..base + bank];
+        let tag_bucket = &self.tags[base..base + bank];
+        let used = 65535usize.wrapping_sub(usize::from(self.tnum[key]));
+        let head = (usize::from(self.tnum[key]) + 1) & mask;
+        let mut cur_best = (best.map_or(3, |(_, l)| l)).max(min_len_hint) as usize;
+        // Bitmask over slots relative to head (bit i = slot (head+i)&mask).
+        let mut matches = 0u64;
+        for i in 0..bank {
+            if tag_bucket[(head + i) & mask] == tag {
+                matches |= 1 << i;
+            }
+        }
+        // Mask off uninitialized slots (upstream: n unused-entry guard).
+        if bank > used {
+            let guard = if used >= 64 { u64::MAX } else { (1u64 << used) - 1 };
+            matches &= guard;
+        }
+        while matches != 0 {
+            let tz = matches.trailing_zeros() as usize;
+            matches &= matches - 1;
+            let prev = bucket[(head + tz) & mask] as usize;
+            let backward = pos.wrapping_sub(prev);
+            if backward == 0 || backward as u32 > self.max_distance {
+                break;
+            }
+            // Double 4-byte reject (upstream): bytes ending at
+            // cur_best+1 must match, then the first 4 bytes.
+            let data = self.data;
+            let bl = cur_best.max(3);
+            if pos + bl + 1 > data.len() || prev + bl + 1 > data.len() {
+                break;
+            }
+            let a = u32::from_le_bytes(
+                data[pos + bl - 3..pos + bl + 1].try_into().unwrap(),
+            );
+            let b = u32::from_le_bytes(
+                data[prev + bl - 3..prev + bl + 1].try_into().unwrap(),
+            );
+            if a != b {
+                continue;
+            }
+            let f4a = u32::from_le_bytes(data[pos..pos + 4].try_into().unwrap());
+            let f4b = u32::from_le_bytes(data[prev..prev + 4].try_into().unwrap());
+            if f4a != f4b {
+                continue;
+            }
+            let len4 = self.match_len_scan(pos + 4, prev + 4, max_len.saturating_sub(4)) + 4;
+            if len4 >= 4 {
+                let score = 7680u64
+                    .wrapping_add(540u64.wrapping_mul(u64::from(len4)))
+                    .wrapping_sub(120u64.wrapping_mul(u64::from(log2_floor(backward as u64))))
+                    >> 2;
+                if score > best_score {
+                    best_score = score;
+                    best = Some((backward as u32, len4));
+                    let nb = len4 as usize;
+                    if nb > cur_best {
+                        cur_best = nb;
+                    }
+                }
+            }
+        }
+        best.map(|(d, l)| (d, l, best_score))
     }
 
     fn scan_with_key(
