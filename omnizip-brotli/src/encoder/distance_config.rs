@@ -211,17 +211,14 @@ pub fn prefix_encode_distance(distance: u32, cfg: &DistanceConfig) -> (u32, u32,
         return (distance_code, 0, 0);
     }
     let postfix_bits = u32::from(cfg.npostfix);
-    let dist = (1u64 << (postfix_bits + 2))
-        + u64::from(distance_code - NUM_SHORT - num_direct);
+    let dist = (1u64 << (postfix_bits + 2)) + u64::from(distance_code - NUM_SHORT - num_direct);
     let bucket = 63 - dist.leading_zeros() - 1; // Log2FloorNonZero(dist) - 1
     let postfix_mask = (1u64 << postfix_bits) - 1;
     let postfix = (dist & postfix_mask) as u32;
     let prefix = u32::try_from((dist >> bucket) & 1).unwrap_or(0);
     let offset = ((2 + u64::from(prefix)) << bucket) as u64;
     let nbits = bucket - postfix_bits;
-    let sym = NUM_SHORT
-        + num_direct
-        + (((2 * (nbits - 1) + prefix) << postfix_bits) + postfix);
+    let sym = NUM_SHORT + num_direct + (((2 * (nbits - 1) + prefix) << postfix_bits) + postfix);
     let extra = ((dist - offset) >> postfix_bits) as u32;
     (sym, extra, nbits)
 }

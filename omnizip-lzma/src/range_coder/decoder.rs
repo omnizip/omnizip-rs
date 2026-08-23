@@ -266,7 +266,6 @@ impl<'a> RangeDecoder<'a> {
 /// Reset helper for callers that reuse the same buffer shape across
 /// LZMA2 chunks. Re-binds the decoder to a new slice and re-initialises.
 impl<'a> RangeDecoder<'a> {
-
     /// Construct a fresh decoder bound to `input` with the same lifecycle
     /// as [`Self::new`]. Provided as a named alternative so call sites
     /// read as "reset and rebind".

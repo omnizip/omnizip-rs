@@ -848,7 +848,9 @@ pub fn split_byte_vector(
         num_histograms = max_histograms;
     }
 
-    let mut histograms: Vec<Hist> = (0..num_histograms + 1).map(|_| Hist::new(data_size)).collect();
+    let mut histograms: Vec<Hist> = (0..num_histograms + 1)
+        .map(|_| Hist::new(data_size))
+        .collect();
     let (hists, _tmp) = histograms.split_at_mut(num_histograms);
     initial_entropy_codes(data, num_histograms, sampling_stride_length, hists);
     refine_entropy_codes(data, sampling_stride_length, num_histograms, hists);

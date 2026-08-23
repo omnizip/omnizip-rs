@@ -301,8 +301,6 @@ mod tests {
         assert_eq!(out, data);
     }
 
-
-
     #[test]
     fn decodes_reference_cli_frames() {
         // Regression (BUGREPORT-zstd-0.1.0): the offset-code table
