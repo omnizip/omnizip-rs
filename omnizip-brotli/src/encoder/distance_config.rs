@@ -53,7 +53,7 @@ impl DistanceConfig {
     /// Fast O(N) scan: counts distances <= 15 and picks NDIRECT=12 if
     /// >=20% of distances are short (beneficial for direct codes).
     #[must_use]
-    pub fn choose(commands: &[super::super::from_spec_encoder::Command]) -> Self {
+    pub fn choose(commands: &[super::super::from_spec_encoder::Command], quality: i32) -> Self {
         // BROTLI_NPOSTFIX forces a specific config (measurement).
         if let Ok(np) = std::env::var("BROTLI_NPOSTFIX") {
             let ndc = std::env::var("BROTLI_NDIRECT_CODE")
@@ -61,6 +61,14 @@ impl DistanceConfig {
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(3);
             return Self::new(np.parse().unwrap_or(0), ndc);
+        }
+        // Upstream runs the distance-parameter cost search only at q10+
+        // (BrotliBuildMetaBlock vs the greedy metablock path); q4-9 keep
+        // the fast heuristic.
+        if quality >= 10 && !std::env::var("BROTLI_NO_DSEARCH").is_ok() {
+            if let Some(cfg) = Self::search(commands) {
+                return cfg;
+            }
         }
 
         // Entropy-based selection: estimate the Huffman cost of the
@@ -94,6 +102,64 @@ impl DistanceConfig {
             }
         }
         best
+    }
+}
+
+impl DistanceConfig {
+    /// Upstream `BrotliBuildMetaBlock`'s ComputeDistanceCost search: for
+    /// each (npostfix, ndirect) trial, re-encode every explicit distance
+    /// under the candidate params and cost the symbol histogram with the
+    /// reference PopulationCost (which models the tree header) plus the
+    /// distance extra bits. The ndirect walk mirrors upstream exactly,
+    /// including its between-npostfix halving. Returns None when some
+    /// distance exceeds a trial's max_distance (upstream skips such
+    /// configs the same way).
+    fn search(commands: &[super::super::from_spec_encoder::Command]) -> Option<Self> {
+        let mut best = Self::new(0, 0);
+        let mut best_cost = f64::INFINITY;
+        let mut ndirect_msb: u32 = 0;
+        for npostfix in 0..=3u8 {
+            while ndirect_msb < 16 {
+                let cfg = Self::new(npostfix, ndirect_msb as u8);
+                let mut hist = vec![0u32; cfg.alphabet_size()];
+                let mut extra_bits = 0f64;
+                let mut ok = true;
+                for c in commands {
+                    if c.copy_len == 0 || c.distance == 0 {
+                        continue;
+                    }
+                    if c.distance <= NUM_SHORT + cfg.ndirect() {
+                        // Short/direct codes carry no extra bits and no
+                        // re-encoding risk.
+                        hist[(c.distance + NUM_SHORT - 1) as usize] += 1;
+                        continue;
+                    }
+                    let (sym, _extra, nbits) = prefix_encode_distance(c.distance, &cfg);
+                    let idx = sym as usize;
+                    if idx >= hist.len() {
+                        ok = false;
+                        break;
+                    }
+                    hist[idx] += 1;
+                    extra_bits += f64::from(nbits);
+                }
+                if !ok {
+                    break;
+                }
+                let cost = crate::encoder::block_splitter::population_cost(&hist) + extra_bits;
+                if cost > best_cost {
+                    break;
+                }
+                best_cost = cost;
+                best = cfg;
+                ndirect_msb += 1;
+            }
+            if ndirect_msb > 0 {
+                ndirect_msb -= 1;
+            }
+            ndirect_msb /= 2;
+        }
+        Some(best)
     }
 }
 
@@ -133,4 +199,29 @@ fn huffman_cost_estimate(syms: &[u32], alphabet: usize) -> u64 {
         }
     }
     bits
+}
+
+/// Upstream `PrefixEncodeCopyDistance` (prefix.h), driven from the raw
+/// LZ77 distance: the caller's distance code is `distance + 15`.
+/// Returns (symbol, extra_value, extra_bit_count).
+pub fn prefix_encode_distance(distance: u32, cfg: &DistanceConfig) -> (u32, u32, u32) {
+    let num_direct = cfg.ndirect();
+    let distance_code = distance + NUM_SHORT - 1;
+    if distance_code < NUM_SHORT + num_direct {
+        return (distance_code, 0, 0);
+    }
+    let postfix_bits = u32::from(cfg.npostfix);
+    let dist = (1u64 << (postfix_bits + 2))
+        + u64::from(distance_code - NUM_SHORT - num_direct);
+    let bucket = 63 - dist.leading_zeros() - 1; // Log2FloorNonZero(dist) - 1
+    let postfix_mask = (1u64 << postfix_bits) - 1;
+    let postfix = (dist & postfix_mask) as u32;
+    let prefix = u32::try_from((dist >> bucket) & 1).unwrap_or(0);
+    let offset = ((2 + u64::from(prefix)) << bucket) as u64;
+    let nbits = bucket - postfix_bits;
+    let sym = NUM_SHORT
+        + num_direct
+        + (((2 * (nbits - 1) + prefix) << postfix_bits) + postfix);
+    let extra = ((dist - offset) >> postfix_bits) as u32;
+    (sym, extra, nbits)
 }
