@@ -922,7 +922,17 @@ pub fn parse_hq(input: &[u8], quality: i32) -> Vec<Command> {
     let tier = if quality >= 11 { 1 } else { 0 };
     let max_zopfli_len = MAX_ZOPFLI_LEN[tier];
     let max_candidates = MAX_ZOPFLI_CANDIDATES[tier];
-    let num_passes = if quality >= 11 { 2 } else { 1 };
+    // Upstream runs the cost-model refinement loop TWICE unconditionally
+    // (backward_references_hq.c: `for (i = 0; i < 2; i++)`) — pass 2
+    // derives costs from pass 1's commands, whose rep-code feedback is
+    // worth ~17 ratio points on repetitive binary input (FITS q10 was
+    // stuck at 1.28x reference size without it). BROTLI_HQ_1PASS
+    // restores the old q10 single pass.
+    let num_passes = if std::env::var("BROTLI_HQ_1PASS").is_ok() {
+        1
+    } else {
+        2
+    };
     let mut tree = omnizip_codecs::BinaryTreeMatchFinder::new(input);
     let (num_matches, matches) = collect_matches(input, &mut tree, quality);
     // Prefix-sum offsets into the flat match list.
