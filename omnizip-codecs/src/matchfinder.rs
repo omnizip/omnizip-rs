@@ -1545,3 +1545,370 @@ mod bank_tests {
         assert!(n_period > 500, "period not found often: {n_period}");
     }
 }
+
+/// Windowed BT4 match finder — port of xz's `lzma_mf_bt4_find` /
+/// `lzma_mf_bt4_skip` (lz_encoder_mf.c). Positions sharing a 4-byte
+/// hash bucket form a binary search tree keyed by byte comparison,
+/// re-rooted at the current position on every find/skip; the walk
+/// surfaces the best candidate at every length tier while pruning
+/// whole subtrees, which is why the reference uses it for all NORMAL
+/// presets. Unlike [`BinaryTreeMatchFinder`] (the brotli H10 port),
+/// the forest is a cyclic array of `dict_size` slots, so memory is
+/// bounded by the dictionary regardless of input length.
+#[derive(Debug)]
+pub struct Bt4MatchFinder<'a> {
+    data: &'a [u8],
+    /// Layout mirrors xz: [0..1024) = 2-byte hash, [1024..1024+65536)
+    /// = 3-byte hash, rest = 4-byte hash.
+    hash: Vec<u32>,
+    hash4_offset: usize,
+    hash4_mask: u32,
+    /// Two u32 slots per cyclic position (left/right tree links).
+    son: Vec<u32>,
+    cyclic_mask: u32,
+    cyclic_size: u32,
+    depth: u32,
+    nice_len: u32,
+    /// CRC-32 low byte table (`lzma_crc32_table[0]` in xz) used by the
+    /// hash mix.
+    crc_table: [u32; 256],
+}
+
+const BT4_EMPTY: u32 = u32::MAX;
+const HASH_2_SIZE: usize = 1 << 10;
+const HASH_3_SIZE: usize = 1 << 16;
+
+fn crc32_low_table() -> [u32; 256] {
+    let mut table = [0u32; 256];
+    for (i, slot) in table.iter_mut().enumerate() {
+        let mut c = i as u32;
+        for _ in 0..8 {
+            c = if c & 1 != 0 {
+                0xEDB8_8320 ^ (c >> 1)
+            } else {
+                c >> 1
+            };
+        }
+        *slot = c;
+    }
+    table
+}
+
+impl<'a> Bt4MatchFinder<'a> {
+    /// Construct over `data` with a `dict_size`-slot cyclic window.
+    /// `depth` 0 selects xz's auto depth (16 + nice_len / 2).
+    #[must_use]
+    pub fn new(data: &'a [u8], dict_size: u32, nice_len: u32, depth: u32) -> Self {
+        let dict_size = dict_size.max(1024).next_power_of_two();
+        let mut hs = dict_size - 1;
+        hs |= hs >> 1;
+        hs |= hs >> 2;
+        hs |= hs >> 4;
+        hs |= hs >> 8;
+        hs >>= 1;
+        hs |= 0xFFFF;
+        if hs > (1 << 24) {
+            hs >>= 1;
+        }
+        let hash4_size = (hs + 1) as usize;
+        let nice_len = nice_len.clamp(4, 273);
+        let depth = if depth == 0 { 16 + nice_len / 2 } else { depth };
+        Self {
+            data,
+            hash: vec![BT4_EMPTY; HASH_2_SIZE + HASH_3_SIZE + hash4_size],
+            hash4_offset: HASH_2_SIZE + HASH_3_SIZE,
+            hash4_mask: hs,
+            son: vec![BT4_EMPTY; dict_size as usize * 2],
+            cyclic_mask: dict_size - 1,
+            cyclic_size: dict_size,
+            depth,
+            nice_len,
+            crc_table: crc32_low_table(),
+        }
+    }
+
+    #[must_use]
+    pub const fn depth(&self) -> u32 {
+        self.depth
+    }
+
+    fn hash_indexes(&self, pos: usize) -> (usize, usize, usize) {
+        let d = self.data;
+        let temp = self.crc_table[d[pos] as usize] ^ u32::from(d[pos + 1]);
+        let h3 = (temp ^ (u32::from(d[pos + 2]) << 8)) & (HASH_3_SIZE as u32 - 1);
+        let h4 = (temp ^ (u32::from(d[pos + 2]) << 8) ^ (self.crc_table[d[pos + 3] as usize] << 5))
+            & self.hash4_mask;
+        (
+            (temp & (HASH_2_SIZE as u32 - 1)) as usize,
+            (HASH_2_SIZE + h3 as usize),
+            self.hash4_offset + h4 as usize,
+        )
+    }
+
+    fn match_len(&self, a: usize, b: usize, start: u32, limit: u32) -> u32 {
+        let d = self.data;
+        let mut len = start as usize;
+        let limit = limit as usize;
+        while len + 8 <= limit {
+            let wa = u64::from_le_bytes(d[len + a..len + a + 8].try_into().expect("8 bytes"));
+            let wb = u64::from_le_bytes(d[len + b..len + b + 8].try_into().expect("8 bytes"));
+            if wa == wb {
+                len += 8;
+            } else {
+                return (len + (wa ^ wb).trailing_zeros() as usize / 8) as u32;
+            }
+        }
+        while len < limit && d[a + len] == d[b + len] {
+            len += 1;
+        }
+        len as u32
+    }
+
+    /// Port of `lzma_mf_bt4_find`: insert `pos` and walk its tree,
+    /// appending the improving-length ladder as `(length, dist0)`
+    /// pairs. Returns the longest length.
+    pub fn find(&mut self, pos: usize, out: &mut Vec<(u32, u32)>) -> u32 {
+        let avail = (self.data.len() - pos) as u32;
+        let len_limit = self.nice_len.min(avail);
+
+        let (h2, h3, h4) = self.hash_indexes(pos);
+        let old2 = self.hash[h2];
+        let old3 = self.hash[h3];
+        let mut cur_match = self.hash[h4];
+        self.hash[h2] = pos as u32;
+        self.hash[h3] = pos as u32;
+        self.hash[h4] = pos as u32;
+
+        let valid = |old: u32, pos: usize| {
+            old != BT4_EMPTY && old < pos as u32 && (pos as u32 - old) < self.cyclic_size
+        };
+
+        let mut delta2 = if valid(old2, pos) {
+            pos as u32 - old2
+        } else {
+            0
+        };
+        let delta3 = if valid(old3, pos) {
+            pos as u32 - old3
+        } else {
+            0
+        };
+        let mut len_best = 1u32;
+
+        if delta2 != 0 && self.data[pos - delta2 as usize] == self.data[pos] {
+            len_best = 2;
+            out.push((2, delta2 - 1));
+        }
+        if delta3 != 0 && delta3 != delta2 && self.data[pos - delta3 as usize] == self.data[pos] {
+            len_best = 3;
+            out.push((3, delta3 - 1));
+            delta2 = delta3;
+        }
+        if let Some(last) = out.last_mut() {
+            len_best = self.match_len(pos, pos - delta2 as usize, len_best, len_limit);
+            last.0 = len_best;
+            if len_best == len_limit {
+                self.tree_walk(pos, cur_match, len_limit, len_best, None);
+                return len_best;
+            }
+        }
+        if len_best < 3 {
+            len_best = 3;
+        }
+        self.tree_walk(pos, cur_match, len_limit, len_best, Some(out));
+        out.last().map_or(len_best, |m| m.0.max(len_best))
+    }
+
+    /// Port of `lzma_mf_bt4_skip`: insert `pos` without reporting
+    /// matches.
+    pub fn skip(&mut self, pos: usize) {
+        if pos + 4 > self.data.len() {
+            return;
+        }
+        let avail = (self.data.len() - pos) as u32;
+        let len_limit = self.nice_len.min(avail);
+        let (h2, h3, h4) = self.hash_indexes(pos);
+        let cur_match = self.hash[h4];
+        self.hash[h2] = pos as u32;
+        self.hash[h3] = pos as u32;
+        self.hash[h4] = pos as u32;
+        self.skip_walk(pos, cur_match, len_limit);
+    }
+
+    /// `bt_skip_func` — the tree walk without match recording. Split
+    /// from `tree_walk` so the skip hot path (greedy parses over
+    /// repetitive data skip most positions) compiles without the
+    /// recording machinery.
+    fn skip_walk(&mut self, pos: usize, cur_match_in: u32, len_limit: u32) {
+        let cyclic_pos = (pos as u32) & self.cyclic_mask;
+        let mut ptr0 = ((cyclic_pos << 1) + 1) as usize;
+        let mut ptr1 = (cyclic_pos << 1) as usize;
+        let mut len0 = 0u32;
+        let mut len1 = 0u32;
+        let mut cur_match = cur_match_in;
+        let mut depth_left = self.depth;
+        let empty = BT4_EMPTY;
+
+        loop {
+            let delta = (pos as u32).wrapping_sub(cur_match);
+            if depth_left == 0 || cur_match == empty || delta >= self.cyclic_size {
+                self.son[ptr0] = empty;
+                self.son[ptr1] = empty;
+                return;
+            }
+            depth_left -= 1;
+
+            let pair = (((cyclic_pos.wrapping_sub(delta)) & self.cyclic_mask) << 1) as usize;
+            let pb = pos - delta as usize;
+            let mut len = len0.min(len1);
+
+            if len < len_limit && self.data[pb + len as usize] == self.data[pos + len as usize] {
+                len = self.match_len(pb, pos, len + 1, len_limit);
+                if len == len_limit {
+                    self.son[ptr1] = self.son[pair];
+                    self.son[ptr0] = self.son[pair + 1];
+                    return;
+                }
+            }
+
+            if len < len_limit && self.data[pb + len as usize] < self.data[pos + len as usize] {
+                self.son[ptr1] = cur_match;
+                ptr1 = pair + 1;
+                cur_match = self.son[ptr1];
+                len1 = len;
+            } else {
+                self.son[ptr0] = cur_match;
+                ptr0 = pair;
+                cur_match = self.son[ptr0];
+                len0 = len;
+            }
+        }
+    }
+
+    /// Shared body of `bt_find_func` / `bt_skip_func`. `out` None =
+    /// skip mode.
+    fn tree_walk(
+        &mut self,
+        pos: usize,
+        cur_match_in: u32,
+        len_limit: u32,
+        len_best_in: u32,
+        mut out: Option<&mut Vec<(u32, u32)>>,
+    ) {
+        let cyclic_pos = (pos as u32) & self.cyclic_mask;
+        let mut ptr0 = ((cyclic_pos << 1) + 1) as usize;
+        let mut ptr1 = (cyclic_pos << 1) as usize;
+        let mut len0 = 0u32;
+        let mut len1 = 0u32;
+        let mut cur_match = cur_match_in;
+        let mut len_best = len_best_in;
+        let mut depth_left = self.depth;
+        let empty = BT4_EMPTY;
+
+        loop {
+            let delta = (pos as u32).wrapping_sub(cur_match);
+            if depth_left == 0 || delta >= self.cyclic_size || cur_match == empty {
+                self.son[ptr0] = empty;
+                self.son[ptr1] = empty;
+                return;
+            }
+            depth_left -= 1;
+
+            let pair_base = ((cyclic_pos.wrapping_sub(delta)) & self.cyclic_mask) << 1;
+            let pair = pair_base as usize;
+            let pb = pos - delta as usize;
+            let mut len = len0.min(len1);
+
+            // The C reads pb[len]/cur[len] one past len_limit into the
+            // dictionary buffer's slack; at len == len_limit the walk
+            // cannot extend or record anything (len_best >= len_limit
+            // already holds there), so the comparison is only needed
+            // while len < len_limit.
+            if len < len_limit && self.data[pb + len as usize] == self.data[pos + len as usize] {
+                len = self.match_len(pb, pos, len + 1, len_limit);
+                if len_best < len {
+                    len_best = len;
+                    if let Some(o) = out.as_deref_mut() {
+                        o.push((len, delta - 1));
+                    }
+                    if len == len_limit {
+                        let p1 = self.son[pair];
+                        let p0 = self.son[pair + 1];
+                        self.son[ptr1] = p1;
+                        self.son[ptr0] = p0;
+                        return;
+                    }
+                }
+            }
+
+            if len < len_limit && self.data[pb + len as usize] < self.data[pos + len as usize] {
+                self.son[ptr1] = cur_match;
+                ptr1 = pair + 1;
+                cur_match = self.son[ptr1];
+                len1 = len;
+            } else {
+                self.son[ptr0] = cur_match;
+                ptr0 = pair;
+                cur_match = self.son[ptr0];
+                len0 = len;
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod bt4_tests {
+    use super::Bt4MatchFinder;
+
+    #[test]
+    fn finds_repeated_phrase() {
+        let data = b"abcdefgh abcdefgh abcdefgh".as_slice();
+        let mut mf = Bt4MatchFinder::new(data, 1 << 16, 64, 0);
+        let mut out = Vec::new();
+        let mut best = 0;
+        for pos in 0..data.len().saturating_sub(4) {
+            out.clear();
+            best = best.max(mf.find(pos, &mut out));
+            for &(len, dist) in &out {
+                let back = pos - dist as usize - 1;
+                assert_eq!(
+                    &data[pos..pos + len as usize],
+                    &data[back..back + len as usize]
+                );
+            }
+        }
+        assert!(best >= 8, "expected the 9-byte repeats, got {best}");
+    }
+
+    #[test]
+    fn skip_keeps_tree_valid() {
+        let data = b"the quick brown fox jumps over the lazy dog the quick brown fox".as_slice();
+        let mut mf = Bt4MatchFinder::new(data, 1 << 16, 64, 0);
+        for pos in 0..20 {
+            mf.skip(pos);
+        }
+        let mut out = Vec::new();
+        let best = mf.find(45, &mut out);
+        assert!(best >= 4, "expected 'quick' era match, got {best}");
+    }
+
+    #[test]
+    fn windowed_positions_expire() {
+        // With a tiny window, candidates beyond dict_size must never
+        // be returned.
+        let mut data = vec![0u8; 4096];
+        for (i, b) in data.iter_mut().enumerate() {
+            *b = (i % 251) as u8;
+        }
+        let dict = 512u32;
+        let mut mf = Bt4MatchFinder::new(&data, dict, 64, 0);
+        let mut out = Vec::new();
+        for pos in 0..data.len() - 4 {
+            out.clear();
+            mf.find(pos, &mut out);
+            for &(_, dist) in &out {
+                assert!(dist < dict, "dist {dist} beyond window {dict}");
+            }
+        }
+    }
+}

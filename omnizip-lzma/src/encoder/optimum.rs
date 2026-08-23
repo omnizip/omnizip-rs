@@ -7,10 +7,10 @@
 //! train.
 //!
 //! The driver keeps its own match-finder position bookkeeping
-//! (`read_pos` / `read_ahead`, mirroring `lzma_mf`) plus the HC4
-//! hash-2/hash-3 pre-pass tables, and pulls candidates from the
-//! shared [`HashChainMatchFinder`] chain walk
-//! ([`HashChainMatchFinder::walk_chain_ladder`]).
+//! (`read_pos` / `read_ahead`, mirroring `lzma_mf`) and pulls
+//! candidate ladders from the windowed BT4 finder
+//! ([`omnizip_codecs::Bt4MatchFinder`]) — the same finder the
+//! reference uses for all NORMAL-mode presets.
 
 #![forbid(unsafe_code)]
 // Line-by-line C port: helper1/helper2 keep the original's shape
@@ -26,12 +26,12 @@
 
 use crate::coder::distance_encoder::distance_slot;
 use crate::encoder::lzma1::Lzma1Encoder;
-use crate::encoder::match_finder::MatchFinder;
 use crate::range_coder::price::{
     rc_bit_0_price, rc_bit_1_price, rc_bit_price, rc_bittree_price, rc_bittree_reverse_price,
     rc_direct_price,
 };
 use crate::state::LzmaState;
+use omnizip_codecs::Bt4MatchFinder;
 
 const REPS: usize = 4;
 const OPTS: usize = 1 << 12;
@@ -89,8 +89,6 @@ pub struct OptimumState {
     read_ahead: u32,
     nice_len: u32,
     dict_size: u32,
-    hash2: Vec<u32>,
-    hash3: Vec<u32>,
     matches: Vec<MatchC>,
     longest_match_length: u32,
     opts: Vec<Optimal>,
@@ -104,14 +102,6 @@ pub struct OptimumState {
     align_price_count: u32,
     stats_file_pos: Option<u64>,
     ladder: Vec<(u32, u32)>,
-}
-
-const HASH_SENTINEL: u32 = u32::MAX;
-
-fn hash3_value(data: &[u8], pos: usize) -> u32 {
-    let v =
-        u32::from(data[pos]) | (u32::from(data[pos + 1]) << 8) | (u32::from(data[pos + 2]) << 16);
-    (v.wrapping_mul(2_654_435_761) >> 8) & 0xFFFF
 }
 
 /// `lzma_memcmplen` — count matching bytes between `a` and `b`,
@@ -147,8 +137,6 @@ impl OptimumState {
             read_ahead: 0,
             nice_len: nice_len.clamp(4, MATCH_LEN_MAX),
             dict_size,
-            hash2: vec![HASH_SENTINEL; 1 << 16],
-            hash3: vec![HASH_SENTINEL; 1 << 16],
             matches: Vec::with_capacity(MATCH_LEN_MAX as usize + 1),
             longest_match_length: 0,
             opts: vec![Optimal::new(); OPTS],
@@ -166,17 +154,6 @@ impl OptimumState {
             ladder: Vec::with_capacity(64),
         }
     }
-
-    fn update_hash23(&mut self, data: &[u8], pos: usize) {
-        if pos + 3 <= data.len() {
-            let h3 = hash3_value(data, pos) as usize;
-            self.hash3[h3] = pos as u32;
-        }
-        if pos + 2 <= data.len() {
-            let h2 = (u32::from(data[pos]) | (u32::from(data[pos + 1]) << 8)) as usize;
-            self.hash2[h2] = pos as u32;
-        }
-    }
 }
 
 /// Port of `helper1` — the first DP step at the decision position.
@@ -186,7 +163,7 @@ fn helper1(
     enc: &Lzma1Encoder,
     st: &mut OptimumState,
     input: &[u8],
-    mf: &mut MatchFinder<'_>,
+    bt: &mut Bt4MatchFinder<'_>,
     position: u32,
     back_res: &mut u32,
     len_res: &mut u32,
@@ -196,7 +173,7 @@ fn helper1(
     let matches_count;
 
     if st.read_ahead == 0 {
-        mf_find(enc, st, input, mf);
+        mf_find(enc, st, input, bt);
         len_main = st.longest_match_length;
         matches_count = st.matches.len();
     } else {
@@ -231,14 +208,14 @@ fn helper1(
     if rep_lens[rep_max_index] >= nice_len {
         *back_res = rep_max_index as u32;
         *len_res = rep_lens[rep_max_index];
-        mf_skip(st, input, mf, *len_res - 1);
+        mf_skip(st, input, bt, *len_res - 1);
         return None;
     }
 
     if len_main >= nice_len {
         *back_res = st.matches[matches_count - 1].dist + REPS as u32;
         *len_res = len_main;
-        mf_skip(st, input, mf, len_main - 1);
+        mf_skip(st, input, bt, len_main - 1);
         return None;
     }
 
@@ -788,11 +765,10 @@ fn backward(st: &mut OptimumState, len_res: &mut u32, back_res: &mut u32, cur_in
     *back_res = st.opts[0].back_prev;
 }
 
-/// Port of the HC4 `mf_find`: hash-2/hash-3 pre-pass plus the shared
-/// finder's chain walk, filling `st.matches` with the improving-length
-/// ladder and setting `st.longest_match_length`. Advances the finder
-/// by one position.
-fn mf_find(_enc: &Lzma1Encoder, st: &mut OptimumState, input: &[u8], mf: &mut MatchFinder<'_>) {
+/// Port of `lzma_mf_find` driving the BT4 finder: fills `st.matches`
+/// with the improving-length ladder and sets `st.longest_match_length`.
+/// Advances the finder by one position.
+fn mf_find(_enc: &Lzma1Encoder, st: &mut OptimumState, input: &[u8], bt: &mut Bt4MatchFinder<'_>) {
     let pos = st.read_pos;
     st.matches.clear();
 
@@ -803,87 +779,23 @@ fn mf_find(_enc: &Lzma1Encoder, st: &mut OptimumState, input: &[u8], mf: &mut Ma
 
     let avail = (input.len() - pos) as u32;
     if avail < 4 {
-        // header(false, 4): too little input for the 4-byte hash.
-        mf.advance();
-        st.update_hash23(input, pos);
+        // header(true, 4): too little input for the 4-byte hash.
+        bt.skip(pos);
         st.read_pos += 1;
         st.read_ahead += 1;
         st.longest_match_length = 0;
         return;
     }
 
-    let len_limit = st.nice_len.min(avail);
+    st.ladder.clear();
+    let mut ladder = std::mem::take(&mut st.ladder);
+    bt.find(pos, &mut ladder);
+    st.ladder = ladder;
+    st.matches
+        .extend(st.ladder.iter().map(|&(len, dist)| MatchC { len, dist }));
 
-    // hash-2 pre-pass.
-    let h2 = (u32::from(input[pos]) | (u32::from(input[pos + 1]) << 8)) as usize;
-    let h2_old = st.hash2[h2];
-    let delta2 = if h2_old == HASH_SENTINEL {
-        u32::MAX
-    } else {
-        (pos as u32).wrapping_sub(h2_old)
-    };
-
-    let h3 = hash3_value(input, pos) as usize;
-    let h3_old = st.hash3[h3];
-    let delta3 = if h3_old == HASH_SENTINEL {
-        u32::MAX
-    } else {
-        (pos as u32).wrapping_sub(h3_old)
-    };
-
-    st.hash2[h2] = pos as u32;
-    st.hash3[h3] = pos as u32;
-
-    let cyclic_ok = |d: u32| d != 0 && d < st.dict_size && (d as usize) <= pos;
-
-    let mut len_best = 1u32;
-    let mut best_delta = 0u32;
-
-    if cyclic_ok(delta2) && input[pos - delta2 as usize] == input[pos] {
-        len_best = 2;
-        st.matches.push(MatchC {
-            len: 2,
-            dist: delta2 - 1,
-        });
-        best_delta = delta2;
-    }
-
-    if delta2 != delta3 && cyclic_ok(delta3) && input[pos - delta3 as usize] == input[pos] {
-        len_best = 3;
-        st.matches.push(MatchC {
-            len: 3,
-            dist: delta3 - 1,
-        });
-        best_delta = delta3;
-    }
-
-    if !st.matches.is_empty() {
-        let back = pos - best_delta as usize;
-        len_best = memcmplen(input, pos, back, len_best, len_limit);
-        st.matches.last_mut().expect("non-empty").len = len_best;
-    }
-
-    if len_best == len_limit && len_best > 0 {
-        mf.advance();
-    } else {
-        if len_best < 3 {
-            len_best = 3;
-        }
-        mf.advance();
-        st.ladder.clear();
-        let mut ladder = std::mem::take(&mut st.ladder);
-        mf.walk_chain_ladder(pos, len_limit, len_best, &mut ladder);
-        st.ladder = ladder;
-        for &(len, dist_1based) in &st.ladder {
-            st.matches.push(MatchC {
-                len,
-                dist: dist_1based - 1,
-            });
-        }
-    }
-
-    // Port of the lzma_mf_find wrapper: the longest length comes from
-    // the ladder's last entry (0 when empty), and a match that hit
+    // The lzma_mf_find wrapper: the longest length comes from the
+    // ladder's last entry (0 when empty), and a match that hit
     // nice_len gets extended up to the real cap before returning.
     let mut longest = st.matches.last().map_or(0, |m| m.len);
     if longest == st.nice_len {
@@ -899,12 +811,11 @@ fn mf_find(_enc: &Lzma1Encoder, st: &mut OptimumState, input: &[u8], mf: &mut Ma
 
 /// Port of `mf_skip`: run `amount` positions through the finder
 /// without searching.
-fn mf_skip(st: &mut OptimumState, input: &[u8], mf: &mut MatchFinder<'_>, amount: u32) {
+fn mf_skip(st: &mut OptimumState, input: &[u8], bt: &mut Bt4MatchFinder<'_>, amount: u32) {
     for _ in 0..amount {
         let p = st.read_pos;
-        if p < input.len() {
-            mf.advance();
-            st.update_hash23(input, p);
+        if p + 4 <= input.len() {
+            bt.skip(p);
         }
         st.read_pos += 1;
     }
@@ -1089,7 +1000,7 @@ impl Lzma1Encoder {
         &mut self,
         st: &mut OptimumState,
         input: &[u8],
-        mf: &mut MatchFinder<'_>,
+        bt: &mut Bt4MatchFinder<'_>,
         position: u32,
     ) -> (u32, u32) {
         if st.opts_end_index != st.opts_current_index {
@@ -1110,7 +1021,7 @@ impl Lzma1Encoder {
 
         let mut back_res = 0u32;
         let mut len_res = 0u32;
-        let len_end = helper1(self, st, input, mf, position, &mut back_res, &mut len_res);
+        let len_end = helper1(self, st, input, bt, position, &mut back_res, &mut len_res);
         let Some(mut len_end) = len_end else {
             return (back_res, len_res);
         };
@@ -1119,7 +1030,7 @@ impl Lzma1Encoder {
 
         let mut cur = 1u32;
         while cur < len_end {
-            mf_find(self, st, input, mf);
+            mf_find(self, st, input, bt);
             let longest = st.longest_match_length;
             if longest >= st.nice_len {
                 break;
@@ -1152,12 +1063,12 @@ impl Lzma1Encoder {
         &mut self,
         st: &mut OptimumState,
         input: &[u8],
-        mf: &mut MatchFinder<'_>,
+        bt: &mut Bt4MatchFinder<'_>,
     ) {
         if input.is_empty() {
             return;
         }
-        mf_skip(st, input, mf, 1);
+        mf_skip(st, input, bt, 1);
         st.read_ahead = 0;
         self.encode_literal_byte(input[0], 0, 0, 0);
     }

@@ -52,7 +52,8 @@ pub use hash::{djb2_32, djb2_32_tagged, fnv1a_32, fnv1a_32_tagged};
 pub use huffman::HuffmanLengths;
 pub use level::CompressionLevel;
 pub use matchfinder::{
-    BankMatchFinder, BinaryTreeMatchFinder, HashChainConfig, HashChainMatchFinder, Lz77Match,
+    BankMatchFinder, BinaryTreeMatchFinder, Bt4MatchFinder, HashChainConfig, HashChainMatchFinder,
+    Lz77Match,
 };
 pub use memory_budget::MemoryBudget;
 pub use options::Options;
