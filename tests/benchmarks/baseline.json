@@ -1,84 +1,84 @@
 {
-  "version": "0.16.86",
+  "version": "0.16.87",
   "commit": "unknown",
-  "timestamp": "unix:1787476583",
+  "timestamp": "unix:1787480364",
   "results": {
     "brotli/q11/csv_100k": {
       "input_bytes": 65768,
       "output_bytes": 8654,
       "ratio": 0.13158374893565258,
-      "elapsed_ms": 676,
-      "mbps": 0.09720614970254308
+      "elapsed_ms": 1018,
+      "mbps": 0.06456081496001774
     },
     "brotli/q5/binary_100k": {
       "input_bytes": 25600,
       "output_bytes": 811,
       "ratio": 0.0316796875,
-      "elapsed_ms": 305,
-      "mbps": 0.08366898295203617
+      "elapsed_ms": 491,
+      "mbps": 0.052081951389953564
     },
     "brotli/q5/csv_100k": {
       "input_bytes": 65768,
       "output_bytes": 10119,
       "ratio": 0.1538590195839922,
-      "elapsed_ms": 777,
-      "mbps": 0.08459084909987653
+      "elapsed_ms": 1315,
+      "mbps": 0.049979681125713125
     },
     "brotli/q5/text_100k": {
       "input_bytes": 102400,
       "output_bytes": 316,
       "ratio": 0.0030859375,
-      "elapsed_ms": 1626,
-      "mbps": 0.06295787664374632
+      "elapsed_ms": 2151,
+      "mbps": 0.047604690457050604
     },
     "lz4_hc/l9/binary_100k": {
       "input_bytes": 25600,
       "output_bytes": 1347,
       "ratio": 0.0526171875,
       "elapsed_ms": 1,
-      "mbps": 18.58495867024621
+      "mbps": 13.827866824678853
     },
     "lz4_hc/l9/csv_100k": {
       "input_bytes": 65768,
       "output_bytes": 34364,
       "ratio": 0.5225033450918379,
-      "elapsed_ms": 25,
-      "mbps": 2.568272455250582
+      "elapsed_ms": 40,
+      "mbps": 1.619992891717116
     },
     "lzma/l6/csv_100k": {
       "input_bytes": 65768,
       "output_bytes": 17564,
       "ratio": 0.2670599683736772,
-      "elapsed_ms": 214,
-      "mbps": 0.3066388361741361
+      "elapsed_ms": 301,
+      "mbps": 0.21786179231227518
     },
     "lzma/l6/text_100k": {
       "input_bytes": 102400,
       "output_bytes": 312,
       "ratio": 0.003046875,
-      "elapsed_ms": 412,
-      "mbps": 0.24832615319925228
+      "elapsed_ms": 691,
+      "mbps": 0.14818635437214453
     },
     "zstd/l9/binary_100k": {
       "input_bytes": 25600,
       "output_bytes": 1791,
       "ratio": 0.0699609375,
-      "elapsed_ms": 3,
-      "mbps": 6.938297396024464
+      "elapsed_ms": 7,
+      "mbps": 3.4200402602864393
     },
     "zstd/l9/csv_100k": {
       "input_bytes": 65768,
       "output_bytes": 29588,
       "ratio": 0.44988444228196084,
-      "elapsed_ms": 12,
-      "mbps": 5.274309314727936
+      "elapsed_ms": 25,
+      "mbps": 2.553944148276635
     },
     "zstd/l9/text_100k": {
       "input_bytes": 102400,
       "output_bytes": 210,
       "ratio": 0.00205078125,
       "elapsed_ms": 2,
-      "mbps": 43.61314459290708
+      "mbps": 38.40899730761931
     }
   }
 }

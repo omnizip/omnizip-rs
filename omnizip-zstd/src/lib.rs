@@ -284,6 +284,25 @@ pub fn decompress_with_dict(
 #[cfg(test)]
 mod tests {
 
+    /// Regression (user report, 100 MB benchmark): the long-distance
+    /// matcher emitted offsets our decoder resolved to different
+    /// bytes on inputs past the first LDM table refill — Best failed
+    /// its frame checksum above ~1 MiB. LDM is disabled by default;
+    /// this pins the round-trip through the previously failing band.
+    #[test]
+    fn best_round_trips_past_first_ldm_refill() {
+        let mut data = Vec::new();
+        for i in 0..60_000u32 {
+            data.extend_from_slice(format!("row {i}, payload text with structure\n").as_bytes());
+        }
+        data.truncate(1_500_000);
+        let c = crate::compress(&data, ZstdLevel::Best).expect("encode");
+        let out = crate::decompress(&c, data.len() as u32).expect("decode");
+        assert_eq!(out, data);
+    }
+
+
+
     #[test]
     fn decodes_reference_cli_frames() {
         // Regression (BUGREPORT-zstd-0.1.0): the offset-code table
