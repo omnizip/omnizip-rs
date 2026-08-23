@@ -61,6 +61,13 @@ pub struct Lzma1Encoder {
     base_prev_byte: u8,
     /// Use BT4 binary-tree match finder.
     use_bt4: bool,
+    /// Emit the EOPM marker + range-coder flush at the end of the
+    /// stream. True for standalone LZMA1/alone/lzip streams; LZMA2
+    /// chunks must NOT contain an EOPM — the reference decoder stops
+    /// at the chunk's uncompressed size and then requires the range
+    /// coder to be exactly finished (`rc_is_finished`), rejecting the
+    /// chunk otherwise (xz: "Compressed data is corrupt").
+    emit_eopm: bool,
 }
 
 impl Lzma1Encoder {
@@ -111,7 +118,18 @@ impl Lzma1Encoder {
             base_pos: 0,
             base_prev_byte: 0,
             use_bt4: false,
+            emit_eopm: true,
         }
+    }
+
+    /// Suppress the EOPM marker (LZMA2 chunk mode). The range-coder
+    /// flush is still written so a size-bounded decoder terminates
+    /// cleanly at the chunk's uncompressed size.
+    #[must_use]
+    pub fn without_eopm(mut self) -> Self {
+        self.emit_eopm = false;
+        self.range_encoder.set_pad_flush();
+        self
     }
 
     /// Set the global position offset. Used by the LZMA2 encoder so
@@ -197,7 +215,7 @@ impl Lzma1Encoder {
     /// Internal encode: dispatches between lazy and optimal parsing.
     fn encode_with_parser(mut self, input: &[u8], use_optimal: bool) -> Vec<u8> {
         if input.is_empty() {
-            self.encode_eopm(0);
+            self.encode_eopm_if_enabled(0);
             self.range_encoder.flush();
             return self.range_encoder.finish();
         }
@@ -262,7 +280,7 @@ impl Lzma1Encoder {
             }
         }
 
-        self.encode_eopm(input.len());
+        self.encode_eopm_if_enabled(input.len());
         self.range_encoder.flush();
         self.range_encoder.finish()
     }
@@ -321,7 +339,7 @@ impl Lzma1Encoder {
             }
         }
 
-        self.encode_eopm(input.len());
+        self.encode_eopm_if_enabled(input.len());
         self.range_encoder.flush();
         self.range_encoder.finish()
     }
@@ -390,7 +408,7 @@ impl Lzma1Encoder {
             }
         }
 
-        self.encode_eopm(input.len());
+        self.encode_eopm_if_enabled(input.len());
         self.range_encoder.flush();
         self.range_encoder.finish()
     }
@@ -423,7 +441,7 @@ impl Lzma1Encoder {
             }
         }
 
-        self.encode_eopm(input.len());
+        self.encode_eopm_if_enabled(input.len());
         self.range_encoder.flush();
         self.range_encoder.finish()
     }
@@ -460,7 +478,7 @@ impl Lzma1Encoder {
             }
         }
 
-        self.encode_eopm(input.len());
+        self.encode_eopm_if_enabled(input.len());
         self.range_encoder.flush();
         self.range_encoder.finish()
     }
@@ -548,6 +566,12 @@ impl Lzma1Encoder {
     }
 
     /// Emit the LZMA End-of-Payload-Marker.
+    fn encode_eopm_if_enabled(&mut self, pos: usize) {
+        if self.emit_eopm {
+            self.encode_eopm(pos);
+        }
+    }
+
     fn encode_eopm(&mut self, pos: usize) {
         let abs_pos = self.base_pos.wrapping_add(pos as u32);
         let pos_state = abs_pos & self.pb_mask;

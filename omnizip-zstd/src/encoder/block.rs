@@ -315,7 +315,7 @@ pub fn encode_frame_with_dict(
             // just this block's plaintext region.
             let mut seq_store = SeqStore::new();
             seq_store.reset(rep_offsets);
-            let min_match = params.min_match.max(4) as usize;
+            let min_match = params.min_match.max(5) as usize;
 
             match params.strategy {
                 Strategy::Fast | Strategy::DoubleFast | Strategy::Greedy => {
@@ -497,7 +497,7 @@ fn write_block(
     // Try compressed block.
     let mut seq_store = SeqStore::new();
     seq_store.reset(*rep_offsets);
-    let min_match = params.min_match.max(4) as usize;
+    let min_match = params.min_match.max(5) as usize;
 
     // Configure match finder depth based on strategy.
     // search_log controls hash-chain walking depth (1 << search_log).
@@ -588,7 +588,7 @@ fn write_block_ldm(
     // Run the LDM-aware lazy2 match finder over this block.
     let mut seq_store = SeqStore::new();
     seq_store.reset(*rep_offsets);
-    let min_match = params.min_match.max(4) as usize;
+    let min_match = params.min_match.max(5) as usize;
 
     let src = &plaintext[..block_end];
     compress_block_lazy2_with_ldm(
@@ -644,7 +644,7 @@ fn write_block_cross(
 
     let mut seq_store = SeqStore::new();
     seq_store.reset(*rep_offsets);
-    let min_match = params.min_match.max(4) as usize;
+    let min_match = params.min_match.max(5) as usize;
 
     let src = &plaintext[..block_end];
     use crate::encoder::cparams::Strategy;

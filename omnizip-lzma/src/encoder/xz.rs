@@ -107,7 +107,14 @@ pub fn xz_compress_with_options(input: &[u8], options: &LzmaOptions) -> Result<V
     let index_start = out.len();
     out.push(0x00);
     out.push(0x01);
-    let unpadded_size = (block_data_end - block_data_start) as u64;
+    // Per the .xz spec, Unpadded Size = Block Header size + Compressed
+    // Data size + Check size — padding EXCLUDED. The previous value
+    // (lzma2 payload + padding) made every stream fail `xz -t`'s index
+    // validation; small-fixture tests only round-tripped through our
+    // own decoder, which does not verify the index sizes.
+    let unpadded_size = (block_data_start - block_header_start) as u64
+        + lzma2_payload.len() as u64
+        + 4;
     let total_uncompressed = input.len() as u64;
     write_vli(&mut out, unpadded_size);
     write_vli(&mut out, total_uncompressed);
@@ -121,13 +128,15 @@ pub fn xz_compress_with_options(input: &[u8], options: &LzmaOptions) -> Result<V
     // 4. Stream footer.
     let index_size = (out.len() - index_start) as u32;
     let backward_size = (index_size / 4) - 1;
-    let mut footer_body = Vec::new();
-    footer_body.extend_from_slice(&backward_size.to_le_bytes());
-    footer_body.extend_from_slice(&flags);
-    footer_body.extend_from_slice(&XZ_FOOTER_MAGIC);
-    let footer_crc = crc32(&footer_body);
+    // Stream Footer layout: CRC32 (4) + Backward Size (4) + Stream
+    // Flags (2) + Magic "YZ". The CRC covers Backward Size + Stream
+    // Flags ONLY — including the magic (as before) produces a wrong
+    // CRC and every stream fails `xz -t`.
+    let footer_core = [&backward_size.to_le_bytes()[..], &flags[..]].concat();
+    let footer_crc = crc32(&footer_core);
     out.extend_from_slice(&footer_crc.to_le_bytes());
-    out.extend_from_slice(&footer_body);
+    out.extend_from_slice(&footer_core);
+    out.extend_from_slice(&XZ_FOOTER_MAGIC);
 
     Ok(out)
 }
