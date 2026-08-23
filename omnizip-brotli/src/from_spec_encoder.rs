@@ -539,7 +539,12 @@ pub fn compress_with_quality(input: &[u8], quality: i32) -> Vec<u8> {
             // (H5 at q4-8: block min(q-1,9); H9 at q9: block 8;
             // num_last_dists 4/10/16). Binary keeps the measured
             // block_bits=6 tuning that beats the reference.
-            let (block_bits, dists) = if is_text_like(input) {
+            let env_block = std::env::var("BROTLI_BLOCK_BITS")
+                .ok()
+                .and_then(|v| v.parse::<usize>().ok());
+            let (block_bits, dists) = if let Some(b) = env_block {
+                (b as u32, 4u32)
+            } else if is_text_like(input) {
                 let b = if q >= 9 { 8 } else { (q - 1).min(9) };
                 let d = if q < 7 {
                     4
@@ -550,11 +555,15 @@ pub fn compress_with_quality(input: &[u8], quality: i32) -> Vec<u8> {
                 };
                 (b as u32, d)
             } else {
-                // Reference H5/H6 params (block = min(q-1,9)), not
-                // the old block-6 tuning: the 64-slot banks cost 4x
-                // the scan per lookup and blew the time bar.
+                // Binary: a 2-slot bank. Measured on FITS 4MB q5, the
+                // reference-shaped 16-slot bank is pure waste — the
+                // reject byte kills nearly every extra entry
+                // (extends/find = 1.5) while the scan dominates
+                // encode time: block_bits 4 -> 1 keeps the output
+                // size-neutral (2,660,465 vs 2,660,549) and cuts the
+                // bank scan ~3x. Text keeps the reference params.
                 (
-                    if q >= 9 { 8 } else { (q - 1).min(9) } as u32,
+                    if q >= 9 { 8 } else { 1 } as u32,
                     if q < 7 {
                         4
                     } else if q < 9 {
@@ -572,7 +581,7 @@ pub fn compress_with_quality(input: &[u8], quality: i32) -> Vec<u8> {
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(if q < 7 && n <= 1 << 20 { 14 } else { 15 });
             let mut bank =
-                omnizip_codecs::BankMatchFinder::new(input, bucket_bits, block_bits, dists);
+                omnizip_codecs::BankMatchFinder::new(input, bucket_bits, block_bits, dists as usize);
             // Upstream 1.2.0 ChooseHasher: quality 5-9 with size_hint
             // >= 1 MiB (and lgwin >= 19) runs H6 — the 5-byte 64-bit
             // kHashMul64 hash — not H5's 4-byte kHashMul32. Smaller
@@ -2063,6 +2072,15 @@ fn emit_metablock_from_commands(
         .iter()
         .map(canonical_with_reverse)
         .collect();
+    // Flat single-table view for the emission fast paths: one bounds
+    // check per literal instead of Vec-of-Vec double indirection.
+    let lit_codes_flat: Vec<(u32, u8)> = {
+        let mut f = Vec::with_capacity(ntrees * 256);
+        for t in &lit_codes_per_tree {
+            f.extend_from_slice(t);
+        }
+        f
+    };
     let cmd_codes_per_block: Vec<Vec<(u32, u8)>> = cmd_lengths_per_block
         .iter()
         .map(canonical_with_reverse)
@@ -2200,6 +2218,37 @@ fn emit_metablock_from_commands(
             bw.write_bits(extra, u32::from(entry.copy_len_extra_bits));
         }
 
+        // Fast path: no literal block switches — the common shape for
+        // binary inputs (4-tree LSB6 map) and every switch-free
+        // metablock. Skips the block-switch countdown and the
+        // Vec-of-Vec code lookup; the single-tree case skips the
+        // context computation entirely.
+        if nbltypes_l <= 1 {
+            let lits = &stream.literals[..];
+            if ntrees == 1 {
+                for _ in 0..cmd.insert_len {
+                    let b = lits[lit_idx];
+                    let (lc, ll) = lit_codes_flat[usize::from(b)];
+                    bw.write_bits(lc, u32::from(ll));
+                    p2 = p1;
+                    p1 = b;
+                    lit_idx += 1;
+                    out_pos += 1;
+                }
+            } else {
+                for _ in 0..cmd.insert_len {
+                    let b = lits[lit_idx];
+                    let ctx = compute_context_id(p1, p2, context_mode) as usize;
+                    let tree = usize::from(lit_ctx_map[ctx]);
+                    let (lc, ll) = lit_codes_flat[(tree << 8) + usize::from(b)];
+                    bw.write_bits(lc, u32::from(ll));
+                    p2 = p1;
+                    p1 = b;
+                    lit_idx += 1;
+                    out_pos += 1;
+                }
+            }
+        } else {
         for _ in 0..cmd.insert_len {
             // Literal block switch BEFORE the literal (decoder checks
             // block_length == 0 at the start of each literal read).
@@ -2272,6 +2321,7 @@ fn emit_metablock_from_commands(
             if nbltypes_l > 1 {
                 lit_block_remaining = lit_block_remaining.saturating_sub(1);
             }
+        }
         }
 
         if env_flag!("BROTLI_CMD_TRACE") {
