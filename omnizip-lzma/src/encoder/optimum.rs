@@ -1227,7 +1227,7 @@ impl Lzma1Encoder {
                     if s[6] >= f && s[7] == 0 {
                         s[7] = 1;
                         eprintln!(
-                            "symstats: lits={} shortrep={} rep={} match={} matchlen={} distsum={}",
+                            "symstats: literal={} shortrep={} rep={} match={} matchlen={} distsum={}",
                             s[0], s[1], s[2], s[3], s[4], s[5]
                         );
                     }
