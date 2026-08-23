@@ -690,6 +690,18 @@ fn encode_compressed_content(
     seq_store: &SeqStore,
     last_huf_weights: &mut Option<Vec<u8>>,
 ) -> Result<(), ZstdError> {
+    // Single-distinct-symbol literal sets: the RLE literals section
+    // (block_type 01) — header + one byte. The Huffman path CANNOT
+    // represent this: a Huffman table needs ≥ 2 symbols, and the old
+    // degenerate fallback (weights over symbols {0,1}) produced codes
+    // for the wrong symbols — the real literal byte encoded as a
+    // zero-bit code and decoded as a flood of 0x00 (the 100 MB Best
+    // corruption: LDM parses leave long single-byte literal runs).
+    let single_symbol = seq_store
+        .literals
+        .first()
+        .is_some_and(|&b| seq_store.literals.iter().all(|&x| x == b));
+
     // Build Raw literals section (always correct).
     let mut raw_literals = Vec::new();
     write_raw_literals(&mut raw_literals, &seq_store.literals);
@@ -725,8 +737,13 @@ fn encode_compressed_content(
         Some(treeless_literals.len())
     };
 
-    // Prefer Treeless → Compressed → Raw (smallest wins).
-    if let Some(tl) = treeless_len {
+    // RLE literals (single distinct symbol) always win when present.
+    if single_symbol {
+        let b = seq_store.literals[0];
+        write_rle_literals(out, b, seq_store.literals.len());
+        // No Huffman table established for a successor Treeless block.
+        *last_huf_weights = None;
+    } else if let Some(tl) = treeless_len {
         if tl < raw_len && (huf_len.is_none() || tl <= huf_len.unwrap()) {
             out.extend_from_slice(&treeless_literals);
         } else if let Some(hl) = huf_len {
@@ -784,6 +801,24 @@ fn write_raw_literals(out: &mut Vec<u8>, literals: &[u8]) {
         out.extend_from_slice(&lhc.to_le_bytes()[..3]);
     }
     out.extend_from_slice(literals);
+}
+
+/// Write an RLE literals section (block_type 01): the size-format
+/// header carries the REGENERATED size, followed by a single byte —
+/// the literal repeated `lit_size` times. This is the format's
+/// intended representation for a single-distinct-symbol literal set.
+fn write_rle_literals(out: &mut Vec<u8>, byte: u8, lit_size: usize) {
+    // Same size-format layout as Raw, with block_type bits = 01.
+    if lit_size < 32 {
+        out.push(((lit_size << 3) as u8) | 0x01);
+    } else if lit_size < 4096 {
+        let lhc: u16 = ((lit_size as u16) << 4) | 0x05; // lhl_code=1, type=01
+        out.extend_from_slice(&lhc.to_le_bytes());
+    } else {
+        let lhc: u32 = ((lit_size as u32) << 4) | 0x0D; // lhl_code=3, type=01
+        out.extend_from_slice(&lhc.to_le_bytes()[..3]);
+    }
+    out.push(byte);
 }
 
 /// Write a Raw block header (3 bytes LE) + data.

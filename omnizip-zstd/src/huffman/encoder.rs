@@ -30,9 +30,20 @@ pub fn build_weights(literals: &[u8]) -> Vec<u8> {
         .collect();
 
     if present.len() < 2 {
+        // A Huffman table needs ≥ 2 symbols. Build one over {the
+        // present symbol, symbol 0} so every real literal encodes to
+        // a REAL code (the old {0,1} table gave the actual symbol a
+        // zero-length code). Callers with single-distinct-symbol
+        // literals should emit an RLE literals section instead (see
+        // encode_compressed_content); this is the safety net.
         let mut weights = vec![0u8; 256];
-        weights[0] = 1;
-        weights[1] = 1;
+        let sym = usize::from(present.first().map_or(0, |&(b, _)| b));
+        weights[sym] = 1;
+        if sym != 0 {
+            weights[0] = 1;
+        } else {
+            weights[1] = 1;
+        }
         return weights;
     }
 
