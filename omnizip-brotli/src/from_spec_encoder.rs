@@ -881,7 +881,7 @@ fn emit_metablock_from_commands(
 ) {
     let _ = is_last;
     // Choose distance-code configuration from the parsed commands.
-    let dist_cfg = DistanceConfig::choose(&commands);
+    let dist_cfg = DistanceConfig::choose(&commands, quality);
 
     let Some(stream) = build_symbol_stream(&commands, input, mlen_offset, &dist_cfg) else {
         // Header consistency: NBLTYPESI/D must still be written before
@@ -3838,7 +3838,7 @@ impl DistCostModel {
         with_cmd_costs: bool,
         setcost_dist: bool,
     ) -> Self {
-        let cfg = DistanceConfig::choose(commands);
+        let cfg = DistanceConfig::choose(commands, 0);
         let mut freq = [0u32; 704];
         let mut cmd_freq = [0u32; 704];
         let mut rep = RepBuffer::new();
@@ -5802,7 +5802,7 @@ fn exact_emission_bits(
     mlen_offset: usize,
     use_context: bool,
 ) -> Option<u64> {
-    let dist_cfg = DistanceConfig::choose(commands);
+    let dist_cfg = DistanceConfig::choose(commands, 0);
     let stream = build_symbol_stream(commands, input, mlen_offset, &dist_cfg)?;
 
     let mut bits: u64 = 0;
@@ -6110,7 +6110,7 @@ fn score_commands_adaptive(commands: &[Command], input: &[u8], mlen_offset: usiz
     // A rep-code-count approximation overcharges implicit-rep0-heavy
     // parses by the whole distance-symbol cost and rejects parses the
     // real encoder encodes smaller.
-    let cfg = DistanceConfig::choose(commands);
+    let cfg = DistanceConfig::choose(commands, 0);
     let mut rep = RepBuffer::new();
     let mut dist_freq = [0u32; 704];
     let mut dist_extra_bits: u64 = 0;
@@ -6264,7 +6264,7 @@ fn score_commands(commands: &[Command], input: &[u8], mlen_offset: usize) -> u64
 
     // Distance bits: rep-buffer simulation with short codes (exact reps
     // AND rep0/rep1 ± 1-3 variants), else the true explicit cost.
-    let cfg = DistanceConfig::choose(commands);
+    let cfg = DistanceConfig::choose(commands, 0);
     let mut rep = RepBuffer::new();
     let mut dist_bits: u64 = 0;
     let mut cur2 = 0usize;
