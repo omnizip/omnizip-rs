@@ -1014,6 +1014,40 @@ impl<'a> BankMatchFinder<'a> {
         HashChainMatchFinder::match_length(self.data, a, b, limit)
     }
 
+    /// Invariant fast path for the bank scan: callers guarantee
+    /// `a + limit <= data.len()` and `b < a` (candidate positions are
+    /// always older than the current one), so every byte access below
+    /// is in bounds by construction — the generic `match_length`
+    /// re-checks both bounds per step.
+    fn match_len_scan(&self, a: usize, b: usize, limit: u32) -> u32 {
+        let data = self.data;
+        let max = limit as usize;
+        let mut len = 0usize;
+        if max >= 16 {
+            let wa = u128::from_le_bytes(data[a..a + 16].try_into().unwrap());
+            let wb = u128::from_le_bytes(data[b..b + 16].try_into().unwrap());
+            if wa != wb {
+                let diff = wa ^ wb;
+                return diff.trailing_zeros() as u32 / 8;
+            }
+            len = 16;
+        }
+        while len + 8 <= max {
+            let wa = u64::from_le_bytes(data[a + len..a + len + 8].try_into().unwrap());
+            let wb = u64::from_le_bytes(data[b + len..b + len + 8].try_into().unwrap());
+            if wa == wb {
+                len += 8;
+            } else {
+                let diff = wa ^ wb;
+                return (len + diff.trailing_zeros() as usize / 8) as u32;
+            }
+        }
+        while len < max && data[a + len] == data[b + len] {
+            len += 1;
+        }
+        len as u32
+    }
+
     /// Upstream FindLongestMatch: the 16 short-code distance probes
     /// (exact reps, then rep0/rep1 ±1-3 — kDistanceCacheIndex/Offset
     /// with kDistanceShortCodeCost scoring), then the bucket scan
@@ -1049,6 +1083,9 @@ impl<'a> BankMatchFinder<'a> {
         max_len: u32,
         min_len_hint: u32,
     ) -> Option<(u32, u32, u64)> {
+        // match_len_scan assumes `pos + max_len <= data.len()`; clamp
+        // once here so every caller shape satisfies it.
+        let max_len = max_len.min((self.data.len() - pos) as u32);
         // (distance-cache index, offset) per short code — upstream
         // kDistanceCacheIndex/kDistanceCacheOffset.
         const CACHE_INDEX: [u8; 16] = [0, 1, 2, 3, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1];
@@ -1087,7 +1124,7 @@ impl<'a> BankMatchFinder<'a> {
             {
                 continue;
             }
-            let len = self.match_len(pos, prev, max_len);
+            let len = self.match_len_scan(pos, prev, max_len);
             // Upstream: >= 3 always, len 2 only for the two exact-rep
             // codes (rep0/rep1 ride 1-2 bit codes).
             if len < 3 && !(len == 2 && i < 2) {
@@ -1118,7 +1155,7 @@ impl<'a> BankMatchFinder<'a> {
         // bounds checks. The entry body is a macro: a capturing
         // closure defeated inlining and dominated the scan.
         macro_rules! consider {
-            ($e:expr, $data:ident, $reject_limit:ident, $cur_best:ident, $pos_val:ident) => {{
+            ($e:expr, $data:ident, $cur_best:ident, $pos_val:ident) => {{
                 let prev = $e as usize;
                 let backward = pos.wrapping_sub(prev);
                 // Skip the self-entry (find_insert scans before
@@ -1127,12 +1164,14 @@ impl<'a> BankMatchFinder<'a> {
                 // entries are then also beyond (arrival order,
                 // scanned newest-first).
                 if backward != 0 && backward as u32 <= self.max_distance {
-                    if prev < $reject_limit && $data[prev + $cur_best] != $pos_val {
+                    // In-bounds by construction: prev < pos and
+                    // pos + cur_best < len, so prev + cur_best < len.
+                    if $data[prev + $cur_best] != $pos_val {
                         continue;
                     }
                     // Upstream requires len >= 4 from the bucket scan
                     // (FindMatchLengthWithLimitMin4).
-                    let len = self.match_len(pos, prev, max_len);
+                    let len = self.match_len_scan(pos, prev, max_len);
                     if len >= 4 {
                         let score = 7680u64
                             .wrapping_add(540u64.wrapping_mul(u64::from(len)))
@@ -1167,22 +1206,21 @@ impl<'a> BankMatchFinder<'a> {
         } else {
             0xFF
         };
-        let reject_limit = data.len().saturating_sub(cur_best);
 
         let down = count.saturating_sub(bank);
         if count <= bank {
             // Ring not yet wrapped: entry i lives at slot i.
             for &e in bucket[down..count].iter().rev() {
-                consider!(e, data, reject_limit, cur_best, pos_val);
+                consider!(e, data, cur_best, pos_val);
             }
         } else {
             // Wrapped: full ring, two segments newest→0 and mask→oldest.
             let newest = (count - 1) & mask;
             for &e in bucket[0..=newest].iter().rev() {
-                consider!(e, data, reject_limit, cur_best, pos_val);
+                consider!(e, data, cur_best, pos_val);
             }
             for &e in bucket[newest + 1..].iter().rev() {
-                consider!(e, data, reject_limit, cur_best, pos_val);
+                consider!(e, data, cur_best, pos_val);
             }
         }
         best.map(|(d, l)| (d, l, best_score))
