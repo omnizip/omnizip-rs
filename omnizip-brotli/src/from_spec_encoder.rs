@@ -600,6 +600,17 @@ pub fn compress_with_quality(input: &[u8], quality: i32) -> Vec<u8> {
             if hash5 {
                 bank.enable_hash5();
             }
+            // H68 tag-bank hasher (the reference's SIMD-shape q4-6
+            // mode, hash_longest_match64_simd_inc.h): 8-byte hash
+            // split into key + tag; the scan visits only tag-matching
+            // slots. Measured on CSV q5 it produces a byte-identical
+            // parse (the text parse is rep-probe-driven; bank
+            // candidates beyond the reps rarely change winners) while
+            // running slower than the scalar path, so it is OPT-IN
+            // (BROTLI_H68=1) rather than default.
+            if env_flag!("BROTLI_H68") && is_text_like(input) && q <= 6 {
+                bank.enable_tag_mode();
+            }
             bank.set_max_distance(MAX_BACKWARD_DISTANCE);
             Some(bank)
         } else {
@@ -725,6 +736,8 @@ fn encode_huffman_chunk_body(
     // this can be flipped back on for inputs with strongly varying
     // per-block statistics.
     let use_block_switch = false;
+    let phase_timer = env_flag!("BROTLI_PHASE_TIMER");
+    let pt0 = std::time::Instant::now();
     let (commands, precomputed) = parse_input_with_offset(
         input,
         history,
@@ -829,6 +842,10 @@ fn encode_huffman_chunk_body(
         if !is_last {
             bw.write_bits(0, 1); // ISUNCOMPRESSED = 0
         }
+        if phase_timer {
+            eprintln!("PHASE parse={:.3}", pt0.elapsed().as_secs_f64());
+        }
+        let pt1 = std::time::Instant::now();
         emit_metablock_from_commands(
             bw,
             input,
@@ -840,6 +857,9 @@ fn encode_huffman_chunk_body(
             use_block_switch,
             &commands,
         );
+        if phase_timer {
+            eprintln!("PHASE emit={:.3}", pt1.elapsed().as_secs_f64());
+        }
     }
 }
 
@@ -6556,6 +6576,10 @@ fn parse_input_with_offset_impl(
     ctx_in: (u8, u8),
 ) -> (Vec<Command>, Option<BitWriter>) {
     let n = input.len();
+    // Timing-only ablation probes (hoisted once per call — an
+    // unhoisted env::var per position poisons the measurement).
+    let probe_no_lazy = env_flag!("BROTLI_PROBE_NO_LAZY");
+    let probe_no_dict = env_flag!("BROTLI_PROBE_NO_DICT");
     // Content classification is O(n) — a per-position call (as the
     // lazy lookahead had) is O(n^2) and dwarfs everything else.
     let is_text_input = is_text_like(input);
@@ -6570,7 +6594,10 @@ fn parse_input_with_offset_impl(
     // The static dictionary pays on text (real word matches); on
     // binary its per-position lookup costs ~30% of greedy-tier encode
     // for ~0.2% size. Binary q4-7 (time-first tier) skips it.
-    let use_dict = use_dict_base && !disable_dict && (quality >= 8 || is_text_input);
+    let use_dict = use_dict_base
+        && !disable_dict
+        && !probe_no_dict
+        && (quality >= 8 || is_text_input);
 
     let _config = omnizip_codecs::HashChainConfig {
         dict_size: MAX_BACKWARD_DISTANCE,
@@ -6884,7 +6911,7 @@ fn parse_input_with_offset_impl(
                 // full depth and defer while the next score beats the
                 // current by >= 175, up to 4 delays in a row. The
                 // chain path keeps the length-based heuristic.
-                if lazy && !env_flag!("BROTLI_NO_LAZY") && pos + 1 < n {
+                if lazy && !probe_no_lazy && !env_flag!("BROTLI_NO_LAZY") && pos + 1 < n {
                     if bank_mf.is_some() {
                         let next_pos = pos + 1;
                         let next_global = mlen_offset + next_pos;
