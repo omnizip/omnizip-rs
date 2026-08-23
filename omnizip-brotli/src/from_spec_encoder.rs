@@ -580,8 +580,12 @@ pub fn compress_with_quality(input: &[u8], quality: i32) -> Vec<u8> {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(if q < 7 && n <= 1 << 20 { 14 } else { 15 });
-            let mut bank =
-                omnizip_codecs::BankMatchFinder::new(input, bucket_bits, block_bits, dists as usize);
+            let mut bank = omnizip_codecs::BankMatchFinder::new(
+                input,
+                bucket_bits,
+                block_bits,
+                dists as usize,
+            );
             // Upstream 1.2.0 ChooseHasher: quality 5-9 with size_hint
             // >= 1 MiB (and lgwin >= 19) runs H6 — the 5-byte 64-bit
             // kHashMul64 hash — not H5's 4-byte kHashMul32. Smaller
@@ -915,8 +919,8 @@ fn emit_metablock_from_commands(
     // (BROTLI_OLD_CSPLIT restores the in-house DP); the reference
     // emits ~5 cost-chosen blocks where the in-house K<=64 DP put 15+
     // on CSV q11, paying switch codes and tree headers.
-    let ref_cmd_split = quality >= 10 && !env_flag!("BROTLI_OLD_CSPLIT")
-        || env_flag!("BROTLI_REF_CSPLIT");
+    let ref_cmd_split =
+        quality >= 10 && !env_flag!("BROTLI_OLD_CSPLIT") || env_flag!("BROTLI_REF_CSPLIT");
     let mut cmd_block_types: Vec<u8> = Vec::new();
     let cmd_boundaries: Vec<usize> = if !cmd_split_on {
         cmd_block_types.push(0);
@@ -1582,8 +1586,8 @@ fn emit_metablock_from_commands(
     // 4, costing ~30K bits of dist_sym entropy on the CSV fixture).
     // Default at q10+ (BROTLI_OLD_DSPLIT restores the in-house DP);
     // BROTLI_REF_DSPLIT forces it at any level.
-    let ref_dist_split = quality >= 10 && !env_flag!("BROTLI_OLD_DSPLIT")
-        || env_flag!("BROTLI_REF_DSPLIT");
+    let ref_dist_split =
+        quality >= 10 && !env_flag!("BROTLI_OLD_DSPLIT") || env_flag!("BROTLI_REF_DSPLIT");
     let mut dist_block_types: Vec<u8> = Vec::new();
     let dist_boundaries: Vec<usize> = if !dist_split_on {
         dist_block_types.push(0);
@@ -1671,7 +1675,8 @@ fn emit_metablock_from_commands(
             .filter(|(i, _)| *i > 0)
             .map(|(_, &t)| t)
             .collect();
-        let (bt, bl) = write_block_switch_header(bw, nbltypes_d, &dist_block_len, &dist_switch_types);
+        let (bt, bl) =
+            write_block_switch_header(bw, nbltypes_d, &dist_block_len, &dist_switch_types);
         dist_bt_wire = bt;
         dist_bl_wire = bl;
     }
@@ -1726,9 +1731,7 @@ fn emit_metablock_from_commands(
             while blk + 1 < dist_boundaries.len() && idx >= dist_boundaries[blk + 1] {
                 blk += 1;
             }
-            let ty = *dist_block_types
-                .get(blk)
-                .unwrap_or(&(blk as u8)) as usize;
+            let ty = *dist_block_types.get(blk).unwrap_or(&(blk as u8)) as usize;
             dist_bc_hists[(ty << 2) + ctx as usize][sym as usize] += 1;
         }
     }
@@ -1880,9 +1883,7 @@ fn emit_metablock_from_commands(
     }
     ntrees_d = ntrees_d_out;
     let dist_ctx_tree_of = |blk: usize, ctx: u8| -> usize {
-        let ty = *dist_block_types
-            .get(blk)
-            .unwrap_or(&(blk as u8)) as usize;
+        let ty = *dist_block_types.get(blk).unwrap_or(&(blk as u8)) as usize;
         usize::from(dist_cmap_full[(ty << 2) + ctx as usize])
     };
 
@@ -2269,79 +2270,82 @@ fn emit_metablock_from_commands(
                 }
             }
         } else {
-        for _ in 0..cmd.insert_len {
-            // Literal block switch BEFORE the literal (decoder checks
-            // block_length == 0 at the start of each literal read).
-            if nbltypes_l > 1 && lit_block_remaining == 0 && lit_next_switch < lit_boundaries.len()
-            {
-                let new_type = *lit_block_types
-                    .get(lit_next_switch)
-                    .unwrap_or(&(lit_next_switch as u8)) as usize;
-                if env_flag!("BROTLI_SW_TRACE") {
-                    eprintln!(
+            for _ in 0..cmd.insert_len {
+                // Literal block switch BEFORE the literal (decoder checks
+                // block_length == 0 at the start of each literal read).
+                if nbltypes_l > 1
+                    && lit_block_remaining == 0
+                    && lit_next_switch < lit_boundaries.len()
+                {
+                    let new_type = *lit_block_types
+                        .get(lit_next_switch)
+                        .unwrap_or(&(lit_next_switch as u8))
+                        as usize;
+                    if env_flag!("BROTLI_SW_TRACE") {
+                        eprintln!(
                         "ENCSW n={lit_next_switch} type={new_type} len={} litpos={lit_idx} bit={}",
                         lit_block_len[lit_next_switch],
                         bw.out.len() * 8 + bw.nbits as usize
                     );
+                    }
+                    let (bt_code, bt_len) = lit_bt_wire[new_type + 2];
+                    bw.write_bits(bt_code, u32::from(bt_len));
+                    let (c, extra, nbits) = block_length_code(lit_block_len[lit_next_switch]);
+                    let (bl_code, bl_len) = lit_bl_wire[c];
+                    bw.write_bits(bl_code, u32::from(bl_len));
+                    bw.write_bits(extra, nbits);
+                    lit_blk = lit_next_switch;
+                    lit_block_remaining = lit_block_len[lit_next_switch] as usize;
+                    lit_next_switch += 1;
                 }
-                let (bt_code, bt_len) = lit_bt_wire[new_type + 2];
-                bw.write_bits(bt_code, u32::from(bt_len));
-                let (c, extra, nbits) = block_length_code(lit_block_len[lit_next_switch]);
-                let (bl_code, bl_len) = lit_bl_wire[c];
-                bw.write_bits(bl_code, u32::from(bl_len));
-                bw.write_bits(extra, nbits);
-                lit_blk = lit_next_switch;
-                lit_block_remaining = lit_block_len[lit_next_switch] as usize;
-                lit_next_switch += 1;
-            }
 
-            let b = stream.literals[lit_idx];
-            if env_flag!("BROTLI_WALK_TRACE") {
-                let w = walk_assign.get(lit_idx);
-                let ctx = compute_context_id(p1, p2, context_mode) as usize;
-                let blk_ty = *lit_block_types.get(lit_blk).unwrap_or(&(lit_blk as u8)) as usize;
-                match w {
-                    Some(&(wrow, wbyte)) if wrow != (blk_ty << 6) + ctx || wbyte != b => {
-                        eprintln!(
+                let b = stream.literals[lit_idx];
+                if env_flag!("BROTLI_WALK_TRACE") {
+                    let w = walk_assign.get(lit_idx);
+                    let ctx = compute_context_id(p1, p2, context_mode) as usize;
+                    let blk_ty = *lit_block_types.get(lit_blk).unwrap_or(&(lit_blk as u8)) as usize;
+                    match w {
+                        Some(&(wrow, wbyte)) if wrow != (blk_ty << 6) + ctx || wbyte != b => {
+                            eprintln!(
                             "WALK-DIVERGE lit={lit_idx} walk_row={wrow} walk_byte={wbyte} emit_row={} emit_byte={b}",
                             (blk_ty << 6) + ctx
                         );
+                        }
+                        None => eprintln!("WALK-MISS lit={lit_idx}"),
+                        _ => {}
                     }
-                    None => eprintln!("WALK-MISS lit={lit_idx}"),
-                    _ => {}
                 }
-            }
-            let tree = if nbltypes_l > 1 {
-                let ctx = compute_context_id(p1, p2, context_mode) as usize;
-                let blk_ty = *lit_block_types.get(lit_blk).unwrap_or(&(lit_blk as u8)) as usize;
-                lit_ctx_map[(blk_ty << 6) + ctx] as usize
-            } else if ntrees > 1 {
-                let ctx = compute_context_id(p1, p2, context_mode) as usize;
-                lit_ctx_map[ctx] as usize
-            } else {
-                0
-            };
-            let (lc, ll) = lit_codes_per_tree[tree][b as usize];
-            if env_flag!("BROTLI_DBG_CTX") && u32::from(ll) == 0 {
-                LIT0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            }
-            let _trace_lit = env_flag!("BROTLI_LIT_TRACE");
-            if _trace_lit {
-                eprintln!(
+                let tree = if nbltypes_l > 1 {
+                    let ctx = compute_context_id(p1, p2, context_mode) as usize;
+                    let blk_ty = *lit_block_types.get(lit_blk).unwrap_or(&(lit_blk as u8)) as usize;
+                    lit_ctx_map[(blk_ty << 6) + ctx] as usize
+                } else if ntrees > 1 {
+                    let ctx = compute_context_id(p1, p2, context_mode) as usize;
+                    lit_ctx_map[ctx] as usize
+                } else {
+                    0
+                };
+                let (lc, ll) = lit_codes_per_tree[tree][b as usize];
+                if env_flag!("BROTLI_DBG_CTX") && u32::from(ll) == 0 {
+                    LIT0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+                let _trace_lit = env_flag!("BROTLI_LIT_TRACE");
+                if _trace_lit {
+                    eprintln!(
                     "ENCLIT {lit_idx} bit={} tree={tree} len={ll} byte={b} p1={p1} p2={p2} blk={lit_blk}",
                     bw.out.len() * 8 + bw.nbits as usize
                 );
-            }
-            bw.write_bits(lc, u32::from(ll));
-            p2 = p1;
-            p1 = b;
-            lit_idx += 1;
-            out_pos += 1;
+                }
+                bw.write_bits(lc, u32::from(ll));
+                p2 = p1;
+                p1 = b;
+                lit_idx += 1;
+                out_pos += 1;
 
-            if nbltypes_l > 1 {
-                lit_block_remaining = lit_block_remaining.saturating_sub(1);
+                if nbltypes_l > 1 {
+                    lit_block_remaining = lit_block_remaining.saturating_sub(1);
+                }
             }
-        }
         }
 
         if env_flag!("BROTLI_CMD_TRACE") {
@@ -2362,7 +2366,8 @@ fn emit_metablock_from_commands(
                     if dist_block_remaining == 0 && dist_next_switch < dist_boundaries.len() {
                         let new_type = *dist_block_types
                             .get(dist_next_switch)
-                            .unwrap_or(&(dist_next_switch as u8)) as usize;
+                            .unwrap_or(&(dist_next_switch as u8))
+                            as usize;
                         let (bt_code, bt_len) = dist_bt_wire[new_type + 2];
                         bw.write_bits(bt_code, u32::from(bt_len));
                         let (c, extra, nbits) = block_length_code(dist_block_len[dist_next_switch]);
@@ -6594,10 +6599,8 @@ fn parse_input_with_offset_impl(
     // The static dictionary pays on text (real word matches); on
     // binary its per-position lookup costs ~30% of greedy-tier encode
     // for ~0.2% size. Binary q4-7 (time-first tier) skips it.
-    let use_dict = use_dict_base
-        && !disable_dict
-        && !probe_no_dict
-        && (quality >= 8 || is_text_input);
+    let use_dict =
+        use_dict_base && !disable_dict && !probe_no_dict && (quality >= 8 || is_text_input);
 
     let _config = omnizip_codecs::HashChainConfig {
         dict_size: MAX_BACKWARD_DISTANCE,

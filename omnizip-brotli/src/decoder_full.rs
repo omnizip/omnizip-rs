@@ -404,9 +404,7 @@ pub fn _print_dec_stats(total_input: usize) {
     );
     eprintln!(
         "DEC_STATS extras: ins_extra={} cpy_extra={} dist_extra={}",
-        st.ins_extra,
-        st.cpy_extra,
-        st.dist_extra
+        st.ins_extra, st.cpy_extra, st.dist_extra
     );
     {
         let mut bits = 0.0f64;

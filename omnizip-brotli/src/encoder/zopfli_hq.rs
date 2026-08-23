@@ -310,12 +310,9 @@ impl CostModel {
         // so SetCost priced them as rare and the DP under-rode reps
         // (~3x fewer implicit-rep0 commands than the reference on CSV).
         let dist_cfg = crate::encoder::distance_config::DistanceConfig::choose(commands, 0);
-        if let Some(stream) = crate::from_spec_encoder::build_symbol_stream(
-            commands,
-            data,
-            0,
-            &dist_cfg,
-        ) {
+        if let Some(stream) =
+            crate::from_spec_encoder::build_symbol_stream(commands, data, 0, &dist_cfg)
+        {
             for &cs in &stream.cmd_symbols {
                 if cs < NUM_CMD_SYMBOLS {
                     hist_cmd[cs] += 1;
