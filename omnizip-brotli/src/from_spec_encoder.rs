@@ -2244,10 +2244,10 @@ fn emit_metablock_from_commands(
         // Vec-of-Vec code lookup; the single-tree case skips the
         // context computation entirely.
         if nbltypes_l <= 1 {
-            let lits = &stream.literals[..];
+            let literal_slice = &stream.literals[..];
             if ntrees == 1 {
                 for _ in 0..cmd.insert_len {
-                    let b = lits[lit_idx];
+                    let b = literal_slice[lit_idx];
                     let (lc, ll) = lit_codes_flat[usize::from(b)];
                     bw.write_bits(lc, u32::from(ll));
                     p2 = p1;
@@ -2257,7 +2257,7 @@ fn emit_metablock_from_commands(
                 }
             } else {
                 for _ in 0..cmd.insert_len {
-                    let b = lits[lit_idx];
+                    let b = literal_slice[lit_idx];
                     let ctx = compute_context_id(p1, p2, context_mode) as usize;
                     let tree = usize::from(lit_ctx_map[ctx]);
                     let (lc, ll) = lit_codes_flat[(tree << 8) + usize::from(b)];
