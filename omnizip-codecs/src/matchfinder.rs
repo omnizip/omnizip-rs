@@ -1632,6 +1632,7 @@ impl<'a> Bt4MatchFinder<'a> {
         self.depth
     }
 
+    #[inline]
     fn hash_indexes(&self, pos: usize) -> (usize, usize, usize) {
         let d = self.data;
         let temp = self.crc_table[d[pos] as usize] ^ u32::from(d[pos + 1]);
@@ -1645,13 +1646,26 @@ impl<'a> Bt4MatchFinder<'a> {
         )
     }
 
+    #[inline]
     fn match_len(&self, a: usize, b: usize, start: u32, limit: u32) -> u32 {
         let d = self.data;
         let mut len = start as usize;
         let limit = limit as usize;
+        // 16-byte chunks first — two loads per iteration like the
+        // reference's word-wide memcmplen (u64 stepping costs twice
+        // the loads and dominated the skip path in profiles).
+        while len + 16 <= limit {
+            let wa = u128::from_le_bytes(d[len + a..len + a + 16].try_into().expect("16"));
+            let wb = u128::from_le_bytes(d[len + b..len + b + 16].try_into().expect("16"));
+            if wa == wb {
+                len += 16;
+            } else {
+                return (len + (wa ^ wb).trailing_zeros() as usize / 8) as u32;
+            }
+        }
         while len + 8 <= limit {
-            let wa = u64::from_le_bytes(d[len + a..len + a + 8].try_into().expect("8 bytes"));
-            let wb = u64::from_le_bytes(d[len + b..len + b + 8].try_into().expect("8 bytes"));
+            let wa = u64::from_le_bytes(d[len + a..len + a + 8].try_into().expect("8"));
+            let wb = u64::from_le_bytes(d[len + b..len + b + 8].try_into().expect("8"));
             if wa == wb {
                 len += 8;
             } else {
