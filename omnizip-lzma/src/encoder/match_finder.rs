@@ -29,7 +29,7 @@ pub fn new_lzma_match_finder(data: &[u8], dict_size: u32) -> MatchFinder<'_> {
         min_match: 3,
         max_chain_length: 256,
         nice_match: 0,
-        hash_log: 16,
+        hash_log: 18,
         max_match_length: 273, // MATCH_LEN_MAX: cap to avoid O(N²) on repetitive data,
         hash_bytes: 4,
     };

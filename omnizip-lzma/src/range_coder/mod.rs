@@ -5,6 +5,7 @@
 
 pub mod decoder;
 pub mod encoder;
+pub mod price;
 
 pub use decoder::RangeDecoder;
 pub use encoder::RangeEncoder;

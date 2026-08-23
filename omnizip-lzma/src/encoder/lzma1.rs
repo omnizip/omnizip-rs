@@ -26,39 +26,39 @@ const MATCH_LEN_MAX: u32 = 273;
 /// and match-finder state.
 #[derive(Debug)]
 pub struct Lzma1Encoder {
-    lc: u32,
+    pub(crate) lc: u32,
     #[allow(dead_code)]
-    lp: u32,
-    pb: u32,
-    pb_mask: u32,
-    literal_mask: u32,
-    state: LzmaState,
-    is_match: Vec<BitModel>,
-    is_rep: Vec<BitModel>,
-    is_rep0: Vec<BitModel>,
-    is_rep1: Vec<BitModel>,
-    is_rep2: Vec<BitModel>,
-    is_rep0_long: Vec<BitModel>,
-    literal_encoder: LiteralEncoder,
-    length_encoder: LengthEncoder,
-    rep_length_encoder: LengthEncoder,
-    distance_encoder: DistanceEncoder,
-    range_encoder: RangeEncoder,
-    rep0: u32,
-    rep1: u32,
-    rep2: u32,
-    rep3: u32,
+    pub(crate) lp: u32,
+    pub(crate) pb: u32,
+    pub(crate) pb_mask: u32,
+    pub(crate) literal_mask: u32,
+    pub(crate) state: LzmaState,
+    pub(crate) is_match: Vec<BitModel>,
+    pub(crate) is_rep: Vec<BitModel>,
+    pub(crate) is_rep0: Vec<BitModel>,
+    pub(crate) is_rep1: Vec<BitModel>,
+    pub(crate) is_rep2: Vec<BitModel>,
+    pub(crate) is_rep0_long: Vec<BitModel>,
+    pub(crate) literal_encoder: LiteralEncoder,
+    pub(crate) length_encoder: LengthEncoder,
+    pub(crate) rep_length_encoder: LengthEncoder,
+    pub(crate) distance_encoder: DistanceEncoder,
+    pub(crate) range_encoder: RangeEncoder,
+    pub(crate) rep0: u32,
+    pub(crate) rep1: u32,
+    pub(crate) rep2: u32,
+    pub(crate) rep3: u32,
     dict_size: u32,
     /// Global position offset (for LZMA2 multi-chunk: the byte offset
     /// of this chunk within the overall input). Zero for standalone
     /// encoding. Added to chunk-local `pos` in `pos_state` / `lit_state`
     /// computations so the decoder's `output.len()`-based position
     /// agrees with the encoder.
-    base_pos: u32,
+    pub(crate) base_pos: u32,
     /// The byte immediately before this chunk's start (for LZMA2
     /// multi-chunk). Zero for standalone encoding. Used as `prev_byte`
     /// for the first literal so the decoder's `output.last()` agrees.
-    base_prev_byte: u8,
+    pub(crate) base_prev_byte: u8,
     /// Use BT4 binary-tree match finder.
     use_bt4: bool,
     /// Emit the EOPM marker + range-coder flush at the end of the
@@ -413,6 +413,111 @@ impl Lzma1Encoder {
         self.range_encoder.finish()
     }
 
+    /// Lazy parse+encode over a RANGE of the full input, using a
+    /// shared match finder already positioned at `start`. Returns the
+    /// chunk's compressed bytes and the end position (a command
+    /// boundary at or after `start + budget`).
+    ///
+    /// This is the LZMA2 dictionary-carry path: the match finder spans
+    /// the whole input, so matches may reference data before `start`
+    /// (within `dict_size`) — legal for every chunk after a
+    /// dictionary-resetting first chunk, and the source of nearly all
+    /// of the reference's ratio advantage on repetitive data.
+    #[allow(clippy::similar_names)]
+    pub fn encode_lazy_range(
+        &mut self,
+        input: &[u8],
+        mf: &mut crate::encoder::match_finder::MatchFinder<'_>,
+        start: usize,
+        budget: usize,
+        max_compressed: usize,
+        max_chain_length: u32,
+        nice_match: u32,
+    ) -> (Vec<u8>, usize) {
+        if max_chain_length > 0 {
+            mf.set_max_chain_length(max_chain_length);
+        }
+        if nice_match > 0 {
+            mf.set_nice_match(nice_match);
+        }
+        let mut end = start;
+        let mut stop = false;
+        while !stop {
+            let Some(pos) = mf.advance() else { break };
+            if pos < start {
+                continue;
+            }
+            let m1 = if pos + FULL_MATCH_LEN_MIN as usize <= input.len() {
+                mf.find_match(pos)
+            } else {
+                None
+            };
+
+            if let Some(m1) = m1 {
+                let better_at_next = if pos + 1 < input.len() {
+                    let m2 = if pos + 1 + FULL_MATCH_LEN_MIN as usize <= input.len() {
+                        mf.find_match(pos + 1)
+                    } else {
+                        None
+                    };
+                    match m2 {
+                        Some(m2) => m2.length > m1.length + 1,
+                        None => false,
+                    }
+                } else {
+                    false
+                };
+
+                if better_at_next {
+                    let prev_byte = if pos > 0 {
+                        input[pos - 1]
+                    } else {
+                        self.base_prev_byte
+                    };
+                    let match_byte = self.get_match_byte(input, pos);
+                    self.encode_literal_byte(input[pos], prev_byte, match_byte, pos);
+                    end = pos + 1;
+                } else {
+                    let len = m1.length.min(MATCH_LEN_MAX);
+                    if m1.distance == self.rep0.wrapping_add(1) && len >= 2 {
+                        // Recurring distance: a rep0 match costs a
+                        // couple of bits once the models train, versus
+                        // a full distance-slot encoding. This is where
+                        // nearly all the ratio on line-oriented data
+                        // (CSV and friends) comes from.
+                        self.encode_rep0_match(len, pos);
+                    } else {
+                        self.encode_match(m1.distance, len, pos);
+                    }
+                    for _ in 0..len.saturating_sub(1) {
+                        if mf.advance().is_none() {
+                            break;
+                        }
+                    }
+                    end = pos + len as usize;
+                }
+            } else {
+                let prev_byte = if pos > 0 {
+                    input[pos - 1]
+                } else {
+                    self.base_prev_byte
+                };
+                let match_byte = self.get_match_byte(input, pos);
+                self.encode_literal_byte(input[pos], prev_byte, match_byte, pos);
+                end = pos + 1;
+            }
+            if end - start >= budget || self.range_encoder.bytes_for_decode() >= max_compressed {
+                stop = true;
+            }
+        }
+        self.encode_eopm_if_enabled(end);
+        self.range_encoder.flush();
+        let mut next_rc = RangeEncoder::new();
+        next_rc.set_pad_flush();
+        let bytes = std::mem::replace(&mut self.range_encoder, next_rc).finish();
+        (bytes, end)
+    }
+
     /// Optimal parser: use the DP-based parse planner, then emit.
     fn encode_via_optimal(mut self, input: &[u8]) -> Vec<u8> {
         use crate::encoder::optimal::{optimal_parse_actions, ParseAction};
@@ -483,8 +588,74 @@ impl Lzma1Encoder {
         self.range_encoder.finish()
     }
 
+    /// Emit a rep match for `rep_index` (0..4) with length >= 2 —
+    /// mirrors `rep_match()` in xz's lzma_encoder.c, including the
+    /// rep-distance rotation for rep_index >= 1.
+    pub(crate) fn encode_rep_match(&mut self, rep_index: u32, length: u32, pos: usize) {
+        if rep_index == 0 {
+            self.encode_rep0_match(length, pos);
+            return;
+        }
+        let abs_pos = self.base_pos.wrapping_add(pos as u32);
+        let pos_state = abs_pos & self.pb_mask;
+        let state_idx = usize::from(self.state.as_u8());
+        let is_match_idx = state_idx * (1 << self.pb as usize) + pos_state as usize;
+
+        self.range_encoder
+            .encode_bit(&mut self.is_match[is_match_idx], 1);
+        self.range_encoder
+            .encode_bit(&mut self.is_rep[state_idx], 1);
+        self.range_encoder
+            .encode_bit(&mut self.is_rep0[state_idx], 1);
+
+        let distance = match rep_index {
+            1 => self.rep1,
+            2 => self.rep2,
+            _ => self.rep3,
+        };
+        if rep_index == 1 {
+            self.range_encoder
+                .encode_bit(&mut self.is_rep1[state_idx], 0);
+        } else {
+            self.range_encoder
+                .encode_bit(&mut self.is_rep1[state_idx], 1);
+            self.range_encoder
+                .encode_bit(&mut self.is_rep2[state_idx], rep_index - 2);
+            if rep_index == 3 {
+                self.rep3 = self.rep2;
+            }
+            self.rep2 = self.rep1;
+        }
+        self.rep1 = self.rep0;
+        self.rep0 = distance;
+
+        let adjusted_len = length.saturating_sub(MATCH_LEN_MIN);
+        self.rep_length_encoder
+            .encode(&mut self.range_encoder, adjusted_len, pos_state as usize);
+        self.state.on_rep();
+    }
+
+    /// Emit a short rep (length-1 rep0 match) — mirrors the `len == 1`
+    /// path of `rep_match()`.
+    pub(crate) fn encode_short_rep(&mut self, pos: usize) {
+        let abs_pos = self.base_pos.wrapping_add(pos as u32);
+        let pos_state = abs_pos & self.pb_mask;
+        let state_idx = usize::from(self.state.as_u8());
+        let is_match_idx = state_idx * (1 << self.pb as usize) + pos_state as usize;
+
+        self.range_encoder
+            .encode_bit(&mut self.is_match[is_match_idx], 1);
+        self.range_encoder
+            .encode_bit(&mut self.is_rep[state_idx], 1);
+        self.range_encoder
+            .encode_bit(&mut self.is_rep0[state_idx], 0);
+        self.range_encoder
+            .encode_bit(&mut self.is_rep0_long[is_match_idx], 0);
+        self.state.on_short_rep();
+    }
+
     /// Get the byte at rep0 distance back (for matched-literal context).
-    fn get_match_byte(&self, input: &[u8], pos: usize) -> u8 {
+    pub(crate) fn get_match_byte(&self, input: &[u8], pos: usize) -> u8 {
         if self.rep0 < pos as u32 {
             input[pos - self.rep0 as usize - 1]
         } else {
@@ -493,7 +664,13 @@ impl Lzma1Encoder {
     }
 
     /// Emit a literal byte packet with context-appropriate encoding.
-    fn encode_literal_byte(&mut self, byte: u8, prev_byte: u8, match_byte: u8, pos: usize) {
+    pub(crate) fn encode_literal_byte(
+        &mut self,
+        byte: u8,
+        prev_byte: u8,
+        match_byte: u8,
+        pos: usize,
+    ) {
         let abs_pos = self.base_pos.wrapping_add(pos as u32);
         let pos_state = abs_pos & self.pb_mask;
         let state_idx = usize::from(self.state.as_u8());
@@ -530,7 +707,7 @@ impl Lzma1Encoder {
     }
 
     /// Emit a match packet (`is_match=1`, `is_rep=0`, length, distance).
-    fn encode_match(&mut self, distance: u32, length: u32, pos: usize) {
+    pub(crate) fn encode_match(&mut self, distance: u32, length: u32, pos: usize) {
         let abs_pos = self.base_pos.wrapping_add(pos as u32);
         let pos_state = abs_pos & self.pb_mask;
         let state_idx = usize::from(self.state.as_u8());

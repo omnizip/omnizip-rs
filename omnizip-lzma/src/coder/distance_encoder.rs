@@ -47,6 +47,25 @@ impl DistanceEncoder {
         Self::new(DEFAULT_NUM_LEN_TO_POS_STATES)
     }
 
+    /// Slot bit-tree models for `len_state` (for price computation).
+    #[must_use]
+    pub(crate) fn slot_models(&self, len_state: usize) -> &[BitModel] {
+        let tree = 1usize << (NUM_DIST_SLOT_BITS + 1);
+        &self.slot_encoders[len_state * tree..(len_state + 1) * tree]
+    }
+
+    /// Reverse-tree "special" models (distances 4..128 footers).
+    #[must_use]
+    pub(crate) fn special_models(&self) -> &[BitModel] {
+        &self.pos_encoders
+    }
+
+    /// Align bit-tree models.
+    #[must_use]
+    pub(crate) fn align_models(&self) -> &[BitModel] {
+        &self.align_encoder
+    }
+
     pub fn reset_models(&mut self) {
         for m in &mut self.slot_encoders {
             m.reset();
@@ -160,7 +179,7 @@ impl DistanceEncoder {
 ///   instead of 63. The decoder then reconstructed `rep0 = 0x7FFFFFFF`
 ///   instead of `0xFFFFFFFF` and never entered the EOPM branch,
 ///   causing xz-utils to report "Compressed data is corrupt".
-fn distance_slot(distance: u32) -> u32 {
+pub(crate) fn distance_slot(distance: u32) -> u32 {
     // Matches the C `dist <= 4` early-return path: get_dist_slot(4) = 4.
     if distance <= 4 {
         return distance;
