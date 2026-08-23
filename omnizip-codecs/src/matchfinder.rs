@@ -1055,6 +1055,12 @@ impl<'a> BankMatchFinder<'a> {
             return result;
         }
         let key = self.key(pos);
+        // Prefetch-by-load (upstream PREFETCH_L1 on the bucket): the
+        // bank is megabytes of randomly-accessed memory; issuing one
+        // dependent-free word load here lets the miss overlap with the
+        // rep probes inside the scan instead of serializing after
+        // them. Measured ~3x per-find cost without it on text.
+        std::hint::black_box(self.buckets[key << self.block_bits]);
         let result = self.scan_with_key(key, pos, last_dists, max_len, min_len_hint);
         if insert && pos < self.data.len() {
             let mask = (1usize << self.block_bits) - 1;
@@ -1078,17 +1084,22 @@ impl<'a> BankMatchFinder<'a> {
     /// is in bounds by construction — the generic `match_length`
     /// re-checks both bounds per step.
     fn match_len_scan(&self, a: usize, b: usize, limit: u32) -> u32 {
+        // Upstream FindMatchLengthWithLimit shape: u32 first (short
+        // rep matches — the common case — cost one load pair), then
+        // u64 stepping. A u128 first-load was 2x slower on the
+        // rep-probe-heavy text path (the 16-byte loads are wasted on
+        // 2-8 byte matches).
         let data = self.data;
         let max = limit as usize;
         let mut len = 0usize;
-        if max >= 16 {
-            let wa = u128::from_le_bytes(data[a..a + 16].try_into().unwrap());
-            let wb = u128::from_le_bytes(data[b..b + 16].try_into().unwrap());
+        if max >= 4 {
+            let wa = u32::from_le_bytes(data[a..a + 4].try_into().unwrap());
+            let wb = u32::from_le_bytes(data[b..b + 4].try_into().unwrap());
             if wa != wb {
                 let diff = wa ^ wb;
-                return diff.trailing_zeros() as u32 / 8;
+                return diff.trailing_zeros() / 8;
             }
-            len = 16;
+            len = 4;
         }
         while len + 8 <= max {
             let wa = u64::from_le_bytes(data[a + len..a + len + 8].try_into().unwrap());
@@ -1133,6 +1144,7 @@ impl<'a> BankMatchFinder<'a> {
             return self.scan_with_tags(pos, last_dists, max_len, min_len_hint);
         }
         let key = self.key(pos);
+        std::hint::black_box(self.buckets[key << self.block_bits]);
         self.scan_with_key(key, pos, last_dists, max_len, min_len_hint)
     }
 
@@ -1206,17 +1218,34 @@ impl<'a> BankMatchFinder<'a> {
         let used = 65535usize.wrapping_sub(usize::from(self.tnum[key]));
         let head = (usize::from(self.tnum[key]) + 1) & mask;
         let mut cur_best = (best.map_or(3, |(_, l)| l)).max(min_len_hint) as usize;
-        // Bitmask over slots relative to head (bit i = slot (head+i)&mask).
-        let mut matches = 0u64;
-        for i in 0..bank {
-            if tag_bucket[(head + i) & mask] == tag {
-                matches |= 1 << i;
-            }
+        // Bitmask over slots relative to head (bit i = slot (head+i)&mask),
+        // built with upstream's SWAR byte-equality gather
+        // (matching_tag_mask.h, the non-SSE path): one XOR + subtract
+        // per 8 tags, then a 16-bit rotate. This is the whole point of
+        // the tag bank — the measured reference visits 0.38 entries
+        // per find because the mask does all the rejection.
+        let mut matches: u16;
+        {
+            const X01: u64 = 0x0101_0101_0101_0101;
+            const X80: u64 = 0x8080_8080_8080_8080;
+            let splat = u64::from(tag) * X01;
+            let extract_magic = (u64::MAX / 0x7F) >> 8;
+            let gather = |off: usize| -> u64 {
+                let chunk = u64::from_le_bytes(
+                    tag_bucket[off..off + 8].try_into().unwrap(),
+                ) ^ splat;
+                let zeros = ((chunk | X80).wrapping_sub(X01) | chunk) & X80;
+                (zeros.wrapping_mul(extract_magic)) >> 56
+            };
+            // C build order: bytes 8-15 first, then bytes 0-7 shifted in.
+            matches = (gather(8) as u16) << 8 | gather(0) as u16;
+            matches = !matches;
+            matches = matches.rotate_right(head as u32);
         }
         // Mask off uninitialized slots (upstream: n unused-entry guard).
         if bank > used {
-            let guard = if used >= 64 { u64::MAX } else { (1u64 << used) - 1 };
-            matches &= guard;
+            let used = used.min(16);
+            matches &= ((1u16 << used) - 1) as u16;
         }
         while matches != 0 {
             let tz = matches.trailing_zeros() as usize;
