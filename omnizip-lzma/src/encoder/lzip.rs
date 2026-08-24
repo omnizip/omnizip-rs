@@ -20,8 +20,10 @@ const DICT_SIZE: u32 = 4 * 1024 * 1024;
 /// Encode the `dict_size` byte that lzip's decoder expects. Inverse
 /// of `lzip::decode_dict_size`.
 fn encode_dict_size_byte(dict_size: u32) -> u8 {
-    // Find the largest code such that decode_dict_size(code) >= dict_size.
-    for code in (0..=40u8).rev() {
+    // Smallest code whose decoded size covers `dict_size`. The old
+    // descending scan always hit 40 (whose decode saturates to
+    // u32::MAX), emitting an out-of-range byte that lzip/xz reject.
+    for code in 0..=40u8 {
         if decode_dict_size(code) >= dict_size {
             return code;
         }

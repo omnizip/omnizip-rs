@@ -1,0 +1,14 @@
+[package]
+name = "omnizip-cpio"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "CPIO (newc + CRC) archive on omnizip-archive-core"
+
+[dependencies]
+omnizip-archive-core = { path = "../omnizip-archive-core" }
+
+[lints]
+workspace = true

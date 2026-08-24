@@ -1,0 +1,20 @@
+[package]
+name = "ozip"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Unified single-file compressor/decompressor CLI for the omnizip pure-Rust codecs (xz, zstd, gzip, bzip2, lzip, lzma-alone)"
+
+[[bin]]
+name = "ozip"
+path = "src/main.rs"
+
+[dependencies]
+omnizip-archive-core = { path = "../omnizip-archive-core" }
+omnizip-lzma = { path = "../omnizip-lzma" }
+omnizip-zstd = { path = "../omnizip-zstd" }
+
+[lints]
+workspace = true
