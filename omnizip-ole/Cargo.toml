@@ -1,0 +1,20 @@
+[package]
+name = "omnizip-ole"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "OLE2 compound files (CFB FAT/minifat/directory read+write) and MSI table read on omnizip-archive-core"
+keywords = ["compression", "ole", "msi", "cfb"]
+categories = ["compression"]
+
+[lib]
+name = "omnizip_ole"
+path = "src/lib.rs"
+
+[dependencies]
+omnizip-archive-core = { path = "../omnizip-archive-core" }
+
+[lints]
+workspace = true
