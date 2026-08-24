@@ -349,7 +349,6 @@ pub fn encode_frame_with_dict(
                 }
             }
             let block_initial_reps = rep_offsets;
-            rep_offsets = seq_store.rep_offsets;
 
             // The chunk for literal/RLE/block-header purposes is the
             // plaintext slice [offset, offset+chunk_size).
@@ -361,15 +360,19 @@ pub fn encode_frame_with_dict(
                 last_huf_weights = None;
             } else {
                 let mut compressed_content = Vec::new();
-                let encode_ok = encode_compressed_content(
+                let encode_result = encode_compressed_content(
                     &mut compressed_content,
                     &seq_store,
                     &mut last_huf_weights,
                     block_initial_reps,
-                )
-                .is_ok();
+                );
+                let encode_ok = encode_result.is_ok();
 
                 if encode_ok && compressed_content.len() < chunk.len() {
+                    // Wire rep state for the next block: the sequence
+                    // encoder's final state (raw blocks leave the
+                    // decoder's rep slots at `block_initial_reps`).
+                    rep_offsets = encode_result.as_ref().map_or(block_initial_reps, |&r| r);
                     write_compressed_block_header(&mut out, compressed_content.len(), is_last);
                     out.extend_from_slice(&compressed_content);
                 } else {
@@ -543,7 +546,6 @@ fn write_block(
             compress_block_lazy2(chunk, &mut seq_store, ms, min_match);
         }
     }
-    *rep_offsets = seq_store.rep_offsets;
 
     let mut compressed_content = Vec::new();
     let encode_result = encode_compressed_content(
@@ -552,10 +554,13 @@ fn write_block(
         last_huf_weights,
         initial_reps,
     );
-
     let use_compressed = encode_result.is_ok() && compressed_content.len() < chunk.len();
 
     if use_compressed {
+        // Wire rep state for the next block: the sequence encoder's
+        // final state. A raw block discards the encoded sequences and
+        // leaves the decoder's rep slots at `initial_reps`.
+        *rep_offsets = encode_result.as_ref().map_or(initial_reps, |&r| r);
         write_compressed_block_header(out, compressed_content.len(), is_last);
         out.extend_from_slice(&compressed_content);
     } else {
@@ -609,7 +614,6 @@ fn write_block_ldm(
         min_match,
         max_distance,
     );
-    *rep_offsets = seq_store.rep_offsets;
 
     // Try compressed block, fall back to Raw.
     let mut compressed_content = Vec::new();
@@ -619,10 +623,13 @@ fn write_block_ldm(
         last_huf_weights,
         initial_reps,
     );
-
     let use_compressed = encode_result.is_ok() && compressed_content.len() < chunk.len();
 
     if use_compressed {
+        // Wire rep state for the next block: the sequence encoder's
+        // final state. A raw block discards the encoded sequences and
+        // leaves the decoder's rep slots at `initial_reps`.
+        *rep_offsets = encode_result.as_ref().map_or(initial_reps, |&r| r);
         write_compressed_block_header(out, compressed_content.len(), is_last);
         out.extend_from_slice(&compressed_content);
     } else {
@@ -677,7 +684,6 @@ fn write_block_cross(
             compress_block_fast_with_prefix(src, block_start, &mut seq_store, ms, min_match);
         }
     }
-    *rep_offsets = seq_store.rep_offsets;
 
     let mut compressed_content = Vec::new();
     let encode_result = encode_compressed_content(
@@ -686,10 +692,13 @@ fn write_block_cross(
         last_huf_weights,
         initial_reps,
     );
-
     let use_compressed = encode_result.is_ok() && compressed_content.len() < chunk.len();
 
     if use_compressed {
+        // Wire rep state for the next block: the sequence encoder's
+        // final state. A raw block discards the encoded sequences and
+        // leaves the decoder's rep slots at `initial_reps`.
+        *rep_offsets = encode_result.as_ref().map_or(initial_reps, |&r| r);
         write_compressed_block_header(out, compressed_content.len(), is_last);
         out.extend_from_slice(&compressed_content);
     } else {
@@ -708,7 +717,7 @@ fn encode_compressed_content(
     seq_store: &SeqStore,
     last_huf_weights: &mut Option<Vec<u8>>,
     initial_reps: [u32; 3],
-) -> Result<(), ZstdError> {
+) -> Result<[u32; 3], ZstdError> {
     // Single-distinct-symbol literal sets: the RLE literals section
     // (block_type 01) — header + one byte. The Huffman path CANNOT
     // represent this: a Huffman table needs ≥ 2 symbols, and the old
@@ -791,13 +800,14 @@ fn encode_compressed_content(
     }
 
     // Sequences section.
+    let mut final_reps = initial_reps;
     if seq_store.sequences.is_empty() && seq_store.literals.is_empty() {
         out.push(0x00);
     } else {
-        encode_section(out, seq_store, initial_reps)?;
+        final_reps = encode_section(out, seq_store, initial_reps)?;
     }
 
-    Ok(())
+    Ok(final_reps)
 }
 
 /// Write a Raw literals section (`block_type=0`). Minimal header for
@@ -988,7 +998,7 @@ mod tests {
         // parser's look-ahead should find better match boundaries than
         // the greedy fast parser.
         let mut input = Vec::new();
-        for block in 0..50 {
+        for block in 0..500 {
             // Each block has a shared prefix (repeated) + unique suffix.
             input.extend_from_slice(b"function process(");
             input.extend_from_slice(format!("{block}").as_bytes());

@@ -1688,7 +1688,7 @@ impl<'a> Bt4MatchFinder<'a> {
         let (h2, h3, h4) = self.hash_indexes(pos);
         let old2 = self.hash[h2];
         let old3 = self.hash[h3];
-        let mut cur_match = self.hash[h4];
+        let cur_match = self.hash[h4];
         self.hash[h2] = pos as u32;
         self.hash[h3] = pos as u32;
         self.hash[h4] = pos as u32;

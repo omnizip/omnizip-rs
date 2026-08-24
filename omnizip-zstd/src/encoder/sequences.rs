@@ -112,14 +112,14 @@ pub fn encode_section(
     out: &mut Vec<u8>,
     seq_store: &SeqStore,
     initial_reps: [u32; 3],
-) -> Result<(), ZstdError> {
+) -> Result<[u32; 3], ZstdError> {
     let nb_seq = seq_store.sequences.len();
 
     // 1. Sequence count (1-3 bytes).
     write_sequence_count(out, nb_seq);
 
     if nb_seq == 0 {
-        return Ok(());
+        return Ok(initial_reps);
     }
 
     // 2. Compute code tables for each sequence.
@@ -192,9 +192,66 @@ pub fn encode_section(
     let of_max = count_symbols(&of_codes, &mut of_count);
 
     // 4. For each table, decide between Predefined and FSE_Compressed.
-    let ll_choice = choose_table_mode(&ll_count, ll_max, &LL_DEFAULT_NORM, 6, 35, nb_seq as u64);
-    let ml_choice = choose_table_mode(&ml_count, ml_max, &ML_DEFAULT_NORM, 6, 52, nb_seq as u64);
-    let of_choice = choose_table_mode(&of_count, of_max, &OF_DEFAULT_NORM, 5, 28, nb_seq as u64);
+    //    Entropy estimates ignore FSE state-machine overhead and were
+    //    off by enough to regress small streams; the choice is made by
+    //    measuring the actual encoded header + payload for both
+    //    candidates (each is a few hundred bytes of scratch work).
+    let codes_ref = (
+        ll_codes.as_slice(),
+        ml_codes.as_slice(),
+        of_codes.as_slice(),
+        ll_extras.as_slice(),
+        ml_extras.as_slice(),
+        off_bases.as_slice(),
+    );
+    let measure = |ll: &TableChoice, ml: &TableChoice, of: &TableChoice| -> u64 {
+        section_size_bits(ll, ml, of, ll_max, ml_max, of_max, codes_ref, nb_seq)
+    };
+
+    let ll_fse = choose_table_mode(&ll_count, ll_max, &LL_DEFAULT_NORM, 6, 35, 9, nb_seq as u64);
+    let ml_fse = choose_table_mode(&ml_count, ml_max, &ML_DEFAULT_NORM, 6, 52, 9, nb_seq as u64);
+    let of_fse = choose_table_mode(&of_count, of_max, &OF_DEFAULT_NORM, 5, 28, 8, nb_seq as u64);
+
+    let ll_pre = TableChoice {
+        mode: MODE_PREDEFINED,
+        norm: LL_DEFAULT_NORM.to_vec(),
+        table_log: 6,
+        max_sym: 35,
+    };
+    let ml_pre = TableChoice {
+        mode: MODE_PREDEFINED,
+        norm: ML_DEFAULT_NORM.to_vec(),
+        table_log: 6,
+        max_sym: 52,
+    };
+    let of_pre = TableChoice {
+        mode: MODE_PREDEFINED,
+        norm: OF_DEFAULT_NORM.to_vec(),
+        table_log: 5,
+        max_sym: 28,
+    };
+
+    let ll_choice = if ll_fse.mode == MODE_FSE
+        && measure(&ll_fse, &ml_pre, &of_pre) < measure(&ll_pre, &ml_pre, &of_pre)
+    {
+        ll_fse
+    } else {
+        ll_pre
+    };
+    let ml_choice = if ml_fse.mode == MODE_FSE
+        && measure(&ll_choice, &ml_fse, &of_pre) < measure(&ll_choice, &ml_pre, &of_pre)
+    {
+        ml_fse
+    } else {
+        ml_pre
+    };
+    let of_choice = if of_fse.mode == MODE_FSE
+        && measure(&ll_choice, &ml_choice, &of_fse) < measure(&ll_choice, &ml_choice, &of_pre)
+    {
+        of_fse
+    } else {
+        of_pre
+    };
 
     // 5. Write modes byte: [LL(2)] [OF(2)] [ML(2)] [reserved(2)].
     let modes: u8 = (ll_choice.mode << 6) | (of_choice.mode << 4) | (ml_choice.mode << 2);
@@ -234,7 +291,9 @@ pub fn encode_section(
     )?;
     out.truncate(start + written);
 
-    Ok(())
+    // The wire rep state after this block — this, not the match
+    // finder's internal rotation, is what the next block must carry.
+    Ok(reps)
 }
 
 /// Count symbol frequencies and return the maximum symbol value.
@@ -265,49 +324,132 @@ impl TableChoice {
 
 /// Choose between Predefined and `FSE_Compressed` for a table.
 ///
-/// Uses Predefined whenever viable (zero overhead). Falls back to
-/// `FSE_Compressed` only when Predefined cannot encode all symbols.
+/// Builds the custom-FSE candidate and picks whichever has the lower
+/// total cost: payload bits plus, for FSE, the normalized-count header.
+/// Viability alone is NOT enough — on peaked distributions (repcodes
+/// concentrate the OF histogram at code 0, lazy parses concentrate ML)
+/// the predefined tables cost ~4x the custom ones, which is exactly
+/// where the reference's custom tables win.
 fn choose_table_mode(
     count: &[u32],
     max_sym: u8,
     default_norm: &[i16],
     default_table_log: u8,
     default_max_sym: u8,
+    accuracy_cap: u8,
     total: u64,
 ) -> TableChoice {
     // Check if Predefined can encode all used symbols.
     let predefined_viable = (0..=max_sym as usize)
         .all(|s| count[s] == 0 || (s < default_norm.len() && default_norm[s] != 0));
 
-    if predefined_viable {
-        return TableChoice {
-            mode: MODE_PREDEFINED,
-            norm: default_norm.to_vec(),
-            table_log: default_table_log,
-            max_sym: default_max_sym,
-        };
-    }
-
-    // Must use FSE_Compressed: some symbols have zero default probability.
-    let opt_log = optimal_table_log(6, total as usize, max_sym);
+    // RFC 8878 sequence-table accuracy caps: LL <= 9, OF <= 8,
+    // ML <= 9. Exceeding them is a spec violation that conformant
+    // decoders (system zstd) reject even though ours is lenient.
+    let opt_log = optimal_table_log(accuracy_cap, total as usize, max_sym);
     let custom_norm = normalize_count(opt_log, count, total, max_sym, false).unwrap_or_default();
 
-    if custom_norm.is_empty() {
+    let fse_choice = if custom_norm.is_empty() {
         let mut single_norm = vec![0i16; max_sym as usize + 1];
         single_norm[max_sym as usize] = 1 << opt_log;
-        return TableChoice {
+        TableChoice {
             mode: MODE_FSE,
             norm: single_norm,
             table_log: opt_log,
             max_sym,
-        };
+        }
+    } else {
+        TableChoice {
+            mode: MODE_FSE,
+            norm: custom_norm,
+            table_log: opt_log,
+            max_sym,
+        }
+    };
+
+    if !predefined_viable {
+        return fse_choice;
     }
 
-    TableChoice {
-        mode: MODE_FSE,
-        norm: custom_norm,
-        table_log: opt_log,
-        max_sym,
+    let predef_bits = estimate_cost(count, default_norm, default_table_log, max_sym);
+    let fse_bits = estimate_cost(count, &fse_choice.norm, fse_choice.table_log, max_sym)
+        + 8 * estimate_ncount_size(&fse_choice.norm, fse_choice.max_sym, fse_choice.table_log)
+            as u64;
+    // Slack favoring Predefined, like the reference's selection
+    // heuristic: the payload estimate is entropy-approximate, so on
+    // small streams a marginal FSE win is noise (and loses in
+    // practice — a 1-byte regression on tiny inputs).
+    let fse_slack_bits = 24;
+
+    if fse_bits + fse_slack_bits < predef_bits {
+        fse_choice
+    } else {
+        TableChoice {
+            mode: MODE_PREDEFINED,
+            norm: default_norm.to_vec(),
+            table_log: default_table_log,
+            max_sym: default_max_sym,
+        }
+    }
+}
+
+/// Actual encoded size (in bits) of the sequences-section header +
+/// payload for a given (LL, ML, OF) table triple: modes byte, ncount
+/// headers for FSE tables, and the FSE bitstream written with those
+/// ctables. Measurement, not estimation — the entropy approximation
+/// regressed small streams by a byte.
+#[allow(clippy::too_many_arguments)]
+fn section_size_bits(
+    ll: &TableChoice,
+    ml: &TableChoice,
+    of: &TableChoice,
+    ll_max: u8,
+    ml_max: u8,
+    of_max: u8,
+    codes: (&[u8], &[u8], &[u8], &[u32], &[u32], &[u32]),
+    nb_seq: usize,
+) -> u64 {
+    let (ll_codes, ml_codes, of_codes, ll_extras, ml_extras, off_bases) = codes;
+    let mut tmp: Vec<u8> = Vec::new();
+    if ll.mode == MODE_FSE {
+        let _ = write_ncount(&mut tmp, &ll.norm, ll_max, ll.table_log);
+    }
+    if of.mode == MODE_FSE {
+        let _ = write_ncount(&mut tmp, &of.norm, of_max, of.table_log);
+    }
+    if ml.mode == MODE_FSE {
+        let _ = write_ncount(&mut tmp, &ml.norm, ml_max, ml.table_log);
+    }
+    let header_bits = 8 * tmp.len() as u64 + 8; // + modes byte
+
+    let ll_ctable = match ll.build_ctable() {
+        Ok(t) => t,
+        Err(_) => return u64::MAX,
+    };
+    let ml_ctable = match ml.build_ctable() {
+        Ok(t) => t,
+        Err(_) => return u64::MAX,
+    };
+    let of_ctable = match of.build_ctable() {
+        Ok(t) => t,
+        Err(_) => return u64::MAX,
+    };
+    let mut payload: Vec<u8> = vec![0; estimated_bitstream_size(nb_seq)];
+    match encode_sequences_bitstream(
+        &mut payload,
+        ll_codes,
+        ml_codes,
+        of_codes,
+        ll_extras,
+        ml_extras,
+        off_bases,
+        &ll_ctable,
+        &ml_ctable,
+        &of_ctable,
+        nb_seq,
+    ) {
+        Ok(written) => header_bits + 8 * written as u64,
+        Err(_) => u64::MAX,
     }
 }
 

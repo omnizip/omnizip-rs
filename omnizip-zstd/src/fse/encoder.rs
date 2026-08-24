@@ -96,7 +96,7 @@ fn optimal_table_log_internal(
     }
     let max_bits_src = (src_size as u32 - 1).ilog2().saturating_sub(minus);
     let min_bits_src = (src_size as u32).ilog2() + 1;
-    let min_bits_sym = u32::from(max_symbol_value).ilog2() + 2;
+    let min_bits_sym = u32::from(max_symbol_value.max(1)).ilog2() + 2;
     let min_bits = min_bits_src.min(min_bits_sym);
     let mut table_log = max_table_log;
     if table_log == 0 {
