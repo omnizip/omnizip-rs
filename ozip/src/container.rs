@@ -60,7 +60,12 @@ const FORMATS: &[FormatSpec] = &[
     FormatSpec {
         name: "7z",
         extensions: &["7z"],
-        write: false,
+        write: true,
+    },
+    FormatSpec {
+        name: "rpm",
+        extensions: &["rpm"],
+        write: true,
     },
     FormatSpec {
         name: "rar",
@@ -70,7 +75,7 @@ const FORMATS: &[FormatSpec] = &[
     FormatSpec {
         name: "iso",
         extensions: &["iso"],
-        write: false,
+        write: true,
     },
     FormatSpec {
         name: "xar",
@@ -81,7 +86,7 @@ const FORMATS: &[FormatSpec] = &[
 
 /// Print the registered-format table (`ozip --formats`).
 pub fn print_formats() {
-    println!("{:<10} {:<28} {}", "FORMAT", "EXTENSIONS", "MODE");
+    println!("{:<10} {:<28} MODE", "FORMAT", "EXTENSIONS");
     for f in FORMATS {
         println!(
             "{:<10} {:<28} {}",
@@ -101,6 +106,9 @@ enum OutputFormat {
     TarZstd,
     Zip,
     Cpio,
+    SevenZip,
+    Rpm,
+    Iso,
 }
 
 fn infer_output(archive: &Path, explicit: Option<&str>) -> Result<OutputFormat, String> {
@@ -113,6 +121,9 @@ fn infer_output(archive: &Path, explicit: Option<&str>) -> Result<OutputFormat, 
             "tar.zst" => Ok(OutputFormat::TarZstd),
             "zip" => Ok(OutputFormat::Zip),
             "cpio" => Ok(OutputFormat::Cpio),
+            "7z" => Ok(OutputFormat::SevenZip),
+            "rpm" => Ok(OutputFormat::Rpm),
+            "iso" => Ok(OutputFormat::Iso),
             other => Err(format!(
                 "unknown format '{other}' (registered: {})",
                 FORMATS.iter().map(|f| f.name).collect::<Vec<_>>().join(", ")
@@ -125,6 +136,7 @@ fn infer_output(archive: &Path, explicit: Option<&str>) -> Result<OutputFormat, 
         .unwrap_or_default();
     for candidate in [
         "tar.gz", "tar.bz2", "tar.xz", "tar.zst", "tgz", "tbz2", "txz", "tar", "zip", "cpio",
+        "7z", "rpm", "iso",
     ] {
         if name.ends_with(candidate) {
             return match candidate {
@@ -135,6 +147,9 @@ fn infer_output(archive: &Path, explicit: Option<&str>) -> Result<OutputFormat, 
                 "tar" => Ok(OutputFormat::Tar),
                 "zip" => Ok(OutputFormat::Zip),
                 "cpio" => Ok(OutputFormat::Cpio),
+                "7z" => Ok(OutputFormat::SevenZip),
+                "rpm" => Ok(OutputFormat::Rpm),
+                "iso" => Ok(OutputFormat::Iso),
                 _ => unreachable!(),
             };
         }
@@ -301,6 +316,23 @@ pub fn create(
             write_all(&mut w, &staged, &options)?;
             w.finish_bytes().map_err(|e| e.to_string())?
         }
+        OutputFormat::SevenZip => {
+            let mut w = omnizip_sevenzip::writer::SevenZipWriter::new(
+                omnizip_sevenzip::writer::SevenZipMethod::Deflate,
+            );
+            write_all(&mut w, &staged, &options)?;
+            w.finish_bytes(&options).map_err(|e| e.to_string())?
+        }
+        OutputFormat::Rpm => {
+            let mut w = omnizip_rpm::writer::RpmWriter::new("archive", "1.0.0", "1");
+            write_all(&mut w, &staged, &options)?;
+            w.finish_bytes(&options).map_err(|e| e.to_string())?
+        }
+        OutputFormat::Iso => {
+            let mut w = omnizip_iso::writer::IsoWriter::new("OZIPVOL");
+            write_all(&mut w, &staged, &options)?;
+            w.finish_bytes(&options).map_err(|e| e.to_string())?
+        }
     };
 
     std::fs::write(archive, &bytes).map_err(|e| format!("{}: {e}", archive.display()))
@@ -327,10 +359,12 @@ fn write_all<W: omnizip_archive_core::ArchiveWriter>(
     Ok(())
 }
 
+type TarCodec<'a> = dyn Fn(&[u8]) -> Result<Vec<u8>, String> + 'a;
+
 fn tar_then(
     staged: &[Staged],
     options: &WriteOptions,
-    codec: &dyn Fn(&[u8]) -> Result<Vec<u8>, String>,
+    codec: &TarCodec<'_>,
     name: &str,
 ) -> Result<Vec<u8>, String> {
     let mut w = omnizip_tar::TarWriter::new();
@@ -341,9 +375,12 @@ fn tar_then(
 
 /// An opened archive, ready to list or extract.
 enum Opened {
-    Tar(omnizip_tar::TarReader),
-    Zip(omnizip_zip::ZipReader),
-    Cpio(omnizip_cpio::CpioReader),
+    Tar(Box<omnizip_tar::TarReader>),
+    Zip(Box<omnizip_zip::ZipReader>),
+    Cpio(Box<omnizip_cpio::CpioReader>),
+    SevenZip(Box<omnizip_sevenzip::reader::SevenZipReader>),
+    Rpm(Box<omnizip_rpm::reader::RpmReader>),
+    Iso(Box<omnizip_iso::reader::IsoReader>),
 }
 
 impl Opened {
@@ -352,6 +389,9 @@ impl Opened {
             Self::Tar(r) => r.entries().map_err(|e| e.to_string()),
             Self::Zip(r) => r.entries().map_err(|e| e.to_string()),
             Self::Cpio(r) => r.entries().map_err(|e| e.to_string()),
+            Self::SevenZip(r) => r.entries().map_err(|e| e.to_string()),
+            Self::Rpm(r) => r.entries().map_err(|e| e.to_string()),
+            Self::Iso(r) => r.entries().map_err(|e| e.to_string()),
         }
     }
 
@@ -361,6 +401,9 @@ impl Opened {
             Self::Tar(r) => r.extract_to(dir, &policy).map_err(|e| e.to_string()),
             Self::Zip(r) => r.extract_to(dir, &policy).map_err(|e| e.to_string()),
             Self::Cpio(r) => r.extract_to(dir, &policy).map_err(|e| e.to_string()),
+            Self::SevenZip(r) => r.extract_to(dir, &policy).map_err(|e| e.to_string()),
+            Self::Rpm(r) => r.extract_to(dir, &policy).map_err(|e| e.to_string()),
+            Self::Iso(r) => r.extract_to(dir, &policy).map_err(|e| e.to_string()),
         }
     }
 }
@@ -374,14 +417,30 @@ fn open_archive(archive: &Path) -> Result<Opened, String> {
 fn open_bytes(data: &[u8]) -> Result<Opened, String> {
     match detect_format(data) {
         FormatKind::Tar => omnizip_tar::TarReader::from_bytes(data)
-            .map(Opened::Tar)
+            .map(|r| Opened::Tar(Box::new(r)))
             .map_err(|e| e.to_string()),
         FormatKind::Zip => omnizip_zip::ZipReader::from_bytes(data)
-            .map(Opened::Zip)
+            .map(|r| Opened::Zip(Box::new(r)))
             .map_err(|e| e.to_string()),
         FormatKind::Cpio => omnizip_cpio::CpioReader::from_bytes(data)
-            .map(Opened::Cpio)
+            .map(|r| Opened::Cpio(Box::new(r)))
             .map_err(|e| e.to_string()),
+        FormatKind::SevenZip => omnizip_sevenzip::reader::SevenZipReader::from_bytes(data)
+            .map(|r| Opened::SevenZip(Box::new(r)))
+            .map_err(|e| e.to_string()),
+        FormatKind::Rar4 | FormatKind::Rar5 => Err("rar archives are not registered yet".into()),
+        _ if data.starts_with(&[0xED, 0xAB, 0xEE, 0xDB]) => {
+            omnizip_rpm::reader::RpmReader::from_bytes(data)
+                .map(|r| Opened::Rpm(Box::new(r)))
+                .map_err(|e| e.to_string())
+        }
+        _ if data.len() >= 16 * 2048 + 6
+            && data.get(16 * 2048 + 1..16 * 2048 + 6) == Some(b"CD001") =>
+        {
+            omnizip_iso::reader::IsoReader::from_bytes(data)
+                .map(|r| Opened::Iso(Box::new(r)))
+                .map_err(|e| e.to_string())
+        }
         // Compressed tar: unwrap the codec layer and parse the tar
         // inside — `ozip x` accepts what `ozip c` produces plus
         // anything the system tools emit.
@@ -417,8 +476,18 @@ fn open_bytes(data: &[u8]) -> Result<Opened, String> {
                 _ => Err("zstd payload is not a tar archive".into()),
             }
         }
-        FormatKind::SevenZip => Err("7z archives are not registered yet".into()),
-        FormatKind::Rar4 | FormatKind::Rar5 => Err("rar archives are not registered yet".into()),
+        _ if data.starts_with(&[0xED, 0xAB, 0xEE, 0xDB]) => {
+            omnizip_rpm::reader::RpmReader::from_bytes(data)
+                .map(|r| Opened::Rpm(Box::new(r)))
+                .map_err(|e| e.to_string())
+        }
+        _ if data.len() >= 16 * 2048 + 6
+            && data.get(16 * 2048 + 1..16 * 2048 + 6) == Some(b"CD001") =>
+        {
+            omnizip_iso::reader::IsoReader::from_bytes(data)
+                .map(|r| Opened::Iso(Box::new(r)))
+                .map_err(|e| e.to_string())
+        }
         FormatKind::Lz4 | FormatKind::Lzip | FormatKind::LzmaAlone | FormatKind::Unknown => Err(
             format!(
                 "not a container archive (detected {:?}); use 'ozip -d' for single-file codecs",
