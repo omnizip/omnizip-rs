@@ -1,0 +1,21 @@
+[package]
+name = "omnizip-par2"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "PAR2 parity archives — packets, MD5/CRC64 slice verification, Reed-Solomon recovery over GF(2^16) on omnizip-archive-core"
+keywords = ["compression", "par2", "parity", "reedsolomon"]
+categories = ["compression"]
+
+[lib]
+name = "omnizip_par2"
+path = "src/lib.rs"
+
+[dependencies]
+omnizip-archive-core = { path = "../omnizip-archive-core" }
+omnizip-crypto = { path = "../omnizip-crypto" }
+
+[lints]
+workspace = true
