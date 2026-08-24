@@ -26,6 +26,25 @@ use crate::ZstdError;
 /// avoid edge cases where some decoders reject exactly-128KiB blocks.
 pub(crate) const BLOCK_MAX_SIZE: usize = 127 * 1024;
 
+/// Total-variation distance between the byte histograms of two
+/// slices, above 0.25 meaning "different content regimes".
+fn halves_diverge(a: &[u8], b: &[u8]) -> bool {
+    let mut ha = [0u32; 256];
+    let mut hb = [0u32; 256];
+    for &x in a {
+        ha[x as usize] += 1;
+    }
+    for &x in b {
+        hb[x as usize] += 1;
+    }
+    let (la, lb) = (a.len() as f64, b.len() as f64);
+    let mut tvd = 0.0f64;
+    for i in 0..256 {
+        tvd += (f64::from(ha[i]) / la - f64::from(hb[i]) / lb).abs();
+    }
+    tvd > 0.5
+}
+
 /// Sparse sampling gap for the LDM hash table (1 entry per 64 bytes).
 /// Controls the memory/coverage trade-off: smaller = denser sampling
 /// (more memory, finds more matches); larger = sparser (less memory,
@@ -181,46 +200,81 @@ fn encode_frame_into(
         let chunk_size = remaining.min(BLOCK_MAX_SIZE);
         let is_last = offset + chunk_size == plaintext.len();
         let block_end = offset + chunk_size;
-        let chunk = &plaintext[offset..block_end];
+
+        // Adaptive block splitting (a coarse stand-in for the
+        // reference's entropy-based splitter): heterogeneous chunks —
+        // first and second halves' byte distributions diverge — get
+        // 16 KiB sub-blocks so each Huffman/FSE table fits its region.
+        // Homogeneous chunks (repetitive, uniform-random, or stationary
+        // text) keep 128 KiB blocks and their minimal header overhead.
+        // Threshold 0.25 total-variation distance separates cleanly:
+        // FITS headers-vs-data ~0.5; repetitive/random/stationary
+        // fixtures <= 0.024.
+        let sub_split = chunk_size >= 32 * 1024 && {
+            let mid = chunk_size / 2;
+            halves_diverge(
+                &plaintext[offset..offset + mid],
+                &plaintext[offset + mid..block_end],
+            )
+        };
+        let step = if sub_split { 16 * 1024 } else { chunk_size };
 
         if ldm_enabled {
-            write_block_ldm(
-                out,
-                plaintext,
-                offset,
-                block_end,
-                is_last,
-                match_state,
-                &mut rep_offsets,
-                params,
-                &mut last_huf_weights,
-                ldm_table
-                    .as_ref()
-                    .expect("ldm table exists when ldm_enabled"),
-                max_distance,
-            )?;
+            let mut sub = offset;
+            while sub < block_end {
+                let sub_end = (sub + step).min(block_end);
+                let sub_last = is_last && sub_end == block_end;
+                write_block_ldm(
+                    out,
+                    plaintext,
+                    sub,
+                    sub_end,
+                    sub_last,
+                    match_state,
+                    &mut rep_offsets,
+                    params,
+                    &mut last_huf_weights,
+                    ldm_table
+                        .as_ref()
+                        .expect("ldm table exists when ldm_enabled"),
+                    max_distance,
+                )?;
+                sub = sub_end;
+            }
         } else if cross_block {
-            write_block_cross(
-                out,
-                plaintext,
-                offset,
-                block_end,
-                is_last,
-                match_state,
-                &mut rep_offsets,
-                params,
-                &mut last_huf_weights,
-            )?;
+            let mut sub = offset;
+            while sub < block_end {
+                let sub_end = (sub + step).min(block_end);
+                let sub_last = is_last && sub_end == block_end;
+                write_block_cross(
+                    out,
+                    plaintext,
+                    sub,
+                    sub_end,
+                    sub_last,
+                    match_state,
+                    &mut rep_offsets,
+                    params,
+                    &mut last_huf_weights,
+                )?;
+                sub = sub_end;
+            }
         } else {
-            write_block(
-                out,
-                chunk,
-                is_last,
-                match_state,
-                &mut rep_offsets,
-                params,
-                &mut last_huf_weights,
-            )?;
+            let mut sub = offset;
+            while sub < block_end {
+                let sub_end = (sub + step).min(block_end);
+                let sub_last = is_last && sub_end == block_end;
+                write_block(
+                    out,
+                    &plaintext[sub..sub_end],
+                    sub_last,
+                    match_state,
+                    &mut rep_offsets,
+                    params,
+                    &mut last_huf_weights,
+                )?;
+                sub = sub_end;
+            }
         }
         offset += chunk_size;
     }
