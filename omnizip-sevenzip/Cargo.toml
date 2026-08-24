@@ -1,0 +1,25 @@
+[package]
+name = "omnizip-sevenzip"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "7z archive container (signature/start header, property-encoded metadata, LZMA/LZMA2/BZip2/Deflate/Copy folders, filters, AES) on omnizip-archive-core"
+keywords = ["compression", "7z", "sevenzip"]
+categories = ["compression"]
+
+[lib]
+name = "omnizip_sevenzip"
+path = "src/lib.rs"
+
+[dependencies]
+omnizip-archive-core = { path = "../omnizip-archive-core" }
+omnizip-lzma = { path = "../omnizip-lzma" }
+omnizip-bzip2 = { path = "../omnizip-bzip2" }
+omnizip-libdeflate = { path = "../omnizip-libdeflate" }
+omnizip-filters = { path = "../omnizip-filters" }
+omnizip-crypto = { path = "../omnizip-crypto" }
+
+[lints]
+workspace = true
