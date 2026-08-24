@@ -3,3 +3,5 @@
 
 pub mod bzip2_file;
 pub mod gzip;
+pub mod lzip;
+pub mod lzma_alone;

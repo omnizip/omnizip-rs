@@ -1,16 +1,17 @@
 [package]
-name = "omnizip-archive-core"
+name = "omnizip-zip"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Shared archive-container layer: entry model, reader/writer traits, security boundary, format detection, gzip/bzip2 single-file formats"
+description = "ZIP container (store/deflate/bzip2/zstd methods, ZIP64) on omnizip-archive-core"
 
 [dependencies]
+omnizip-archive-core = { path = "../omnizip-archive-core" }
 omnizip-libdeflate = { path = "../omnizip-libdeflate" }
-omnizip-lzma = { path = "../omnizip-lzma" }
 omnizip-bzip2 = { path = "../omnizip-bzip2" }
+omnizip-zstd = { path = "../omnizip-zstd" }
 
 [lints]
 workspace = true

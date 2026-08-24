@@ -2,6 +2,7 @@
 # Use glob patterns so missing directories at old git commits don't
 # break cargo metadata (fixes release-plz historical comparison).
 members = [
+    "ozip",
     "omnizip-*",
     "tests/differential",
     "tests/determinism",

@@ -10,6 +10,10 @@
 
 #![forbid(unsafe_code)]
 
+/// CRC-32 (IEEE, reflected) — shared by the gzip trailer, ZIP, and
+/// any other container needing the zlib polynomial.
+pub use formats::gzip::crc32;
+
 pub mod detect;
 pub mod error;
 pub mod formats;
