@@ -49,7 +49,7 @@ fn halves_diverge(a: &[u8], b: &[u8]) -> bool {
 /// Controls the memory/coverage trade-off: smaller = denser sampling
 /// (more memory, finds more matches); larger = sparser (less memory,
 /// may miss some matches).
-const LDM_GAP: usize = 64;
+const LDM_GAP: usize = 16;
 
 /// Determine whether LDM should be enabled for this input.
 ///
@@ -61,6 +61,9 @@ fn should_enable_ldm(
     input_len: usize,
 ) -> bool {
     use crate::encoder::cparams::Strategy;
+    if std::env::var("OMNIZIP_NO_LDM").is_ok() {
+        return false;
+    }
     input_len > BLOCK_MAX_SIZE && matches!(params.strategy, Strategy::Btultra2)
 }
 
@@ -155,7 +158,29 @@ fn encode_frame_into(
     // LDM is enabled at Btultra2 (L19+) for inputs larger than one
     // block. The LDM hash table is pre-populated over the full input
     // and queried at every position alongside the normal hash table.
-    let ldm_enabled = should_enable_ldm(params, plaintext.len());
+    // Long-distance matches only pay off on homogeneous streams: in
+    // heterogeneous data (measured: FITS) far-offset matches are
+    // mostly coincidental cross-regime patterns whose offset coding
+    // costs more than the match saves — LDM there grew L19 output by
+    // 50 KB while the same fixture's L6 (no LDM) beat it. Gate on the
+    // fraction of 128 KiB chunks whose halves diverge, the same
+    // signal the block splitter uses.
+    let ldm_enabled = should_enable_ldm(params, plaintext.len()) && {
+        let mut total = 0usize;
+        let mut divergent = 0usize;
+        for off in (0..plaintext.len()).step_by(BLOCK_MAX_SIZE) {
+            let chunk = &plaintext[off..(off + BLOCK_MAX_SIZE).min(plaintext.len())];
+            if chunk.len() < 32 * 1024 {
+                continue;
+            }
+            total += 1;
+            let mid = chunk.len() / 2;
+            if halves_diverge(&chunk[..mid], &chunk[mid..]) {
+                divergent += 1;
+            }
+        }
+        total == 0 || divergent * 2 <= total
+    };
 
     // Build and pre-populate the LDM hash table.
     let ldm_table: Option<LdmHashTable> = if ldm_enabled {
