@@ -193,7 +193,6 @@ mod tests {
             entries[2].kind,
             omnizip_archive_core::EntryKind::Symlink("../hello.txt".into())
         );
-        let _ = TYPE_REGULAR;
     }
 
     #[test]
