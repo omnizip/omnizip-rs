@@ -44,6 +44,9 @@ impl ZipMethod {
 struct WrittenEntry {
     name: String,
     method: u16,
+    aes: bool,
+    real_method: u16,
+    flags: u16,
     version_needed: u16,
     dos_time: u16,
     dos_date: u16,
@@ -60,6 +63,9 @@ pub struct ZipWriter {
     out: Vec<u8>,
     entries: Vec<WrittenEntry>,
     method: ZipMethod,
+    password: Option<String>,
+    aes_version: u16,
+    aes_strength: crate::aes::AesStrength,
     finished: bool,
 }
 
@@ -70,8 +76,21 @@ impl ZipWriter {
             out: Vec::new(),
             entries: Vec::new(),
             method: ZipMethod::Deflate,
+            password: None,
+            aes_version: 2,
+            aes_strength: crate::aes::AesStrength::Aes256,
             finished: false,
         }
+    }
+
+    /// Encrypt subsequent entries with WinZip AES (task 05). AE-2
+    /// (CRC zeroed, HMAC-only authentication) with AES-256 unless
+    /// reconfigured. The salt is derived, not random, so archives
+    /// stay byte-reproducible.
+    #[must_use]
+    pub fn with_password(mut self, password: &str) -> Self {
+        self.password = Some(password.to_string());
+        self
     }
 
     /// Select the compression method for subsequent entries.
@@ -144,19 +163,45 @@ impl ZipWriter {
         } else {
             self.method.code()
         };
-        let version = if is_dir {
-            VERSION_DEFAULT
-        } else {
-            self.method.version_needed()
-        };
-
-        let payload = if is_dir {
+        let content_crc = if is_dir { 0 } else { crc32(data) };
+        let mut stored_crc = content_crc;
+        let mut stored_method = method;
+        let mut version_needed_override: Option<u16> = None;
+        let mut payload = if is_dir {
             Vec::new()
         } else {
             compress_with(self.method, data)?
         };
+        if let Some(pw) = self.password.clone() {
+            if !is_dir {
+                let strength = self.aes_strength;
+                let salt = crate::aes::derived_salt(
+                    pw.as_bytes(),
+                    entry.name.as_bytes(),
+                    content_crc,
+                    strength,
+                );
+                let wire = crate::aes::encrypt(pw.as_bytes(), &salt, strength, &payload)?;
+                if self.aes_version == 2 {
+                    stored_crc = 0; // AE-2: HMAC replaces the CRC
+                }
+                stored_method = crate::aes::METHOD_AES;
+                version_needed_override = Some(crate::aes::VERSION_AES);
+                payload = wire;
+            }
+        }
 
-        let crc = if is_dir { 0 } else { crc32(data) };
+        let crc = stored_crc;
+        let flags = if stored_method == crate::aes::METHOD_AES {
+            FLAG_UTF8 | crate::FLAG_ENCRYPTED
+        } else {
+            FLAG_UTF8
+        };
+        let version = if is_dir {
+            VERSION_DEFAULT
+        } else {
+            version_needed_override.unwrap_or_else(|| self.method.version_needed())
+        };
         let csize = payload.len() as u64;
         let usize_ = data.len() as u64;
         let zip64 = csize >= u32::MAX as u64 || usize_ >= u32::MAX as u64;
@@ -170,17 +215,22 @@ impl ZipWriter {
 
         let local_offset = self.out.len() as u64;
 
-        // ZIP64 extra in the local header when sizes overflow.
-        let extra: Vec<u8> = if zip64 {
-            let mut v = Vec::with_capacity(20);
-            v.extend_from_slice(&ZIP64_EXTRA_TAG.to_le_bytes());
-            v.extend_from_slice(&16u16.to_le_bytes());
-            v.extend_from_slice(&usize_.to_le_bytes());
-            v.extend_from_slice(&csize.to_le_bytes());
-            v
-        } else {
-            Vec::new()
-        };
+        // Local-header extras: ZIP64 sizes on overflow, and the
+        // WinZip AES marker on encrypted entries.
+        let mut extra: Vec<u8> = Vec::new();
+        if zip64 {
+            extra.extend_from_slice(&ZIP64_EXTRA_TAG.to_le_bytes());
+            extra.extend_from_slice(&16u16.to_le_bytes());
+            extra.extend_from_slice(&usize_.to_le_bytes());
+            extra.extend_from_slice(&csize.to_le_bytes());
+        }
+        if stored_method == crate::aes::METHOD_AES {
+            extra.extend_from_slice(&crate::aes::extra_bytes(
+                self.aes_version,
+                self.aes_strength,
+                self.method.code(),
+            ));
+        }
 
         let name_bytes = entry.name.as_bytes();
         let header_len = 30 + name_bytes.len() + extra.len();
@@ -189,8 +239,8 @@ impl ZipWriter {
         let mut header = Vec::with_capacity(header_len);
         header.extend_from_slice(&LOCAL_SIG.to_le_bytes());
         header.extend_from_slice(&version.to_le_bytes());
-        header.extend_from_slice(&FLAG_UTF8.to_le_bytes());
-        header.extend_from_slice(&method.to_le_bytes());
+        header.extend_from_slice(&flags.to_le_bytes());
+        header.extend_from_slice(&stored_method.to_le_bytes());
         header.extend_from_slice(&dos_time.to_le_bytes());
         header.extend_from_slice(&dos_date.to_le_bytes());
         header.extend_from_slice(&crc.to_le_bytes());
@@ -215,7 +265,10 @@ impl ZipWriter {
 
         self.entries.push(WrittenEntry {
             name: entry.name.clone(),
-            method,
+            method: stored_method,
+            aes: stored_method == crate::aes::METHOD_AES,
+            real_method: self.method.code(),
+            flags,
             version_needed: if zip64 {
                 VERSION_ZIP64.max(version)
             } else {
@@ -314,6 +367,13 @@ impl ArchiveWriter for ZipWriter {
         for e in &self.entries {
             let name = e.name.as_bytes();
             let mut extra: Vec<u8> = Vec::new();
+            if e.aes {
+                extra.extend_from_slice(&crate::aes::extra_bytes(
+                    self.aes_version,
+                    self.aes_strength,
+                    e.real_method,
+                ));
+            }
             if e.zip64 || e.local_offset >= u32::MAX as u64 {
                 extra.extend_from_slice(&ZIP64_EXTRA_TAG.to_le_bytes());
                 extra.extend_from_slice(&((if e.zip64 { 24 } else { 8 }) as u16).to_le_bytes());
@@ -328,7 +388,7 @@ impl ArchiveWriter for ZipWriter {
             rec.extend_from_slice(&CENTRAL_SIG.to_le_bytes());
             rec.extend_from_slice(&((3 << 8) | e.version_needed).to_le_bytes()); // made by unix
             rec.extend_from_slice(&e.version_needed.to_le_bytes());
-            rec.extend_from_slice(&FLAG_UTF8.to_le_bytes());
+            rec.extend_from_slice(&e.flags.to_le_bytes());
             rec.extend_from_slice(&e.method.to_le_bytes());
             rec.extend_from_slice(&e.dos_time.to_le_bytes());
             rec.extend_from_slice(&e.dos_date.to_le_bytes());
@@ -434,6 +494,43 @@ mod tests {
     #[test]
     fn deterministic() {
         assert_eq!(demo(ZipMethod::Deflate), demo(ZipMethod::Deflate));
+    }
+
+    #[test]
+    fn winzip_aes_round_trip_and_wrong_password() {
+        let opts = WriteOptions::deterministic().with_mtime(1_700_000_000);
+        let mut w = ZipWriter::new().with_password("swordfish");
+        w.add_file(&NewEntry::file("secret.txt", &opts), b"top secret payload\n".repeat(20).as_slice(), &opts)
+            .unwrap();
+        w.add_file(&NewEntry::file("plain.bin", &opts), &[0x5A; 512], &opts)
+            .unwrap();
+        let bytes = w.finish_bytes().unwrap();
+
+        // Deterministic even encrypted: derived salts.
+        let mut w2 = ZipWriter::new().with_password("swordfish");
+        w2.add_file(&NewEntry::file("secret.txt", &opts), b"top secret payload\n".repeat(20).as_slice(), &opts)
+            .unwrap();
+        w2.add_file(&NewEntry::file("plain.bin", &opts), &[0x5A; 512], &opts)
+            .unwrap();
+        assert_eq!(bytes, w2.finish_bytes().unwrap());
+
+        let mut r = ZipReader::from_bytes(&bytes).unwrap();
+        r.set_password("swordfish");
+        let entries = r.entries().unwrap();
+        assert_eq!(entries[0].name, "secret.txt");
+        assert_eq!(r.read_entry(0).unwrap(), b"top secret payload\n".repeat(20));
+        assert_eq!(r.read_entry(1).unwrap(), vec![0x5A; 512]);
+
+        // Wrong password: verification bytes, not padding.
+        let mut bad = ZipReader::from_bytes(&bytes).unwrap();
+        bad.set_password("wrong");
+        let err = bad.read_entry(0).unwrap_err();
+        assert!(err.to_string().contains("verification"), "{err}");
+
+        // No password at all: clear error naming the entry.
+        let mut none = ZipReader::from_bytes(&bytes).unwrap();
+        let err = none.read_entry(0).unwrap_err();
+        assert!(err.to_string().contains("supply a password"), "{err}");
     }
 
     #[test]

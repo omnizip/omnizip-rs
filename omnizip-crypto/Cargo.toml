@@ -1,0 +1,30 @@
+[package]
+name = "omnizip-crypto"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Crypto primitives for omnizip container formats (WinZip AES, RPM digests, PAR2) — thin, pinned wrappers over audited RustCrypto crates"
+keywords = ["compression", "crypto", "aes", "pbkdf2"]
+categories = ["compression", "cryptography"]
+
+[lib]
+name = "omnizip_crypto"
+path = "src/lib.rs"
+
+[dependencies]
+# The task-05 decision: vetted pure-Rust RustCrypto crates, never
+# hand-rolled primitives. All are #![forbid(unsafe_code)] in their
+# core implementations; versions pinned for auditability.
+digest = "0.11"
+md-5 = "0.11"
+sha1 = "0.11"
+sha2 = "0.11"
+hmac = "0.13"
+pbkdf2 = { version = "0.13", default-features = false, features = ["hmac"] }
+aes = "0.9"
+ctr = "0.10"
+
+[lints]
+workspace = true

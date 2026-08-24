@@ -13,6 +13,7 @@ use std::path::Path;
 struct StoredEntry {
     entry: ArchiveEntry,
     method: u16,
+    aes: Option<crate::aes::AesInfo>,
     crc32: u32,
     compressed_size: u64,
     local_offset: u64,
@@ -22,6 +23,7 @@ struct StoredEntry {
 pub struct ZipReader {
     data: Vec<u8>,
     entries: Vec<StoredEntry>,
+    password: Option<String>,
 }
 
 impl ZipReader {
@@ -88,11 +90,18 @@ impl ZipReader {
                 })?;
             let name = String::from_utf8_lossy(&rest[..name_len]).into_owned();
 
-            // ZIP64 extra field overrides saturated values.
+            // ZIP64 extra field overrides saturated values; the
+            // WinZip AES extra carries strength + real method.
+            let mut aes = None;
             let mut off = name_len;
             while off + 4 <= name_len + extra_len {
                 let tag = u16::from_le_bytes([rest[off], rest[off + 1]]);
                 let sz = u16::from_le_bytes([rest[off + 2], rest[off + 3]]) as usize;
+                if tag == crate::aes::AES_EXTRA_TAG {
+                    if let Some(body) = rest.get(off + 4..off + 4 + sz) {
+                        aes = crate::aes::parse_extra(body).ok();
+                    }
+                }
                 if tag == ZIP64_EXTRA_TAG {
                     let body = &rest[off + 4..(off + 4 + sz).min(rest.len())];
                     let mut b = 0usize;
@@ -134,9 +143,10 @@ impl ZipReader {
                     gid: None,
                     uname: String::new(),
                     gname: String::new(),
-                    method: Some(method),
+                    method: Some(aes.map(|a| a.real_method).unwrap_or(method)),
                 },
                 method,
+                aes,
                 crc32: crc,
                 compressed_size: csize,
                 local_offset: local_off,
@@ -147,7 +157,13 @@ impl ZipReader {
         Ok(Self {
             data: data.to_vec(),
             entries,
+            password: None,
         })
+    }
+
+    /// Supply the password for WinZip-AES (method 99) entries.
+    pub fn set_password(&mut self, password: &str) {
+        self.password = Some(password.to_string());
     }
 
     /// Open a ZIP file from disk.
@@ -238,6 +254,33 @@ impl ArchiveReader for ZipReader {
             .get(data_start..data_start + csize)
             .ok_or_else(|| ArchiveError::InvalidArchive("truncated entry data".into()))?;
 
+        // WinZip AES: decrypt + authenticate, then decompress the
+        // inner method. Wrong passwords fail on the verification
+        // bytes (never on padding).
+        let (method, buffer): (u16, Vec<u8>) = if method == crate::aes::METHOD_AES {
+            let info = self.entries[index]
+                .aes
+                .ok_or_else(|| ArchiveError::InvalidArchive(
+                    "AES entry missing the 0x9901 extra field".into(),
+                ))?;
+            let password = self.password.as_deref().ok_or_else(|| {
+                ArchiveError::Security(format!(
+                    "entry '{}' is WinZip-AES encrypted; supply a password",
+                    self.entries[index].entry.name
+                ))
+            })?;
+            let plain = crate::aes::decrypt(
+                password.as_bytes(),
+                raw,
+                info.strength,
+                &self.entries[index].entry.name,
+            )?;
+            (info.real_method, plain)
+        } else {
+            (method, raw.to_vec())
+        };
+        let raw: &[u8] = &buffer;
+
         let out = match method {
             METHOD_STORE => raw.to_vec(),
             METHOD_DEFLATE => {
@@ -264,7 +307,8 @@ impl ArchiveReader for ZipReader {
         };
 
         let st = &self.entries[index];
-        if st.crc32 != 0 && crc32(&out) != st.crc32 {
+        let ae2 = st.aes.is_some_and(|a| a.version == 2);
+        if !ae2 && st.crc32 != 0 && crc32(&out) != st.crc32 {
             return Err(ArchiveError::Checksum(format!(
                 "entry '{}': stored {:08X}, computed {:08X}",
                 st.entry.name,
