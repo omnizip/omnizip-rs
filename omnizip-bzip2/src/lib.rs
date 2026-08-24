@@ -37,6 +37,27 @@ mod rle;
 
 pub use codec::{Bzip2Codec, Bzip2Compressor};
 
+/// Decompress a `.bz2` stream whose output length is not known a
+/// priori (file-level decoding; multi-block concatenation included).
+///
+/// # Errors
+///
+/// Returns [`OmnizipError`] on malformed blocks or CRC mismatch.
+/// Decompress a `.bz2` wire-format stream (single member) produced by
+/// [`compress_framed`] or any bzip2 tool.
+///
+/// # Errors
+///
+/// Returns [`omnizip_codecs::OmnizipError`] on malformed structure or
+/// CRC mismatch.
+pub fn decompress_framed(input: &[u8]) -> Result<Vec<u8>, omnizip_codecs::OmnizipError> {
+    bz2::decompress::decompress_framed(input)
+}
+
+pub fn decompress_unknown_len(compressed: &[u8]) -> Result<Vec<u8>, omnizip_codecs::OmnizipError> {
+    codec::decompress_all_blocks(compressed)
+}
+
 // Re-export the pipeline stages so downstream crates/tests can exercise them
 // in isolation (matching the Ruby class layout).
 pub use bwt::{bwt_decode, bwt_encode};

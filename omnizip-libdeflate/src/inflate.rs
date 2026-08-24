@@ -40,6 +40,18 @@ fn corrupt(reason: impl Into<String>) -> Error {
 ///
 /// Returns [`OmnizipError::Corrupt`] on malformed input.
 pub fn inflate(input: &[u8], expected_len: usize) -> Result<Vec<u8>, Error> {
+    inflate_with_consumed(input, expected_len).map(|(out, _)| out)
+}
+
+/// Like [`inflate`] but also reports how many input bytes the DEFLATE
+/// stream consumed (the caller's trailer/next-member starts there;
+/// bits already read from the final byte are not re-consumed).
+///
+/// # Errors
+///
+/// Returns [`Error`] on malformed DEFLATE data or when the output
+/// exceeds 4x `expected_len` (the safety cap).
+pub fn inflate_with_consumed(input: &[u8], expected_len: usize) -> Result<(Vec<u8>, usize), Error> {
     let mut reader = BitReader::new(input);
     let mut out = Vec::with_capacity(expected_len);
     // Safety cap: if the decoder produces more than 4× the expected
@@ -68,7 +80,8 @@ pub fn inflate(input: &[u8], expected_len: usize) -> Result<Vec<u8>, Error> {
             break;
         }
     }
-    Ok(out)
+    let consumed = reader.consumed_bytes();
+    Ok((out, consumed))
 }
 
 // ---------------------------------------------------------------------------
@@ -113,6 +126,13 @@ impl<'a> BitReader<'a> {
     }
 
     #[inline]
+    /// Whole bytes consumed so far: the read cursor minus any whole
+    /// byte still buffered in `bits` (the LSB-first buffer holds up to
+    /// 8 unread bits belonging to earlier-loaded bytes).
+    fn consumed_bytes(&self) -> usize {
+        self.pos - (self.nbits / 8) as usize
+    }
+
     fn read_bits(&mut self, n: u32) -> Result<u32, Error> {
         if n == 0 {
             return Ok(0);

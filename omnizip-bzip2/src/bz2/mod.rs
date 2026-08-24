@@ -11,6 +11,7 @@
 
 pub mod bitwriter;
 pub mod crc32;
+pub mod decompress;
 pub mod huffman;
 pub mod mtf;
 pub mod rle2;

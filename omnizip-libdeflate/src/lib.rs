@@ -59,7 +59,7 @@
 pub mod deflate;
 pub mod deflate_dynamic;
 pub mod deflate_lz77;
-mod inflate;
+pub mod inflate;
 
 use omnizip_codecs::{Codec, CodecId, CompressionLevel, OmnizipError};
 

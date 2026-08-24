@@ -148,14 +148,7 @@ impl Codec for Bzip2Codec {
             });
         }
 
-        let mut out = Vec::with_capacity(expected_us);
-        let mut cursor = 0usize;
-        while cursor < compressed.len() {
-            let (block, consumed) = decode_block(&compressed[cursor..])?;
-            out.extend_from_slice(&block);
-            cursor += consumed;
-        }
-
+        let out = decompress_all_blocks(compressed)?;
         if out.len() != expected_us {
             return Err(OmnizipError::LengthMismatch {
                 codec: CodecId::BZIP2,
@@ -165,6 +158,22 @@ impl Codec for Bzip2Codec {
         }
         Ok(out)
     }
+}
+
+/// Decode every bzip2 block in `compressed`, concatenating the
+/// output. Output length is unknown for `.bz2` files read from disk
+/// (the format carries per-block CRCs, not a total size), so
+/// file-level decoding goes through here instead of the exact-length
+/// [`Codec::decompress`].
+pub(crate) fn decompress_all_blocks(compressed: &[u8]) -> Result<Vec<u8>, OmnizipError> {
+    let mut out = Vec::with_capacity(compressed.len().saturating_mul(2));
+    let mut cursor = 0usize;
+    while cursor < compressed.len() {
+        let (block, consumed) = decode_block(&compressed[cursor..])?;
+        out.extend_from_slice(&block);
+        cursor += consumed;
+    }
+    Ok(out)
 }
 
 /// Reusable `BZip2` compressor that caches the output Vec across calls.
