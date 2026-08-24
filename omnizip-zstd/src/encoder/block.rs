@@ -348,6 +348,7 @@ pub fn encode_frame_with_dict(
                     );
                 }
             }
+            let block_initial_reps = rep_offsets;
             rep_offsets = seq_store.rep_offsets;
 
             // The chunk for literal/RLE/block-header purposes is the
@@ -364,6 +365,7 @@ pub fn encode_frame_with_dict(
                     &mut compressed_content,
                     &seq_store,
                     &mut last_huf_weights,
+                    block_initial_reps,
                 )
                 .is_ok();
 
@@ -483,6 +485,8 @@ fn write_block(
     params: &crate::encoder::cparams::CompressionParams,
     last_huf_weights: &mut Option<Vec<u8>>,
 ) -> Result<(), ZstdError> {
+    let initial_reps = *rep_offsets;
+
     // Clear hash table: positions are block-relative, so cross-block
     // references would be invalid.
     ms.clear();
@@ -542,8 +546,12 @@ fn write_block(
     *rep_offsets = seq_store.rep_offsets;
 
     let mut compressed_content = Vec::new();
-    let encode_result =
-        encode_compressed_content(&mut compressed_content, &seq_store, last_huf_weights);
+    let encode_result = encode_compressed_content(
+        &mut compressed_content,
+        &seq_store,
+        last_huf_weights,
+        initial_reps,
+    );
 
     let use_compressed = encode_result.is_ok() && compressed_content.len() < chunk.len();
 
@@ -576,6 +584,7 @@ fn write_block_ldm(
     ldm: &LdmHashTable,
     max_distance: usize,
 ) -> Result<(), ZstdError> {
+    let initial_reps = *rep_offsets;
     let chunk = &plaintext[block_start..block_end];
 
     // RLE check: entire chunk is one repeated byte.
@@ -604,8 +613,12 @@ fn write_block_ldm(
 
     // Try compressed block, fall back to Raw.
     let mut compressed_content = Vec::new();
-    let encode_result =
-        encode_compressed_content(&mut compressed_content, &seq_store, last_huf_weights);
+    let encode_result = encode_compressed_content(
+        &mut compressed_content,
+        &seq_store,
+        last_huf_weights,
+        initial_reps,
+    );
 
     let use_compressed = encode_result.is_ok() && compressed_content.len() < chunk.len();
 
@@ -634,6 +647,7 @@ fn write_block_cross(
     params: &crate::encoder::cparams::CompressionParams,
     last_huf_weights: &mut Option<Vec<u8>>,
 ) -> Result<(), ZstdError> {
+    let initial_reps = *rep_offsets;
     let chunk = &plaintext[block_start..block_end];
 
     if chunk.len() >= 2 && chunk.iter().all(|&b| b == chunk[0]) {
@@ -666,8 +680,12 @@ fn write_block_cross(
     *rep_offsets = seq_store.rep_offsets;
 
     let mut compressed_content = Vec::new();
-    let encode_result =
-        encode_compressed_content(&mut compressed_content, &seq_store, last_huf_weights);
+    let encode_result = encode_compressed_content(
+        &mut compressed_content,
+        &seq_store,
+        last_huf_weights,
+        initial_reps,
+    );
 
     let use_compressed = encode_result.is_ok() && compressed_content.len() < chunk.len();
 
@@ -689,6 +707,7 @@ fn encode_compressed_content(
     out: &mut Vec<u8>,
     seq_store: &SeqStore,
     last_huf_weights: &mut Option<Vec<u8>>,
+    initial_reps: [u32; 3],
 ) -> Result<(), ZstdError> {
     // Single-distinct-symbol literal sets: the RLE literals section
     // (block_type 01) — header + one byte. The Huffman path CANNOT
@@ -775,7 +794,7 @@ fn encode_compressed_content(
     if seq_store.sequences.is_empty() && seq_store.literals.is_empty() {
         out.push(0x00);
     } else {
-        encode_section(out, seq_store)?;
+        encode_section(out, seq_store, initial_reps)?;
     }
 
     Ok(())

@@ -108,7 +108,11 @@ const fn off_base(offset: u32) -> u32 {
 /// # Errors
 ///
 /// Returns [`ZstdError::Corrupt`] on internal failures.
-pub fn encode_section(out: &mut Vec<u8>, seq_store: &SeqStore) -> Result<(), ZstdError> {
+pub fn encode_section(
+    out: &mut Vec<u8>,
+    seq_store: &SeqStore,
+    initial_reps: [u32; 3],
+) -> Result<(), ZstdError> {
     let nb_seq = seq_store.sequences.len();
 
     // 1. Sequence count (1-3 bytes).
@@ -126,15 +130,57 @@ pub fn encode_section(out: &mut Vec<u8>, seq_store: &SeqStore) -> Result<(), Zst
     let mut ml_extras = Vec::with_capacity(nb_seq);
     let mut off_bases = Vec::with_capacity(nb_seq);
 
+    // Repeat-offset tracking, mirroring the decoder's
+    // SequenceExecutor::resolve_offset. Only the unambiguous
+    // repcode configurations are emitted (the `prev[0] - 1` quirk is
+    // left explicit); everything else falls back to a full offset.
+    // This is where recurring-distance data (line-oriented text,
+    // periodic headers) gets its ~6-bits-per-match discount — without
+    // it every match pays a full offset code.
+    let mut reps = initial_reps;
     for seq in &seq_store.sequences {
         let (ll_c, ll_e) = ll_code(seq.literal_length);
         let (ml_c, ml_e) = ml_code(seq.match_length);
+        let ll0 = seq.literal_length == 0;
+
+        let ob = if !ll0 && seq.offset == reps[0] {
+            // offBase 1, no state change.
+            1
+        } else if ll0 && seq.offset == reps[1] {
+            // offBase 1 with ll0: decoder uses prev[1] and swaps.
+            let used = reps[1];
+            reps[1] = reps[0];
+            reps[0] = used;
+            1
+        } else if seq.offset == reps[2] && seq.offset > 3 {
+            // rep3. The decoder's of_bits==1 path computes
+            // `value = OF_base[1] + ll0 + read(1)` and selects prev[2]
+            // when value == 2 — so the extra bit differs by ll0:
+            // offBase 3 (extra 1) without literals, offBase 2
+            // (extra 0) with. `offset > 3` guards tiny reps that also
+            // have a cheap explicit code.
+            let used = reps[2];
+            reps[2] = reps[1];
+            reps[1] = reps[0];
+            reps[0] = used;
+            if ll0 {
+                2
+            } else {
+                3
+            }
+        } else {
+            reps[2] = reps[1];
+            reps[1] = reps[0];
+            reps[0] = seq.offset;
+            off_base(seq.offset)
+        };
+
         ll_codes.push(ll_c);
         ml_codes.push(ml_c);
-        of_codes.push(off_code_for_offset(seq.offset));
+        of_codes.push(ob.ilog2().min(31) as u8);
         ll_extras.push(ll_e);
         ml_extras.push(ml_e);
-        off_bases.push(off_base(seq.offset));
+        off_bases.push(ob);
     }
 
     // 3. Count symbol frequencies for FSE mode selection.
@@ -452,7 +498,7 @@ mod tests {
     fn empty_seq_store_produces_zero_byte() {
         let mut out = Vec::new();
         let ss = SeqStore::new();
-        encode_section(&mut out, &ss).expect("encode");
+        encode_section(&mut out, &ss, [1, 4, 8]).expect("encode");
         assert_eq!(out, vec![0x00]); // 0 sequences
     }
 
@@ -464,6 +510,6 @@ mod tests {
         compress_block_fast(input, &mut ss, &mut ms);
         let mut out = Vec::new();
         // This may fail due to FSE bitstream bugs; just check no panic.
-        let _ = encode_section(&mut out, &ss);
+        let _ = encode_section(&mut out, &ss, [1, 4, 8]);
     }
 }
