@@ -32,7 +32,15 @@ impl SevenZipMethod {
         match self {
             Self::Copy => Ok(data.to_vec()),
             Self::Deflate => omnizip_libdeflate::deflate_dynamic::deflate_dynamic_huffman(data)
-                .map(|o| o.unwrap_or_else(|| data.to_vec()))
+                .map(|o| {
+                    o.unwrap_or_else(|| {
+                        // Dynamic Huffman declined; emit a valid
+                        // stored-block deflate stream instead of raw
+                        // bytes.
+                        omnizip_libdeflate::deflate::deflate_stored(data)
+                            .unwrap_or_else(|_| data.to_vec())
+                    })
+                })
                 .map_err(|e| ArchiveError::InvalidArchive(format!("deflate: {e}"))),
             Self::Bzip2 => omnizip_bzip2::compress_framed(data, 9)
                 .map_err(|e| ArchiveError::InvalidArchive(format!("bzip2: {e}"))),
