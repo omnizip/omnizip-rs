@@ -126,7 +126,11 @@ fn infer_output(archive: &Path, explicit: Option<&str>) -> Result<OutputFormat, 
             "iso" => Ok(OutputFormat::Iso),
             other => Err(format!(
                 "unknown format '{other}' (registered: {})",
-                FORMATS.iter().map(|f| f.name).collect::<Vec<_>>().join(", ")
+                FORMATS
+                    .iter()
+                    .map(|f| f.name)
+                    .collect::<Vec<_>>()
+                    .join(", ")
             )),
         };
     }
@@ -135,8 +139,8 @@ fn infer_output(archive: &Path, explicit: Option<&str>) -> Result<OutputFormat, 
         .map(|n| n.to_string_lossy().to_lowercase())
         .unwrap_or_default();
     for candidate in [
-        "tar.gz", "tar.bz2", "tar.xz", "tar.zst", "tgz", "tbz2", "txz", "tar", "zip", "cpio",
-        "7z", "rpm", "iso",
+        "tar.gz", "tar.bz2", "tar.xz", "tar.zst", "tgz", "tbz2", "txz", "tar", "zip", "cpio", "7z",
+        "rpm", "iso",
     ] {
         if name.ends_with(candidate) {
             return match candidate {
@@ -171,8 +175,8 @@ struct Staged {
 fn stage(inputs: &[PathBuf], options: &WriteOptions) -> Result<Vec<Staged>, String> {
     let mut out = Vec::new();
     for input in inputs {
-        let meta = std::fs::symlink_metadata(input)
-            .map_err(|e| format!("{}: {e}", input.display()))?;
+        let meta =
+            std::fs::symlink_metadata(input).map_err(|e| format!("{}: {e}", input.display()))?;
         let base = input
             .file_name()
             .ok_or_else(|| format!("{}: cannot archive the filesystem root", input.display()))?
@@ -221,8 +225,8 @@ fn walk_dir(
     }
     for (name, path) in children {
         let rel = format!("{prefix}/{name}");
-        let meta = std::fs::symlink_metadata(&path)
-            .map_err(|e| format!("{}: {e}", path.display()))?;
+        let meta =
+            std::fs::symlink_metadata(&path).map_err(|e| format!("{}: {e}", path.display()))?;
         if meta.is_dir() {
             walk_dir(&path, &rel, options, out)?;
         } else if meta.file_type().is_symlink() {
@@ -296,9 +300,7 @@ pub fn create(
         OutputFormat::TarZstd => tar_then(
             &staged,
             &options,
-            &|tar| {
-                omnizip_zstd::compress(tar, crate::zstd_level(level)).map_err(|e| e.to_string())
-            },
+            &|tar| omnizip_zstd::compress(tar, crate::zstd_level(level)).map_err(|e| e.to_string()),
             "zstd",
         )?,
         OutputFormat::Zip => {
@@ -311,8 +313,7 @@ pub fn create(
             w.finish_bytes().map_err(|e| e.to_string())?
         }
         OutputFormat::Cpio => {
-            let mut w = omnizip_cpio::CpioWriter::new()
-                .with_format(omnizip_cpio::CpioFormat::Newc);
+            let mut w = omnizip_cpio::CpioWriter::new().with_format(omnizip_cpio::CpioFormat::Newc);
             write_all(&mut w, &staged, &options)?;
             w.finish_bytes().map_err(|e| e.to_string())?
         }
@@ -409,8 +410,7 @@ impl Opened {
 }
 
 fn open_archive(archive: &Path) -> Result<Opened, String> {
-    let data =
-        std::fs::read(archive).map_err(|e| format!("{}: {e}", archive.display()))?;
+    let data = std::fs::read(archive).map_err(|e| format!("{}: {e}", archive.display()))?;
     open_bytes(&data)
 }
 
@@ -461,16 +461,15 @@ fn open_bytes(data: &[u8]) -> Result<Opened, String> {
             }
         }
         FormatKind::Xz => {
-            let inner =
-                omnizip_lzma::xz_decompress(data).map_err(|e| format!("xz: {e}"))?;
+            let inner = omnizip_lzma::xz_decompress(data).map_err(|e| format!("xz: {e}"))?;
             match open_bytes(&inner)? {
                 opened @ Opened::Tar(_) => Ok(opened),
                 _ => Err("xz payload is not a tar archive".into()),
             }
         }
         FormatKind::Zstd => {
-            let inner = omnizip_zstd::decompress(data, u32::MAX)
-                .map_err(|e| format!("zstd: {e}"))?;
+            let inner =
+                omnizip_zstd::decompress(data, u32::MAX).map_err(|e| format!("zstd: {e}"))?;
             match open_bytes(&inner)? {
                 opened @ Opened::Tar(_) => Ok(opened),
                 _ => Err("zstd payload is not a tar archive".into()),
@@ -488,12 +487,12 @@ fn open_bytes(data: &[u8]) -> Result<Opened, String> {
                 .map(|r| Opened::Iso(Box::new(r)))
                 .map_err(|e| e.to_string())
         }
-        FormatKind::Lz4 | FormatKind::Lzip | FormatKind::LzmaAlone | FormatKind::Unknown => Err(
-            format!(
+        FormatKind::Lz4 | FormatKind::Lzip | FormatKind::LzmaAlone | FormatKind::Unknown => {
+            Err(format!(
                 "not a container archive (detected {:?}); use 'ozip -d' for single-file codecs",
                 detect_format(data)
-            ),
-        ),
+            ))
+        }
         _ => Err("unsupported archive format".into()),
     }
 }
@@ -533,11 +532,9 @@ fn mode_string(entry: &ArchiveEntry) -> String {
         EntryKind::HardLink(_) => 'h',
         _ => '-',
     };
-    let bits = entry.mode.unwrap_or(if entry.is_directory() {
-        0o755
-    } else {
-        0o644
-    });
+    let bits = entry
+        .mode
+        .unwrap_or(if entry.is_directory() { 0o755 } else { 0o644 });
     let mut s = String::new();
     s.push(kind);
     for shift in [6, 3, 0] {

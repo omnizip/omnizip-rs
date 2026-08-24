@@ -5,6 +5,11 @@ fn main() {
     println!("volume: {}", r.volume_identifier());
     for (i, e) in r.entries().unwrap().iter().enumerate() {
         let d = r.read_entry(i).unwrap_or_default();
-        println!("{}: {} bytes: {:?}", e.name, d.len(), String::from_utf8_lossy(&d[..d.len().min(30)]));
+        println!(
+            "{}: {} bytes: {:?}",
+            e.name,
+            d.len(),
+            String::from_utf8_lossy(&d[..d.len().min(30)])
+        );
     }
 }

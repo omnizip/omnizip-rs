@@ -90,7 +90,9 @@ impl IsoWriter {
         for (path, (_, data)) in &self.files {
             nodes
                 .get_mut(&parent_of(path))
-                .ok_or_else(|| ArchiveError::InvalidArchive(format!("iso: no parent dir for {path}")))?
+                .ok_or_else(|| {
+                    ArchiveError::InvalidArchive(format!("iso: no parent dir for {path}"))
+                })?
                 .children
                 .push(path.clone());
             nodes.insert(
@@ -239,7 +241,11 @@ fn iso_mangle(name: &str) -> String {
     };
     let stem: String = stem.chars().take(8).collect();
     let ext: String = ext.chars().take(3).collect();
-    if ext.is_empty() { stem } else { format!("{stem}.{ext}") }
+    if ext.is_empty() {
+        stem
+    } else {
+        format!("{stem}.{ext}")
+    }
 }
 
 fn iso_field(s: &str, width: usize) -> String {
@@ -320,7 +326,13 @@ fn directory_bytes(nodes: &BTreeMap<String, Node>, path: &str, options: &WriteOp
     for child in &node.children {
         let cn = &nodes[child.as_str()];
         if cn.is_dir {
-            out.extend_from_slice(&record_bytes(0x02, cn.extent, cn.dir_size, options, &cn.iso_name));
+            out.extend_from_slice(&record_bytes(
+                0x02,
+                cn.extent,
+                cn.dir_size,
+                options,
+                &cn.iso_name,
+            ));
         } else {
             out.extend_from_slice(&record_bytes(
                 0x00,
@@ -340,7 +352,11 @@ fn build_path_table(nodes: &BTreeMap<String, Node>, be: bool) -> Vec<u8> {
     let dirs: Vec<&String> = nodes
         .keys()
         .filter(|k| !k.is_empty())
-        .filter(|k| nodes.get(k.as_str()).is_some_and(|n| n.is_dir && !n.children.is_empty()))
+        .filter(|k| {
+            nodes
+                .get(k.as_str())
+                .is_some_and(|n| n.is_dir && !n.children.is_empty())
+        })
         .collect();
     let mut number: BTreeMap<&str, u16> = BTreeMap::new();
     number.insert("", 1);
@@ -433,7 +449,8 @@ mod tests {
     fn build() -> Vec<u8> {
         let opts = WriteOptions::deterministic().with_mtime(1_700_000_000);
         let mut w = IsoWriter::new("TESTVOL");
-        w.add_directory(&NewEntry::directory("docs", &opts), &opts).unwrap();
+        w.add_directory(&NewEntry::directory("docs", &opts), &opts)
+            .unwrap();
         w.add_file(
             &NewEntry::file("docs/readme.txt", &opts),
             b"iso round trip\n".repeat(40).as_slice(),
@@ -454,7 +471,10 @@ mod tests {
         let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
         assert_eq!(names, vec!["DOCS", "DOCS/README.TXT", "HELLO.DAT"]);
         let readme = names.iter().position(|n| n.contains("README")).unwrap();
-        assert_eq!(r.read_entry(readme).unwrap(), b"iso round trip\n".repeat(40));
+        assert_eq!(
+            r.read_entry(readme).unwrap(),
+            b"iso round trip\n".repeat(40)
+        );
         let hello = names.iter().position(|n| *n == "HELLO.DAT").unwrap();
         assert_eq!(r.read_entry(hello).unwrap(), vec![0x42; 4096]);
     }

@@ -121,9 +121,7 @@ impl DirectoryRecord {
     pub fn rock_ridge_mode(&self) -> Option<u32> {
         for entry in susp_entries(&self.system_use) {
             if entry.len() >= 5 && &entry[0..2] == b"PX" {
-                let mode = u32::from_le_bytes(
-                    entry.get(4..8)?.try_into().ok()?,
-                );
+                let mode = u32::from_le_bytes(entry.get(4..8)?.try_into().ok()?);
                 return Some(mode & 0o7777);
             }
         }
@@ -211,10 +209,14 @@ pub fn parse_record(data: &[u8], offset: usize, joliet: bool) -> Option<Director
 }
 
 /// Parse a volume-descriptor sector.
-pub fn parse_volume_descriptor(sector: &[u8]) -> Result<VolumeDescriptor, omnizip_archive_core::ArchiveError> {
+pub fn parse_volume_descriptor(
+    sector: &[u8],
+) -> Result<VolumeDescriptor, omnizip_archive_core::ArchiveError> {
     use omnizip_archive_core::ArchiveError;
     if sector.len() < SECTOR_SIZE {
-        return Err(ArchiveError::InvalidArchive("iso: short descriptor sector".into()));
+        return Err(ArchiveError::InvalidArchive(
+            "iso: short descriptor sector".into(),
+        ));
     }
     let type_ = sector[0];
     if sector[1..6] != *ISO_IDENTIFIER {
@@ -222,7 +224,10 @@ pub fn parse_volume_descriptor(sector: &[u8]) -> Result<VolumeDescriptor, omnizi
             "iso: missing CD001 identifier".into(),
         ));
     }
-    let joliet = type_ == vd_type::SUPPLEMENTARY && sector[88] == 0x25 && sector[89] == 0x2f && sector[90] == 0x45;
+    let joliet = type_ == vd_type::SUPPLEMENTARY
+        && sector[88] == 0x25
+        && sector[89] == 0x2f
+        && sector[90] == 0x45;
     let carries_tree = type_ == vd_type::PRIMARY || type_ == vd_type::SUPPLEMENTARY;
     let root = if carries_tree {
         parse_record(&sector[156..190], 0, joliet)

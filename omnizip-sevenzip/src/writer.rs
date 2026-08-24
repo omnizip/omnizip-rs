@@ -5,7 +5,7 @@
 //! `WriteOptions`, sorted entry order, stable CRCs.
 #![forbid(unsafe_code)]
 
-use crate::{method, property, START_HEADER_SIZE, SIGNATURE};
+use crate::{method, property, SIGNATURE, START_HEADER_SIZE};
 use omnizip_archive_core::write_options::WriteOptions;
 use omnizip_archive_core::{ArchiveError, ArchiveWriter, EntryKind, NewEntry};
 use std::collections::BTreeMap;
@@ -166,7 +166,7 @@ impl SevenZipWriter {
                 h.extend_from_slice(&omnizip_archive_core::crc32(data).to_le_bytes());
             }
             h.push(property::END as u8); // end unpack info
-            // No substreams info: one stream per folder is implied.
+                                         // No substreams info: one stream per folder is implied.
             h.push(property::END as u8); // end main streams info
         }
 
@@ -327,7 +327,8 @@ mod tests {
     fn build(m: SevenZipMethod) -> Vec<u8> {
         let opts = WriteOptions::deterministic().with_mtime(1_700_000_000);
         let mut w = SevenZipWriter::new(m);
-        w.add_directory(&NewEntry::directory("doc", &opts), &opts).unwrap();
+        w.add_directory(&NewEntry::directory("doc", &opts), &opts)
+            .unwrap();
         w.add_file(
             &NewEntry::file("doc/readme.txt", &opts),
             b"seven zip round trip\n".repeat(20).as_slice(),
@@ -350,7 +351,11 @@ mod tests {
             let mut r = SevenZipReader::from_bytes(&bytes).unwrap();
             let entries = r.entries().unwrap();
             let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
-            assert_eq!(names, vec!["doc", "doc/data.bin", "doc/readme.txt"], "{m:?}");
+            assert_eq!(
+                names,
+                vec!["doc", "doc/data.bin", "doc/readme.txt"],
+                "{m:?}"
+            );
             let readme = names.iter().position(|n| *n == "doc/readme.txt").unwrap();
             assert_eq!(
                 r.read_entry(readme).unwrap(),
@@ -364,17 +369,37 @@ mod tests {
 
     #[test]
     fn deterministic() {
-        assert_eq!(build(SevenZipMethod::Deflate), build(SevenZipMethod::Deflate));
+        assert_eq!(
+            build(SevenZipMethod::Deflate),
+            build(SevenZipMethod::Deflate)
+        );
     }
 
     #[test]
     fn vli_round_trip() {
         use crate::parser::HeaderParser;
-        for value in [0u64, 1, 0x7F, 0x80, 0xFF, 0x100, 0x1234, 0xFFFF, 0x1_0000, u64::from(u32::MAX), 0x00FF_FFFF_FFFF_FFFF] {
+        for value in [
+            0u64,
+            1,
+            0x7F,
+            0x80,
+            0xFF,
+            0x100,
+            0x1234,
+            0xFFFF,
+            0x1_0000,
+            u64::from(u32::MAX),
+            0x00FF_FFFF_FFFF_FFFF,
+        ] {
             let mut buf = Vec::new();
             write_number(&mut buf, value);
             let mut p = HeaderParser::new(&buf);
-            assert_eq!(p.number().unwrap(), value, "value {value:x} -> {:02x?}", buf);
+            assert_eq!(
+                p.number().unwrap(),
+                value,
+                "value {value:x} -> {:02x?}",
+                buf
+            );
         }
     }
 }

@@ -4,7 +4,10 @@
 //! modes, expose the unified `ArchiveReader` trait.
 #![forbid(unsafe_code)]
 
-use crate::{parse_record, parse_volume_descriptor, DirectoryRecord, VolumeDescriptor, SECTOR_SIZE, VOLUME_DESCRIPTOR_START, flags, vd_type};
+use crate::{
+    flags, parse_record, parse_volume_descriptor, vd_type, DirectoryRecord, VolumeDescriptor,
+    SECTOR_SIZE, VOLUME_DESCRIPTOR_START,
+};
 use omnizip_archive_core::{ArchiveEntry, ArchiveError, ArchiveReader, EntryKind};
 use std::path::Path;
 
@@ -56,8 +59,9 @@ impl IsoReader {
                 "iso: no volume descriptor terminator".into(),
             ));
         }
-        let primary = primary
-            .ok_or_else(|| ArchiveError::InvalidArchive("iso: no primary volume descriptor".into()))?;
+        let primary = primary.ok_or_else(|| {
+            ArchiveError::InvalidArchive("iso: no primary volume descriptor".into())
+        })?;
         let tree = joliet.clone().unwrap_or_else(|| primary.clone());
 
         let mut reader = Self {
@@ -103,7 +107,9 @@ impl IsoReader {
         let dir_data = self
             .data
             .get(start..end)
-            .ok_or_else(|| ArchiveError::InvalidArchive("iso: directory extent out of bounds".into()))?
+            .ok_or_else(|| {
+                ArchiveError::InvalidArchive("iso: directory extent out of bounds".into())
+            })?
             .to_vec();
 
         let mut offset = 0usize;
@@ -116,9 +122,9 @@ impl IsoReader {
                 break;
             }
             if !record.is_current() && !record.is_parent() {
-                let name = record.rock_ridge_name().unwrap_or_else(|| {
-                    strip_iso_name(&record.name)
-                });
+                let name = record
+                    .rock_ridge_name()
+                    .unwrap_or_else(|| strip_iso_name(&record.name));
                 let full_path = if prefix.is_empty() {
                     name.clone()
                 } else {
@@ -137,7 +143,6 @@ impl IsoReader {
         }
         Ok(())
     }
-
 }
 
 /// Strip ISO level-1 decorations: `NAME.EXT;VERSION` → `name.ext`.

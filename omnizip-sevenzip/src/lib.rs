@@ -192,9 +192,9 @@ pub struct StartHeader {
 
 /// Parse and verify the signature + start header.
 pub fn parse_start_header(data: &[u8]) -> Result<StartHeader, ArchiveError> {
-    let h = data
-        .get(..START_HEADER_SIZE)
-        .ok_or_else(|| ArchiveError::InvalidArchive("7z: file shorter than the start header".into()))?;
+    let h = data.get(..START_HEADER_SIZE).ok_or_else(|| {
+        ArchiveError::InvalidArchive("7z: file shorter than the start header".into())
+    })?;
     if h[0..6] != SIGNATURE {
         return Err(ArchiveError::InvalidArchive("7z: invalid signature".into()));
     }

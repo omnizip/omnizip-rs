@@ -500,16 +500,24 @@ mod tests {
     fn winzip_aes_round_trip_and_wrong_password() {
         let opts = WriteOptions::deterministic().with_mtime(1_700_000_000);
         let mut w = ZipWriter::new().with_password("swordfish");
-        w.add_file(&NewEntry::file("secret.txt", &opts), b"top secret payload\n".repeat(20).as_slice(), &opts)
-            .unwrap();
+        w.add_file(
+            &NewEntry::file("secret.txt", &opts),
+            b"top secret payload\n".repeat(20).as_slice(),
+            &opts,
+        )
+        .unwrap();
         w.add_file(&NewEntry::file("plain.bin", &opts), &[0x5A; 512], &opts)
             .unwrap();
         let bytes = w.finish_bytes().unwrap();
 
         // Deterministic even encrypted: derived salts.
         let mut w2 = ZipWriter::new().with_password("swordfish");
-        w2.add_file(&NewEntry::file("secret.txt", &opts), b"top secret payload\n".repeat(20).as_slice(), &opts)
-            .unwrap();
+        w2.add_file(
+            &NewEntry::file("secret.txt", &opts),
+            b"top secret payload\n".repeat(20).as_slice(),
+            &opts,
+        )
+        .unwrap();
         w2.add_file(&NewEntry::file("plain.bin", &opts), &[0x5A; 512], &opts)
             .unwrap();
         assert_eq!(bytes, w2.finish_bytes().unwrap());

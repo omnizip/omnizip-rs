@@ -258,11 +258,9 @@ impl ArchiveReader for ZipReader {
         // inner method. Wrong passwords fail on the verification
         // bytes (never on padding).
         let (method, buffer): (u16, Vec<u8>) = if method == crate::aes::METHOD_AES {
-            let info = self.entries[index]
-                .aes
-                .ok_or_else(|| ArchiveError::InvalidArchive(
-                    "AES entry missing the 0x9901 extra field".into(),
-                ))?;
+            let info = self.entries[index].aes.ok_or_else(|| {
+                ArchiveError::InvalidArchive("AES entry missing the 0x9901 extra field".into())
+            })?;
             let password = self.password.as_deref().ok_or_else(|| {
                 ArchiveError::Security(format!(
                     "entry '{}' is WinZip-AES encrypted; supply a password",

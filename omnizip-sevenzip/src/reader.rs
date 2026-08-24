@@ -64,16 +64,20 @@ impl SevenZipReader {
         // an AES coder in the encoded stream info).
         let header = if raw.first() == Some(&(property::ENCODED_HEADER as u8)) {
             let info = parser::streams_info_top(raw)?;
-            let folder = info
-                .folders
-                .first()
-                .ok_or_else(|| ArchiveError::InvalidArchive("7z: encoded header has no folder".into()))?;
+            let folder = info.folders.first().ok_or_else(|| {
+                ArchiveError::InvalidArchive("7z: encoded header has no folder".into())
+            })?;
             let pack_pos = START_HEADER_SIZE + info.pack_pos as usize;
             let pack_size = info.pack_sizes.first().copied().unwrap_or(0) as usize;
-            let packed = data
-                .get(pack_pos..pack_pos + pack_size)
-                .ok_or_else(|| ArchiveError::InvalidArchive("7z: encoded header bytes missing".into()))?;
-            decode_folder(folder, packed, password, folder.uncompressed_size() as usize)?
+            let packed = data.get(pack_pos..pack_pos + pack_size).ok_or_else(|| {
+                ArchiveError::InvalidArchive("7z: encoded header bytes missing".into())
+            })?;
+            decode_folder(
+                folder,
+                packed,
+                password,
+                folder.uncompressed_size() as usize,
+            )?
         } else {
             raw.to_vec()
         };
@@ -124,7 +128,12 @@ impl SevenZipReader {
             }
             let mut folder_idx = 0usize;
             let mut accumulated = 0usize;
-            for (fi, num) in self.stream_info.num_unpack_streams_in_folders.iter().enumerate() {
+            for (fi, num) in self
+                .stream_info
+                .num_unpack_streams_in_folders
+                .iter()
+                .enumerate()
+            {
                 if stream_idx < accumulated + *num as usize {
                     folder_idx = fi;
                     break;
@@ -165,13 +174,9 @@ impl SevenZipReader {
         if let Some(cached) = self.solid_cache.get(&folder_index) {
             return Ok(cached.clone());
         }
-        let folder = self
-            .stream_info
-            .folders
-            .get(folder_index)
-            .ok_or_else(|| {
-                ArchiveError::InvalidArchive(format!("7z: folder {folder_index} missing"))
-            })?;
+        let folder = self.stream_info.folders.get(folder_index).ok_or_else(|| {
+            ArchiveError::InvalidArchive(format!("7z: folder {folder_index} missing"))
+        })?;
 
         // Pack-stream index range for this folder.
         let mut pack_idx = 0usize;
@@ -181,8 +186,7 @@ impl SevenZipReader {
                 break;
             }
             pack_idx += f.pack_stream_indices.len();
-            for p in &self.stream_info.pack_sizes
-                [pack_idx - f.pack_stream_indices.len()..pack_idx]
+            for p in &self.stream_info.pack_sizes[pack_idx - f.pack_stream_indices.len()..pack_idx]
             {
                 byte_offset += *p as usize;
             }
@@ -193,7 +197,12 @@ impl SevenZipReader {
                 reason: "7z: multi-pack-stream folders (BCJ2) are not supported".into(),
             });
         }
-        let pack_size = self.stream_info.pack_sizes.get(pack_idx).copied().unwrap_or(0) as usize;
+        let pack_size = self
+            .stream_info
+            .pack_sizes
+            .get(pack_idx)
+            .copied()
+            .unwrap_or(0) as usize;
         let pack_pos = START_HEADER_SIZE + self.stream_info.pack_pos as usize + byte_offset;
         let packed = self
             .data
@@ -323,18 +332,15 @@ pub fn decode_folder(
                 decoded_any = true;
             }
             method::LZMA2 => {
-                let (out, _consumed) =
-                    omnizip_lzma::lzma2::decode_lzma2_stream(&data).map_err(|e| {
-                        ArchiveError::InvalidArchive(format!("7z LZMA2: {e}"))
-                    })?;
+                let (out, _consumed) = omnizip_lzma::lzma2::decode_lzma2_stream(&data)
+                    .map_err(|e| ArchiveError::InvalidArchive(format!("7z LZMA2: {e}")))?;
                 data = out;
                 decoded_any = true;
             }
             method::LZMA => {
                 let (lc, lp, pb, dict_size) = lzma_props(&coder.properties)?;
-                let mut decoder = omnizip_lzma::decoder::lzma1::Lzma1Decoder::new(
-                    lc, lp, pb, dict_size,
-                );
+                let mut decoder =
+                    omnizip_lzma::decoder::lzma1::Lzma1Decoder::new(lc, lp, pb, dict_size);
                 // 7z LZMA streams carry no EOPM; the size is exact.
                 data = decoder
                     .decode(&data, Some(unpack_size as u64), false)
@@ -364,7 +370,10 @@ pub fn decode_folder(
             }
             method::DELTA => {
                 let distance = coder.properties.first().copied().unwrap_or(0) as usize + 1;
-                data = omnizip_filters::Filter::decode(&omnizip_filters::DeltaFilter::new(distance), &data);
+                data = omnizip_filters::Filter::decode(
+                    &omnizip_filters::DeltaFilter::new(distance),
+                    &data,
+                );
                 decoded_any = true;
             }
             method::BCJ_X86 => {
@@ -394,9 +403,7 @@ pub fn decode_folder(
             }
             method::AES => {
                 let password = password.ok_or_else(|| {
-                    ArchiveError::Security(
-                        "7z: archive is AES-encrypted; supply a password".into(),
-                    )
+                    ArchiveError::Security("7z: archive is AES-encrypted; supply a password".into())
                 })?;
                 data = decode_aes_stream(&data, &coder.properties, password)?;
             }
@@ -408,7 +415,9 @@ pub fn decode_folder(
         }
     }
     if !decoded_any {
-        return Err(ArchiveError::InvalidArchive("7z: folder has no decoders".into()));
+        return Err(ArchiveError::InvalidArchive(
+            "7z: folder has no decoders".into(),
+        ));
     }
     Ok(data)
 }
@@ -431,11 +440,7 @@ fn lzma_props(props: &[u8]) -> Result<(u32, u32, u32, u32), ArchiveError> {
 
 /// AES-encrypted stream: properties = [salt_len][cycles_power] (with
 /// the salt-length high bits per the 7z AES coder spec).
-fn decode_aes_stream(
-    packed: &[u8],
-    props: &[u8],
-    password: &str,
-) -> Result<Vec<u8>, ArchiveError> {
+fn decode_aes_stream(packed: &[u8], props: &[u8], password: &str) -> Result<Vec<u8>, ArchiveError> {
     let (&first, rest) = props
         .split_first()
         .ok_or_else(|| ArchiveError::InvalidArchive("7z: AES coder without properties".into()))?;
@@ -447,12 +452,12 @@ fn decode_aes_stream(
         salt_len
     };
     let salt_len = (salt_len.min(16)) as usize;
-    let cycles_power = *rest.first().ok_or_else(|| {
-        ArchiveError::InvalidArchive("7z: AES properties missing cycles".into())
+    let cycles_power = *rest
+        .first()
+        .ok_or_else(|| ArchiveError::InvalidArchive("7z: AES properties missing cycles".into()))?;
+    let salt = packed.get(..salt_len).ok_or_else(|| {
+        ArchiveError::InvalidArchive("7z: AES stream shorter than its salt".into())
     })?;
-    let salt = packed
-        .get(..salt_len)
-        .ok_or_else(|| ArchiveError::InvalidArchive("7z: AES stream shorter than its salt".into()))?;
     let iv = packed
         .get(salt_len..salt_len + 16)
         .ok_or_else(|| ArchiveError::InvalidArchive("7z: AES stream missing IV".into()))?;

@@ -166,7 +166,9 @@ pub fn parse_lead(data: &[u8]) -> Result<Lead, omnizip_archive_core::ArchiveErro
         .get(..LEAD_SIZE)
         .ok_or_else(|| ArchiveError::InvalidArchive("truncated RPM lead".into()))?;
     if raw[0..4] != LEAD_MAGIC {
-        return Err(ArchiveError::InvalidArchive("invalid RPM lead magic".into()));
+        return Err(ArchiveError::InvalidArchive(
+            "invalid RPM lead magic".into(),
+        ));
     }
     let u16be = |o: usize| u16::from_be_bytes([raw[o], raw[o + 1]]);
     let name_end = raw[10..76].iter().position(|&b| b == 0).unwrap_or(66);
@@ -192,7 +194,9 @@ pub fn parse_header(
         .get(offset..offset + HEADER_HEADER_SIZE)
         .ok_or_else(|| ArchiveError::InvalidArchive("truncated RPM header header".into()))?;
     if hh[0..8] != HEADER_MAGIC {
-        return Err(ArchiveError::InvalidArchive("invalid RPM header magic".into()));
+        return Err(ArchiveError::InvalidArchive(
+            "invalid RPM header magic".into(),
+        ));
     }
     let n = u32::from_be_bytes(hh[8..12].try_into().expect("4")) as usize;
     let blob_len = u32::from_be_bytes(hh[12..16].try_into().expect("4")) as usize;
@@ -215,7 +219,13 @@ pub fn parse_header(
             .ok_or_else(|| ArchiveError::InvalidArchive(format!("tag {tag} out of bounds")))?;
         entries.push((tag, value));
     }
-    Ok((RpmHeader { entries, length: total }, total))
+    Ok((
+        RpmHeader {
+            entries,
+            length: total,
+        },
+        total,
+    ))
 }
 
 fn decode_value(type_: u32, off: usize, count: usize, blob: &[u8]) -> Option<TagValue> {
