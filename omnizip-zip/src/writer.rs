@@ -11,7 +11,7 @@ use crate::{
     ZIP64_LOCATOR_SIG,
 };
 use omnizip_archive_core::crc32;
-use omnizip_archive_core::{ArchiveEntry, ArchiveError, ArchiveWriter, NewEntry, WriteOptions};
+use omnizip_archive_core::{ArchiveError, ArchiveWriter, NewEntry, WriteOptions};
 
 /// Compression methods the writer emits.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

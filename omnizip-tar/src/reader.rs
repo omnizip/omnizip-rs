@@ -4,7 +4,7 @@
 
 use crate::header::{padding_len, parse, to_entry};
 use crate::{
-    BLOCK_SIZE, HEADER_SIZE, TYPE_GNU_LONGLINK, TYPE_GNU_LONGNAME, TYPE_PAX_EXTENDED, TYPE_REGULAR,
+    HEADER_SIZE, TYPE_GNU_LONGLINK, TYPE_GNU_LONGNAME, TYPE_PAX_EXTENDED,
 };
 use omnizip_archive_core::{ArchiveEntry, ArchiveError, ArchiveReader};
 use std::path::Path;
