@@ -8,7 +8,6 @@ repository.workspace = true
 description = "Shared archive-container layer: entry model, reader/writer traits, security boundary, format detection, gzip/bzip2 single-file formats"
 
 [dependencies]
-omnizip-codecs = { path = "../omnizip-codecs" }
 omnizip-libdeflate = { path = "../omnizip-libdeflate" }
 omnizip-bzip2 = { path = "../omnizip-bzip2" }
 
