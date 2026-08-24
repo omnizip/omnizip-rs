@@ -143,7 +143,7 @@ impl CpioWriter {
         h[38..46].copy_from_slice(&encode_hex(1, 8)); // nlink
         h[46..54].copy_from_slice(&encode_hex(mtime, 8));
         h[54..62].copy_from_slice(&encode_hex(filesize, 8));
-        let mut p = 62;
+        let p = 62;
         // major, minor — offset by NAME size first (per newc spec).
         // CPIO names are variable-width: 8-byte mtime + ... up to here,
         // then namesize offset is at the current `p`. We fill field-by-field.

@@ -1,11 +1,15 @@
-//! `ozip` — the unified single-file codec CLI (TODO.containers task
-//! 18, v0): xz / zstd / gzip / bzip2 / lzip / lzma-alone compress and
-//! decompress with gzip(1)-style file handling (suffix, -k keep, -d
-//! decompress, stdin/stdout, exit codes per xz(1) conventions).
+//! `ozip` — the unified codec + container CLI (TODO.containers tasks
+//! 18 and 15): xz / zstd / gzip / bzip2 / lzip / lzma-alone single-file
+//! codecs with gzip(1)-style handling, plus `c/x/t/l` archive commands
+//! over tar/zip/cpio (and compressed tar) with deterministic creation
+//! by default.
 //!
 //! Pure Rust, no argument-parsing dependency: the codec set maps onto
 //! a fixed table — adding a codec is one row, never a new flag branch.
 #![forbid(unsafe_code)]
+
+mod container;
+
 
 use std::io::Read;
 use std::io::Write;
@@ -138,14 +142,19 @@ fn lvl_factor(lvl: u8) -> u32 {
 
 fn usage(codecs: &[CodecSpec]) {
     println!(
-        "ozip {} — pure-Rust single-file codec CLI",
+        "ozip {} — pure-Rust codec + container CLI",
         env!("CARGO_PKG_VERSION")
     );
     println!();
     println!("USAGE:");
     println!("    ozip <codec> [OPTIONS] [FILE ...]   compress FILEs (or stdin)");
     println!("    ozip -d [OPTIONS] [FILE ...]         decompress (codec from suffix/magic)");
-    println!("    ozip --list-codecs                   codec registry");
+    println!("    ozip c ARCHIVE INPUT...               create archive (format by ext or -f)");
+    println!("    ozip x ARCHIVE [-C DIR]               extract archive (auto-detect)");
+    println!("    ozip t ARCHIVE                        list entry names");
+    println!("    ozip l ARCHIVE                        long listing (mode/size/mtime)");
+    println!("    ozip --list-codecs                    codec registry");
+    println!("    ozip --formats                        container registry");
     println!();
     println!("OPTIONS:");
     println!("    -#       compression level (codec range applies)");
@@ -153,6 +162,8 @@ fn usage(codecs: &[CodecSpec]) {
     println!("    -k       keep (do not delete) input files");
     println!("    -c       write to stdout");
     println!("    -o FILE  output name (single input only)");
+    println!("    -f FMT   container format override (tar, tar.gz, zip, cpio, ...)");
+    println!("    -C DIR   extraction directory (ozip x)");
     println!();
     println!("CODECS:");
     for c in codecs {
@@ -202,10 +213,19 @@ fn run() -> Result<(), String> {
         }
         return Ok(());
     }
+    if args[0] == "--formats" {
+        container::print_formats();
+        return Ok(());
+    }
 
-    let mut decompress = args.iter().any(|a| a == "-d");
-    let mut keep = args.iter().any(|a| a == "-k");
-    let mut to_stdout = args.iter().any(|a| a == "-c");
+    // Container commands: c (create), x (extract), t (list), l (long).
+    if matches!(args[0].as_str(), "c" | "x" | "t" | "l") {
+        return run_container(&args);
+    }
+
+    let decompress = args.iter().any(|a| a == "-d");
+    let keep = args.iter().any(|a| a == "-k");
+    let to_stdout = args.iter().any(|a| a == "-c");
     let mut level: Option<u8> = None;
     let mut out_name: Option<String> = None;
     let mut files: Vec<PathBuf> = Vec::new();
@@ -336,8 +356,52 @@ fn run() -> Result<(), String> {
             std::fs::remove_file(path).map_err(|e| format!("{}: {e}", path.display()))?;
         }
     }
-    let _ = (&mut decompress, &mut keep);
     Ok(())
+}
+
+fn run_container(args: &[String]) -> Result<(), String> {
+    let command = args[0].as_str();
+    let mut level: Option<u8> = None;
+    let mut format: Option<String> = None;
+    let mut out_dir: Option<PathBuf> = None;
+    let mut paths: Vec<PathBuf> = Vec::new();
+
+    let mut i = 1usize;
+    while i < args.len() {
+        let a = &args[i];
+        if a.len() >= 2 && a.starts_with('-') && a[1..].chars().all(|c| c.is_ascii_digit()) {
+            level = Some(a[1..].parse().map_err(|_| format!("bad level {a}"))?);
+            i += 1;
+            continue;
+        }
+        if a == "-f" {
+            format = args.get(i + 1).cloned();
+            i += 2;
+            continue;
+        }
+        if a == "-C" {
+            out_dir = args.get(i + 1).cloned().map(PathBuf::from);
+            i += 2;
+            continue;
+        }
+        if a.starts_with('-') {
+            return Err(format!("unknown option {a}"));
+        }
+        paths.push(PathBuf::from(a));
+        i += 1;
+    }
+
+    if paths.is_empty() {
+        return Err(format!("ozip {command}: an archive path is required"));
+    }
+    let archive = paths.remove(0);
+    match command {
+        "c" => container::create(&archive, &paths, format.as_deref(), level),
+        "x" => container::extract(&archive, out_dir.as_deref()),
+        "t" => container::list(&archive, false),
+        "l" => container::list(&archive, true),
+        _ => unreachable!(),
+    }
 }
 
 fn main() -> ExitCode {
