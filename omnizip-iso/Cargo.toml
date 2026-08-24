@@ -1,0 +1,20 @@
+[package]
+name = "omnizip-iso"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "ISO 9660 image container (volume descriptors, directory records, Rock Ridge read, deterministic level-1 write) on omnizip-archive-core"
+keywords = ["compression", "iso9660", "optical"]
+categories = ["compression"]
+
+[lib]
+name = "omnizip_iso"
+path = "src/lib.rs"
+
+[dependencies]
+omnizip-archive-core = { path = "../omnizip-archive-core" }
+
+[lints]
+workspace = true
