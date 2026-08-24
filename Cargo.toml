@@ -3,6 +3,7 @@
 # break cargo metadata (fixes release-plz historical comparison).
 members = [
     "ozip",
+    "omnizip-xar",
     "omnizip-iso",
     "omnizip-*",
     "tests/differential",

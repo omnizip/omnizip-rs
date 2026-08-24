@@ -1,0 +1,27 @@
+[package]
+name = "omnizip-xar"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "XAR archive container (macOS .pkg; zlib TOC XML via quick-xml, heap checksums) on omnizip-archive-core"
+keywords = ["compression", "xar", "pkg"]
+categories = ["compression"]
+
+[lib]
+name = "omnizip_xar"
+path = "src/lib.rs"
+
+[dependencies]
+omnizip-archive-core = { path = "../omnizip-archive-core" }
+omnizip-libdeflate = { path = "../omnizip-libdeflate" }
+omnizip-crypto = { path = "../omnizip-crypto" }
+# Task 10's XML decision, per the user's directive: a real XML library
+# handles the TOC in both directions. quick-xml is pure Rust, no unsafe
+# in its core, widely audited. The writer keeps a fixed element order
+# so output stays byte-deterministic.
+quick-xml = "0.38"
+
+[lints]
+workspace = true
