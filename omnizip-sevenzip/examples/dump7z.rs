@@ -9,8 +9,19 @@ fn main() {
     };
     let opts = WriteOptions::deterministic().with_mtime(1_700_000_000);
     let mut w = omnizip_sevenzip::writer::SevenZipWriter::new(m);
-    w.add_directory(&NewEntry::directory("doc", &opts), &opts).unwrap();
-    w.add_file(&NewEntry::file("doc/readme.txt", &opts), b"seven zip round trip\n".repeat(20).as_slice(), &opts).unwrap();
-    w.add_file(&NewEntry::file("doc/data.bin", &opts), &[0x77u8; 1024], &opts).unwrap();
+    w.add_directory(&NewEntry::directory("doc", &opts), &opts)
+        .unwrap();
+    w.add_file(
+        &NewEntry::file("doc/readme.txt", &opts),
+        b"seven zip round trip\n".repeat(20).as_slice(),
+        &opts,
+    )
+    .unwrap();
+    w.add_file(
+        &NewEntry::file("doc/data.bin", &opts),
+        &[0x77u8; 1024],
+        &opts,
+    )
+    .unwrap();
     std::fs::write(out, w.finish_bytes(&opts).unwrap()).unwrap();
 }

@@ -61,7 +61,8 @@ fn create_and_extract(fmt: &str, ext: &str, tag: &str) {
         .iter()
         .map(|p| p.as_os_str().to_owned())
         .collect();
-    let mut args: Vec<std::ffi::OsString> = vec![os("c").to_owned(), archive.as_os_str().to_owned()];
+    let mut args: Vec<std::ffi::OsString> =
+        vec![os("c").to_owned(), archive.as_os_str().to_owned()];
     args.extend(inputs);
     let args: Vec<&std::ffi::OsStr> = args.iter().map(std::convert::AsRef::as_ref).collect();
     let (ok, _, err) = run(&args);
@@ -70,19 +71,17 @@ fn create_and_extract(fmt: &str, ext: &str, tag: &str) {
     // List both ways.
     let (ok, out, err) = run(&[os("t"), archive.as_os_str()]);
     assert!(ok, "ozip t {fmt} failed: {err}");
-    assert!(out.contains("hello.txt"), "t listing missing hello.txt: {out}");
+    assert!(
+        out.contains("hello.txt"),
+        "t listing missing hello.txt: {out}"
+    );
     let (ok, _, err) = run(&[os("l"), archive.as_os_str()]);
     assert!(ok, "ozip l {fmt} failed: {err}");
 
     // Extract and compare.
     let out_dir = dir.join("x");
     std::fs::create_dir_all(&out_dir).unwrap();
-    let (ok, _, err) = run(&[
-        os("x"),
-        archive.as_os_str(),
-        os("-C"),
-        out_dir.as_os_str(),
-    ]);
+    let (ok, _, err) = run(&[os("x"), archive.as_os_str(), os("-C"), out_dir.as_os_str()]);
     assert!(ok, "ozip x {fmt} failed: {err}");
     let base = out_dir.join(tree.root.file_name().unwrap());
     assert_eq!(
@@ -96,7 +95,8 @@ fn create_and_extract(fmt: &str, ext: &str, tag: &str) {
 
     // Determinism: create twice, byte-identical.
     let archive2 = dir.join(format!("test2.{ext}"));
-    let mut args: Vec<std::ffi::OsString> = vec![os("c").to_owned(), archive2.as_os_str().to_owned()];
+    let mut args: Vec<std::ffi::OsString> =
+        vec![os("c").to_owned(), archive2.as_os_str().to_owned()];
     args.extend(tree.inputs().iter().map(|p| p.as_os_str().to_owned()));
     let args: Vec<&std::ffi::OsStr> = args.iter().map(std::convert::AsRef::as_ref).collect();
     let (ok, _, err) = run(&args);
@@ -141,7 +141,8 @@ fn reference_tools_accept_our_archives() {
 
     let make = |name: &str| {
         let archive = dir.join(name);
-        let mut args: Vec<std::ffi::OsString> = vec![os("c").to_owned(), archive.as_os_str().to_owned()];
+        let mut args: Vec<std::ffi::OsString> =
+            vec![os("c").to_owned(), archive.as_os_str().to_owned()];
         args.extend(tree.inputs().iter().map(|p| p.as_os_str().to_owned()));
         let args: Vec<&std::ffi::OsStr> = args.iter().map(std::convert::AsRef::as_ref).collect();
         let (ok, _, err) = run(&args);
@@ -201,7 +202,12 @@ fn extraction_rejects_traversal() {
     let evil = dir.join("evil.tar");
     std::fs::write(&evil, &bytes).unwrap();
 
-    let (ok, _, err) = run(&[os("x"), evil.as_os_str(), os("-C"), dir.join("out").as_os_str()]);
+    let (ok, _, err) = run(&[
+        os("x"),
+        evil.as_os_str(),
+        os("-C"),
+        dir.join("out").as_os_str(),
+    ]);
     assert!(!ok, "ozip x accepted a traversal archive");
     assert!(err.contains("traversal"), "unexpected error: {err}");
 

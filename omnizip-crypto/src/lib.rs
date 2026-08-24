@@ -142,17 +142,20 @@ impl AesCtr {
         let inner = match key.len() {
             16 => {
                 let enc = aes::Aes128::new(key[..16].try_into().expect("16"));
-                let core = ctr::CtrCore::<_, ctr::flavors::Ctr128LE>::inner_iv_init(enc, (&n).into());
+                let core =
+                    ctr::CtrCore::<_, ctr::flavors::Ctr128LE>::inner_iv_init(enc, (&n).into());
                 WinZipInner::Aes128(ctr::Ctr128LE::from_core(core))
             }
             24 => {
                 let enc = aes::Aes192::new(key[..24].try_into().expect("24"));
-                let core = ctr::CtrCore::<_, ctr::flavors::Ctr128LE>::inner_iv_init(enc, (&n).into());
+                let core =
+                    ctr::CtrCore::<_, ctr::flavors::Ctr128LE>::inner_iv_init(enc, (&n).into());
                 WinZipInner::Aes192(ctr::Ctr128LE::from_core(core))
             }
             _ => {
                 let enc = aes::Aes256::new(key[..32].try_into().expect("32"));
-                let core = ctr::CtrCore::<_, ctr::flavors::Ctr128LE>::inner_iv_init(enc, (&n).into());
+                let core =
+                    ctr::CtrCore::<_, ctr::flavors::Ctr128LE>::inner_iv_init(enc, (&n).into());
                 WinZipInner::Aes256(ctr::Ctr128LE::from_core(core))
             }
         };
@@ -308,7 +311,10 @@ mod tests {
             hex(&sha256(b"abc")),
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
         );
-        assert_eq!(hex(&sha1(b"abc")), "a9993e364706816aba3e25717850c26c9cd0d89d");
+        assert_eq!(
+            hex(&sha1(b"abc")),
+            "a9993e364706816aba3e25717850c26c9cd0d89d"
+        );
     }
 
     #[test]

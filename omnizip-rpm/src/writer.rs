@@ -158,14 +158,11 @@ impl RpmWriter {
     /// Payload compression failures.
     pub fn finish_bytes(&mut self, options: &WriteOptions) -> Result<Vec<u8>, ArchiveError> {
         if self.finished {
-            return Err(ArchiveError::InvalidArchive(
-                "RPM already finished".into(),
-            ));
+            return Err(ArchiveError::InvalidArchive("RPM already finished".into()));
         }
 
         // CPIO payload through the shared crate (deterministic newc).
-        let mut cpio = omnizip_cpio::CpioWriter::new()
-            .with_format(omnizip_cpio::CpioFormat::Newc);
+        let mut cpio = omnizip_cpio::CpioWriter::new().with_format(omnizip_cpio::CpioFormat::Newc);
         for (entry, data) in &self.files {
             match entry.kind {
                 EntryKind::Directory => cpio.add_directory(entry, options)?,
@@ -296,39 +293,163 @@ impl RpmWriter {
         }
 
         let mut defs = vec![
-            TagDef { id: tags::NAME, type_: types::STRING, value: TagOut::Str(self.name.clone()) },
-            TagDef { id: tags::VERSION, type_: types::STRING, value: TagOut::Str(self.version.clone()) },
-            TagDef { id: tags::RELEASE, type_: types::STRING, value: TagOut::Str(self.release.clone()) },
-            TagDef { id: tags::SUMMARY, type_: types::STRING, value: TagOut::Str(self.summary.clone().unwrap_or_default()) },
-            TagDef { id: tags::DESCRIPTION, type_: types::STRING, value: TagOut::Str(self.description.clone().unwrap_or_default()) },
-            TagDef { id: tags::BUILDTIME, type_: types::INT32, value: TagOut::Int32(vec![options.mtime.min(u32::MAX as u64) as u32]) },
-            TagDef { id: tags::BUILDHOST, type_: types::STRING, value: TagOut::Str(options.host_tool.clone()) },
-            TagDef { id: tags::SIZE, type_: types::INT32, value: TagOut::Int32(vec![self.files.iter().map(|(_, d)| d.len() as u32).sum()]) },
-            TagDef { id: tags::LICENSE, type_: types::STRING, value: TagOut::Str(self.license.clone().unwrap_or_default()) },
-            TagDef { id: tags::GROUP, type_: types::STRING, value: TagOut::Str("Unspecified".into()) },
-            TagDef { id: tags::URL, type_: types::STRING, value: TagOut::Str(self.url.clone().unwrap_or_default()) },
-            TagDef { id: tags::OS, type_: types::STRING, value: TagOut::Str("linux".into()) },
-            TagDef { id: tags::ARCH, type_: types::STRING, value: TagOut::Str(self.arch.clone()) },
-            TagDef { id: tags::FILESIZES, type_: types::INT32, value: TagOut::Int32(sizes) },
-            TagDef { id: tags::FILEMODES, type_: types::INT16, value: TagOut::Int16(modes) },
-            TagDef { id: tags::FILEUIDS, type_: types::INT32, value: TagOut::Int32(vec![0; basenames.len()]) },
-            TagDef { id: tags::FILEGIDS, type_: types::INT32, value: TagOut::Int32(vec![0; basenames.len()]) },
-            TagDef { id: tags::FILEMTIMES, type_: types::INT32, value: TagOut::Int32(mtimes) },
-            TagDef { id: tags::FILEDIGESTS, type_: types::STRING_ARRAY, value: TagOut::StrArray(digests) },
-            TagDef { id: tags::FILELINKTOS, type_: types::STRING_ARRAY, value: TagOut::StrArray(linktos) },
-            TagDef { id: tags::FILEFLAGS, type_: types::INT32, value: TagOut::Int32(vec![0; basenames.len()]) },
-            TagDef { id: tags::FILEUSERNAME, type_: types::STRING_ARRAY, value: TagOut::StrArray(owners) },
-            TagDef { id: tags::FILEGROUPNAME, type_: types::STRING_ARRAY, value: TagOut::StrArray(groups) },
-            TagDef { id: tags::ARCHIVESIZE, type_: types::INT32, value: TagOut::Int32(vec![payload_uncompressed]) },
-            TagDef { id: tags::RPMVERSION, type_: types::STRING, value: TagOut::Str("4.16.0".into()) },
-            TagDef { id: tags::DIRNAMES, type_: types::STRING_ARRAY, value: TagOut::StrArray(dirnames) },
-            TagDef { id: tags::BASENAMES, type_: types::STRING_ARRAY, value: TagOut::StrArray(basenames) },
-            TagDef { id: tags::DIRINDEXES, type_: types::INT32, value: TagOut::Int32(dirindexes) },
-            TagDef { id: tags::PAYLOADFORMAT, type_: types::STRING, value: TagOut::Str("cpio".into()) },
+            TagDef {
+                id: tags::NAME,
+                type_: types::STRING,
+                value: TagOut::Str(self.name.clone()),
+            },
+            TagDef {
+                id: tags::VERSION,
+                type_: types::STRING,
+                value: TagOut::Str(self.version.clone()),
+            },
+            TagDef {
+                id: tags::RELEASE,
+                type_: types::STRING,
+                value: TagOut::Str(self.release.clone()),
+            },
+            TagDef {
+                id: tags::SUMMARY,
+                type_: types::STRING,
+                value: TagOut::Str(self.summary.clone().unwrap_or_default()),
+            },
+            TagDef {
+                id: tags::DESCRIPTION,
+                type_: types::STRING,
+                value: TagOut::Str(self.description.clone().unwrap_or_default()),
+            },
+            TagDef {
+                id: tags::BUILDTIME,
+                type_: types::INT32,
+                value: TagOut::Int32(vec![options.mtime.min(u32::MAX as u64) as u32]),
+            },
+            TagDef {
+                id: tags::BUILDHOST,
+                type_: types::STRING,
+                value: TagOut::Str(options.host_tool.clone()),
+            },
+            TagDef {
+                id: tags::SIZE,
+                type_: types::INT32,
+                value: TagOut::Int32(vec![self.files.iter().map(|(_, d)| d.len() as u32).sum()]),
+            },
+            TagDef {
+                id: tags::LICENSE,
+                type_: types::STRING,
+                value: TagOut::Str(self.license.clone().unwrap_or_default()),
+            },
+            TagDef {
+                id: tags::GROUP,
+                type_: types::STRING,
+                value: TagOut::Str("Unspecified".into()),
+            },
+            TagDef {
+                id: tags::URL,
+                type_: types::STRING,
+                value: TagOut::Str(self.url.clone().unwrap_or_default()),
+            },
+            TagDef {
+                id: tags::OS,
+                type_: types::STRING,
+                value: TagOut::Str("linux".into()),
+            },
+            TagDef {
+                id: tags::ARCH,
+                type_: types::STRING,
+                value: TagOut::Str(self.arch.clone()),
+            },
+            TagDef {
+                id: tags::FILESIZES,
+                type_: types::INT32,
+                value: TagOut::Int32(sizes),
+            },
+            TagDef {
+                id: tags::FILEMODES,
+                type_: types::INT16,
+                value: TagOut::Int16(modes),
+            },
+            TagDef {
+                id: tags::FILEUIDS,
+                type_: types::INT32,
+                value: TagOut::Int32(vec![0; basenames.len()]),
+            },
+            TagDef {
+                id: tags::FILEGIDS,
+                type_: types::INT32,
+                value: TagOut::Int32(vec![0; basenames.len()]),
+            },
+            TagDef {
+                id: tags::FILEMTIMES,
+                type_: types::INT32,
+                value: TagOut::Int32(mtimes),
+            },
+            TagDef {
+                id: tags::FILEDIGESTS,
+                type_: types::STRING_ARRAY,
+                value: TagOut::StrArray(digests),
+            },
+            TagDef {
+                id: tags::FILELINKTOS,
+                type_: types::STRING_ARRAY,
+                value: TagOut::StrArray(linktos),
+            },
+            TagDef {
+                id: tags::FILEFLAGS,
+                type_: types::INT32,
+                value: TagOut::Int32(vec![0; basenames.len()]),
+            },
+            TagDef {
+                id: tags::FILEUSERNAME,
+                type_: types::STRING_ARRAY,
+                value: TagOut::StrArray(owners),
+            },
+            TagDef {
+                id: tags::FILEGROUPNAME,
+                type_: types::STRING_ARRAY,
+                value: TagOut::StrArray(groups),
+            },
+            TagDef {
+                id: tags::ARCHIVESIZE,
+                type_: types::INT32,
+                value: TagOut::Int32(vec![payload_uncompressed]),
+            },
+            TagDef {
+                id: tags::RPMVERSION,
+                type_: types::STRING,
+                value: TagOut::Str("4.16.0".into()),
+            },
+            TagDef {
+                id: tags::DIRNAMES,
+                type_: types::STRING_ARRAY,
+                value: TagOut::StrArray(dirnames),
+            },
+            TagDef {
+                id: tags::BASENAMES,
+                type_: types::STRING_ARRAY,
+                value: TagOut::StrArray(basenames),
+            },
+            TagDef {
+                id: tags::DIRINDEXES,
+                type_: types::INT32,
+                value: TagOut::Int32(dirindexes),
+            },
+            TagDef {
+                id: tags::PAYLOADFORMAT,
+                type_: types::STRING,
+                value: TagOut::Str("cpio".into()),
+            },
         ];
         if !comp_name.is_empty() {
-            defs.push(TagDef { id: tags::PAYLOADCOMPRESSOR, type_: types::STRING, value: TagOut::Str(comp_name.into()) });
-            defs.push(TagDef { id: tags::PAYLOADFLAGS, type_: types::STRING, value: TagOut::Str(comp_flags.into()) });
+            defs.push(TagDef {
+                id: tags::PAYLOADCOMPRESSOR,
+                type_: types::STRING,
+                value: TagOut::Str(comp_name.into()),
+            });
+            defs.push(TagDef {
+                id: tags::PAYLOADFLAGS,
+                type_: types::STRING,
+                value: TagOut::Str(comp_flags.into()),
+            });
         }
         serialize_header(&defs)
     }
@@ -482,14 +603,23 @@ mod tests {
             assert_eq!(info.version, "1.0.0");
             let entries = r.entries().unwrap();
             let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
-            assert!(names.contains(&"usr/share/hello/hello.txt"), "{c:?}: {names:?}");
-            let idx = names.iter().position(|n| *n == "usr/share/hello/hello.txt").unwrap();
+            assert!(
+                names.contains(&"usr/share/hello/hello.txt"),
+                "{c:?}: {names:?}"
+            );
+            let idx = names
+                .iter()
+                .position(|n| *n == "usr/share/hello/hello.txt")
+                .unwrap();
             assert_eq!(r.read_entry(idx).unwrap(), b"hello rpm\n");
         }
     }
 
     #[test]
     fn deterministic() {
-        assert_eq!(build(PayloadCompression::Gzip), build(PayloadCompression::Gzip));
+        assert_eq!(
+            build(PayloadCompression::Gzip),
+            build(PayloadCompression::Gzip)
+        );
     }
 }

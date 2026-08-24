@@ -18,7 +18,7 @@ path = "src/lib.rs"
 # hand-rolled primitives. All are #![forbid(unsafe_code)] in their
 # core implementations; versions pinned for auditability.
 digest = "0.11"
-md-5 = "0.11"
+md5 = { package = "md-5", version = "0.11" }
 sha1 = "0.11"
 sha2 = "0.11"
 hmac = "0.13"

@@ -316,7 +316,11 @@ impl<'a> HeaderParser<'a> {
             }
         }
 
-        let num_digests: usize = info.num_unpack_streams_in_folders.iter().map(|n| *n as usize).sum();
+        let num_digests: usize = info
+            .num_unpack_streams_in_folders
+            .iter()
+            .map(|n| *n as usize)
+            .sum();
         if self.peek() == Some(property::CRC as u8) {
             self.byte()?;
             let defined = self.digest_defined_vector(num_digests)?;

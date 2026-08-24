@@ -119,7 +119,12 @@ pub fn extra_bytes(version: u16, strength: AesStrength, real_method: u16) -> Vec
 /// to the strength's salt length. Keeps encrypted archives
 /// byte-reproducible (task 17).
 #[must_use]
-pub fn derived_salt(password: &[u8], name: &[u8], content_crc: u32, strength: AesStrength) -> Vec<u8> {
+pub fn derived_salt(
+    password: &[u8],
+    name: &[u8],
+    content_crc: u32,
+    strength: AesStrength,
+) -> Vec<u8> {
     let mut material = Vec::with_capacity(password.len() + name.len() + 4);
     material.extend_from_slice(password);
     material.extend_from_slice(name);
@@ -141,8 +146,7 @@ pub fn encrypt(
     strength: AesStrength,
     compressed: &[u8],
 ) -> Result<Vec<u8>, ArchiveError> {
-    let keys =
-        omnizip_crypto::winzip_aes_keys(password, salt, strength.key_len());
+    let keys = omnizip_crypto::winzip_aes_keys(password, salt, strength.key_len());
     let mut out = Vec::with_capacity(salt.len() + 2 + compressed.len() + 10);
     out.extend_from_slice(salt);
     out.extend_from_slice(&keys.verification);
