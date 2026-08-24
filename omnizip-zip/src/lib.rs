@@ -4,6 +4,7 @@
 //! bzip2(12) / zstd(93), deterministic normalization.
 #![forbid(unsafe_code)]
 
+pub mod aes;
 mod reader;
 mod writer;
 
@@ -22,6 +23,7 @@ pub(crate) const METHOD_DEFLATE: u16 = 8;
 pub(crate) const METHOD_BZIP2: u16 = 12;
 pub(crate) const METHOD_ZSTD: u16 = 93;
 
+pub(crate) const FLAG_ENCRYPTED: u16 = 0x0001;
 pub(crate) const FLAG_UTF8: u16 = 0x0800;
 
 pub(crate) const VERSION_DEFAULT: u16 = 20;
