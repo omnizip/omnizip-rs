@@ -17,9 +17,11 @@ use omnizip_archive_core::{
 use std::collections::BTreeMap;
 use std::path::Path;
 
+#[derive(Clone)]
 struct RawEntry {
     name: String,
     is_dir: bool,
+    window_size: usize,
     unpacked_size: u64,
     crc32: Option<u32>,
     method: u64,
@@ -35,6 +37,12 @@ struct RawEntry {
 pub struct Rar5Reader {
     data: Vec<u8>,
     entries: Vec<RawEntry>,
+    /// Solid streams must be decoded in archive order; this tracks how
+    /// far the shared window has been advanced.
+    main_solid: bool,
+    solid: crate::rar5_unpack::SolidState,
+    consumed: usize,
+    cached: Option<(usize, Vec<u8>)>,
 }
 
 impl Rar5Reader {
@@ -52,13 +60,19 @@ impl Rar5Reader {
         let mut entries = Vec::new();
         let mut pos = 8usize;
         let mut seen_main = false;
+        let mut main_solid = false;
 
         loop {
             let Some(block) = parse_block(data, &mut pos)? else {
                 break;
             };
             match block.kind {
-                rar5_block::MAIN => seen_main = true,
+                rar5_block::MAIN => {
+                    if let Ok((flags, _)) = read_vint(data, &mut block.content.clone()) {
+                        main_solid = flags & 0x0004 != 0;
+                    }
+                    seen_main = true;
+                }
                 rar5_block::END => break,
                 rar5_block::FILE => {
                     if let Some(entry) = parse_file_header(data, &block)? {
@@ -77,6 +91,10 @@ impl Rar5Reader {
         Ok(Self {
             data: data.to_vec(),
             entries,
+            main_solid,
+            solid: crate::rar5_unpack::SolidState::default(),
+            consumed: 0,
+            cached: None,
         })
     }
 
@@ -223,6 +241,7 @@ fn parse_file_header(data: &[u8], block: &Block) -> Result<Option<RawEntry>, Arc
     Ok(Some(RawEntry {
         name,
         is_dir,
+        window_size: crate::rar5_unpack::window_size_from_comp_info(comp_info),
         unpacked_size,
         crc32: crc,
         method,
@@ -282,6 +301,79 @@ fn scan_extra(data: &[u8], block: &Block, name_end: usize) -> (Option<String>, b
     out
 }
 
+impl Rar5Reader {
+    /// Decode LZ entries in archive order up to `index`, maintaining
+    /// the shared solid window; returns entry `index`'s bytes.
+    fn decode_solid_prefix(&mut self, index: usize) -> Result<Vec<u8>, ArchiveError> {
+        if index < self.consumed {
+            if let Some((i, ref data)) = self.cached {
+                if i == index {
+                    return Ok(data.clone());
+                }
+            }
+            // Backwards random access: rebuild the stream from the top.
+            self.solid = crate::rar5_unpack::SolidState::default();
+            self.consumed = 0;
+            self.cached = None;
+        }
+        while self.consumed <= index {
+            let i = self.consumed;
+            let e = &self.entries[i];
+            let output = if e.is_dir || e.method == 0 || e.symlink_target.is_some() {
+                Vec::new()
+            } else {
+                let packed = self
+                    .data
+                    .get(e.data.0..e.data.1)
+                    .ok_or_else(|| ArchiveError::InvalidArchive("rar5: data out of bounds".into()))?
+                    .to_vec();
+                // The bit reader legitimately looks ahead past the last
+                // block into whatever follows; keep those real bytes.
+                let tail = self
+                    .data
+                    .get(e.data.1..(e.data.1 + 8).min(self.data.len()))
+                    .unwrap_or(&[])
+                    .to_vec();
+                crate::rar5_unpack::set_lookahead_tail(tail);
+                let mut state = std::mem::take(&mut self.solid);
+                if !self.main_solid {
+                    state = crate::rar5_unpack::SolidState::default();
+                }
+                let res = crate::rar5_unpack::unpack_lz(
+                    &packed,
+                    e.unpacked_size,
+                    e.window_size,
+                    &mut state,
+                );
+                // libarchive's reset_file_context: in solid archives the
+                // window persists and the base offset advances by this
+                // entry's contribution.
+                state.solid_offset += state.last_advance;
+                self.solid = state;
+                let out = res?;
+                if let Some(crc) = e.crc32 {
+                    let computed = omnizip_archive_core::crc32(&out);
+                    if computed != crc {
+                        return Err(ArchiveError::Checksum(format!(
+                            "rar5: entry '{}': CRC mismatch: stored {crc:08X}, computed {computed:08X}",
+                            e.name
+                        )));
+                    }
+                }
+                out
+            };
+            self.consumed = i + 1;
+            self.cached = Some((i, output));
+        }
+        Ok(self
+            .cached
+            .as_ref()
+            .filter(|(i, _)| *i == index)
+            .map(|(_, d)| d.clone())
+            .unwrap_or_default())
+    }
+}
+
 impl ArchiveReader for Rar5Reader {
     fn entries(&mut self) -> Result<Vec<ArchiveEntry>, ArchiveError> {
         Ok(self
@@ -309,10 +401,12 @@ impl ArchiveReader for Rar5Reader {
     }
 
     fn read_entry(&mut self, index: usize) -> Result<Vec<u8>, ArchiveError> {
-        let e = self
+        let entry = self
             .entries
             .get(index)
-            .ok_or_else(|| ArchiveError::InvalidArchive(format!("rar5: no entry {index}")))?;
+            .ok_or_else(|| ArchiveError::InvalidArchive(format!("rar5: no entry {index}")))?
+            .clone();
+        let e = &entry;
         if e.is_dir {
             return Ok(Vec::new());
         }
@@ -325,21 +419,30 @@ impl ArchiveReader for Rar5Reader {
                 e.name
             )));
         }
-        let raw = self
-            .data
-            .get(e.data.0..e.data.1)
-            .ok_or_else(|| ArchiveError::InvalidArchive("rar5: data out of bounds".into()))?;
-        let out = match e.method {
-            0 => raw.to_vec(),
-            other => {
-                return Err(ArchiveError::UnsupportedFeature {
-                    reason: format!(
-                        "rar5: compression method {other} (LZ) not implemented; entry '{}'",
-                        e.name
-                    ),
-                });
+        if e.method == 0 {
+            self.consumed = self.consumed.max(index + 1);
+            let raw = self
+                .data
+                .get(e.data.0..e.data.1)
+                .ok_or_else(|| ArchiveError::InvalidArchive("rar5: data out of bounds".into()))?;
+            if raw.len() as u64 != e.unpacked_size {
+                return Err(ArchiveError::InvalidArchive(format!(
+                    "rar5: entry '{}': size mismatch",
+                    e.name
+                )));
             }
-        };
+            if let Some(crc) = e.crc32 {
+                let computed = omnizip_archive_core::crc32(raw);
+                if computed != crc {
+                    return Err(ArchiveError::Checksum(format!(
+                        "rar5: entry '{}': CRC mismatch: stored {crc:08X}, computed {computed:08X}",
+                        e.name
+                    )));
+                }
+            }
+            return Ok(raw.to_vec());
+        }
+        let out = self.decode_solid_prefix(index)?;
         if out.len() as u64 != e.unpacked_size {
             return Err(ArchiveError::InvalidArchive(format!(
                 "rar5: entry '{}': size mismatch",
