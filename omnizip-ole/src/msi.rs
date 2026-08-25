@@ -117,7 +117,7 @@ impl MsiReader {
         // sub-views); pick the pair whose lengths sum to the data
         // size — the self-consistent one is the database's.
         let pools = self.all_named("_StringPool");
-        let datas = self.all_named("_StringData");
+        let data_streams = self.all_named("_StringData");
         let u16le = |b: &[u8], o: usize| u16::from_le_bytes([b[o], b[o + 1]]);
         let parse = |pool: &[u8], data: &[u8]| -> Option<Vec<String>> {
             if pool.len() < 4 {
@@ -144,7 +144,7 @@ impl MsiReader {
         };
 
         for pool in &pools {
-            for data in &datas {
+            for data in &data_streams {
                 if let Some(strings) = parse(pool, data) {
                     let total: usize = strings.iter().map(String::len).sum();
                     if total == data.len() && !strings.is_empty() {
@@ -155,7 +155,7 @@ impl MsiReader {
             }
         }
         // Fallback: the first pair, unverified.
-        if let (Some(pool), Some(data)) = (pools.first(), datas.first()) {
+        if let (Some(pool), Some(data)) = (pools.first(), data_streams.first()) {
             if let Some(strings) = parse(pool, data) {
                 self.strings = strings;
             }
