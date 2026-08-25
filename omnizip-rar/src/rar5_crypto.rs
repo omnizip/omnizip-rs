@@ -201,6 +201,7 @@ pub fn decrypt_headers(
     password: &[u8],
     info: &CryptInfo,
     stream: &[u8],
+    iv: [u8; 16],
 ) -> Result<Vec<u8>, ArchiveError> {
     let keys = derive(password, &info.salt, info.kdf_count);
     if let Some(check) = &info.check {
@@ -208,7 +209,7 @@ pub fn decrypt_headers(
     }
     let mut buf = stream.to_vec();
     buf.truncate(buf.len() - buf.len() % 16);
-    let mut cipher = omnizip_crypto::AesCbc256Decrypt::new(&keys.aes_key, &info.iv);
+    let mut cipher = omnizip_crypto::AesCbc256Decrypt::new(&keys.aes_key, &iv);
     cipher.decrypt(&mut buf);
     Ok(buf)
 }
