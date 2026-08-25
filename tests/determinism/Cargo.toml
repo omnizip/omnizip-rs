@@ -11,6 +11,10 @@ publish = false
 name = "determinism"
 path = "determinism.rs"
 
+[[test]]
+name = "archive_determinism"
+path = "archive_determinism.rs"
+
 [dev-dependencies]
 omnizip-codecs = { path = "../../omnizip-codecs", version = "0.18.0" }
 omnizip-lzma = { path = "../../omnizip-lzma", version = "0.18.0" }
@@ -28,3 +32,12 @@ omnizip-bench = { path = "../../omnizip-bench", version = "0.18.0" }
 
 [lints]
 workspace = true
+
+[dependencies]
+omnizip-archive-core = { path = "../../omnizip-archive-core" }
+omnizip-tar = { path = "../../omnizip-tar" }
+omnizip-zip = { path = "../../omnizip-zip" }
+omnizip-sevenzip = { path = "../../omnizip-sevenzip" }
+omnizip-iso = { path = "../../omnizip-iso" }
+omnizip-xar = { path = "../../omnizip-xar" }
+omnizip-ole = { path = "../../omnizip-ole" }

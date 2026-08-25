@@ -25,5 +25,14 @@ omnizip-ricepp = { path = "../../omnizip-ricepp", version = "0.18.0" }
 omnizip-snappy = { path = "../../omnizip-snappy", version = "0.18.0" }
 tempfile = "3"
 
+[dependencies]
+omnizip-archive-core = { path = "../../omnizip-archive-core", version = "0.18.0" }
+omnizip-tar = { path = "../../omnizip-tar", version = "0.18.0" }
+omnizip-zip = { path = "../../omnizip-zip", version = "0.18.0" }
+omnizip-cpio = { path = "../../omnizip-cpio", version = "0.18.0" }
+omnizip-sevenzip = { path = "../../omnizip-sevenzip", version = "0.18.0" }
+omnizip-xar = { path = "../../omnizip-xar", version = "0.18.0" }
+omnizip-rpm = { path = "../../omnizip-rpm", version = "0.18.0" }
+
 [lints]
 workspace = true
