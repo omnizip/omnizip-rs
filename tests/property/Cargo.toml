@@ -20,10 +20,10 @@ name = "proptest_round_trip"
 path = "proptest_round_trip.rs"
 
 [dev-dependencies]
-omnizip-codecs = { path = "../../omnizip-codecs", version = "0.20.0" }
-omnizip-lzma = { path = "../../omnizip-lzma", version = "0.20.0" }
-omnizip-zstd = { path = "../../omnizip-zstd", version = "0.20.0" }
-omnizip-brotli = { path = "../../omnizip-brotli", version = "0.20.0" }
-omnizip-lz4 = { path = "../../omnizip-lz4", version = "0.20.0" }
-omnizip-deflate = { path = "../../omnizip-deflate", version = "0.20.0" }
+omnizip-codecs = { path = "../../omnizip-codecs", version = "0.20.1" }
+omnizip-lzma = { path = "../../omnizip-lzma", version = "0.20.1" }
+omnizip-zstd = { path = "../../omnizip-zstd", version = "0.20.1" }
+omnizip-brotli = { path = "../../omnizip-brotli", version = "0.20.1" }
+omnizip-lz4 = { path = "../../omnizip-lz4", version = "0.20.1" }
+omnizip-deflate = { path = "../../omnizip-deflate", version = "0.20.1" }
 proptest = "1"
