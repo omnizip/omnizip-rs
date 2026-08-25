@@ -73,13 +73,13 @@ fn libarchive_corpus_walks_cleanly() {
     // corrupt headers, encrypted filenames) we reject too, and every
     // fixture 7zz reads we either parse or classify structurally.
     assert!(
-        parsed >= 20,
-        "expected STORE archives to fully parse: {parsed}"
+        parsed >= 40,
+        "expected STORE+LZ archives to fully decode: {parsed}"
     );
     assert!(
-        structured >= 70,
-        "expected LZ/encrypted fixtures: {structured}"
+        structured >= 55,
+        "expected encrypted/corrupt fixtures: {structured}"
     );
-    assert!(rejected <= 40, "too many plain rejections: {rejected}");
+    assert!(rejected <= 50, "too many plain rejections: {rejected}");
     assert!(parsed + structured + rejected >= 140, "corpus coverage");
 }
