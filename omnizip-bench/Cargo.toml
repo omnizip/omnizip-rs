@@ -20,6 +20,14 @@ name = "omnizip_bench"
 path = "src/lib.rs"
 
 [dependencies]
+omnizip-iso = { path = "../omnizip-iso" }
+omnizip-rpm = { path = "../omnizip-rpm" }
+omnizip-xar = { path = "../omnizip-xar" }
+omnizip-sevenzip = { path = "../omnizip-sevenzip" }
+omnizip-cpio = { path = "../omnizip-cpio" }
+omnizip-zip = { path = "../omnizip-zip" }
+omnizip-tar = { path = "../omnizip-tar" }
+omnizip-archive-core = { path = "../omnizip-archive-core" }
 omnizip-codecs = { path = "../omnizip-codecs", version = "0.18.0" }
 omnizip-lzma = { path = "../omnizip-lzma", version = "0.18.0" }
 omnizip-zstd = { path = "../omnizip-zstd", version = "0.18.0" }

@@ -41,12 +41,12 @@ impl XarWriter {
         let mut next_id = 1u64;
 
         let push_file = |name: &str,
-                             body: &[u8],
-                             heap: &mut Vec<u8>,
-                             entries: &mut Vec<TocEntry>,
-                             next_id: &mut u64,
-                             mtime: u64,
-                             mode: u32| {
+                         body: &[u8],
+                         heap: &mut Vec<u8>,
+                         entries: &mut Vec<TocEntry>,
+                         next_id: &mut u64,
+                         mtime: u64,
+                         mode: u32| {
             let archived = zlib_compress(body)?;
             let offset = 20 + heap.len() as u64;
             heap.extend_from_slice(&archived);
@@ -109,7 +109,20 @@ impl XarWriter {
             });
             next_id += 1;
         }
-        for name in self.dirs.keys() {
+        // Explicit directories plus every parent implied by a file
+        // path — nesting resolves full paths on read.
+        let mut dir_names: Vec<String> = self.dirs.keys().cloned().collect();
+        for path in self.files.keys().chain(self.symlinks.keys()) {
+            let mut p = path.as_str();
+            while let Some(i) = p.rfind('/') {
+                p = &p[..i];
+                if !dir_names.iter().any(|d| d == p) {
+                    dir_names.push(p.to_string());
+                }
+            }
+        }
+        dir_names.sort();
+        for name in dir_names {
             entries.push(TocEntry {
                 id: next_id,
                 name: name.clone(),

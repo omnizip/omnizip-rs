@@ -54,6 +54,11 @@ struct Args {
     #[arg(long)]
     list_codecs: bool,
 
+    /// Run the archive-level benchmark suite (create + extract per
+    /// format, with the determinism double-run check).
+    #[arg(long)]
+    archives: bool,
+
     /// Diff two benchmark JSON outputs (positional args after `--`).
     /// Usage: omnizip-bench --diff -- baseline.json current.json
     #[arg(long)]
@@ -186,6 +191,11 @@ fn main() {
         for c in default_codecs() {
             println!("{:<10} levels {:?}", c.name(), c.levels());
         }
+        return;
+    }
+
+    if args.archives {
+        omnizip_bench::archives::run();
         return;
     }
 

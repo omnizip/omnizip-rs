@@ -1,0 +1,18 @@
+[package]
+name = "omnizip-security-tests"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Extraction-security corpus tests (TODO.containers task 21)"
+publish = false
+
+[dependencies]
+omnizip-archive-core = { path = "../../omnizip-archive-core" }
+omnizip-tar = { path = "../../omnizip-tar" }
+omnizip-zip = { path = "../../omnizip-zip" }
+omnizip-cpio = { path = "../../omnizip-cpio" }
+
+[lints]
+workspace = true

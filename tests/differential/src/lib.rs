@@ -22,6 +22,7 @@
 #![forbid(unsafe_code)]
 #![warn(clippy::pedantic)]
 
+pub mod archive_manifest;
 pub mod wav;
 
 use std::io::Write;

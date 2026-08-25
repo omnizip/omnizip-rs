@@ -23,6 +23,7 @@
 #![forbid(unsafe_code)]
 #![warn(clippy::pedantic)]
 
+pub mod archives;
 pub mod case;
 pub mod corpus;
 pub mod llm_corpus;
