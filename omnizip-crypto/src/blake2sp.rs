@@ -77,6 +77,7 @@ impl Blake2s {
     }
 
     #[cfg(test)]
+    #[allow(dead_code)]
     fn from_raw_params(p: &[u8; 32]) -> Self {
         let mut h = IV;
         for (i, word) in h.iter_mut().enumerate() {
@@ -113,8 +114,7 @@ impl Blake2s {
                 v[15] = !v[15];
             }
         }
-        for round in 0..10 {
-            let s = &SIGMA[round];
+        for s in SIGMA.iter() {
             g(&mut v, 0, 4, 8, 12, m[s[0]], m[s[1]]);
             g(&mut v, 1, 5, 9, 13, m[s[2]], m[s[3]]);
             g(&mut v, 2, 6, 10, 14, m[s[4]], m[s[5]]);

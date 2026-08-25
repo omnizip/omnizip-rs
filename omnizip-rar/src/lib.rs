@@ -30,6 +30,8 @@ pub mod rar5_header_flags {
     pub const EXTRA_AREA: u64 = 0x0001;
     pub const DATA_AREA: u64 = 0x0002;
     pub const SKIP_IF_UNKNOWN: u64 = 0x0004;
+    pub const SPLIT_BEFORE: u64 = 0x0008;
+    pub const SPLIT_AFTER: u64 = 0x0010;
     pub const DATA_AREA_SIZE_UNKNOWN: u64 = 0x0008;
     pub const ENCRYPTED: u64 = 0x0010;
 }
