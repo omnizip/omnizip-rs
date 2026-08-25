@@ -14,11 +14,16 @@
 
 use digest::Digest;
 
+/// MD5 digest, raw 16 bytes (PAR2 ids, packet checksums).
+#[must_use]
+pub fn md5(data: &[u8]) -> [u8; 16] {
+    md5::Md5::digest(data).into()
+}
+
 /// MD5 digest, hex-encoded lowercase (RPM `filedigests`, PAR2 packet ids).
 #[must_use]
 pub fn md5_hex(data: &[u8]) -> String {
-    let d = md5::Md5::digest(data);
-    hex(&d)
+    hex(&md5(data))
 }
 
 /// SHA-1 digest, raw bytes (WinZip AE-1 HMAC, PAR2 file ids).
