@@ -206,8 +206,8 @@ pub struct SolidState {
     pub dd: DecodeTable,
     pub ldd: DecodeTable,
     pub rd: DecodeTable,
-    last_len: u32,
-    dist_cache: [i64; 4],
+    pub last_len: u32,
+    pub dist_cache: [i64; 4],
 }
 
 struct Unpacker<'a> {
@@ -218,8 +218,8 @@ struct Unpacker<'a> {
     last_write_ptr: u64,
     filters: std::collections::VecDeque<Filter>,
     out: Vec<u8>,
-    last_len: u32,
-    dist_cache: [i64; 4],
+    pub last_len: u32,
+    pub dist_cache: [i64; 4],
 }
 
 impl<'a> Unpacker<'a> {
@@ -258,7 +258,12 @@ impl<'a> Unpacker<'a> {
     }
 
     fn push_window(&mut self, start: u64, end: u64) {
-        let chunk = self.window_range(start, end);
+        // Window coordinates are offset by the solid base — every
+        // write lands at (solid_offset + pos) & mask.
+        let chunk = self.window_range(
+            self.solid.solid_offset + start,
+            self.solid.solid_offset + end,
+        );
         self.out.extend_from_slice(&chunk);
         self.last_write_ptr = end;
     }
@@ -425,9 +430,9 @@ pub fn unpack_lz(
 
     let mut cursor = 0usize;
     loop {
-        if u.write_ptr >= unpacked_size {
-            break;
-        }
+        // NOTE: do not stop at unpacked_size — trailing symbols
+        // (typically filter definitions) still await in the stream;
+        // drain until the last block signals completion.
         if cursor + 3 > padded.len() {
             return Err(invalid("rar5: truncated block header"));
         }
@@ -528,7 +533,7 @@ pub fn unpack_lz(
                     dist += i64::from(dist_slot);
                 } else {
                     dbits = (dist_slot / 2 - 1) as u32;
-                    dist += i64::from((2 | (dist_slot & 1)) << dbits);
+                    dist += (2i64 | i64::from(dist_slot & 1)) << dbits;
                 }
                 if dbits > 0 {
                     if dbits >= 4 {

@@ -83,3 +83,33 @@ fn libarchive_corpus_walks_cleanly() {
     assert!(rejected <= 60, "too many plain rejections: {rejected}");
     assert!(parsed + structured + rejected >= 140, "corpus coverage");
 }
+
+#[test]
+fn multivolume_sets_decode_fully() {
+    let root = std::path::Path::new(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../omnizip/spec/fixtures/rar/libarchive_reference"
+    ));
+    if !root.exists() {
+        return;
+    }
+    for first in [
+        "test_read_format_rar5_multiarchive.part01.rar",
+        "test_read_format_rar5_multiarchive_solid.part01.rar",
+    ] {
+        let mut r = Rar5Reader::open_volume_set(&root.join(first)).unwrap();
+        let entries = r.entries().unwrap();
+        assert!(!entries.is_empty());
+        for (i, entry) in entries.iter().enumerate() {
+            let name = entry.name.clone();
+            let data = r
+                .read_entry(i)
+                .unwrap_or_else(|e| panic!("{first}: {name}: {e}"));
+            assert_eq!(
+                data.len() as u64,
+                entry.size.unwrap_or(0),
+                "{first}: {name}"
+            );
+        }
+    }
+}
