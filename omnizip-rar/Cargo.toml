@@ -15,6 +15,7 @@ path = "src/lib.rs"
 
 [dependencies]
 omnizip-archive-core = { path = "../omnizip-archive-core" }
+omnizip-crypto = { path = "../omnizip-crypto" }
 
 [lints]
 workspace = true
