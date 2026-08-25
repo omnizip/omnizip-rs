@@ -6,6 +6,7 @@
 
 use crate::ENCODING_NONE;
 use quick_xml::events::Event;
+use quick_xml::XmlVersion;
 use quick_xml::{Reader, Writer};
 
 /// One TOC file entry.
@@ -116,7 +117,7 @@ pub fn parse_toc(xml: &[u8]) -> Result<Toc, quick_xml::Error> {
                 }
             }
             Event::Text(t) => {
-                let text: String = t.xml_content()?.into_owned();
+                let text: String = t.decode().map_err(quick_xml::Error::Encoding)?.into_owned();
                 let element = match stack.last() {
                     Some(f) => f.element.clone(),
                     None => continue,
@@ -225,7 +226,11 @@ fn attr(e: &quick_xml::events::BytesStart, key: &str) -> Option<String> {
     e.attributes()
         .flatten()
         .find(|a| a.key.as_ref() == key.as_bytes())
-        .and_then(|a| a.unescape_value().ok().map(|v| v.into_owned()))
+        .and_then(|a| {
+            a.normalized_value(XmlVersion::Implicit1_0)
+                .ok()
+                .map(|v| v.into_owned())
+        })
 }
 
 fn attr_u64(e: &quick_xml::events::BytesStart, key: &str) -> Option<u64> {
