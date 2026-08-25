@@ -21,7 +21,7 @@ omnizip-crypto = { path = "../omnizip-crypto" }
 # handles the TOC in both directions. quick-xml is pure Rust, no unsafe
 # in its core, widely audited. The writer keeps a fixed element order
 # so output stays byte-deterministic.
-quick-xml = "0.38"
+quick-xml = "0.41"
 
 [lints]
 workspace = true
