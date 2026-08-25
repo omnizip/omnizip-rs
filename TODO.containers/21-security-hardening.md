@@ -23,6 +23,11 @@ never globally.
 
 ## Acceptance
 
+- [x] Symlink escapes fully enforced (0.20.1): `validate_symlink_target`
+      rejects absolute/drive/UNC targets and traversal-by-depth; every
+      mkdir/write/symlink in `extract_to` first checks no path component
+      is a previously extracted symlink (write-through-symlink guard);
+      `allow_symlink_escape` restores the old behavior explicitly.
 - [ ] Unit corpus: every row above has a crafted malicious archive that is
       rejected (checked into `tests/security/fixtures/`)
 - [ ] Fuzz targets for each format's parser (extend the existing cargo-fuzz

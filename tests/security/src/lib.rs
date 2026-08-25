@@ -167,3 +167,113 @@ fn clean_archives_extract_untouched() {
     );
     let _ = std::fs::remove_dir_all(&out);
 }
+
+fn poison_tar_symlink(name: &str, target: &str) -> Vec<u8> {
+    let o = opts();
+    let mut w = omnizip_tar::TarWriter::new();
+    w.add_symlink(&NewEntry::symlink(name, target, &o), &o)
+        .unwrap();
+    w.finish_bytes().unwrap()
+}
+
+fn poison_zip_symlink(name: &str, target: &str) -> Vec<u8> {
+    let o = opts();
+    let mut w = omnizip_zip::ZipWriter::new();
+    w.add_symlink(&NewEntry::symlink(name, target, &o), &o)
+        .unwrap();
+    w.finish_bytes().unwrap()
+}
+
+#[test]
+fn rejects_escaping_symlink_targets() {
+    let out = temp_dir("symesc");
+    for target in [
+        "/etc/passwd-style-attack",
+        "../../outside-tree",
+        "C:\\Windows\\evil",
+        "\\\\server\\share\\evil",
+    ] {
+        let mut r =
+            omnizip_tar::TarReader::from_bytes(&poison_tar_symlink("evil", target)).unwrap();
+        let err = r
+            .extract_to(&out, &SecurityPolicy::default())
+            .expect_err("escaping symlink target must be rejected");
+        assert!(err.to_string().contains("symlink"), "wrong error: {err}");
+        let mut z =
+            omnizip_zip::ZipReader::from_bytes(&poison_zip_symlink("evil", target)).unwrap();
+        assert!(z.extract_to(&out, &SecurityPolicy::default()).is_err());
+    }
+    assert!(!out.join("evil").exists());
+    let _ = std::fs::remove_dir_all(&out);
+}
+
+#[cfg(unix)]
+#[test]
+fn extracts_in_tree_symlinks() {
+    let out = temp_dir("symok");
+    let o = opts();
+    let mut w = omnizip_tar::TarWriter::new();
+    w.add_file(&NewEntry::file("data.txt", &o), b"payload", &o)
+        .unwrap();
+    w.add_symlink(&NewEntry::symlink("link", "data.txt", &o), &o)
+        .unwrap();
+    w.add_symlink(&NewEntry::symlink("sub/parent-link", "../data.txt", &o), &o)
+        .unwrap();
+    let bytes = w.finish_bytes().unwrap();
+    let mut r = omnizip_tar::TarReader::from_bytes(&bytes).unwrap();
+    r.extract_to(&out, &SecurityPolicy::default()).unwrap();
+    assert_eq!(std::fs::read(out.join("link")).unwrap(), b"payload");
+    assert_eq!(
+        std::fs::read(out.join("sub/parent-link")).unwrap(),
+        b"payload"
+    );
+    let _ = std::fs::remove_dir_all(&out);
+}
+
+#[cfg(unix)]
+#[test]
+fn rejects_writes_through_symlinks() {
+    let out = temp_dir("symwrite");
+    let o = opts();
+    // `alias` is a valid in-tree symlink to `real`; the next entry
+    // writes THROUGH it. Even a benign target must not be traversed
+    // by a later entry path.
+    let mut w = omnizip_tar::TarWriter::new();
+    w.add_directory(&NewEntry::directory("real", &o), &o)
+        .unwrap();
+    w.add_symlink(&NewEntry::symlink("alias", "real", &o), &o)
+        .unwrap();
+    w.add_file(&NewEntry::file("alias/pivot.txt", &o), b"pwn", &o)
+        .unwrap();
+    let bytes = w.finish_bytes().unwrap();
+    let mut r = omnizip_tar::TarReader::from_bytes(&bytes).unwrap();
+    let err = r
+        .extract_to(&out, &SecurityPolicy::default())
+        .expect_err("write through a symlink must be rejected");
+    assert!(
+        err.to_string().contains("traverses a symlink"),
+        "wrong error: {err}"
+    );
+    assert!(!out.join("alias/pivot.txt").exists());
+    assert!(!out.join("real/pivot.txt").exists());
+    let _ = std::fs::remove_dir_all(&out);
+}
+
+#[cfg(unix)]
+#[test]
+fn symlink_escape_opt_out_restores_old_behavior() {
+    let out = temp_dir("symopt");
+    let o = opts();
+    let mut w = omnizip_tar::TarWriter::new();
+    w.add_symlink(&NewEntry::symlink("evil", "../../escapee", &o), &o)
+        .unwrap();
+    let bytes = w.finish_bytes().unwrap();
+    let mut r = omnizip_tar::TarReader::from_bytes(&bytes).unwrap();
+    let permissive = SecurityPolicy {
+        allow_symlink_escape: true,
+        ..SecurityPolicy::default()
+    };
+    r.extract_to(&out, &permissive).unwrap();
+    assert!(std::fs::symlink_metadata(out.join("evil")).is_ok());
+    let _ = std::fs::remove_dir_all(&out);
+}

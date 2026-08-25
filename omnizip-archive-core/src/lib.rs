@@ -123,12 +123,19 @@ pub trait ArchiveReader {
         for (index, entry) in entries.iter().enumerate() {
             let safe = policy.validate_entry(&entry.name)?;
             let dest = output_dir.join(&safe);
+            // A previously extracted symlink must never sit on the
+            // path of a later mkdir/write — that is the classic
+            // pivot-then-write attack.
+            if !policy.allow_symlink_escape {
+                ensure_no_symlink_ancestor(output_dir, &safe)?;
+            }
             match entry.kind {
                 EntryKind::Directory => {
                     std::fs::create_dir_all(&dest)
                         .map_err(|e| ArchiveError::io("create_dir", &dest, e))?;
                 }
                 EntryKind::Symlink(ref target) => {
+                    policy.validate_symlink_target(target, &safe)?;
                     if let Some(parent) = dest.parent() {
                         std::fs::create_dir_all(parent)
                             .map_err(|e| ArchiveError::io("mkdir", parent, e))?;
@@ -155,6 +162,27 @@ pub trait ArchiveReader {
         }
         Ok(())
     }
+}
+
+/// Reject `safe` paths (relative to `root`) whose intermediate
+/// components contain a symlink: `alias/file.txt` after `alias ->
+/// elsewhere` would be written through the link.
+fn ensure_no_symlink_ancestor(root: &Path, safe: &str) -> Result<(), ArchiveError> {
+    let mut current = root.to_path_buf();
+    for component in Path::new(safe).components() {
+        current = current.join(component.as_os_str());
+        if let Ok(meta) = std::fs::symlink_metadata(&current) {
+            if meta.file_type().is_symlink() {
+                // The final component counts too: overwriting a
+                // symlink with a file writes through it.
+                return Err(ArchiveError::Security(format!(
+                    "entry path traverses a symlink: {safe} (at {})",
+                    current.display()
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Metadata describing an entry to write, consumed by format writers.
