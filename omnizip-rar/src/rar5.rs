@@ -380,7 +380,6 @@ fn decrypt_header_stream(data: &[u8], password: &[u8]) -> Result<Vec<u8>, Archiv
                 .get(p..p + 16)
                 .and_then(|s| s.try_into().ok())
                 .ok_or_else(|| ArchiveError::InvalidArchive("rar5: crypt salt truncated".into()))?;
-            p += 16;
             let info = crate::rar5_crypto::CryptInfo {
                 flags,
                 kdf_count: kdf,
