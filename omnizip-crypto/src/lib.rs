@@ -10,7 +10,10 @@
 //! - PAR2 slice hashing (MD5) — see task 13
 //!
 //! Codec crates never depend on this; only container crates do.
+
 #![forbid(unsafe_code)]
+
+pub mod blake2sp;
 
 use digest::Digest;
 

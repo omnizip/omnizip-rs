@@ -29,6 +29,8 @@ struct RawEntry {
     mtime: Option<u64>,
     /// Target path for redirection (hardlink/symlink) entries.
     symlink_target: Option<String>,
+    /// BLAKE2sp-256 from the EX_HASH extra record, when present.
+    blake2sp: Option<[u8; 32]>,
     /// Byte range of the packed data in the file.
     data: (usize, usize),
 }
@@ -43,6 +45,33 @@ pub struct Rar5Reader {
     solid: crate::rar5_unpack::SolidState,
     consumed: usize,
     cached: Option<(usize, Vec<u8>)>,
+}
+
+fn verify_hashes(
+    name: &str,
+    crc: Option<u32>,
+    blake2sp: Option<&[u8; 32]>,
+    data: &[u8],
+) -> Result<(), ArchiveError> {
+    if let Some(crc) = crc {
+        let computed = omnizip_archive_core::crc32(data);
+        if computed != crc {
+            return Err(ArchiveError::Checksum(format!(
+                "rar5: entry '{name}': CRC mismatch: stored {crc:08X}, computed {computed:08X}"
+            )));
+        }
+    }
+    if let Some(want) = blake2sp {
+        let got = omnizip_crypto::blake2sp::blake2sp_256(data);
+        if &got != want {
+            return Err(ArchiveError::Checksum(format!(
+                "rar5: entry '{name}': BLAKE2sp mismatch: stored {}, computed {}",
+                want.iter().map(|b| format!("{b:02x}")).collect::<String>(),
+                got.iter().map(|b| format!("{b:02x}")).collect::<String>()
+            )));
+        }
+    }
+    Ok(())
 }
 
 impl Rar5Reader {
@@ -236,7 +265,7 @@ fn parse_file_header(data: &[u8], block: &Block) -> Result<Option<RawEntry>, Arc
 
     let (_, _, method, _) = rar5_decode_comp_info(comp_info);
     let is_dir = file_flags & rar5_file_flags::IS_DIR != 0;
-    let (symlink_target, encrypted) = scan_extra(data, block, p + name_len);
+    let extra = scan_extra(data, block, p + name_len);
 
     Ok(Some(RawEntry {
         name,
@@ -245,9 +274,10 @@ fn parse_file_header(data: &[u8], block: &Block) -> Result<Option<RawEntry>, Arc
         unpacked_size,
         crc32: crc,
         method,
-        encrypted,
+        encrypted: extra.encrypted,
         mtime,
-        symlink_target,
+        symlink_target: extra.symlink_target,
+        blake2sp: extra.blake2sp,
         data: (block.header_end, block.end),
     }))
 }
@@ -255,14 +285,26 @@ fn parse_file_header(data: &[u8], block: &Block) -> Result<Option<RawEntry>, Arc
 /// Extra-area record types.
 mod extra_record {
     pub const CRYPT: u64 = 0x01;
+    pub const HASH: u64 = 0x02;
     pub const REDIR: u64 = 0x05;
 }
 
+/// Parsed extra-area facts for one file header.
+struct ExtraFacts {
+    symlink_target: Option<String>,
+    encrypted: bool,
+    blake2sp: Option<[u8; 32]>,
+}
+
 /// Walk the extra area (records are `size vint` covering `type vint +
-/// data`) for the CRYPT and REDIR records. `name_end` is where the
-/// regular header fields end; returns (redirection target, encrypted).
-fn scan_extra(data: &[u8], block: &Block, name_end: usize) -> (Option<String>, bool) {
-    let mut out = (None, false);
+/// data`) for the CRYPT, REDIR, and HASH records. `name_end` is where
+/// the regular header fields end.
+fn scan_extra(data: &[u8], block: &Block, name_end: usize) -> ExtraFacts {
+    let mut out = ExtraFacts {
+        symlink_target: None,
+        encrypted: false,
+        blake2sp: None,
+    };
     if block.extra_size == 0 || name_end > block.header_end {
         return out;
     }
@@ -280,7 +322,17 @@ fn scan_extra(data: &[u8], block: &Block, name_end: usize) -> (Option<String>, b
             return out;
         };
         match kind {
-            extra_record::CRYPT => out.1 = true,
+            extra_record::CRYPT => out.encrypted = true,
+            extra_record::HASH => {
+                // hash-type vint (0 = BLAKE2sp) followed by 32 bytes.
+                if let Ok((hash_type, _)) = read_vint(data, &mut p) {
+                    if hash_type == 0 {
+                        if let Some(bytes) = data.get(p..p + 32) {
+                            out.blake2sp = Some(bytes.try_into().expect("32"));
+                        }
+                    }
+                }
+            }
             extra_record::REDIR => {
                 // type vint, flags vint, name-length vint, name bytes.
                 let redir_type = read_vint(data, &mut p);
@@ -289,7 +341,7 @@ fn scan_extra(data: &[u8], block: &Block, name_end: usize) -> (Option<String>, b
                     if let Ok((n, _)) = read_vint(data, &mut p) {
                         let n = n as usize;
                         if let Some(b) = data.get(p..p + n) {
-                            out.0 = Some(String::from_utf8_lossy(b).into_owned());
+                            out.symlink_target = Some(String::from_utf8_lossy(b).into_owned());
                         }
                     }
                 }
@@ -351,15 +403,7 @@ impl Rar5Reader {
                 state.solid_offset += state.last_advance;
                 self.solid = state;
                 let out = res?;
-                if let Some(crc) = e.crc32 {
-                    let computed = omnizip_archive_core::crc32(&out);
-                    if computed != crc {
-                        return Err(ArchiveError::Checksum(format!(
-                            "rar5: entry '{}': CRC mismatch: stored {crc:08X}, computed {computed:08X}",
-                            e.name
-                        )));
-                    }
-                }
+                verify_hashes(&e.name, e.crc32, e.blake2sp.as_ref(), &out)?;
                 out
             };
             self.consumed = i + 1;
@@ -431,15 +475,7 @@ impl ArchiveReader for Rar5Reader {
                     e.name
                 )));
             }
-            if let Some(crc) = e.crc32 {
-                let computed = omnizip_archive_core::crc32(raw);
-                if computed != crc {
-                    return Err(ArchiveError::Checksum(format!(
-                        "rar5: entry '{}': CRC mismatch: stored {crc:08X}, computed {computed:08X}",
-                        e.name
-                    )));
-                }
-            }
+            verify_hashes(&e.name, e.crc32, e.blake2sp.as_ref(), raw)?;
             return Ok(raw.to_vec());
         }
         let out = self.decode_solid_prefix(index)?;
