@@ -37,7 +37,8 @@ struct RawEntry {
 
 /// Reads a RAR5 archive held in memory.
 pub struct Rar5Reader {
-    data: Vec<u8>,
+    /// Contiguous packed data for every entry (split parts stitched).
+    arena: Vec<u8>,
     entries: Vec<RawEntry>,
     /// Solid streams must be decoded in archive order; this tracks how
     /// far the shared window has been advanced.
@@ -86,10 +87,12 @@ impl Rar5Reader {
                 "rar5: invalid signature".into(),
             ));
         }
-        let mut entries = Vec::new();
+        let mut entries: Vec<RawEntry> = Vec::new();
+        let mut arena: Vec<u8> = Vec::new();
         let mut pos = 8usize;
         let mut seen_main = false;
         let mut main_solid = false;
+        let mut continuation: Option<usize> = None;
 
         loop {
             let Some(block) = parse_block(data, &mut pos)? else {
@@ -97,15 +100,67 @@ impl Rar5Reader {
             };
             match block.kind {
                 rar5_block::MAIN => {
-                    if let Ok((flags, _)) = read_vint(data, &mut block.content.clone()) {
+                    let mut c = block.content;
+                    if let Ok((flags, _)) = read_vint(data, &mut c) {
                         main_solid = flags & 0x0004 != 0;
                     }
                     seen_main = true;
                 }
-                rar5_block::END => break,
+                rar5_block::END => {
+                    // A next volume repeats its signature + MAIN right
+                    // after this END; keep parsing if so.
+                    let mut peek = block.end;
+                    let mut more = false;
+                    while data.get(peek..peek + 8) == Some(&MAGIC_RAR5[..]) {
+                        peek += 8;
+                        more = true;
+                    }
+                    if more && peek > block.end {
+                        pos = peek;
+                        continue;
+                    }
+                    break;
+                }
                 rar5_block::FILE => {
-                    if let Some(entry) = parse_file_header(data, &block)? {
-                        entries.push(entry);
+                    let mut entry = parse_file_header(data, &block)?;
+                    if let Some(e) = &mut entry {
+                        // Packed slices from different volumes are not
+                        // contiguous (headers interleave), so every
+                        // slice is copied into a per-reader arena and
+                        // split parts append to their pending entry.
+                        let slice = data.get(e.data.0..e.data.1).ok_or_else(|| {
+                            ArchiveError::InvalidArchive("rar5: data out of bounds".into())
+                        })?;
+                        let split_before = block.flags & rar5_header_flags::SPLIT_BEFORE != 0;
+                        let split_after = block.flags & rar5_header_flags::SPLIT_AFTER != 0;
+                        match (split_before, continuation) {
+                            (true, Some(idx)) => {
+                                let start = entries[idx].data.1;
+                                arena.extend_from_slice(slice);
+                                entries[idx].data = (start, arena.len());
+                                // Continuation headers repeat the first
+                                // header's full unpacked size and
+                                // compression info; only the packed
+                                // bytes accumulate.
+                                continuation = if split_after { Some(idx) } else { None };
+                            }
+                            (true, None) => {
+                                return Err(ArchiveError::InvalidArchive(
+                                    "rar5: split continuation without an open entry".into(),
+                                ));
+                            }
+                            _ => {
+                                let start = arena.len();
+                                arena.extend_from_slice(slice);
+                                e.data = (start, arena.len());
+                                continuation = if split_after && !e.is_dir {
+                                    Some(entries.len())
+                                } else {
+                                    None
+                                };
+                                entries.push(e.clone());
+                            }
+                        }
                     }
                 }
                 _ => {}
@@ -118,7 +173,7 @@ impl Rar5Reader {
             ));
         }
         Ok(Self {
-            data: data.to_vec(),
+            arena,
             entries,
             main_solid,
             solid: crate::rar5_unpack::SolidState::default(),
@@ -136,10 +191,66 @@ impl Rar5Reader {
         let data = std::fs::read(path).map_err(|e| ArchiveError::io("read", path, e))?;
         Self::from_bytes(&data)
     }
+
+    /// Open a multi-volume set: the parts are concatenated in order
+    /// and parsed as one stream; each part's repeated signature and
+    /// MAIN header are skipped on the fly. Split entries are stitched
+    /// across parts by the SPLIT_BEFORE/SPLIT_AFTER flags.
+    ///
+    /// # Errors
+    ///
+    /// IO or archive errors from any part.
+    pub fn open_volumes(paths: &[std::path::PathBuf]) -> Result<Self, ArchiveError> {
+        if paths.is_empty() {
+            return Err(ArchiveError::InvalidArchive(
+                "rar5: no volumes given".into(),
+            ));
+        }
+        let mut data = Vec::new();
+        for path in paths {
+            let part = std::fs::read(path).map_err(|e| ArchiveError::io("read", path, e))?;
+            data.extend_from_slice(&part);
+        }
+        Self::from_bytes(&data)
+    }
+
+    /// Open a volume set starting at `first` by scanning sibling
+    /// parts (`.partNN.rar` numbering, then `.rNN`/`.sNN`).
+    ///
+    /// # Errors
+    ///
+    /// IO or archive errors.
+    pub fn open_volume_set(first: &Path) -> Result<Self, ArchiveError> {
+        let mut parts = vec![first.to_path_buf()];
+        let name = first
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        if let Some(idx) = name.find(".part") {
+            if let Some(dot) = name[idx + 5..].find('.') {
+                let num_len = dot;
+                let stem = &name[..idx + 5];
+                let ext = &name[idx + 5 + dot..];
+                let mut n = 2u64;
+                loop {
+                    let candidate = format!("{stem}{n:0num_len$}{ext}");
+                    let path = first.with_file_name(candidate);
+                    if path.exists() {
+                        parts.push(path);
+                        n += 1;
+                    } else {
+                        break;
+                    }
+                }
+            }
+        }
+        Self::open_volumes(&parts)
+    }
 }
 
 struct Block {
     kind: u64,
+    flags: u64,
     /// Offset just past the header-size vint and type/flags/size
     /// fields (start of header-area content).
     content: usize,
@@ -194,6 +305,7 @@ fn parse_block(data: &[u8], pos: &mut usize) -> Result<Option<Block>, ArchiveErr
     }
     Ok(Some(Block {
         kind,
+        flags,
         content,
         header_end,
         end,
@@ -375,15 +487,15 @@ impl Rar5Reader {
                 Vec::new()
             } else {
                 let packed = self
-                    .data
+                    .arena
                     .get(e.data.0..e.data.1)
                     .ok_or_else(|| ArchiveError::InvalidArchive("rar5: data out of bounds".into()))?
                     .to_vec();
                 // The bit reader legitimately looks ahead past the last
                 // block into whatever follows; keep those real bytes.
                 let tail = self
-                    .data
-                    .get(e.data.1..(e.data.1 + 8).min(self.data.len()))
+                    .arena
+                    .get(e.data.1..(e.data.1 + 8).min(self.arena.len()))
                     .unwrap_or(&[])
                     .to_vec();
                 crate::rar5_unpack::set_lookahead_tail(tail);
@@ -466,34 +578,14 @@ impl ArchiveReader for Rar5Reader {
         if e.method == 0 {
             self.consumed = self.consumed.max(index + 1);
             let raw = self
-                .data
+                .arena
                 .get(e.data.0..e.data.1)
                 .ok_or_else(|| ArchiveError::InvalidArchive("rar5: data out of bounds".into()))?;
-            if raw.len() as u64 != e.unpacked_size {
-                return Err(ArchiveError::InvalidArchive(format!(
-                    "rar5: entry '{}': size mismatch",
-                    e.name
-                )));
-            }
             verify_hashes(&e.name, e.crc32, e.blake2sp.as_ref(), raw)?;
             return Ok(raw.to_vec());
         }
         let out = self.decode_solid_prefix(index)?;
-        if out.len() as u64 != e.unpacked_size {
-            return Err(ArchiveError::InvalidArchive(format!(
-                "rar5: entry '{}': size mismatch",
-                e.name
-            )));
-        }
-        if let Some(crc) = e.crc32 {
-            let computed = omnizip_archive_core::crc32(&out);
-            if computed != crc {
-                return Err(ArchiveError::Checksum(format!(
-                    "rar5: entry '{}': CRC mismatch: stored {crc:08X}, computed {computed:08X}",
-                    e.name
-                )));
-            }
-        }
+        verify_hashes(&e.name, e.crc32, e.blake2sp.as_ref(), &out)?;
         Ok(out)
     }
 }
