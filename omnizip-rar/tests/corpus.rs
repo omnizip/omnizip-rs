@@ -113,3 +113,39 @@ fn multivolume_sets_decode_fully() {
         }
     }
 }
+
+#[test]
+fn encrypted_entries_decrypt() {
+    let root = std::path::Path::new(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../omnizip/spec/fixtures/rar/libarchive_reference"
+    ));
+    if !root.exists() {
+        return;
+    }
+    // test_read_format_rar5_encrypted.rar: a.txt/b.txt/c.txt decrypt
+    // with "password" (b.txt carries the tweaked-checksum flag; d.txt
+    // uses a different password on purpose). solid_encrypted adds
+    // AES-wrapped LZ entries.
+    let mut r = Rar5Reader::open(&root.join("test_read_format_rar5_encrypted.rar"))
+        .unwrap()
+        .with_password("password");
+    let entries = r.entries().unwrap();
+    let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
+    for (i, name) in names.iter().enumerate() {
+        if *name == "d.txt" {
+            assert!(r.read_entry(i).is_err(), "different password must fail");
+        } else {
+            let data = r.read_entry(i).unwrap_or_else(|e| panic!("{name}: {e}"));
+            assert!(!data.is_empty());
+        }
+    }
+    let mut s = Rar5Reader::open(&root.join("test_read_format_rar5_solid_encrypted.rar"))
+        .unwrap()
+        .with_password("password");
+    let entries = s.entries().unwrap();
+    for i in 0..entries.len() {
+        s.read_entry(i)
+            .unwrap_or_else(|e| panic!("{}: {e}", entries[i].name));
+    }
+}

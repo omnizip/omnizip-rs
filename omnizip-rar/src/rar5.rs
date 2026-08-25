@@ -31,6 +31,8 @@ struct RawEntry {
     symlink_target: Option<String>,
     /// BLAKE2sp-256 from the EX_HASH extra record, when present.
     blake2sp: Option<[u8; 32]>,
+    /// CRYPT extra record when the entry data is encrypted.
+    crypt: Option<crate::rar5_crypto::CryptInfo>,
     /// Entry assembled from multiple volume parts; per-part CRC32
     /// fields are not the whole-content CRC (the reference reader
     /// skips verification for these).
@@ -50,6 +52,7 @@ pub struct Rar5Reader {
     solid: crate::rar5_unpack::SolidState,
     consumed: usize,
     cached: Option<(usize, Vec<u8>)>,
+    password: Option<Vec<u8>>,
 }
 
 fn verify_hashes(
@@ -57,10 +60,17 @@ fn verify_hashes(
     crc: Option<u32>,
     blake2sp: Option<&[u8; 32]>,
     split: bool,
+    hash_key: Option<&crate::rar5_crypto::Rar5Keys>,
     data: &[u8],
 ) -> Result<(), ArchiveError> {
     if let Some(crc) = crc.filter(|_| !split) {
         let computed = omnizip_archive_core::crc32(data);
+        // With flag 0x0002 the stored value is an HMAC-SHA256 MAC of
+        // the CRC over the checksum key, not the raw CRC.
+        let computed = match hash_key {
+            Some(keys) => keys.crc_mac(computed),
+            None => computed,
+        };
         if computed != crc {
             return Err(ArchiveError::Checksum(format!(
                 "rar5: entry '{name}': CRC mismatch: stored {crc:08X}, computed {computed:08X}"
@@ -182,6 +192,7 @@ impl Rar5Reader {
             solid: crate::rar5_unpack::SolidState::default(),
             consumed: 0,
             cached: None,
+            password: None,
         })
     }
 
@@ -193,6 +204,29 @@ impl Rar5Reader {
     pub fn open(path: &Path) -> Result<Self, ArchiveError> {
         let data = std::fs::read(path).map_err(|e| ArchiveError::io("read", path, e))?;
         Self::from_bytes(&data)
+    }
+
+    /// Parse with a password, decrypting an encrypted-header archive
+    /// (the type-4 archive encryption block) transparently: the block
+    /// itself is plaintext, everything after it is AES-256-CBC with a
+    /// zero IV.
+    ///
+    /// # Errors
+    ///
+    /// [`ArchiveError`] on structure or password problems.
+    pub fn from_bytes_with_password(data: &[u8], password: &str) -> Result<Self, ArchiveError> {
+        let spliced = decrypt_header_stream(data, password.as_bytes())?;
+        let mut reader = Self::from_bytes(&spliced)?;
+        reader.password = Some(password.as_bytes().to_vec());
+        Ok(reader)
+    }
+
+    /// Provide the password for encrypted entries (and encrypted
+    /// headers, which are then decrypted transparently).
+    #[must_use]
+    pub fn with_password(mut self, password: &str) -> Self {
+        self.password = Some(password.as_bytes().to_vec());
+        self
     }
 
     /// Open a multi-volume set: the parts are concatenated in order
@@ -322,6 +356,56 @@ fn vint_header_size(value: u64) -> usize {
     crate::vint_len(value)
 }
 
+/// If the archive starts with an encryption header (type 4), decrypt
+/// the remainder of the stream and splice it behind the plaintext
+/// prefix. Unencrypted archives return the input unchanged.
+fn decrypt_header_stream(data: &[u8], password: &[u8]) -> Result<Vec<u8>, ArchiveError> {
+    let mut pos = 8usize;
+    while pos + 4 < data.len() {
+        let Some(block) = parse_block(data, &mut pos)? else {
+            break;
+        };
+        if block.kind == rar5_block::ENCRYPTION {
+            // Body: version, flags, kdf, salt, (check) — the data area
+            // of this block is unused for the header stream itself.
+            let body = data.get(block.content..block.header_end).unwrap_or(&[]);
+            let mut p = 0usize;
+            let (_version, _) = read_vint(body, &mut p)?;
+            let (flags, _) = read_vint(body, &mut p)?;
+            let kdf = *body
+                .get(p)
+                .ok_or_else(|| ArchiveError::InvalidArchive("rar5: crypt truncated".into()))?;
+            p += 1;
+            let salt: [u8; 16] = body
+                .get(p..p + 16)
+                .and_then(|s| s.try_into().ok())
+                .ok_or_else(|| ArchiveError::InvalidArchive("rar5: crypt salt truncated".into()))?;
+            p += 16;
+            let info = crate::rar5_crypto::CryptInfo {
+                flags,
+                kdf_count: kdf,
+                salt,
+                iv: [0u8; 16],
+                check: None,
+            };
+            // 16 cleartext IV bytes follow the block, then ciphertext.
+            let iv: [u8; 16] = data
+                .get(block.end..block.end + 16)
+                .and_then(|s| s.try_into().ok())
+                .ok_or_else(|| ArchiveError::InvalidArchive("rar5: header iv truncated".into()))?;
+            let mut info = info;
+            info.iv = iv;
+            let decrypted =
+                crate::rar5_crypto::decrypt_headers(password, &info, &data[block.end + 16..])?;
+            let mut spliced = data[..block.end].to_vec();
+            spliced.extend_from_slice(&decrypted);
+            return Ok(spliced);
+        }
+        pos = block.end;
+    }
+    Ok(data.to_vec())
+}
+
 fn find_signature(data: &[u8], from: usize) -> Option<usize> {
     (from..data.len().saturating_sub(MAGIC_RAR5.len()))
         .find(|&i| data.get(i..i + MAGIC_RAR5.len()) == Some(&MAGIC_RAR5[..]))
@@ -398,6 +482,7 @@ fn parse_file_header(data: &[u8], block: &Block) -> Result<Option<RawEntry>, Arc
         mtime,
         symlink_target: extra.symlink_target,
         blake2sp: extra.blake2sp,
+        crypt: extra.crypt,
         split: false,
         data: (block.header_end, block.end),
     }))
@@ -415,6 +500,7 @@ struct ExtraFacts {
     symlink_target: Option<String>,
     encrypted: bool,
     blake2sp: Option<[u8; 32]>,
+    crypt: Option<crate::rar5_crypto::CryptInfo>,
 }
 
 /// Walk the extra area (records are `size vint` covering `type vint +
@@ -425,6 +511,7 @@ fn scan_extra(data: &[u8], block: &Block, name_end: usize) -> ExtraFacts {
         symlink_target: None,
         encrypted: false,
         blake2sp: None,
+        crypt: None,
     };
     if block.extra_size == 0 || name_end > block.header_end {
         return out;
@@ -443,7 +530,13 @@ fn scan_extra(data: &[u8], block: &Block, name_end: usize) -> ExtraFacts {
             return out;
         };
         match kind {
-            extra_record::CRYPT => out.encrypted = true,
+            extra_record::CRYPT => {
+                out.encrypted = true;
+                // Record body runs from the version vint to rec_end.
+                if let Some(body) = data.get(p..rec_end) {
+                    out.crypt = crate::rar5_crypto::CryptInfo::parse(body).ok();
+                }
+            }
             extra_record::HASH => {
                 // hash-type vint (0 = BLAKE2sp) followed by 32 bytes.
                 if let Ok((hash_type, _)) = read_vint(data, &mut p) {
@@ -475,6 +568,46 @@ fn scan_extra(data: &[u8], block: &Block, name_end: usize) -> ExtraFacts {
 }
 
 impl Rar5Reader {
+    fn keys_for(&self, index: usize) -> Option<crate::rar5_crypto::Rar5Keys> {
+        let e = &self.entries[index];
+        match (&e.crypt, &self.password) {
+            (Some(info), Some(pw)) => {
+                let keys = crate::rar5_crypto::derive_keys(pw, info);
+                if info.flags & 0x0002 != 0 {
+                    Some(keys)
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// Packed bytes for an entry, decrypted when the entry carries a
+    /// CRYPT record and a password is available.
+    fn entry_packed(&self, index: usize) -> Result<Vec<u8>, ArchiveError> {
+        let e = &self.entries[index];
+        let raw = self
+            .arena
+            .get(e.data.0..e.data.1)
+            .ok_or_else(|| ArchiveError::InvalidArchive("rar5: data out of bounds".into()))?;
+        match (&e.crypt, &self.password) {
+            (Some(info), Some(pw)) => {
+                let mut plain = crate::rar5_crypto::decrypt_entry(pw, info, raw)?;
+                if plain.len() > e.unpacked_size as usize {
+                    // LZ streams read their own block sizes; keep as-is.
+                }
+                let _ = &mut plain;
+                Ok(plain)
+            }
+            (Some(_), None) => Err(ArchiveError::Security(format!(
+                "rar5: entry '{}' is encrypted; password required",
+                e.name
+            ))),
+            _ => Ok(raw.to_vec()),
+        }
+    }
+
     /// Decode LZ entries in archive order up to `index`, maintaining
     /// the shared solid window; returns entry `index`'s bytes.
     fn decode_solid_prefix(&mut self, index: usize) -> Result<Vec<u8>, ArchiveError> {
@@ -495,11 +628,7 @@ impl Rar5Reader {
             let output = if e.is_dir || e.method == 0 || e.symlink_target.is_some() {
                 Vec::new()
             } else {
-                let packed = self
-                    .arena
-                    .get(e.data.0..e.data.1)
-                    .ok_or_else(|| ArchiveError::InvalidArchive("rar5: data out of bounds".into()))?
-                    .to_vec();
+                let packed = self.entry_packed(i)?;
                 // The bit reader legitimately looks ahead past the last
                 // block into whatever follows; keep those real bytes.
                 let tail = self
@@ -524,7 +653,15 @@ impl Rar5Reader {
                 state.solid_offset += state.last_advance;
                 self.solid = state;
                 let out = res?;
-                verify_hashes(&e.name, e.crc32, e.blake2sp.as_ref(), e.split, &out)?;
+                let keys = self.keys_for(i);
+                verify_hashes(
+                    &e.name,
+                    e.crc32,
+                    e.blake2sp.as_ref(),
+                    e.split,
+                    keys.as_ref(),
+                    &out,
+                )?;
                 out
             };
             self.consumed = i + 1;
@@ -578,7 +715,7 @@ impl ArchiveReader for Rar5Reader {
         if let Some(target) = &e.symlink_target {
             return Ok(target.as_bytes().to_vec());
         }
-        if e.encrypted {
+        if e.encrypted && (e.crypt.is_none() || self.password.is_none()) {
             return Err(ArchiveError::Security(format!(
                 "rar5: entry '{}' is encrypted; password required",
                 e.name
@@ -586,15 +723,29 @@ impl ArchiveReader for Rar5Reader {
         }
         if e.method == 0 {
             self.consumed = self.consumed.max(index + 1);
-            let raw = self
-                .arena
-                .get(e.data.0..e.data.1)
-                .ok_or_else(|| ArchiveError::InvalidArchive("rar5: data out of bounds".into()))?;
-            verify_hashes(&e.name, e.crc32, e.blake2sp.as_ref(), e.split, raw)?;
+            let raw = self.entry_packed(index)?;
+            let keys = self.keys_for(index);
+            verify_hashes(
+                &e.name,
+                e.crc32,
+                e.blake2sp.as_ref(),
+                e.split,
+                keys.as_ref(),
+                &raw,
+            )?;
+            let raw = &raw[..raw.len().min(e.unpacked_size as usize)];
             return Ok(raw.to_vec());
         }
         let out = self.decode_solid_prefix(index)?;
-        verify_hashes(&e.name, e.crc32, e.blake2sp.as_ref(), e.split, &out)?;
+        let keys = self.keys_for(index);
+        verify_hashes(
+            &e.name,
+            e.crc32,
+            e.blake2sp.as_ref(),
+            e.split,
+            keys.as_ref(),
+            &out,
+        )?;
         Ok(out)
     }
 }

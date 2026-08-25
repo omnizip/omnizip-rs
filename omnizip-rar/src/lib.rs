@@ -9,6 +9,7 @@
 
 pub mod rar3;
 pub mod rar5;
+pub mod rar5_crypto;
 pub mod rar5_unpack;
 
 /// RAR4 signature: `Rar!\x1A\x07\x00`.
