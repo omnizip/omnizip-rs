@@ -366,8 +366,8 @@ fn decrypt_header_stream(data: &[u8], password: &[u8]) -> Result<Vec<u8>, Archiv
             break;
         };
         if block.kind == rar5_block::ENCRYPTION {
-            // Body: version, flags, kdf, salt, (check) — the data area
-            // of this block is unused for the header stream itself.
+            // The encryption block's header body carries the record:
+            // version, flags, kdf, salt, (check).
             let body = data.get(block.content..block.header_end).unwrap_or(&[]);
             let mut p = 0usize;
             let (_version, _) = read_vint(body, &mut p)?;
@@ -378,31 +378,71 @@ fn decrypt_header_stream(data: &[u8], password: &[u8]) -> Result<Vec<u8>, Archiv
             p += 1;
             let salt: [u8; 16] = body
                 .get(p..p + 16)
-                .and_then(|s| s.try_into().ok())
+                .and_then(|x| x.try_into().ok())
                 .ok_or_else(|| ArchiveError::InvalidArchive("rar5: crypt salt truncated".into()))?;
+            let check = if flags & 0x0001 != 0 {
+                Some(
+                    body.get(p + 16..p + 28)
+                        .and_then(|x| x.try_into().ok())
+                        .ok_or_else(|| {
+                            ArchiveError::InvalidArchive("rar5: crypt check truncated".into())
+                        })?,
+                )
+            } else {
+                None
+            };
             let info = crate::rar5_crypto::CryptInfo {
                 flags,
                 kdf_count: kdf,
                 salt,
                 iv: [0u8; 16],
-                check: None,
+                check,
             };
             // 16 cleartext IV bytes follow the block, then ciphertext.
             let iv: [u8; 16] = data
                 .get(block.end..block.end + 16)
-                .and_then(|s| s.try_into().ok())
+                .and_then(|x| x.try_into().ok())
                 .ok_or_else(|| ArchiveError::InvalidArchive("rar5: header iv truncated".into()))?;
-            let mut info = info;
-            info.iv = iv;
-            let decrypted =
-                crate::rar5_crypto::decrypt_headers(password, &info, &data[block.end + 16..])?;
-            let mut spliced = data[..block.end].to_vec();
-            spliced.extend_from_slice(&decrypted);
-            return Ok(spliced);
+            let stream = &data[block.end + 16..];
+            let decrypted = crate::rar5_crypto::decrypt_headers(password, &info, stream, iv)?;
+            // In the encrypted stream every header block occupies
+            // align16(head_size) + 16 bytes (unrar's FullHeaderSize);
+            // entry data areas follow raw. Compact the stream to the
+            // plain layout so the normal walker can parse it.
+            let mut compact = data[..block.end].to_vec();
+            compact.extend_from_slice(&compact_stream(&decrypted)?);
+            return Ok(compact);
         }
         pos = block.end;
     }
     Ok(data.to_vec())
+}
+
+/// Drop the per-header padding/IV slots from a decrypted header
+/// stream, keeping header bytes and entry data areas contiguous.
+fn compact_stream(decrypted: &[u8]) -> Result<Vec<u8>, ArchiveError> {
+    let mut out = Vec::with_capacity(decrypted.len());
+    let mut pos = 0usize;
+    loop {
+        let start = pos;
+        let Some(block) = parse_block(decrypted, &mut pos)? else {
+            break;
+        };
+        // Region layout: [header][pad..16-byte slot][data area].
+        let head_len = block.header_end - start;
+        let region = (head_len + 15) / 16 * 16 + 16;
+        out.extend_from_slice(&decrypted[start..block.header_end]);
+        let data_len = block.end - block.header_end;
+        let data_start = start + region;
+        if let Some(data) = decrypted.get(data_start..data_start + data_len) {
+            out.extend_from_slice(data);
+        }
+        pos = data_start + data_len;
+        if block.kind == rar5_block::END {
+            break;
+        }
+    }
+    Ok(out)
 }
 
 fn find_signature(data: &[u8], from: usize) -> Option<usize> {
