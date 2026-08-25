@@ -22,6 +22,9 @@ pub struct SecurityPolicy {
     pub max_ratio: Option<u64>,
     /// Permit absolute entry names (leading `/`).
     pub allow_absolute_paths: bool,
+    /// Permit symlink targets pointing outside the output tree, and
+    /// paths that traverse a previously extracted symlink.
+    pub allow_symlink_escape: bool,
 }
 
 impl Default for SecurityPolicy {
@@ -32,6 +35,7 @@ impl Default for SecurityPolicy {
             max_entry_size: Some(1 << 31), // 2 GiB
             max_ratio: Some(1000),
             allow_absolute_paths: false,
+            allow_symlink_escape: false,
         }
     }
 }
@@ -99,6 +103,77 @@ impl SecurityPolicy {
         Ok(clean.join("/"))
     }
 
+    /// Validate a symlink target against the entry's sanitized name.
+    /// The target is resolved lexically relative to the entry's
+    /// directory: it may point anywhere *within* the output tree, but
+    /// not above it (and not at an absolute path, drive letter, or
+    /// UNC root, which bypass the tree entirely).
+    ///
+    /// # Errors
+    ///
+    /// [`ArchiveError::Security`] when the target escapes the output
+    /// tree.
+    pub fn validate_symlink_target(
+        &self,
+        target: &str,
+        sanitized_entry_name: &str,
+    ) -> Result<(), ArchiveError> {
+        if self.allow_symlink_escape || self.allow_absolute_paths {
+            return Ok(());
+        }
+        if target.is_empty() {
+            return Err(ArchiveError::Security(format!(
+                "symlink entry '{sanitized_entry_name}' has an empty target"
+            )));
+        }
+        if Path::new(target).is_absolute() {
+            return Err(ArchiveError::Security(format!(
+                "symlink entry '{sanitized_entry_name}' has an absolute target: {target}"
+            )));
+        }
+        if target.len() >= 2
+            && target.as_bytes()[1] == b':'
+            && target.as_bytes()[0].is_ascii_alphabetic()
+        {
+            return Err(ArchiveError::Security(format!(
+                "symlink entry '{sanitized_entry_name}' has a drive-letter target: {target}"
+            )));
+        }
+        if target.starts_with("\\\\") {
+            return Err(ArchiveError::Security(format!(
+                "symlink entry '{sanitized_entry_name}' has a UNC target: {target}"
+            )));
+        }
+        // Depth = directories between the output root and the link.
+        // The link itself sits at that depth; each target `..` must
+        // stay at or above the root.
+        let mut depth = Path::new(sanitized_entry_name)
+            .components()
+            .filter(|c| matches!(c, Component::Normal(_)))
+            .count()
+            .saturating_sub(1) as i64;
+        for component in Path::new(target).components() {
+            match component {
+                Component::Normal(_) => depth += 1,
+                Component::CurDir => {}
+                Component::ParentDir => {
+                    depth -= 1;
+                    if depth < 0 {
+                        return Err(ArchiveError::Security(format!(
+                            "symlink entry '{sanitized_entry_name}' target escapes the output tree: {target}"
+                        )));
+                    }
+                }
+                Component::RootDir | Component::Prefix(_) => {
+                    return Err(ArchiveError::Security(format!(
+                        "absolute component in symlink target of '{sanitized_entry_name}': {target}"
+                    )));
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Enforce per-entry and archive-wide decompression budgets.
     ///
     /// # Errors
@@ -163,6 +238,40 @@ mod tests {
             ..SecurityPolicy::default()
         };
         assert!(p.validate_entry("../out").is_ok());
+    }
+
+    #[test]
+    fn rejects_escaping_symlink_targets() {
+        let p = SecurityPolicy::default();
+        assert!(p.validate_symlink_target("/etc/passwd", "link").is_err());
+        assert!(p.validate_symlink_target("..", "link").is_err());
+        assert!(p.validate_symlink_target("../sibling", "link").is_err());
+        assert!(p.validate_symlink_target("../../x", "dir/link").is_err());
+        assert!(p.validate_symlink_target("C:\\evil", "link").is_err());
+        assert!(p.validate_symlink_target("\\\\srv\\share", "link").is_err());
+        assert!(p.validate_symlink_target("", "link").is_err());
+    }
+
+    #[test]
+    fn accepts_in_tree_symlink_targets() {
+        let p = SecurityPolicy::default();
+        assert!(p.validate_symlink_target("data.txt", "link").is_ok());
+        assert!(p.validate_symlink_target("./data.txt", "link").is_ok());
+        assert!(p
+            .validate_symlink_target("other/file.txt", "dir/link")
+            .is_ok());
+        // ../ tops out at the archive root, still inside the tree.
+        assert!(p.validate_symlink_target("../top.txt", "dir/link").is_ok());
+    }
+
+    #[test]
+    fn symlink_escape_opt_out_works() {
+        let p = SecurityPolicy {
+            allow_symlink_escape: true,
+            ..SecurityPolicy::default()
+        };
+        assert!(p.validate_symlink_target("/etc/passwd", "link").is_ok());
+        assert!(p.validate_symlink_target("../../x", "link").is_ok());
     }
 
     #[test]
