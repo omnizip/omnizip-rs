@@ -65,6 +65,20 @@ fn assert_rejected_cpio(bytes: &[u8], out: &Path) {
     assert!(r.extract_to(out, &SecurityPolicy::default()).is_err());
 }
 
+fn poison_rar(name: &str) -> Vec<u8> {
+    let o = opts();
+    let mut w = omnizip_rar::rar5::Rar5Writer::new();
+    let mut e = NewEntry::file("decoy.txt", &o);
+    e.name = name.to_string();
+    w.add_file(&e, b"payload", &o).unwrap();
+    w.finish_bytes(&o).unwrap()
+}
+
+fn assert_rejected_rar(bytes: &[u8], out: &Path) {
+    let mut r = omnizip_rar::rar5::Rar5Reader::from_bytes(bytes).unwrap();
+    assert!(r.extract_to(out, &SecurityPolicy::default()).is_err());
+}
+
 fn temp_dir(tag: &str) -> std::path::PathBuf {
     let d = std::env::temp_dir().join(format!("ozip-sec-{tag}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&d);
@@ -83,6 +97,7 @@ fn rejects_zip_slip_all_formats() {
         assert_rejected_tar(&poison_tar(name), &out);
         assert_rejected_zip(&poison_zip(name), &out);
         assert_rejected_cpio(&poison_cpio(name), &out);
+        assert_rejected_rar(&poison_rar(name), &out);
     }
     assert!(!out.join("escape.txt").exists());
     let _ = std::fs::remove_dir_all(&out);
@@ -95,6 +110,7 @@ fn rejects_absolute_paths_all_formats() {
         assert_rejected_tar(&poison_tar(name), &out);
         assert_rejected_zip(&poison_zip(name), &out);
         assert_rejected_cpio(&poison_cpio(name), &out);
+        assert_rejected_rar(&poison_rar(name), &out);
     }
     let _ = std::fs::remove_dir_all(&out);
 }

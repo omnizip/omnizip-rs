@@ -202,6 +202,21 @@ pub fn run() {
                 })
             }),
         ),
+        bench(
+            "rar5",
+            Box::new(|tree, o| {
+                let mut w = omnizip_rar::rar5::Rar5Writer::new();
+                for (name, data) in tree {
+                    w.add_file(&NewEntry::file(name, o), data, o).unwrap();
+                }
+                w.finish_bytes(o).unwrap()
+            }),
+            Box::new(|b| {
+                read_all(b, |bytes| {
+                    omnizip_rar::rar5::Rar5Reader::from_bytes(bytes).ok()
+                })
+            }),
+        ),
     ];
 
     println!(

@@ -136,7 +136,7 @@ fn sevenzip_manifest_round_trip() {
 }
 
 #[test]
-fn cpio_xar_rpm_manifest_round_trips() {
+fn cpio_xar_rpm_rar5_manifest_round_trips() {
     let o = opts();
 
     let mut w = omnizip_cpio::CpioWriter::new();
@@ -182,6 +182,24 @@ fn cpio_xar_rpm_manifest_round_trips() {
     }
     let bytes = w.finish_bytes(&o).unwrap();
     let mut r = omnizip_rpm::reader::RpmReader::from_bytes(&bytes).unwrap();
+    let mut rows = Vec::new();
+    let entries = r.entries().unwrap();
+    for (i, e) in entries.iter().enumerate() {
+        let data = r.read_entry(i).unwrap_or_default();
+        rows.push((e.name.clone(), data.len() as u64, sha1_hex(&data)));
+    }
+    let got = manifest(&rows);
+    for (name, data) in tree() {
+        assert!(got.contains(&format!("{name} {} {}", data.len(), sha1_hex(&data))));
+    }
+
+    let mut w = omnizip_rar::rar5::Rar5Writer::new();
+    for (name, data) in tree() {
+        w.add_file(&NewEntry::file(name.clone(), &o), &data, &o)
+            .unwrap();
+    }
+    let bytes = w.finish_bytes(&o).unwrap();
+    let mut r = omnizip_rar::rar5::Rar5Reader::from_bytes(&bytes).unwrap();
     let mut rows = Vec::new();
     let entries = r.entries().unwrap();
     for (i, e) in entries.iter().enumerate() {
