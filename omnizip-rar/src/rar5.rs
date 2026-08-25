@@ -31,6 +31,10 @@ struct RawEntry {
     symlink_target: Option<String>,
     /// BLAKE2sp-256 from the EX_HASH extra record, when present.
     blake2sp: Option<[u8; 32]>,
+    /// Entry assembled from multiple volume parts; per-part CRC32
+    /// fields are not the whole-content CRC (the reference reader
+    /// skips verification for these).
+    split: bool,
     /// Byte range of the packed data in the file.
     data: (usize, usize),
 }
@@ -52,9 +56,10 @@ fn verify_hashes(
     name: &str,
     crc: Option<u32>,
     blake2sp: Option<&[u8; 32]>,
+    split: bool,
     data: &[u8],
 ) -> Result<(), ArchiveError> {
-    if let Some(crc) = crc {
+    if let Some(crc) = crc.filter(|_| !split) {
         let computed = omnizip_archive_core::crc32(data);
         if computed != crc {
             return Err(ArchiveError::Checksum(format!(
@@ -107,16 +112,10 @@ impl Rar5Reader {
                     seen_main = true;
                 }
                 rar5_block::END => {
-                    // A next volume repeats its signature + MAIN right
-                    // after this END; keep parsing if so.
-                    let mut peek = block.end;
-                    let mut more = false;
-                    while data.get(peek..peek + 8) == Some(&MAGIC_RAR5[..]) {
-                        peek += 8;
-                        more = true;
-                    }
-                    if more && peek > block.end {
-                        pos = peek;
+                    // A next volume's signature may sit after some
+                    // padding bytes; scan for it like the reference.
+                    if let Some(at) = find_signature(data, block.end) {
+                        pos = at + MAGIC_RAR5.len();
                         continue;
                     }
                     break;
@@ -124,6 +123,9 @@ impl Rar5Reader {
                 rar5_block::FILE => {
                     let mut entry = parse_file_header(data, &block)?;
                     if let Some(e) = &mut entry {
+                        e.split = block.flags
+                            & (rar5_header_flags::SPLIT_BEFORE | rar5_header_flags::SPLIT_AFTER)
+                            != 0;
                         // Packed slices from different volumes are not
                         // contiguous (headers interleave), so every
                         // slice is copied into a per-reader arena and
@@ -135,9 +137,10 @@ impl Rar5Reader {
                         let split_after = block.flags & rar5_header_flags::SPLIT_AFTER != 0;
                         match (split_before, continuation) {
                             (true, Some(idx)) => {
-                                let start = entries[idx].data.1;
                                 arena.extend_from_slice(slice);
-                                entries[idx].data = (start, arena.len());
+                                // Keep the first slice's start; only the
+                                // end advances as parts accumulate.
+                                entries[idx].data.1 = arena.len();
                                 // Continuation headers repeat the first
                                 // header's full unpacked size and
                                 // compression info; only the packed
@@ -319,6 +322,11 @@ fn vint_header_size(value: u64) -> usize {
     crate::vint_len(value)
 }
 
+fn find_signature(data: &[u8], from: usize) -> Option<usize> {
+    (from..data.len().saturating_sub(MAGIC_RAR5.len()))
+        .find(|&i| data.get(i..i + MAGIC_RAR5.len()) == Some(&MAGIC_RAR5[..]))
+}
+
 fn archive_end() -> ArchiveError {
     ArchiveError::InvalidArchive("rar5: unexpected end of archive".into())
 }
@@ -390,6 +398,7 @@ fn parse_file_header(data: &[u8], block: &Block) -> Result<Option<RawEntry>, Arc
         mtime,
         symlink_target: extra.symlink_target,
         blake2sp: extra.blake2sp,
+        split: false,
         data: (block.header_end, block.end),
     }))
 }
@@ -515,7 +524,7 @@ impl Rar5Reader {
                 state.solid_offset += state.last_advance;
                 self.solid = state;
                 let out = res?;
-                verify_hashes(&e.name, e.crc32, e.blake2sp.as_ref(), &out)?;
+                verify_hashes(&e.name, e.crc32, e.blake2sp.as_ref(), e.split, &out)?;
                 out
             };
             self.consumed = i + 1;
@@ -581,11 +590,11 @@ impl ArchiveReader for Rar5Reader {
                 .arena
                 .get(e.data.0..e.data.1)
                 .ok_or_else(|| ArchiveError::InvalidArchive("rar5: data out of bounds".into()))?;
-            verify_hashes(&e.name, e.crc32, e.blake2sp.as_ref(), raw)?;
+            verify_hashes(&e.name, e.crc32, e.blake2sp.as_ref(), e.split, raw)?;
             return Ok(raw.to_vec());
         }
         let out = self.decode_solid_prefix(index)?;
-        verify_hashes(&e.name, e.crc32, e.blake2sp.as_ref(), &out)?;
+        verify_hashes(&e.name, e.crc32, e.blake2sp.as_ref(), e.split, &out)?;
         Ok(out)
     }
 }
