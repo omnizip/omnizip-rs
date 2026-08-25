@@ -166,18 +166,41 @@ jobs:
   # ============================================================================
   # Rust Tests (Multi-platform)
   # ============================================================================
+  # One serial `cargo test --workspace` job per OS took hours (the codec
+  # parity suites dominate). The group matrix fans the workspace out so
+  # heavy crates get their own runners; the union of groups covers every
+  # workspace member. When adding a crate, place it in the lightest-fit
+  # group.
   test:
-    name: Test (${{ matrix.os }})
+    name: Test (${{ matrix.group.name }} / ${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     needs: [preflight]
     if: needs.preflight.outputs.should_run == 'true'
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - os: ubuntu-latest
-          - os: macos-latest
-          - os: windows-latest
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        group:
+          - name: codecs-parity-a
+            crates: omnizip-codecs omnizip-brotli
+          - name: codecs-parity-b
+            crates: omnizip-zstd omnizip-lzma
+          - name: codecs-parity-c
+            crates: omnizip-flac omnizip-libdeflate omnizip-deflate omnizip-deflate64
+          - name: codecs-rest
+            crates: >-
+              omnizip-bzip2 omnizip-lz4 omnizip-snappy omnizip-ppmd omnizip-glza
+              omnizip-zpaq omnizip-fsst omnizip-ricepp omnizip-blosc
+              omnizip-filters omnizip-crypto
+          - name: containers-a
+            crates: omnizip-archive-core omnizip-tar omnizip-zip omnizip-cpio omnizip-sevenzip omnizip-rpm
+          - name: containers-b
+            crates: omnizip-iso omnizip-xar omnizip-ole omnizip-par2 omnizip-rar
+          - name: harness
+            crates: >-
+              ozip omnizip-bench omnizip-differential omnizip-determinism
+              omnizip-property omnizip-conformance omnizip-security-tests
+              omnizip-benchmarks
     steps:
       - uses: actions/checkout@v7
 
@@ -205,14 +228,17 @@ jobs:
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@v2
         with:
-          key: ${{ matrix.os }}
+          key: ${{ matrix.os }}-${{ matrix.group.name }}
           cache-on-failure: true
 
-      - name: Build
-        run: cargo build --workspace --verbose
-
       - name: Run tests
-        run: cargo test --workspace --verbose
+        shell: bash
+        run: |
+          for crate in ${{ matrix.group.crates }}; do
+            echo "::group::cargo test -p $crate"
+            cargo test -p "$crate" --verbose
+            echo "::endgroup::"
+          done
 
 
 
