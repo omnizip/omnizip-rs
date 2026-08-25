@@ -40,4 +40,5 @@ omnizip-zip = { path = "../../omnizip-zip" }
 omnizip-sevenzip = { path = "../../omnizip-sevenzip" }
 omnizip-iso = { path = "../../omnizip-iso" }
 omnizip-xar = { path = "../../omnizip-xar" }
+omnizip-rar = { path = "../../omnizip-rar" }
 omnizip-ole = { path = "../../omnizip-ole" }

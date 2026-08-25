@@ -121,4 +121,16 @@ fn double_create_is_byte_identical_all_writers() {
         build_xar(omnizip_xar::writer::XarWriter::new()),
         build_xar(omnizip_xar::writer::XarWriter::new())
     );
+
+    let build_rar5 = |mut w: omnizip_rar::rar5::Rar5Writer| {
+        for (name, data) in &fs {
+            w.add_file(&NewEntry::file(name.clone(), &o), data, &o)
+                .unwrap();
+        }
+        w.finish_bytes(&o).unwrap()
+    };
+    assert_eq!(
+        build_rar5(omnizip_rar::rar5::Rar5Writer::new()),
+        build_rar5(omnizip_rar::rar5::Rar5Writer::new())
+    );
 }

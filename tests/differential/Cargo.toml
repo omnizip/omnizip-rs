@@ -32,6 +32,7 @@ omnizip-zip = { path = "../../omnizip-zip", version = "0.19.0" }
 omnizip-cpio = { path = "../../omnizip-cpio", version = "0.19.0" }
 omnizip-sevenzip = { path = "../../omnizip-sevenzip", version = "0.19.0" }
 omnizip-xar = { path = "../../omnizip-xar", version = "0.19.0" }
+omnizip-rar = { path = "../../omnizip-rar", version = "0.19.0" }
 omnizip-rpm = { path = "../../omnizip-rpm", version = "0.19.0" }
 
 [lints]

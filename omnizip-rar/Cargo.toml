@@ -1,0 +1,20 @@
+[package]
+name = "omnizip-rar"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "RAR archives — RAR5 read/write (store) + RAR4 read (store), VINT headers, CRC32 verification on omnizip-archive-core"
+keywords = ["compression", "rar", "rar5"]
+categories = ["compression"]
+
+[lib]
+name = "omnizip_rar"
+path = "src/lib.rs"
+
+[dependencies]
+omnizip-archive-core = { path = "../omnizip-archive-core" }
+
+[lints]
+workspace = true

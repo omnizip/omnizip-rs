@@ -21,6 +21,7 @@ omnizip-cpio = { path = "../omnizip-cpio" }
 omnizip-sevenzip = { path = "../omnizip-sevenzip" }
 omnizip-rpm = { path = "../omnizip-rpm" }
 omnizip-iso = { path = "../omnizip-iso" }
+omnizip-rar = { path = "../omnizip-rar" }
 
 [lints]
 workspace = true

@@ -8,7 +8,7 @@
 use omnizip_archive_core::detect::{detect_format, FormatKind};
 use omnizip_archive_core::security::SecurityPolicy;
 use omnizip_archive_core::write_options::WriteOptions;
-use omnizip_archive_core::{ArchiveEntry, ArchiveReader, EntryKind};
+use omnizip_archive_core::{ArchiveEntry, ArchiveReader, ArchiveWriter, EntryKind};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -68,8 +68,13 @@ const FORMATS: &[FormatSpec] = &[
         write: true,
     },
     FormatSpec {
-        name: "rar",
+        name: "rar5",
         extensions: &["rar"],
+        write: true,
+    },
+    FormatSpec {
+        name: "rar4",
+        extensions: &[],
         write: false,
     },
     FormatSpec {
@@ -109,6 +114,7 @@ enum OutputFormat {
     SevenZip,
     Rpm,
     Iso,
+    Rar5,
 }
 
 fn infer_output(archive: &Path, explicit: Option<&str>) -> Result<OutputFormat, String> {
@@ -124,6 +130,7 @@ fn infer_output(archive: &Path, explicit: Option<&str>) -> Result<OutputFormat, 
             "7z" => Ok(OutputFormat::SevenZip),
             "rpm" => Ok(OutputFormat::Rpm),
             "iso" => Ok(OutputFormat::Iso),
+            "rar" | "rar5" => Ok(OutputFormat::Rar5),
             other => Err(format!(
                 "unknown format '{other}' (registered: {})",
                 FORMATS
@@ -140,7 +147,7 @@ fn infer_output(archive: &Path, explicit: Option<&str>) -> Result<OutputFormat, 
         .unwrap_or_default();
     for candidate in [
         "tar.gz", "tar.bz2", "tar.xz", "tar.zst", "tgz", "tbz2", "txz", "tar", "zip", "cpio", "7z",
-        "rpm", "iso",
+        "rpm", "iso", "rar",
     ] {
         if name.ends_with(candidate) {
             return match candidate {
@@ -154,6 +161,7 @@ fn infer_output(archive: &Path, explicit: Option<&str>) -> Result<OutputFormat, 
                 "7z" => Ok(OutputFormat::SevenZip),
                 "rpm" => Ok(OutputFormat::Rpm),
                 "iso" => Ok(OutputFormat::Iso),
+                "rar" => Ok(OutputFormat::Rar5),
                 _ => unreachable!(),
             };
         }
@@ -334,6 +342,23 @@ pub fn create(
             write_all(&mut w, &staged, &options)?;
             w.finish_bytes(&options).map_err(|e| e.to_string())?
         }
+        OutputFormat::Rar5 => {
+            let mut w = omnizip_rar::rar5::Rar5Writer::new();
+            for s in &staged {
+                match s.entry.kind {
+                    EntryKind::Symlink(_) => {
+                        return Err("rar5: symlink writing not supported".into())
+                    }
+                    EntryKind::Directory => w
+                        .add_directory(&s.entry, &options)
+                        .map_err(|e| e.to_string())?,
+                    _ => w
+                        .add_file(&s.entry, &s.data, &options)
+                        .map_err(|e| e.to_string())?,
+                }
+            }
+            w.finish_bytes(&options).map_err(|e| e.to_string())?
+        }
     };
 
     std::fs::write(archive, &bytes).map_err(|e| format!("{}: {e}", archive.display()))
@@ -382,6 +407,8 @@ enum Opened {
     SevenZip(Box<omnizip_sevenzip::reader::SevenZipReader>),
     Rpm(Box<omnizip_rpm::reader::RpmReader>),
     Iso(Box<omnizip_iso::reader::IsoReader>),
+    Rar5(Box<omnizip_rar::rar5::Rar5Reader>),
+    Rar4(Box<omnizip_rar::rar3::Rar4Reader>),
 }
 
 impl Opened {
@@ -393,6 +420,8 @@ impl Opened {
             Self::SevenZip(r) => r.entries().map_err(|e| e.to_string()),
             Self::Rpm(r) => r.entries().map_err(|e| e.to_string()),
             Self::Iso(r) => r.entries().map_err(|e| e.to_string()),
+            Self::Rar5(r) => r.entries().map_err(|e| e.to_string()),
+            Self::Rar4(r) => r.entries().map_err(|e| e.to_string()),
         }
     }
 
@@ -405,6 +434,8 @@ impl Opened {
             Self::SevenZip(r) => r.extract_to(dir, &policy).map_err(|e| e.to_string()),
             Self::Rpm(r) => r.extract_to(dir, &policy).map_err(|e| e.to_string()),
             Self::Iso(r) => r.extract_to(dir, &policy).map_err(|e| e.to_string()),
+            Self::Rar5(r) => r.extract_to(dir, &policy).map_err(|e| e.to_string()),
+            Self::Rar4(r) => r.extract_to(dir, &policy).map_err(|e| e.to_string()),
         }
     }
 }
@@ -428,7 +459,12 @@ fn open_bytes(data: &[u8]) -> Result<Opened, String> {
         FormatKind::SevenZip => omnizip_sevenzip::reader::SevenZipReader::from_bytes(data)
             .map(|r| Opened::SevenZip(Box::new(r)))
             .map_err(|e| e.to_string()),
-        FormatKind::Rar4 | FormatKind::Rar5 => Err("rar archives are not registered yet".into()),
+        FormatKind::Rar5 => omnizip_rar::rar5::Rar5Reader::from_bytes(data)
+            .map(|r| Opened::Rar5(Box::new(r)))
+            .map_err(|e| e.to_string()),
+        FormatKind::Rar4 => omnizip_rar::rar3::Rar4Reader::from_bytes(data)
+            .map(|r| Opened::Rar4(Box::new(r)))
+            .map_err(|e| e.to_string()),
         _ if data.starts_with(&[0xED, 0xAB, 0xEE, 0xDB]) => {
             omnizip_rpm::reader::RpmReader::from_bytes(data)
                 .map(|r| Opened::Rpm(Box::new(r)))

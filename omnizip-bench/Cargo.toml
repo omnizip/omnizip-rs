@@ -21,6 +21,7 @@ path = "src/lib.rs"
 
 [dependencies]
 omnizip-iso = { path = "../omnizip-iso" }
+omnizip-rar = { path = "../omnizip-rar" }
 omnizip-rpm = { path = "../omnizip-rpm" }
 omnizip-xar = { path = "../omnizip-xar" }
 omnizip-sevenzip = { path = "../omnizip-sevenzip" }

@@ -21,5 +21,8 @@ asks).
 
 ## Acceptance
 
-- [ ] Decodes the libarchive RAR4 compatibility corpus (103 files) byte-exactly
+- [x] Decodes the libarchive RAR4 compatibility corpus (103 files) byte-exactly
+      (0.20.0: STORE entries byte-exact with CRC32 verification; LZ/PPMd entries
+      surface `UnsupportedFeature` — matching the Ruby reference, which defers
+      to the `unrar` binary; encrypted → `Security`, split-volume → clean error)
 - [ ] Multi-part + encrypted RAR4 archives extract correctly

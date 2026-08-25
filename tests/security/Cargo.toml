@@ -13,6 +13,7 @@ omnizip-archive-core = { path = "../../omnizip-archive-core" }
 omnizip-tar = { path = "../../omnizip-tar" }
 omnizip-zip = { path = "../../omnizip-zip" }
 omnizip-cpio = { path = "../../omnizip-cpio" }
+omnizip-rar = { path = "../../omnizip-rar" }
 
 [lints]
 workspace = true
