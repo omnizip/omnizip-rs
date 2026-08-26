@@ -144,8 +144,47 @@ fn encrypted_entries_decrypt() {
         .unwrap()
         .with_password("password");
     let entries = s.entries().unwrap();
-    for i in 0..entries.len() {
+    for (i, entry) in entries.iter().enumerate() {
         s.read_entry(i)
-            .unwrap_or_else(|e| panic!("{}: {e}", entries[i].name));
+            .unwrap_or_else(|e| panic!("{}: {e}", entry.name));
     }
+}
+
+#[test]
+fn encrypted_header_archives_extract() {
+    let root = std::path::Path::new(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../omnizip/spec/fixtures/rar/libarchive_reference"
+    ));
+    if !root.exists() {
+        return;
+    }
+    // -hp archives: the type-4 encryption block, a cleartext IV, then
+    // the header CBC stream (self-resynchronizing at each header's
+    // IV slot) with file data stored raw under per-entry encryption.
+    // Every entry decrypts to "This is from <name>\n" (verified
+    // against the reference extractor).
+    for name in [
+        "test_read_format_rar5_encrypted_filenames.rar",
+        "test_read_format_rar5_solid_encrypted_filenames.rar",
+    ] {
+        let mut r = Rar5Reader::from_bytes_with_password(
+            &std::fs::read(root.join(name)).unwrap(),
+            "password",
+        )
+        .unwrap();
+        let entries = r.entries().unwrap();
+        assert_eq!(entries.len(), 4, "{name}");
+        for (i, entry) in entries.iter().enumerate() {
+            let data = r.read_entry(i).unwrap_or_else(|e| panic!("{name}: {e}"));
+            let want = format!("This is from {}", entry.name);
+            assert_eq!(String::from_utf8_lossy(&data), want, "{name}");
+        }
+    }
+    // Wrong password fails closed.
+    let bad = Rar5Reader::from_bytes_with_password(
+        &std::fs::read(root.join("test_read_format_rar5_encrypted_filenames.rar")).unwrap(),
+        "not-the-password",
+    );
+    assert!(bad.is_err());
 }
