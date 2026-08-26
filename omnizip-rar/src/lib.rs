@@ -9,6 +9,8 @@
 
 pub mod rar3;
 pub mod rar5;
+pub mod rar5_crypto;
+pub mod rar5_unpack;
 
 /// RAR4 signature: `Rar!\x1A\x07\x00`.
 pub const MAGIC_RAR4: [u8; 7] = [0x52, 0x61, 0x72, 0x21, 0x1A, 0x07, 0x00];
@@ -29,6 +31,8 @@ pub mod rar5_header_flags {
     pub const EXTRA_AREA: u64 = 0x0001;
     pub const DATA_AREA: u64 = 0x0002;
     pub const SKIP_IF_UNKNOWN: u64 = 0x0004;
+    pub const SPLIT_BEFORE: u64 = 0x0008;
+    pub const SPLIT_AFTER: u64 = 0x0010;
     pub const DATA_AREA_SIZE_UNKNOWN: u64 = 0x0008;
     pub const ENCRYPTED: u64 = 0x0010;
 }

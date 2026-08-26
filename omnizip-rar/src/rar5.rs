@@ -17,9 +17,11 @@ use omnizip_archive_core::{
 use std::collections::BTreeMap;
 use std::path::Path;
 
+#[derive(Clone)]
 struct RawEntry {
     name: String,
     is_dir: bool,
+    window_size: usize,
     unpacked_size: u64,
     crc32: Option<u32>,
     method: u64,
@@ -27,14 +29,65 @@ struct RawEntry {
     mtime: Option<u64>,
     /// Target path for redirection (hardlink/symlink) entries.
     symlink_target: Option<String>,
+    /// BLAKE2sp-256 from the EX_HASH extra record, when present.
+    blake2sp: Option<[u8; 32]>,
+    /// CRYPT extra record when the entry data is encrypted.
+    crypt: Option<crate::rar5_crypto::CryptInfo>,
+    /// Entry assembled from multiple volume parts; per-part CRC32
+    /// fields are not the whole-content CRC (the reference reader
+    /// skips verification for these).
+    split: bool,
     /// Byte range of the packed data in the file.
     data: (usize, usize),
 }
 
 /// Reads a RAR5 archive held in memory.
 pub struct Rar5Reader {
-    data: Vec<u8>,
+    /// Contiguous packed data for every entry (split parts stitched).
+    arena: Vec<u8>,
     entries: Vec<RawEntry>,
+    /// Solid streams must be decoded in archive order; this tracks how
+    /// far the shared window has been advanced.
+    main_solid: bool,
+    solid: crate::rar5_unpack::SolidState,
+    consumed: usize,
+    cached: Option<(usize, Vec<u8>)>,
+    password: Option<Vec<u8>>,
+}
+
+fn verify_hashes(
+    name: &str,
+    crc: Option<u32>,
+    blake2sp: Option<&[u8; 32]>,
+    split: bool,
+    hash_key: Option<&crate::rar5_crypto::Rar5Keys>,
+    data: &[u8],
+) -> Result<(), ArchiveError> {
+    if let Some(crc) = crc.filter(|_| !split) {
+        let computed = omnizip_archive_core::crc32(data);
+        // With flag 0x0002 the stored value is an HMAC-SHA256 MAC of
+        // the CRC over the checksum key, not the raw CRC.
+        let computed = match hash_key {
+            Some(keys) => keys.crc_mac(computed),
+            None => computed,
+        };
+        if computed != crc {
+            return Err(ArchiveError::Checksum(format!(
+                "rar5: entry '{name}': CRC mismatch: stored {crc:08X}, computed {computed:08X}"
+            )));
+        }
+    }
+    if let Some(want) = blake2sp {
+        let got = omnizip_crypto::blake2sp::blake2sp_256(data);
+        if &got != want {
+            return Err(ArchiveError::Checksum(format!(
+                "rar5: entry '{name}': BLAKE2sp mismatch: stored {}, computed {}",
+                want.iter().map(|b| format!("{b:02x}")).collect::<String>(),
+                got.iter().map(|b| format!("{b:02x}")).collect::<String>()
+            )));
+        }
+    }
+    Ok(())
 }
 
 impl Rar5Reader {
@@ -49,20 +102,78 @@ impl Rar5Reader {
                 "rar5: invalid signature".into(),
             ));
         }
-        let mut entries = Vec::new();
+        let mut entries: Vec<RawEntry> = Vec::new();
+        let mut arena: Vec<u8> = Vec::new();
         let mut pos = 8usize;
         let mut seen_main = false;
+        let mut main_solid = false;
+        let mut continuation: Option<usize> = None;
 
         loop {
             let Some(block) = parse_block(data, &mut pos)? else {
                 break;
             };
             match block.kind {
-                rar5_block::MAIN => seen_main = true,
-                rar5_block::END => break,
+                rar5_block::MAIN => {
+                    let mut c = block.content;
+                    if let Ok((flags, _)) = read_vint(data, &mut c) {
+                        main_solid = flags & 0x0004 != 0;
+                    }
+                    seen_main = true;
+                }
+                rar5_block::END => {
+                    // A next volume's signature may sit after some
+                    // padding bytes; scan for it like the reference.
+                    if let Some(at) = find_signature(data, block.end) {
+                        pos = at + MAGIC_RAR5.len();
+                        continue;
+                    }
+                    break;
+                }
                 rar5_block::FILE => {
-                    if let Some(entry) = parse_file_header(data, &block)? {
-                        entries.push(entry);
+                    let mut entry = parse_file_header(data, &block)?;
+                    if let Some(e) = &mut entry {
+                        e.split = block.flags
+                            & (rar5_header_flags::SPLIT_BEFORE | rar5_header_flags::SPLIT_AFTER)
+                            != 0;
+                        // Packed slices from different volumes are not
+                        // contiguous (headers interleave), so every
+                        // slice is copied into a per-reader arena and
+                        // split parts append to their pending entry.
+                        let slice = data.get(e.data.0..e.data.1).ok_or_else(|| {
+                            ArchiveError::InvalidArchive("rar5: data out of bounds".into())
+                        })?;
+                        let split_before = block.flags & rar5_header_flags::SPLIT_BEFORE != 0;
+                        let split_after = block.flags & rar5_header_flags::SPLIT_AFTER != 0;
+                        match (split_before, continuation) {
+                            (true, Some(idx)) => {
+                                arena.extend_from_slice(slice);
+                                // Keep the first slice's start; only the
+                                // end advances as parts accumulate.
+                                entries[idx].data.1 = arena.len();
+                                // Continuation headers repeat the first
+                                // header's full unpacked size and
+                                // compression info; only the packed
+                                // bytes accumulate.
+                                continuation = if split_after { Some(idx) } else { None };
+                            }
+                            (true, None) => {
+                                return Err(ArchiveError::InvalidArchive(
+                                    "rar5: split continuation without an open entry".into(),
+                                ));
+                            }
+                            _ => {
+                                let start = arena.len();
+                                arena.extend_from_slice(slice);
+                                e.data = (start, arena.len());
+                                continuation = if split_after && !e.is_dir {
+                                    Some(entries.len())
+                                } else {
+                                    None
+                                };
+                                entries.push(e.clone());
+                            }
+                        }
                     }
                 }
                 _ => {}
@@ -75,8 +186,13 @@ impl Rar5Reader {
             ));
         }
         Ok(Self {
-            data: data.to_vec(),
+            arena,
             entries,
+            main_solid,
+            solid: crate::rar5_unpack::SolidState::default(),
+            consumed: 0,
+            cached: None,
+            password: None,
         })
     }
 
@@ -89,10 +205,89 @@ impl Rar5Reader {
         let data = std::fs::read(path).map_err(|e| ArchiveError::io("read", path, e))?;
         Self::from_bytes(&data)
     }
+
+    /// Parse with a password, decrypting an encrypted-header archive
+    /// (the type-4 archive encryption block) transparently: the block
+    /// itself is plaintext, everything after it is AES-256-CBC with a
+    /// zero IV.
+    ///
+    /// # Errors
+    ///
+    /// [`ArchiveError`] on structure or password problems.
+    pub fn from_bytes_with_password(data: &[u8], password: &str) -> Result<Self, ArchiveError> {
+        let spliced = decrypt_header_stream(data, password.as_bytes())?;
+        let mut reader = Self::from_bytes(&spliced)?;
+        reader.password = Some(password.as_bytes().to_vec());
+        Ok(reader)
+    }
+
+    /// Provide the password for encrypted entries (and encrypted
+    /// headers, which are then decrypted transparently).
+    #[must_use]
+    pub fn with_password(mut self, password: &str) -> Self {
+        self.password = Some(password.as_bytes().to_vec());
+        self
+    }
+
+    /// Open a multi-volume set: the parts are concatenated in order
+    /// and parsed as one stream; each part's repeated signature and
+    /// MAIN header are skipped on the fly. Split entries are stitched
+    /// across parts by the SPLIT_BEFORE/SPLIT_AFTER flags.
+    ///
+    /// # Errors
+    ///
+    /// IO or archive errors from any part.
+    pub fn open_volumes(paths: &[std::path::PathBuf]) -> Result<Self, ArchiveError> {
+        if paths.is_empty() {
+            return Err(ArchiveError::InvalidArchive(
+                "rar5: no volumes given".into(),
+            ));
+        }
+        let mut data = Vec::new();
+        for path in paths {
+            let part = std::fs::read(path).map_err(|e| ArchiveError::io("read", path, e))?;
+            data.extend_from_slice(&part);
+        }
+        Self::from_bytes(&data)
+    }
+
+    /// Open a volume set starting at `first` by scanning sibling
+    /// parts (`.partNN.rar` numbering, then `.rNN`/`.sNN`).
+    ///
+    /// # Errors
+    ///
+    /// IO or archive errors.
+    pub fn open_volume_set(first: &Path) -> Result<Self, ArchiveError> {
+        let mut parts = vec![first.to_path_buf()];
+        let name = first
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        if let Some(idx) = name.find(".part") {
+            if let Some(dot) = name[idx + 5..].find('.') {
+                let num_len = dot;
+                let stem = &name[..idx + 5];
+                let ext = &name[idx + 5 + dot..];
+                let mut n = 2u64;
+                loop {
+                    let candidate = format!("{stem}{n:0num_len$}{ext}");
+                    let path = first.with_file_name(candidate);
+                    if path.exists() {
+                        parts.push(path);
+                        n += 1;
+                    } else {
+                        break;
+                    }
+                }
+            }
+        }
+        Self::open_volumes(&parts)
+    }
 }
 
 struct Block {
     kind: u64,
+    flags: u64,
     /// Offset just past the header-size vint and type/flags/size
     /// fields (start of header-area content).
     content: usize,
@@ -147,6 +342,7 @@ fn parse_block(data: &[u8], pos: &mut usize) -> Result<Option<Block>, ArchiveErr
     }
     Ok(Some(Block {
         kind,
+        flags,
         content,
         header_end,
         end,
@@ -158,6 +354,115 @@ fn parse_block(data: &[u8], pos: &mut usize) -> Result<Option<Block>, ArchiveErr
 /// recompute it from the value.
 fn vint_header_size(value: u64) -> usize {
     crate::vint_len(value)
+}
+
+/// If the archive starts with an encryption header (type 4), decrypt
+/// the remainder of the stream and splice it behind the plaintext
+/// prefix. Unencrypted archives return the input unchanged.
+fn decrypt_header_stream(data: &[u8], password: &[u8]) -> Result<Vec<u8>, ArchiveError> {
+    let mut pos = 8usize;
+    while pos + 4 < data.len() {
+        let Some(block) = parse_block(data, &mut pos)? else {
+            break;
+        };
+        if block.kind == rar5_block::ENCRYPTION {
+            // The encryption block's header body carries the record:
+            // version, flags, kdf, salt, (check).
+            let body = data.get(block.content..block.header_end).unwrap_or(&[]);
+            let mut p = 0usize;
+            let (_version, _) = read_vint(body, &mut p)?;
+            let (flags, _) = read_vint(body, &mut p)?;
+            let kdf = *body
+                .get(p)
+                .ok_or_else(|| ArchiveError::InvalidArchive("rar5: crypt truncated".into()))?;
+            p += 1;
+            let salt: [u8; 16] = body
+                .get(p..p + 16)
+                .and_then(|x| x.try_into().ok())
+                .ok_or_else(|| ArchiveError::InvalidArchive("rar5: crypt salt truncated".into()))?;
+            let check = if flags & 0x0001 != 0 {
+                Some(
+                    body.get(p + 16..p + 28)
+                        .and_then(|x| x.try_into().ok())
+                        .ok_or_else(|| {
+                            ArchiveError::InvalidArchive("rar5: crypt check truncated".into())
+                        })?,
+                )
+            } else {
+                None
+            };
+            let info = crate::rar5_crypto::CryptInfo {
+                flags,
+                kdf_count: kdf,
+                salt,
+                iv: [0u8; 16],
+                check,
+            };
+            // 16 cleartext IV bytes follow the block, then ciphertext.
+            let iv: [u8; 16] = data
+                .get(block.end..block.end + 16)
+                .and_then(|x| x.try_into().ok())
+                .ok_or_else(|| ArchiveError::InvalidArchive("rar5: header iv truncated".into()))?;
+            let decrypted =
+                crate::rar5_crypto::decrypt_headers(password, &info, &data[block.end + 16..], iv)?;
+            // The header stream self-resynchronizes: each header's
+            // 16-byte IV slot immediately precedes it, so a single
+            // continuous CBC pass yields every header; file data
+            // areas are stored raw (encrypted only with their own
+            // per-entry records) and must come from the physical
+            // bytes, not the stream.
+            let stream_start = block.end + 16;
+            let compact = compact_stream(data, &decrypted, stream_start)?;
+            let mut spliced = data[..block.end].to_vec();
+            spliced.extend_from_slice(&compact);
+            return Ok(spliced);
+        }
+        pos = block.end;
+    }
+    Ok(data.to_vec())
+}
+
+/// Compact the encrypted-header layout into the plain one: header
+/// bytes come from the decrypted stream, entry data areas from the
+/// physical buffer (they are separately encrypted). Each header
+/// region occupies align16(head_size) bytes of stream, then the data
+/// area, then the next header's 16-byte IV slot.
+fn compact_stream(
+    physical: &[u8],
+    decrypted: &[u8],
+    stream_start: usize,
+) -> Result<Vec<u8>, ArchiveError> {
+    let mut out = Vec::with_capacity(decrypted.len());
+    let mut pos = 0usize;
+    loop {
+        let start = pos;
+        let Some(block) = parse_block(decrypted, &mut pos)? else {
+            break;
+        };
+        let head_len = block.header_end - start;
+        out.extend_from_slice(&decrypted[start..block.header_end]);
+        let data_len = block.end - block.header_end;
+        let phys_data = stream_start + start + head_len.div_ceil(16) * 16;
+        if let Some(data) = physical.get(phys_data..phys_data + data_len) {
+            out.extend_from_slice(data);
+        }
+        pos = phys_data_pos_next(start, head_len, data_len);
+        if block.kind == rar5_block::END {
+            break;
+        }
+    }
+    Ok(out)
+}
+
+/// Stream offset of the next header: past the aligned header, the
+/// data area, and the next header's IV slot.
+fn phys_data_pos_next(start: usize, head_len: usize, data_len: usize) -> usize {
+    start + head_len.div_ceil(16) * 16 + data_len + 16
+}
+
+fn find_signature(data: &[u8], from: usize) -> Option<usize> {
+    (from..data.len().saturating_sub(MAGIC_RAR5.len()))
+        .find(|&i| data.get(i..i + MAGIC_RAR5.len()) == Some(&MAGIC_RAR5[..]))
 }
 
 fn archive_end() -> ArchiveError {
@@ -218,17 +523,21 @@ fn parse_file_header(data: &[u8], block: &Block) -> Result<Option<RawEntry>, Arc
 
     let (_, _, method, _) = rar5_decode_comp_info(comp_info);
     let is_dir = file_flags & rar5_file_flags::IS_DIR != 0;
-    let (symlink_target, encrypted) = scan_extra(data, block, p + name_len);
+    let extra = scan_extra(data, block, p + name_len);
 
     Ok(Some(RawEntry {
         name,
         is_dir,
+        window_size: crate::rar5_unpack::window_size_from_comp_info(comp_info),
         unpacked_size,
         crc32: crc,
         method,
-        encrypted,
+        encrypted: extra.encrypted,
         mtime,
-        symlink_target,
+        symlink_target: extra.symlink_target,
+        blake2sp: extra.blake2sp,
+        crypt: extra.crypt,
+        split: false,
         data: (block.header_end, block.end),
     }))
 }
@@ -236,14 +545,28 @@ fn parse_file_header(data: &[u8], block: &Block) -> Result<Option<RawEntry>, Arc
 /// Extra-area record types.
 mod extra_record {
     pub const CRYPT: u64 = 0x01;
+    pub const HASH: u64 = 0x02;
     pub const REDIR: u64 = 0x05;
 }
 
+/// Parsed extra-area facts for one file header.
+struct ExtraFacts {
+    symlink_target: Option<String>,
+    encrypted: bool,
+    blake2sp: Option<[u8; 32]>,
+    crypt: Option<crate::rar5_crypto::CryptInfo>,
+}
+
 /// Walk the extra area (records are `size vint` covering `type vint +
-/// data`) for the CRYPT and REDIR records. `name_end` is where the
-/// regular header fields end; returns (redirection target, encrypted).
-fn scan_extra(data: &[u8], block: &Block, name_end: usize) -> (Option<String>, bool) {
-    let mut out = (None, false);
+/// data`) for the CRYPT, REDIR, and HASH records. `name_end` is where
+/// the regular header fields end.
+fn scan_extra(data: &[u8], block: &Block, name_end: usize) -> ExtraFacts {
+    let mut out = ExtraFacts {
+        symlink_target: None,
+        encrypted: false,
+        blake2sp: None,
+        crypt: None,
+    };
     if block.extra_size == 0 || name_end > block.header_end {
         return out;
     }
@@ -261,7 +584,23 @@ fn scan_extra(data: &[u8], block: &Block, name_end: usize) -> (Option<String>, b
             return out;
         };
         match kind {
-            extra_record::CRYPT => out.1 = true,
+            extra_record::CRYPT => {
+                out.encrypted = true;
+                // Record body runs from the version vint to rec_end.
+                if let Some(body) = data.get(p..rec_end) {
+                    out.crypt = crate::rar5_crypto::CryptInfo::parse(body).ok();
+                }
+            }
+            extra_record::HASH => {
+                // hash-type vint (0 = BLAKE2sp) followed by 32 bytes.
+                if let Ok((hash_type, _)) = read_vint(data, &mut p) {
+                    if hash_type == 0 {
+                        if let Some(bytes) = data.get(p..p + 32) {
+                            out.blake2sp = Some(bytes.try_into().expect("32"));
+                        }
+                    }
+                }
+            }
             extra_record::REDIR => {
                 // type vint, flags vint, name-length vint, name bytes.
                 let redir_type = read_vint(data, &mut p);
@@ -270,7 +609,7 @@ fn scan_extra(data: &[u8], block: &Block, name_end: usize) -> (Option<String>, b
                     if let Ok((n, _)) = read_vint(data, &mut p) {
                         let n = n as usize;
                         if let Some(b) = data.get(p..p + n) {
-                            out.0 = Some(String::from_utf8_lossy(b).into_owned());
+                            out.symlink_target = Some(String::from_utf8_lossy(b).into_owned());
                         }
                     }
                 }
@@ -280,6 +619,115 @@ fn scan_extra(data: &[u8], block: &Block, name_end: usize) -> (Option<String>, b
         p = rec_end;
     }
     out
+}
+
+impl Rar5Reader {
+    fn keys_for(&self, index: usize) -> Option<crate::rar5_crypto::Rar5Keys> {
+        let e = &self.entries[index];
+        match (&e.crypt, &self.password) {
+            (Some(info), Some(pw)) => {
+                let keys = crate::rar5_crypto::derive_keys(pw, info);
+                if info.flags & 0x0002 != 0 {
+                    Some(keys)
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// Packed bytes for an entry, decrypted when the entry carries a
+    /// CRYPT record and a password is available.
+    fn entry_packed(&self, index: usize) -> Result<Vec<u8>, ArchiveError> {
+        let e = &self.entries[index];
+        let raw = self
+            .arena
+            .get(e.data.0..e.data.1)
+            .ok_or_else(|| ArchiveError::InvalidArchive("rar5: data out of bounds".into()))?;
+        match (&e.crypt, &self.password) {
+            (Some(info), Some(pw)) => {
+                let mut plain = crate::rar5_crypto::decrypt_entry(pw, info, raw)?;
+                if plain.len() > e.unpacked_size as usize {
+                    // LZ streams read their own block sizes; keep as-is.
+                }
+                let _ = &mut plain;
+                Ok(plain)
+            }
+            (Some(_), None) => Err(ArchiveError::Security(format!(
+                "rar5: entry '{}' is encrypted; password required",
+                e.name
+            ))),
+            _ => Ok(raw.to_vec()),
+        }
+    }
+
+    /// Decode LZ entries in archive order up to `index`, maintaining
+    /// the shared solid window; returns entry `index`'s bytes.
+    fn decode_solid_prefix(&mut self, index: usize) -> Result<Vec<u8>, ArchiveError> {
+        if index < self.consumed {
+            if let Some((i, ref data)) = self.cached {
+                if i == index {
+                    return Ok(data.clone());
+                }
+            }
+            // Backwards random access: rebuild the stream from the top.
+            self.solid = crate::rar5_unpack::SolidState::default();
+            self.consumed = 0;
+            self.cached = None;
+        }
+        while self.consumed <= index {
+            let i = self.consumed;
+            let e = &self.entries[i];
+            let output = if e.is_dir || e.method == 0 || e.symlink_target.is_some() {
+                Vec::new()
+            } else {
+                let packed = self.entry_packed(i)?;
+                // The bit reader legitimately looks ahead past the last
+                // block into whatever follows; keep those real bytes.
+                let tail = self
+                    .arena
+                    .get(e.data.1..(e.data.1 + 8).min(self.arena.len()))
+                    .unwrap_or(&[])
+                    .to_vec();
+                crate::rar5_unpack::set_lookahead_tail(tail);
+                let mut state = std::mem::take(&mut self.solid);
+                if !self.main_solid {
+                    state = crate::rar5_unpack::SolidState::default();
+                }
+                let res = crate::rar5_unpack::unpack_lz(
+                    &packed,
+                    e.unpacked_size,
+                    e.window_size,
+                    &mut state,
+                );
+                // libarchive's reset_file_context: in solid archives the
+                // window persists and the base offset advances by this
+                // entry's contribution.
+                state.solid_offset += state.last_advance;
+                self.solid = state;
+                let out = res?;
+                let keys = self.keys_for(i);
+                verify_hashes(
+                    &e.name,
+                    e.crc32,
+                    e.blake2sp.as_ref(),
+                    e.split,
+                    keys.as_ref(),
+                    &out,
+                )?;
+                out
+            };
+            self.consumed = i + 1;
+            self.cached = Some((i, output));
+        }
+        Ok(self
+            .cached
+            .as_ref()
+            .filter(|(i, _)| *i == index)
+            .map(|(_, d)| d.clone())
+            .unwrap_or_default())
+    }
 }
 
 impl ArchiveReader for Rar5Reader {
@@ -309,52 +757,49 @@ impl ArchiveReader for Rar5Reader {
     }
 
     fn read_entry(&mut self, index: usize) -> Result<Vec<u8>, ArchiveError> {
-        let e = self
+        let entry = self
             .entries
             .get(index)
-            .ok_or_else(|| ArchiveError::InvalidArchive(format!("rar5: no entry {index}")))?;
+            .ok_or_else(|| ArchiveError::InvalidArchive(format!("rar5: no entry {index}")))?
+            .clone();
+        let e = &entry;
         if e.is_dir {
             return Ok(Vec::new());
         }
         if let Some(target) = &e.symlink_target {
             return Ok(target.as_bytes().to_vec());
         }
-        if e.encrypted {
+        if e.encrypted && (e.crypt.is_none() || self.password.is_none()) {
             return Err(ArchiveError::Security(format!(
                 "rar5: entry '{}' is encrypted; password required",
                 e.name
             )));
         }
-        let raw = self
-            .data
-            .get(e.data.0..e.data.1)
-            .ok_or_else(|| ArchiveError::InvalidArchive("rar5: data out of bounds".into()))?;
-        let out = match e.method {
-            0 => raw.to_vec(),
-            other => {
-                return Err(ArchiveError::UnsupportedFeature {
-                    reason: format!(
-                        "rar5: compression method {other} (LZ) not implemented; entry '{}'",
-                        e.name
-                    ),
-                });
-            }
-        };
-        if out.len() as u64 != e.unpacked_size {
-            return Err(ArchiveError::InvalidArchive(format!(
-                "rar5: entry '{}': size mismatch",
-                e.name
-            )));
+        if e.method == 0 {
+            self.consumed = self.consumed.max(index + 1);
+            let raw = self.entry_packed(index)?;
+            let keys = self.keys_for(index);
+            verify_hashes(
+                &e.name,
+                e.crc32,
+                e.blake2sp.as_ref(),
+                e.split,
+                keys.as_ref(),
+                &raw,
+            )?;
+            let raw = &raw[..raw.len().min(e.unpacked_size as usize)];
+            return Ok(raw.to_vec());
         }
-        if let Some(crc) = e.crc32 {
-            let computed = omnizip_archive_core::crc32(&out);
-            if computed != crc {
-                return Err(ArchiveError::Checksum(format!(
-                    "rar5: entry '{}': CRC mismatch: stored {crc:08X}, computed {computed:08X}",
-                    e.name
-                )));
-            }
-        }
+        let out = self.decode_solid_prefix(index)?;
+        let keys = self.keys_for(index);
+        verify_hashes(
+            &e.name,
+            e.crc32,
+            e.blake2sp.as_ref(),
+            e.split,
+            keys.as_ref(),
+            &out,
+        )?;
         Ok(out)
     }
 }
