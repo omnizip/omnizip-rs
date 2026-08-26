@@ -10,6 +10,7 @@
 
 pub mod bitwriter;
 pub mod block_splitter;
+pub mod btopt;
 pub mod context;
 pub mod dict_hash;
 pub mod dict_hash_lut;
