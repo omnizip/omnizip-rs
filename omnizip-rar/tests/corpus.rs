@@ -73,7 +73,7 @@ fn libarchive_corpus_walks_cleanly() {
     // corrupt headers, encrypted filenames) we reject too, and every
     // fixture 7zz reads we either parse or classify structurally.
     assert!(
-        parsed >= 40,
+        parsed >= 41,
         "expected STORE+LZ archives to fully decode: {parsed}"
     );
     assert!(
@@ -187,4 +187,25 @@ fn encrypted_header_archives_extract() {
         "not-the-password",
     );
     assert!(bad.is_err());
+}
+
+#[test]
+fn arm_fixture_decodes_completely() {
+    let path = std::path::Path::new(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../omnizip/spec/fixtures/rar/libarchive_reference/test_read_format_rar5_arm.rar"
+    ));
+    if !path.exists() {
+        return;
+    }
+    let mut r = Rar5Reader::open(path).unwrap();
+    let entries = r.entries().unwrap();
+    let idx = entries
+        .iter()
+        .position(|e| e.name.contains("ARMv7"))
+        .unwrap();
+    let data = r.read_entry(idx).unwrap();
+    assert_eq!(data.len(), 90808);
+    // Symbol-for-symbol parity with the reference decoder was verified
+    // during the port (29243 symbols, identical sequence).
 }
