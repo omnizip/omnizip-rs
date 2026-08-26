@@ -207,16 +207,16 @@ impl StartPosQueue {
 }
 
 /// Upstream `ZopfliCostModel`.
-struct CostModel {
-    cost_cmd: Vec<f32>,
-    cost_dist: Vec<f32>,
+pub(crate) struct CostModel {
+    pub(crate) cost_cmd: Vec<f32>,
+    pub(crate) cost_dist: Vec<f32>,
     literal_costs: Vec<f32>,
-    min_cost_cmd: f32,
+    pub(crate) min_cost_cmd: f32,
 }
 
 /// Upstream `SetCost`: per-symbol Shannon cost with a fixed
 /// missing-symbol penalty (+2 bits) for non-literal histograms.
-fn set_cost(histogram: &[u32], literal_histogram: bool, cost: &mut [f32]) {
+pub(crate) fn set_cost(histogram: &[u32], literal_histogram: bool, cost: &mut [f32]) {
     let mut sum: u64 = 0;
     for &h in histogram.iter() {
         sum += u64::from(h);
@@ -248,7 +248,7 @@ impl CostModel {
     /// Pass-1 costs: sliding-window literal entropy (upstream
     /// `ZopfliCostModelSetFromLiteralCosts` +
     /// `BrotliEstimateBitCostsForLiterals`, non-UTF8 variant).
-    fn from_literal_costs(data: &[u8]) -> Self {
+    pub(crate) fn from_literal_costs(data: &[u8]) -> Self {
         let n = data.len();
         let mut literal_costs = vec![0.0f32; n + 1];
         if is_mostly_utf8(data) {
@@ -281,7 +281,7 @@ impl CostModel {
 
     /// Pass-2 costs: histograms over the previous pass's commands
     /// (upstream `ZopfliCostModelSetFromCommands`).
-    fn from_commands(data: &[u8], commands: &[Command]) -> Self {
+    pub(crate) fn from_commands(data: &[u8], commands: &[Command]) -> Self {
         let n = data.len();
         let mut hist_literal = [0u32; 256];
         let mut hist_cmd = [0u32; NUM_CMD_SYMBOLS];
@@ -359,8 +359,23 @@ impl CostModel {
         self.cost_dist[distcode]
     }
     #[inline]
-    fn lit_costs(&self, from: usize, to: usize) -> f32 {
+    pub(crate) fn lit_costs(&self, from: usize, to: usize) -> f32 {
         self.literal_costs[to] - self.literal_costs[from]
+    }
+
+    /// Replace the flat literal prefix-sum with per-position costs
+    /// (e.g. context-partitioned SetCost tables). Used by the btopt
+    /// parser to steer literals by (p1, p2) context.
+    pub(crate) fn with_positional_literals(mut self, lit_pos: &[f32]) -> Self {
+        let mut literal_costs = vec![0.0f32; lit_pos.len() + 1];
+        let mut carry = 0.0f32;
+        for (i, &c) in lit_pos.iter().enumerate() {
+            carry += c;
+            literal_costs[i + 1] = literal_costs[i] + carry;
+            carry -= literal_costs[i + 1] - literal_costs[i];
+        }
+        self.literal_costs = literal_costs;
+        self
     }
 }
 
@@ -540,7 +555,7 @@ fn estimate_literal_bit_costs(data: &[u8], cost: &mut [f32]) {
 
 /// npostfix=0/ndirect=0 long-form distance symbol (upstream
 /// PrefixEncodeCopyDistance low 10 bits).
-fn long_dist_symbol(distance: u32) -> usize {
+pub(crate) fn long_dist_symbol(distance: u32) -> usize {
     if distance == 0 {
         return 0;
     }
@@ -564,7 +579,7 @@ fn long_dist_symbol(distance: u32) -> usize {
 /// long-copy skip: when the longest match exceeds MAX_ZOPFLI_LEN,
 /// keep only it and zero the tail positions.
 #[allow(clippy::type_complexity)]
-fn collect_matches(
+pub(crate) fn collect_matches(
     data: &[u8],
     tree: &mut omnizip_codecs::BinaryTreeMatchFinder,
     quality: i32,
@@ -634,17 +649,20 @@ fn collect_matches(
 }
 
 /// Upstream `ComputeMinimumCopyLength`.
-fn compute_minimum_copy_length(
+pub(crate) fn compute_minimum_copy_length<F>(
     start_cost: f32,
-    nodes: &[Node],
+    cost_at: F,
     num_bytes: usize,
     pos: usize,
-) -> usize {
+) -> usize
+where
+    F: Fn(usize) -> f32,
+{
     let mut min_cost = start_cost;
     let mut len = 2usize;
     let mut next_len_bucket = 4usize;
     let mut next_len_offset = 10usize;
-    while pos + len <= num_bytes && nodes[pos + len].cost <= min_cost {
+    while pos + len <= num_bytes && cost_at(pos + len) <= min_cost {
         len += 1;
         if len == next_len_offset {
             min_cost += 1.0;
@@ -731,7 +749,7 @@ fn update_nodes(
     let min_len = {
         let posdata = queue.at(0);
         let min_cost = posdata.cost + model.min_cost_cmd + model.lit_costs(posdata.pos, pos);
-        compute_minimum_copy_length(min_cost, nodes, n, pos)
+        compute_minimum_copy_length(min_cost, |p| nodes[p].cost, n, pos)
     };
 
     for k in 0..max_candidates.min(queue.size()) {
@@ -916,6 +934,24 @@ pub fn parse_hq(input: &[u8], quality: i32) -> Vec<Command> {
     if n < 8 {
         return Vec::new();
     }
+    let mut tree = omnizip_codecs::BinaryTreeMatchFinder::new(input);
+    let (num_matches, matches) = collect_matches(input, &mut tree, quality);
+    parse_hq_with(input, quality, &num_matches, &matches)
+}
+
+/// Collection-sharing variant used by the q10/11 routing (the btopt
+/// candidate consumes the same H10 list instead of re-walking the
+/// tree). `num_matches`/`matches` come from [`collect_matches`].
+pub(crate) fn parse_hq_with(
+    input: &[u8],
+    quality: i32,
+    num_matches: &[u32],
+    matches: &[(u32, u32)],
+) -> Vec<Command> {
+    let n = input.len();
+    if n < 8 {
+        return Vec::new();
+    }
     let tier = if quality >= 11 { 1 } else { 0 };
     let max_zopfli_len = MAX_ZOPFLI_LEN[tier];
     let max_candidates = MAX_ZOPFLI_CANDIDATES[tier];
@@ -930,8 +966,6 @@ pub fn parse_hq(input: &[u8], quality: i32) -> Vec<Command> {
     } else {
         2
     };
-    let mut tree = omnizip_codecs::BinaryTreeMatchFinder::new(input);
-    let (num_matches, matches) = collect_matches(input, &mut tree, quality);
     // Prefix-sum offsets into the flat match list.
     let mut offsets = vec![0u32; n + 1];
     for i in 0..n {
