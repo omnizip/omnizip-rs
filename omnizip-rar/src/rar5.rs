@@ -403,24 +403,35 @@ fn decrypt_header_stream(data: &[u8], password: &[u8]) -> Result<Vec<u8>, Archiv
                 .get(block.end..block.end + 16)
                 .and_then(|x| x.try_into().ok())
                 .ok_or_else(|| ArchiveError::InvalidArchive("rar5: header iv truncated".into()))?;
-            let stream = &data[block.end + 16..];
-            let decrypted = crate::rar5_crypto::decrypt_headers(password, &info, stream, iv)?;
-            // In the encrypted stream every header block occupies
-            // align16(head_size) + 16 bytes (unrar's FullHeaderSize);
-            // entry data areas follow raw. Compact the stream to the
-            // plain layout so the normal walker can parse it.
-            let mut compact = data[..block.end].to_vec();
-            compact.extend_from_slice(&compact_stream(&decrypted)?);
-            return Ok(compact);
+            let decrypted =
+                crate::rar5_crypto::decrypt_headers(password, &info, &data[block.end + 16..], iv)?;
+            // The header stream self-resynchronizes: each header's
+            // 16-byte IV slot immediately precedes it, so a single
+            // continuous CBC pass yields every header; file data
+            // areas are stored raw (encrypted only with their own
+            // per-entry records) and must come from the physical
+            // bytes, not the stream.
+            let stream_start = block.end + 16;
+            let compact = compact_stream(data, &decrypted, stream_start)?;
+            let mut spliced = data[..block.end].to_vec();
+            spliced.extend_from_slice(&compact);
+            return Ok(spliced);
         }
         pos = block.end;
     }
     Ok(data.to_vec())
 }
 
-/// Drop the per-header padding/IV slots from a decrypted header
-/// stream, keeping header bytes and entry data areas contiguous.
-fn compact_stream(decrypted: &[u8]) -> Result<Vec<u8>, ArchiveError> {
+/// Compact the encrypted-header layout into the plain one: header
+/// bytes come from the decrypted stream, entry data areas from the
+/// physical buffer (they are separately encrypted). Each header
+/// region occupies align16(head_size) bytes of stream, then the data
+/// area, then the next header's 16-byte IV slot.
+fn compact_stream(
+    physical: &[u8],
+    decrypted: &[u8],
+    stream_start: usize,
+) -> Result<Vec<u8>, ArchiveError> {
     let mut out = Vec::with_capacity(decrypted.len());
     let mut pos = 0usize;
     loop {
@@ -428,21 +439,25 @@ fn compact_stream(decrypted: &[u8]) -> Result<Vec<u8>, ArchiveError> {
         let Some(block) = parse_block(decrypted, &mut pos)? else {
             break;
         };
-        // Region layout: [header][pad..16-byte slot][data area].
         let head_len = block.header_end - start;
-        let region = (head_len + 15) / 16 * 16 + 16;
         out.extend_from_slice(&decrypted[start..block.header_end]);
         let data_len = block.end - block.header_end;
-        let data_start = start + region;
-        if let Some(data) = decrypted.get(data_start..data_start + data_len) {
+        let phys_data = stream_start + start + head_len.div_ceil(16) * 16;
+        if let Some(data) = physical.get(phys_data..phys_data + data_len) {
             out.extend_from_slice(data);
         }
-        pos = data_start + data_len;
+        pos = phys_data_pos_next(start, head_len, data_len);
         if block.kind == rar5_block::END {
             break;
         }
     }
     Ok(out)
+}
+
+/// Stream offset of the next header: past the aligned header, the
+/// data area, and the next header's IV slot.
+fn phys_data_pos_next(start: usize, head_len: usize, data_len: usize) -> usize {
+    start + head_len.div_ceil(16) * 16 + data_len + 16
 }
 
 fn find_signature(data: &[u8], from: usize) -> Option<usize> {
