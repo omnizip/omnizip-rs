@@ -149,7 +149,7 @@ impl RarVm {
                 if data_size as usize > VM_MEMSIZE || data_size < 4 {
                     return false;
                 }
-                const FILE_SIZE: u32 = 0x1000_0000;
+                const FILE_SIZE: u32 = 0x100_0000;
                 let cmp_byte2: u8 = if filter == VmFilter::E8e9 { 0xE9 } else { 0xE8 };
                 let mut cur_pos = 0usize;
                 let mut ptr = 0usize;
