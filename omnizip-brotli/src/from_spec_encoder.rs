@@ -57,7 +57,7 @@ const WINDOW_GAP: u32 = 16;
 
 /// Maximum backward distance for LZ77 matches.
 /// Per RFC 7932 §9.1: `max_backward_distance` = (1 << WBITS) - `WINDOW_GAP`.
-const MAX_BACKWARD_DISTANCE: u32 = (1 << WINDOW_BITS) - WINDOW_GAP;
+pub(crate) const MAX_BACKWARD_DISTANCE: u32 = (1 << WINDOW_BITS) - WINDOW_GAP;
 
 /// Minimum match length for LZ77.
 const MIN_MATCH: u32 = 4;
@@ -2819,7 +2819,7 @@ pub(crate) fn build_symbol_stream(
 /// `copy_len_offset == 2` (smallest). The decoder short-circuits at
 /// metablock end without executing the copy, so the phantom `copy_len`
 /// is harmless.
-fn find_cmd_symbol(insert_len: u32, copy_len: u32) -> Option<usize> {
+pub(crate) fn find_cmd_symbol(insert_len: u32, copy_len: u32) -> Option<usize> {
     find_cmd_symbol_impl(insert_len, copy_len, None)
 }
 
@@ -2827,7 +2827,7 @@ fn find_cmd_symbol(insert_len: u32, copy_len: u32) -> Option<usize> {
 /// entries (rep codes). When `rep_code` is `Some(dc)`, searches for
 /// entries with `distance_code == dc` instead of `distance_code == -1`.
 /// This enables cheaper encoding for repeat-offset matches.
-fn find_cmd_symbol_with_rep(
+pub(crate) fn find_cmd_symbol_with_rep(
     insert_len: u32,
     copy_len: u32,
     rep_code: Option<i32>,
@@ -6667,7 +6667,42 @@ fn parse_input_with_offset_impl(
         // Reference port: BrotliCreate(Hq)ZopfliBackwardReferences —
         // q10 single pass, q11 two passes with the StartPosQueue.
         // BROTLI_OLD_ZOPFLI restores the in-house iterative DP.
-        return (crate::encoder::zopfli_hq::parse_hq(input, quality), None);
+        // btopt (task 5): a second candidate parse — the LZMA-optimum
+        // generalization with exact per-node rep rings and
+        // static-dictionary candidates — judged by EXACT emission
+        // bits. The smaller metablock ships (ties keep the reference
+        // parse), so this tier's output can only improve; the winner's
+        // measured writer IS the metablock (winner-emission reuse).
+        // BROTLI_NO_BTOPT restores the plain reference parse.
+        let mut tree = omnizip_codecs::BinaryTreeMatchFinder::new(input);
+        let (num_matches, matches) =
+            crate::encoder::zopfli_hq::collect_matches(input, &mut tree, quality);
+        let hq = crate::encoder::zopfli_hq::parse_hq_with(input, quality, &num_matches, &matches);
+        if env_flag!("BROTLI_NO_BTOPT") || env_flag!("BROTLI_NO_CM") || n < 8 || input.len() < 4096
+        {
+            return (hq, None);
+        }
+        let bt = crate::encoder::btopt::parse_btopt_with(
+            input,
+            quality,
+            mlen_offset,
+            &num_matches,
+            &matches,
+        );
+        let (hq_bits, hq_bw) =
+            measure_emission_bits(&hq, input, mlen_offset, quality, is_last, ctx_in);
+        let (bt_bits, bt_bw) =
+            measure_emission_bits(&bt, input, mlen_offset, quality, is_last, ctx_in);
+        if env_flag!("BROTLI_BTOPT_DUMP") {
+            eprintln!(
+                "BTOPT chunk@{mlen_offset} n={n} hq={hq_bits} bt={bt_bits} winner={}",
+                if bt_bits < hq_bits { "BT" } else { "HQ" }
+            );
+        }
+        if bt_bits < hq_bits {
+            return (bt, Some(bt_bw));
+        }
+        return (hq, Some(hq_bw));
     } else if quality >= 4 && input.len() <= 8 * 1024 * 1024 {
         return zopfli_iterative_parse(
             input,
