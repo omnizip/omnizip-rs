@@ -21,6 +21,6 @@ that make the CLI's `ozip gzip` / `ozip bzip2` drop-in comparable to
 
 ## Acceptance
 
-- [ ] `gzip -d` / `bzip2 -d` decode our outputs byte-exactly
-- [ ] We decode everything `gzip`/`bzip2 -9` produce (incl. multi-member gzip)
+- [x] `gzip -d` / `bzip2 -d` decode our outputs byte-exactly
+- [x] We decode everything `gzip`/`bzip2 -9` produce (incl. multi-member gzip)
 - [ ] Trailer CRC32 + ISIZE verified on decode

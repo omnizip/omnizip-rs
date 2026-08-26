@@ -21,5 +21,5 @@ add the encoder-side lzip container (magic, version byte, CRC32 footer).
 
 ## Acceptance
 
-- [ ] `lzip -d` / `lzma -d` decode our outputs; we decode theirs
+- [x] `lzip -d` / `lzma -d` decode our outputs; we decode theirs
 - [ ] Registered in the format registry with magic sniffing
