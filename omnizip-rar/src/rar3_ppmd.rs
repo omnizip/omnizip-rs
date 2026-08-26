@@ -667,7 +667,7 @@ impl ModelPPM {
         self.max_context = ctx;
         self.ctx_set_suffix(ctx, 0);
         self.order_fall = self.max_order;
-        self.ctx_set_num_stats(ctx, 257);
+        self.ctx_set_num_stats(ctx, 256);
         self.ctx_set_summ_freq(ctx, 257);
         let stats = self.sub_alloc.alloc_units(256 / 2) as u32;
         self.found_state = stats;
@@ -754,6 +754,9 @@ impl ModelPPM {
             self.ctx_set_num_stats(pc, 1);
             self.state_write(self.one_state(pc), first_state);
             self.ctx_set_suffix(pc, ctx);
+            if std::env::var("OZIP_SW").is_ok() {
+                eprintln!("SW cc o={:#x} v={:#x}", p_stats, pc);
+            }
             self.state_set_successor(p_stats, pc);
         }
         pc
@@ -857,10 +860,16 @@ impl ModelPPM {
                 return self.cs_tail(pc, &ps, pps, up_branch);
             }
         }
-        let mut from_p1 = p1 != 0;
-        let mut p = p1;
+        // The p1 entry point starts at suffix(min_context) with p
+        // given; every later iteration descends one more suffix and
+        // searches for the found symbol there.
+        let mut p = 0u32;
+        if p1 != 0 {
+            pc = self.ctx_suffix(pc);
+            p = p1;
+        }
         loop {
-            if !from_p1 {
+            if p == 0 {
                 pc = self.ctx_suffix(pc);
                 p = if self.ctx_num_stats(pc) != 1 {
                     self.find_state(pc, self.state_read(self.found_state).symbol)
@@ -871,7 +880,18 @@ impl ModelPPM {
                     return 0;
                 }
             }
-            from_p1 = false;
+            if std::env::var("OZIP_CS").is_ok() {
+                eprintln!(
+                    "MINE: pc={:#x} stats={:#x} pcns={} p={:#x} sym={} succ={:#x} upb={:#x}",
+                    pc,
+                    self.ctx_stats(pc),
+                    self.ctx_num_stats(pc),
+                    p,
+                    self.state_read(p).symbol,
+                    self.state_read(p).successor,
+                    up_branch
+                );
+            }
             if self.state_read(p).successor != up_branch {
                 pc = self.state_read(p).successor;
                 break;
@@ -881,6 +901,7 @@ impl ModelPPM {
             }
             ps[pps] = p;
             pps += 1;
+            p = 0;
             if self.ctx_suffix(pc) == 0 {
                 break;
             }
@@ -889,6 +910,9 @@ impl ModelPPM {
     }
 
     fn cs_tail(&mut self, pc: u32, ps: &[u32; MAX_O], pps: usize, up_branch: u32) -> u32 {
+        if std::env::var("OZIP_CS").is_ok() {
+            eprintln!("CS-out: pps={} pc={:#x}", pps, pc);
+        }
         if pps == 0 {
             return pc;
         }
@@ -932,7 +956,15 @@ impl ModelPPM {
     }
 
     fn update_model(&mut self) {
+        let dbg3 = std::env::var("OZIP_DBG3").is_ok();
         let fs = self.state_read(self.found_state);
+        if dbg3 {
+            eprintln!(
+                "UM in: sym={} fssucc={:#x} minc={:#x} maxc={:#x} of={} pt={:#x} fsfreq={}",
+                fs.symbol, fs.successor, self.min_context, self.max_context, self.order_fall,
+                self.sub_alloc.p_text, fs.freq
+            );
+        }
         let mut p = 0u32;
         if fs.freq < (MAX_FREQ / 4) as u8 {
             let pc = self.ctx_suffix(self.min_context);
@@ -971,6 +1003,9 @@ impl ModelPPM {
         let mut fs = fs;
         if self.order_fall == 0 {
             let successor = self.create_successors(true, p);
+            if std::env::var("OZIP_SW").is_ok() {
+                eprintln!("SW of0 o={:#x} v={:#x}", self.found_state, successor);
+            }
             self.state_set_successor(self.found_state, successor);
             self.min_context = successor;
             self.max_context = successor;
@@ -1001,12 +1036,26 @@ impl ModelPPM {
                     .p_text -= usize::from(self.max_context != self.min_context);
             }
         } else {
+            if std::env::var("OZIP_SW").is_ok() {
+                eprintln!("SW else o={:#x} v={:#x}", self.found_state, successor);
+            }
             self.state_set_successor(self.found_state, successor);
             fs.successor = self.min_context;
         }
         let ns = u32::from(self.ctx_num_stats(self.min_context));
         let s0 =
             u32::from(self.ctx_summ_freq(self.min_context)) - ns - (u32::from(fs.freq) - 1);
+        if std::env::var("OZIP_UM").is_ok() {
+            let mut w = self.max_context;
+            let mut c = 0;
+            let mut out = String::new();
+            while w != self.min_context && w != 0 && c < 80 {
+                out.push_str(&format!("WALK {}:{}/{}@{:#x} ", c, self.ctx_num_stats(w), self.ctx_suffix(w), w));
+                w = self.ctx_suffix(w);
+                c += 1;
+            }
+            eprintln!("{} | WALKEND count={} us={:#x} fus={:#x} pt={:#x}", out, c, self.sub_alloc.units_start, self.sub_alloc.fake_units_start, self.sub_alloc.p_text);
+        }
         let mut pc = self.max_context;
         while pc != self.min_context {
             let mut ns1 = u32::from(self.ctx_num_stats(pc));
@@ -1054,6 +1103,9 @@ impl ModelPPM {
                 self.ctx_set_summ_freq(pc, self.ctx_summ_freq(pc).wrapping_add(cf as u16));
             }
             let p_slot = self.ctx_stats(pc) + ns1 * STATE_STRIDE as u32;
+            if std::env::var("OZIP_SW").is_ok() {
+                eprintln!("SW app o={:#x} v={:#x} ctx={:#x}", p_slot, successor, pc);
+            }
             self.state_write(
                 p_slot,
                 &StateVal {
@@ -1068,6 +1120,12 @@ impl ModelPPM {
         }
         self.max_context = fs.successor;
         self.min_context = fs.successor;
+        if dbg3 {
+            eprintln!(
+                "UM out: minc={:#x} of={} pt={:#x}",
+                self.min_context, self.order_fall, self.sub_alloc.p_text
+            );
+        }
     }
 
     fn restart_model(&mut self) {
@@ -1347,8 +1405,28 @@ impl ModelPPM {
 
     /// `ModelPPM::DecodeChar`; -1 signals corrupt data.
     pub fn decode_char(&mut self, src: &mut dyn ByteSource) -> i32 {
+        let dbg = std::env::var("OZIP_DBG").is_ok();
+        let dbg2 = std::env::var("OZIP_DBG2").is_ok();
+        if dbg2 {
+            // Suffix chain num_stats sequence from min_context.
+            let mut chain = String::new();
+            let mut cx = self.min_context;
+            let mut guard = 0;
+            while cx != 0 && guard < 80 {
+                chain.push_str(&format!("{}/{}:", self.ctx_num_stats(cx), self.ctx_suffix(cx)));
+                cx = self.ctx_suffix(cx);
+                guard += 1;
+            }
+            eprintln!(
+                "DC in: mc={:#x} mcx={:#x} pt={:#x} of={} nm={} ec={} rl={} ps={} hb={} ie={} chain={}",
+                self.min_context, self.max_context, self.sub_alloc.p_text, self.order_fall,
+                self.num_masked, self.esc_count, self.run_length, self.prev_success,
+                self.hi_bits_flag, self.init_esc, chain
+            );
+        }
         let mc = self.min_context;
         if mc as usize <= self.sub_alloc.p_text || mc as usize > self.sub_alloc.heap_end {
+            if dbg { eprintln!("DC ret-1 A: mc={mc:#x} ptext={:#x}", self.sub_alloc.p_text); }
             return -1;
         }
         if self.ctx_num_stats(mc) != 1 {
@@ -1356,9 +1434,11 @@ impl ModelPPM {
             if stats as usize <= self.sub_alloc.p_text
                 || stats as usize > self.sub_alloc.heap_end
             {
+                if dbg { eprintln!("DC ret-1 B: stats={stats:#x} ptext={:#x}", self.sub_alloc.p_text); }
                 return -1;
             }
             if !self.decode_symbol1(mc) {
+                if dbg { eprintln!("DC ret-1 C: sym1 false ns={}", self.ctx_num_stats(mc)); }
                 return -1;
             }
         } else {
@@ -1370,11 +1450,18 @@ impl ModelPPM {
             loop {
                 self.order_fall += 1;
                 self.min_context = self.ctx_suffix(self.min_context);
+                if std::env::var("OZIP_DBG2").is_ok() {
+                    eprintln!(
+                        "ESC: mc={:#x} of={} nm={} ec={}",
+                        self.min_context, self.order_fall, self.num_masked, self.esc_count
+                    );
+                }
                 let mc = self.min_context;
                 if mc == 0
                     || mc as usize <= self.sub_alloc.p_text
                     || mc as usize > self.sub_alloc.heap_end
                 {
+                    if dbg { eprintln!("DC ret-1 D: mc={mc:#x}"); }
                     return -1;
                 }
                 if self.ctx_num_stats(mc) != self.num_masked as u16 {
@@ -1382,6 +1469,7 @@ impl ModelPPM {
                 }
             }
             if !self.decode_symbol2(self.min_context) {
+                if dbg { eprintln!("DC ret-1 E: sym2 false"); }
                 return -1;
             }
             self.coder.decode();
@@ -1399,6 +1487,13 @@ impl ModelPPM {
                 self.esc_count = 1;
                 self.char_mask = [0; 256];
             }
+        }
+        if dbg2 {
+            eprintln!(
+                "DC out: sym={} fs={:#x} fs->succ={:#x} of={} nm={} ec={} rl={}",
+                symbol, self.found_state, self.state_read(self.found_state).successor,
+                self.order_fall, self.num_masked, self.esc_count, self.run_length
+            );
         }
         self.coder.dec_normalize(src);
         i32::from(symbol)

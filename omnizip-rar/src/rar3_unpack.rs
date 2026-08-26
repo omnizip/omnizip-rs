@@ -199,10 +199,13 @@ fn make_decode_tables(length_table: &[u8], dec: &mut DecodeTable, size: usize) {
         dec.quick_len[code] = cur_bit_length as u8;
         let mut dist = bit_field.wrapping_sub(dec.decode_len[(cur_bit_length - 1) as usize]);
         dist >>= 16 - cur_bit_length;
-        let pos = dec.decode_pos[cur_bit_length as usize].wrapping_add(dist);
-        dec.quick_num[code] = if (cur_bit_length as usize) < dec.decode_pos.len() && (pos as usize) < size
-        {
-            dec.decode_num[pos as usize]
+        dec.quick_num[code] = if (cur_bit_length as usize) < dec.decode_pos.len() {
+            let pos = dec.decode_pos[cur_bit_length as usize].wrapping_add(dist);
+            if (pos as usize) < size {
+                dec.decode_num[pos as usize]
+            } else {
+                0
+            }
         } else {
             0
         };
@@ -1047,7 +1050,11 @@ impl Unpacker30 {
         let bit_field = self.inp.getbits();
         if bit_field & 0x8000 != 0 {
             self.block_type = BlockType::Ppm;
-            return self.ppm.decode_init(&mut self.inp, &mut self.ppm_esc_char);
+            let ok = self.ppm.decode_init(&mut self.inp, &mut self.ppm_esc_char);
+            if std::env::var("OZIP_DBG").is_ok() {
+                eprintln!("TABLES30->PPM decode_init={ok}");
+            }
+            return ok;
         }
         self.block_type = BlockType::Lz;
         self.prev_low_dist = 0;
