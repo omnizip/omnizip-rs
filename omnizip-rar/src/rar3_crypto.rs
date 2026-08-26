@@ -28,7 +28,13 @@ fn rotl32(v: u32, n: u32) -> u32 {
 impl Sha1Rar29 {
     fn new() -> Self {
         Self {
-            state: [0x6745_2301, 0xEFCD_AB89, 0x98BA_DCFE, 0x1032_5476, 0xC3D2_E1F0],
+            state: [
+                0x6745_2301,
+                0xEFCD_AB89,
+                0x98BA_DCFE,
+                0x1032_5476,
+                0xC3D2_E1F0,
+            ],
             count: 0,
             buffer: [0u8; 64],
         }
@@ -219,7 +225,11 @@ mod tests {
     #[test]
     fn sha1_matches_reference() {
         // The normal path must agree with the generic SHA1.
-        for msg in [&b""[..], b"abc", b"The quick brown fox jumps over the lazy dog"] {
+        for msg in [
+            &b""[..],
+            b"abc",
+            b"The quick brown fox jumps over the lazy dog",
+        ] {
             let mut ctx = Sha1Rar29::new();
             ctx.process_rar29(&mut msg.to_vec());
             let digest = ctx.finish();

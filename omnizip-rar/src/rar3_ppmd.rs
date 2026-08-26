@@ -296,7 +296,8 @@ impl SubAllocator {
     }
 
     fn split_block(&mut self, pv: usize, old_indx: usize, new_indx: usize) {
-        let mut u_diff = i32::from(self.indx2_units[old_indx]) - i32::from(self.indx2_units[new_indx]);
+        let mut u_diff =
+            i32::from(self.indx2_units[old_indx]) - i32::from(self.indx2_units[new_indx]);
         let mut p = pv + u2b(self.indx2_units[new_indx]);
         let mut i = self.units2_indx[(u_diff - 1) as usize] as usize;
         if i32::from(self.indx2_units[i]) != u_diff {
@@ -336,11 +337,19 @@ impl SubAllocator {
         }
         let next_of = |sa: &Self, p: usize| -> usize {
             let n = sa.blk_next(p);
-            if n == 0 { SENT } else { n as usize }
+            if n == 0 {
+                SENT
+            } else {
+                n as usize
+            }
         };
         let prev_of = |sa: &Self, p: usize| -> usize {
             let v = sa.blk_prev(p);
-            if v == 0 { SENT } else { v as usize }
+            if v == 0 {
+                SENT
+            } else {
+                v as usize
+            }
         };
         let mut p = sent_next;
         while p != SENT {
@@ -556,6 +565,12 @@ pub struct ModelPPM {
     sub_alloc: SubAllocator,
 }
 
+impl Default for ModelPPM {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ModelPPM {
     pub fn new() -> Self {
         Self {
@@ -688,15 +703,14 @@ impl ModelPPM {
             );
         }
 
-        const INIT_BIN_ESC: [u16; 8] =
-            [0x3CDD, 0x1F3F, 0x59BF, 0x48F3, 0x64A1, 0x5ABC, 0x6632, 0x6051];
+        const INIT_BIN_ESC: [u16; 8] = [
+            0x3CDD, 0x1F3F, 0x59BF, 0x48F3, 0x64A1, 0x5ABC, 0x6632, 0x6051,
+        ];
         for (i, row) in self.bin_summ.iter_mut().enumerate() {
-            for k in 0..8usize {
+            for (k, esc) in INIT_BIN_ESC.iter().enumerate() {
                 let mut m = k;
                 while m < 64 {
-                    row[m] = BIN_SCALE
-                        .wrapping_sub(u32::from(INIT_BIN_ESC[k]) / (i as u32 + 2))
-                        as u16;
+                    row[m] = BIN_SCALE.wrapping_sub(u32::from(*esc) / (i as u32 + 2)) as u16;
                     m += 8;
                 }
             }
@@ -754,9 +768,6 @@ impl ModelPPM {
             self.ctx_set_num_stats(pc, 1);
             self.state_write(self.one_state(pc), first_state);
             self.ctx_set_suffix(pc, ctx);
-            if std::env::var("OZIP_SW").is_ok() {
-                eprintln!("SW cc o={:#x} v={:#x}", p_stats, pc);
-            }
             self.state_set_successor(p_stats, pc);
         }
         pc
@@ -796,15 +807,13 @@ impl ModelPPM {
                 loop {
                     self.state_write(p1, &self.state_read(p1 - STATE_STRIDE as u32));
                     p1 -= STATE_STRIDE as u32;
-                    if p1 == stats
-                        || tmp.freq <= self.state_read(p1 - STATE_STRIDE as u32).freq
-                    {
+                    if p1 == stats || tmp.freq <= self.state_read(p1 - STATE_STRIDE as u32).freq {
                         break;
                     }
                 }
                 self.state_write(p1, &tmp);
             }
-            i -= 1;
+            i = i.wrapping_sub(1);
             if i == 0 {
                 break;
             }
@@ -880,18 +889,6 @@ impl ModelPPM {
                     return 0;
                 }
             }
-            if std::env::var("OZIP_CS").is_ok() {
-                eprintln!(
-                    "MINE: pc={:#x} stats={:#x} pcns={} p={:#x} sym={} succ={:#x} upb={:#x}",
-                    pc,
-                    self.ctx_stats(pc),
-                    self.ctx_num_stats(pc),
-                    p,
-                    self.state_read(p).symbol,
-                    self.state_read(p).successor,
-                    up_branch
-                );
-            }
             if self.state_read(p).successor != up_branch {
                 pc = self.state_read(p).successor;
                 break;
@@ -910,9 +907,6 @@ impl ModelPPM {
     }
 
     fn cs_tail(&mut self, pc: u32, ps: &[u32; MAX_O], pps: usize, up_branch: u32) -> u32 {
-        if std::env::var("OZIP_CS").is_ok() {
-            eprintln!("CS-out: pps={} pc={:#x}", pps, pc);
-        }
         if pps == 0 {
             return pc;
         }
@@ -930,8 +924,7 @@ impl ModelPPM {
                 p => p,
             };
             let cf = u32::from(self.state_read(p).freq) - 1;
-            let s0 =
-                u32::from(self.ctx_summ_freq(pc)) - u32::from(self.ctx_num_stats(pc)) - cf;
+            let s0 = u32::from(self.ctx_summ_freq(pc)) - u32::from(self.ctx_num_stats(pc)) - cf;
             up_state.freq = if 2 * cf <= s0 {
                 u8::from(5 * cf > s0)
             } else {
@@ -956,15 +949,7 @@ impl ModelPPM {
     }
 
     fn update_model(&mut self) {
-        let dbg3 = std::env::var("OZIP_DBG3").is_ok();
         let fs = self.state_read(self.found_state);
-        if dbg3 {
-            eprintln!(
-                "UM in: sym={} fssucc={:#x} minc={:#x} maxc={:#x} of={} pt={:#x} fsfreq={}",
-                fs.symbol, fs.successor, self.min_context, self.max_context, self.order_fall,
-                self.sub_alloc.p_text, fs.freq
-            );
-        }
         let mut p = 0u32;
         if fs.freq < (MAX_FREQ / 4) as u8 {
             let pc = self.ctx_suffix(self.min_context);
@@ -1003,9 +988,6 @@ impl ModelPPM {
         let mut fs = fs;
         if self.order_fall == 0 {
             let successor = self.create_successors(true, p);
-            if std::env::var("OZIP_SW").is_ok() {
-                eprintln!("SW of0 o={:#x} v={:#x}", self.found_state, successor);
-            }
             self.state_set_successor(self.found_state, successor);
             self.min_context = successor;
             self.max_context = successor;
@@ -1032,39 +1014,25 @@ impl ModelPPM {
             self.order_fall -= 1;
             if self.order_fall == 0 {
                 successor = fs.successor;
-                self.sub_alloc
-                    .p_text -= usize::from(self.max_context != self.min_context);
+                self.sub_alloc.p_text -= usize::from(self.max_context != self.min_context);
             }
         } else {
-            if std::env::var("OZIP_SW").is_ok() {
-                eprintln!("SW else o={:#x} v={:#x}", self.found_state, successor);
-            }
             self.state_set_successor(self.found_state, successor);
             fs.successor = self.min_context;
         }
         let ns = u32::from(self.ctx_num_stats(self.min_context));
-        let s0 =
-            u32::from(self.ctx_summ_freq(self.min_context)) - ns - (u32::from(fs.freq) - 1);
-        if std::env::var("OZIP_UM").is_ok() {
-            let mut w = self.max_context;
-            let mut c = 0;
-            let mut out = String::new();
-            while w != self.min_context && w != 0 && c < 80 {
-                out.push_str(&format!("WALK {}:{}/{}@{:#x} ", c, self.ctx_num_stats(w), self.ctx_suffix(w), w));
-                w = self.ctx_suffix(w);
-                c += 1;
-            }
-            eprintln!("{} | WALKEND count={} us={:#x} fus={:#x} pt={:#x}", out, c, self.sub_alloc.units_start, self.sub_alloc.fake_units_start, self.sub_alloc.p_text);
-        }
+        let s0 = u32::from(self.ctx_summ_freq(self.min_context))
+            .wrapping_sub(ns)
+            .wrapping_sub(u32::from(fs.freq) - 1);
         let mut pc = self.max_context;
         while pc != self.min_context {
             let mut ns1 = u32::from(self.ctx_num_stats(pc));
             if ns1 != 1 {
                 if ns1 & 1 == 0 {
-                    let expanded = self.sub_alloc.expand_units(
-                        self.ctx_stats(pc) as usize,
-                        (ns1 >> 1) as usize,
-                    ) as u32;
+                    let expanded = self
+                        .sub_alloc
+                        .expand_units(self.ctx_stats(pc) as usize, (ns1 >> 1) as usize)
+                        as u32;
                     self.ctx_set_stats(pc, expanded);
                     if expanded == 0 {
                         self.restart_model();
@@ -1099,13 +1067,13 @@ impl ModelPPM {
                 cf = 1 + u32::from(cf > sf) + u32::from(cf >= 4 * sf);
                 self.ctx_set_summ_freq(pc, self.ctx_summ_freq(pc).wrapping_add(3));
             } else {
-                cf = 4 + u32::from(cf >= 9 * sf) + u32::from(cf >= 12 * sf) + u32::from(cf >= 15 * sf);
+                cf = 4
+                    + u32::from(cf >= 9 * sf)
+                    + u32::from(cf >= 12 * sf)
+                    + u32::from(cf >= 15 * sf);
                 self.ctx_set_summ_freq(pc, self.ctx_summ_freq(pc).wrapping_add(cf as u16));
             }
             let p_slot = self.ctx_stats(pc) + ns1 * STATE_STRIDE as u32;
-            if std::env::var("OZIP_SW").is_ok() {
-                eprintln!("SW app o={:#x} v={:#x} ctx={:#x}", p_slot, successor, pc);
-            }
             self.state_write(
                 p_slot,
                 &StateVal {
@@ -1120,12 +1088,6 @@ impl ModelPPM {
         }
         self.max_context = fs.successor;
         self.min_context = fs.successor;
-        if dbg3 {
-            eprintln!(
-                "UM out: minc={:#x} of={} pt={:#x}",
-                self.min_context, self.order_fall, self.sub_alloc.p_text
-            );
-        }
     }
 
     fn restart_model(&mut self) {
@@ -1156,13 +1118,13 @@ impl ModelPPM {
             self.coder.sub_range.low_count = 0;
             self.coder.sub_range.high_count = bs;
             self.bin_summ[row][col] =
-                bs.wrapping_add(INTERVAL).wrapping_sub(get_mean(bs, PERIOD_BITS, 2)) as u16;
+                bs.wrapping_add(INTERVAL)
+                    .wrapping_sub(get_mean(bs, PERIOD_BITS, 2)) as u16;
             self.prev_success = 1;
             self.run_length += 1;
         } else {
             self.coder.sub_range.low_count = bs;
-            self.bin_summ[row][col] =
-                bs.wrapping_sub(get_mean(bs, PERIOD_BITS, 2)) as u16;
+            self.bin_summ[row][col] = bs.wrapping_sub(get_mean(bs, PERIOD_BITS, 2)) as u16;
             self.coder.sub_range.high_count = BIN_SCALE;
             self.init_esc = i32::from(EXP_ESCAPE[(self.bin_summ[row][col] >> 10) as usize]);
             self.num_masked = 1;
@@ -1203,7 +1165,7 @@ impl ModelPPM {
             self.prev_success = u8::from(2 * hi_cnt > self.coder.sub_range.scale as i32);
             self.run_length += i32::from(self.prev_success != 0);
             let mut st = self.state_read(p);
-            hi_cnt += 4;
+            hi_cnt = hi_cnt.wrapping_add(4);
             st.freq = hi_cnt as u8;
             self.state_write(p, &st);
             self.found_state = p;
@@ -1222,11 +1184,11 @@ impl ModelPPM {
         let mut i = self.ctx_num_stats(ctx) as i32 - 1;
         loop {
             p += STATE_STRIDE as u32;
-            hi_cnt += i32::from(self.state_read(p).freq);
+            hi_cnt = hi_cnt.wrapping_add(i32::from(self.state_read(p).freq));
             if hi_cnt > count {
                 break;
             }
-            i -= 1;
+            i = i.wrapping_sub(1);
             if i == 0 {
                 self.hi_bits_flag =
                     self.hb2_flag[self.state_read(self.found_state).symbol as usize];
@@ -1246,8 +1208,7 @@ impl ModelPPM {
             }
         }
         self.coder.sub_range.high_count = hi_cnt as u32;
-        self.coder.sub_range.low_count =
-            hi_cnt as u32 - u32::from(self.state_read(p).freq);
+        self.coder.sub_range.low_count = hi_cnt as u32 - u32::from(self.state_read(p).freq);
         self.update1(ctx, p);
         true
     }
@@ -1262,7 +1223,7 @@ impl ModelPPM {
         if st.freq > MAX_FREQ as u8 {
             self.rescale(ctx);
         }
-        self.esc_count += 1;
+        self.esc_count = self.esc_count.wrapping_add(1);
         self.run_length = self.init_rl;
     }
 
@@ -1274,11 +1235,11 @@ impl ModelPPM {
         if self.ctx_num_stats(ctx) != 256 {
             let suffix = self.ctx_suffix(ctx);
             let row = self.ns2_indx[(i - 1) as usize] as usize;
-            let col = usize::from(
-                i < self.ctx_num_stats(suffix) as i32 - self.ctx_num_stats(ctx) as i32,
-            ) + 2 * usize::from(self.ctx_summ_freq(ctx) < 11 * self.ctx_num_stats(ctx))
-                + 4 * usize::from(self.num_masked > i)
-                + self.hi_bits_flag as usize;
+            let col =
+                usize::from(i < self.ctx_num_stats(suffix) as i32 - self.ctx_num_stats(ctx) as i32)
+                    + 2 * usize::from(self.ctx_summ_freq(ctx) < 11 * self.ctx_num_stats(ctx))
+                    + 4 * usize::from(self.num_masked > i)
+                    + self.hi_bits_flag as usize;
             self.coder.sub_range.scale = self.see2_cont[row][col].get_mean();
             see2_idx = row * 16 + col;
             dummy = false;
@@ -1299,13 +1260,13 @@ impl ModelPPM {
                     break;
                 }
             }
-            hi_cnt += i32::from(self.state_read(p).freq);
+            hi_cnt = hi_cnt.wrapping_add(i32::from(self.state_read(p).freq));
             if pps >= 256 {
                 return false;
             }
             ps[pps] = p;
             pps += 1;
-            i -= 1;
+            i = i.wrapping_sub(1);
             if i == 0 {
                 break;
             }
@@ -1320,7 +1281,7 @@ impl ModelPPM {
         if count < hi_cnt {
             hi_cnt = 0;
             loop {
-                hi_cnt += i32::from(self.state_read(p).freq);
+                hi_cnt = hi_cnt.wrapping_add(i32::from(self.state_read(p).freq));
                 if hi_cnt > count {
                     break;
                 }
@@ -1331,8 +1292,7 @@ impl ModelPPM {
                 p = ps[pps];
             }
             self.coder.sub_range.high_count = hi_cnt as u32;
-            self.coder.sub_range.low_count =
-                hi_cnt as u32 - u32::from(self.state_read(p).freq);
+            self.coder.sub_range.low_count = hi_cnt as u32 - u32::from(self.state_read(p).freq);
             if !dummy {
                 self.see2_cont[see2_idx / 16][see2_idx % 16].update();
             }
@@ -1347,15 +1307,15 @@ impl ModelPPM {
                 }
                 self.char_mask[self.state_read(ps[pps]).symbol as usize] = self.esc_count;
                 pps += 1;
-                i -= 1;
+                i = i.wrapping_sub(1);
                 if i == 0 {
                     break;
                 }
             }
             if !dummy {
                 let v = self.coder.sub_range.scale as u16;
-                self.see2_cont[see2_idx / 16][see2_idx % 16].summ = self
-                    .see2_cont[see2_idx / 16][see2_idx % 16]
+                self.see2_cont[see2_idx / 16][see2_idx % 16].summ = self.see2_cont[see2_idx / 16]
+                    [see2_idx % 16]
                     .summ
                     .wrapping_add(v);
             }
@@ -1405,40 +1365,16 @@ impl ModelPPM {
 
     /// `ModelPPM::DecodeChar`; -1 signals corrupt data.
     pub fn decode_char(&mut self, src: &mut dyn ByteSource) -> i32 {
-        let dbg = std::env::var("OZIP_DBG").is_ok();
-        let dbg2 = std::env::var("OZIP_DBG2").is_ok();
-        if dbg2 {
-            // Suffix chain num_stats sequence from min_context.
-            let mut chain = String::new();
-            let mut cx = self.min_context;
-            let mut guard = 0;
-            while cx != 0 && guard < 80 {
-                chain.push_str(&format!("{}/{}:", self.ctx_num_stats(cx), self.ctx_suffix(cx)));
-                cx = self.ctx_suffix(cx);
-                guard += 1;
-            }
-            eprintln!(
-                "DC in: mc={:#x} mcx={:#x} pt={:#x} of={} nm={} ec={} rl={} ps={} hb={} ie={} chain={}",
-                self.min_context, self.max_context, self.sub_alloc.p_text, self.order_fall,
-                self.num_masked, self.esc_count, self.run_length, self.prev_success,
-                self.hi_bits_flag, self.init_esc, chain
-            );
-        }
         let mc = self.min_context;
         if mc as usize <= self.sub_alloc.p_text || mc as usize > self.sub_alloc.heap_end {
-            if dbg { eprintln!("DC ret-1 A: mc={mc:#x} ptext={:#x}", self.sub_alloc.p_text); }
             return -1;
         }
         if self.ctx_num_stats(mc) != 1 {
             let stats = self.ctx_stats(mc);
-            if stats as usize <= self.sub_alloc.p_text
-                || stats as usize > self.sub_alloc.heap_end
-            {
-                if dbg { eprintln!("DC ret-1 B: stats={stats:#x} ptext={:#x}", self.sub_alloc.p_text); }
+            if stats as usize <= self.sub_alloc.p_text || stats as usize > self.sub_alloc.heap_end {
                 return -1;
             }
             if !self.decode_symbol1(mc) {
-                if dbg { eprintln!("DC ret-1 C: sym1 false ns={}", self.ctx_num_stats(mc)); }
                 return -1;
             }
         } else {
@@ -1448,20 +1384,13 @@ impl ModelPPM {
         while self.found_state == 0 {
             self.coder.dec_normalize(src);
             loop {
-                self.order_fall += 1;
+                self.order_fall = self.order_fall.wrapping_add(1);
                 self.min_context = self.ctx_suffix(self.min_context);
-                if std::env::var("OZIP_DBG2").is_ok() {
-                    eprintln!(
-                        "ESC: mc={:#x} of={} nm={} ec={}",
-                        self.min_context, self.order_fall, self.num_masked, self.esc_count
-                    );
-                }
                 let mc = self.min_context;
                 if mc == 0
                     || mc as usize <= self.sub_alloc.p_text
                     || mc as usize > self.sub_alloc.heap_end
                 {
-                    if dbg { eprintln!("DC ret-1 D: mc={mc:#x}"); }
                     return -1;
                 }
                 if self.ctx_num_stats(mc) != self.num_masked as u16 {
@@ -1469,7 +1398,6 @@ impl ModelPPM {
                 }
             }
             if !self.decode_symbol2(self.min_context) {
-                if dbg { eprintln!("DC ret-1 E: sym2 false"); }
                 return -1;
             }
             self.coder.decode();
@@ -1487,13 +1415,6 @@ impl ModelPPM {
                 self.esc_count = 1;
                 self.char_mask = [0; 256];
             }
-        }
-        if dbg2 {
-            eprintln!(
-                "DC out: sym={} fs={:#x} fs->succ={:#x} of={} nm={} ec={} rl={}",
-                symbol, self.found_state, self.state_read(self.found_state).successor,
-                self.order_fall, self.num_masked, self.esc_count, self.run_length
-            );
         }
         self.coder.dec_normalize(src);
         i32::from(symbol)

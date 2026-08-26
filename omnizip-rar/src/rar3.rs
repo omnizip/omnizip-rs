@@ -19,7 +19,6 @@ struct RawEntry {
     name: String,
     is_dir: bool,
     is_symlink: bool,
-    split: bool,
     /// Split entry still awaiting its final part.
     split_open: bool,
     unpacked_size: u64,
@@ -64,7 +63,14 @@ impl Rar4Reader {
         let mut continuation: Option<usize> = None;
         let mut header_encrypted = false;
 
-        while let Some(next) = parse_block(data, pos, &mut entries, &mut arena, &mut continuation, &mut header_encrypted)? {
+        while let Some(next) = parse_block(
+            data,
+            pos,
+            &mut entries,
+            &mut arena,
+            &mut continuation,
+            &mut header_encrypted,
+        )? {
             pos = next;
         }
         Ok(Self {
@@ -195,9 +201,7 @@ fn parse_block(
             } else {
                 32
             };
-            let name_bytes = rest
-                .get(name_start..name_start + name_size)
-                .unwrap_or(&[]);
+            let name_bytes = rest.get(name_start..name_start + name_size).unwrap_or(&[]);
             // Optional 8-byte salt sits right after the name.
             let mut salt = None;
             if flags & rar4_flags::SALT != 0 {
@@ -223,6 +227,12 @@ fn parse_block(
                     Some(idx) => {
                         let idx = *idx;
                         arena.extend_from_slice(slice);
+                        // Volume parts repeat the file header; every
+                        // part except the last stores a pack-CRC in
+                        // the CRC field, so the latest header's value
+                        // wins and the final part leaves the real
+                        // unpacked CRC behind.
+                        entries[idx].crc32 = Some(file_crc);
                         // Keep the first slice's start; only the end
                         // advances as parts accumulate.
                         entries[idx].data.1 = arena.len();
@@ -234,9 +244,12 @@ fn parse_block(
                         }
                     }
                     None => {
-                        return Err(ArchiveError::InvalidArchive(
-                            "rar4: split continuation without an open entry".into(),
-                        ));
+                        // A standalone mid-volume .rar has a
+                        // SPLIT_BEFORE entry with no open continuation;
+                        // treat as a clean archive end so the
+                        // multi-volume API stitches the parts but
+                        // walking each part alone stays parseable.
+                        return Ok(None);
                     }
                 }
             } else {
@@ -246,7 +259,6 @@ fn parse_block(
                     name,
                     is_dir,
                     is_symlink: attr & 0xF000 == 0xA000,
-                    split: split_before || split_after,
                     split_open: split_after && !is_dir,
                     unpacked_size: unpack,
                     crc32: Some(file_crc),
@@ -310,9 +322,7 @@ fn splice_encrypted_headers(data: &[u8], password: &[u8]) -> Result<Vec<u8>, Arc
         let flags = u16::from_le_bytes([data[pos + 3], data[pos + 4]]);
         let size = u16::from_le_bytes([data[pos + 5], data[pos + 6]]) as usize;
         if size < 7 {
-            return Err(ArchiveError::InvalidArchive(
-                "rar4: bad block size".into(),
-            ));
+            return Err(ArchiveError::InvalidArchive("rar4: bad block size".into()));
         }
         out.extend_from_slice(&data[pos..pos + size]);
         pos += size;
@@ -351,7 +361,7 @@ fn splice_encrypted_headers(data: &[u8], password: &[u8]) -> Result<Vec<u8>, Arc
         let mut cipher = omnizip_crypto::AesCbc128Decrypt::new(&key, &iv);
         cipher.decrypt(&mut head16);
         let size = u16::from_le_bytes([head16[5], head16[6]]) as usize;
-        if size < 7 || size > 0x8000 {
+        if !(7..=0x8000).contains(&size) {
             return Err(ArchiveError::InvalidArchive(
                 "rar4: header decryption failed (wrong password?)".into(),
             ));
@@ -547,10 +557,7 @@ impl Rar4Reader {
         let e = self.entries[index].clone();
         if e.split_open {
             return Err(ArchiveError::UnsupportedFeature {
-                reason: format!(
-                    "rar4: entry '{}' spans volumes beyond this set",
-                    e.name
-                ),
+                reason: format!("rar4: entry '{}' spans volumes beyond this set", e.name),
             });
         }
         if e.encrypted && self.password.is_none() {
@@ -584,7 +591,11 @@ impl Rar4Reader {
                     e.window_size,
                 )
                 .map_err(|err| match err {
-                    ArchiveError::UnsupportedFeature { reason } => ArchiveError::UnsupportedFeature { reason: format!("rar4: entry '{}': {reason}", e.name) },
+                    ArchiveError::UnsupportedFeature { reason } => {
+                        ArchiveError::UnsupportedFeature {
+                            reason: format!("rar4: entry '{}': {reason}", e.name),
+                        }
+                    }
                     other => other,
                 })?
         };

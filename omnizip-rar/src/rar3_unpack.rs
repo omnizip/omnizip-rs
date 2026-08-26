@@ -159,8 +159,8 @@ impl DecodeTable {
 fn make_decode_tables(length_table: &[u8], dec: &mut DecodeTable, size: usize) {
     dec.max_num = size;
     let mut length_count = [0u32; 16];
-    for i in 0..size {
-        length_count[(length_table[i] & 0xF) as usize] += 1;
+    for &lt in length_table.iter().take(size) {
+        length_count[(lt & 0xF) as usize] += 1;
     }
     length_count[0] = 0;
     dec.decode_num[..size].fill(0);
@@ -175,8 +175,8 @@ fn make_decode_tables(length_table: &[u8], dec: &mut DecodeTable, size: usize) {
         dec.decode_pos[i] = dec.decode_pos[i - 1] + length_count[i - 1];
     }
     let mut copy_decode_pos = dec.decode_pos;
-    for i in 0..size {
-        let cur = (length_table[i] & 0xF) as usize;
+    for (i, &lt) in length_table.iter().take(size).enumerate() {
+        let cur = (lt & 0xF) as usize;
         if cur != 0 {
             let last_pos = copy_decode_pos[cur] as usize;
             dec.decode_num[last_pos] = i as u16;
@@ -263,16 +263,14 @@ fn dist_tables() -> &'static ([u32; DC30], [u32; DC30]) {
         let mut decode = [0u32; DC30];
         let mut bits = [0u32; DC30];
         let mut dist = 0u32;
-        let mut bit_length = 0u32;
         let mut slot = 0usize;
-        for &count in D_BIT_LENGTH_COUNTS.iter() {
+        for (bit_length, &count) in D_BIT_LENGTH_COUNTS.iter().enumerate() {
             for _ in 0..count {
                 decode[slot] = dist;
-                bits[slot] = bit_length;
+                bits[slot] = bit_length as u32;
                 slot += 1;
                 dist += 1 << bit_length;
             }
-            bit_length += 1;
         }
         (decode, bits)
     })
@@ -345,8 +343,8 @@ static SHORT_LEN1: [u32; 15] = [1, 3, 4, 4, 5, 6, 7, 8, 8, 4, 4, 5, 6, 6, 4];
 static SHORT_LEN2: [u32; 15] = [2, 3, 3, 3, 4, 4, 5, 6, 6, 4, 4, 5, 6, 6, 4];
 
 static L_DECODE: [u32; 28] = [
-    0, 1, 2, 3, 4, 5, 6, 7, 8, 10, 12, 14, 16, 20, 24, 28, 32, 40, 48, 56, 64, 80, 96, 112,
-    128, 160, 192, 224,
+    0, 1, 2, 3, 4, 5, 6, 7, 8, 10, 12, 14, 16, 20, 24, 28, 32, 40, 48, 56, 64, 80, 96, 112, 128,
+    160, 192, 224,
 ];
 static L_BITS: [u32; 28] = [
     0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5,
@@ -356,13 +354,12 @@ static SD_BITS: [u32; 8] = [2, 2, 3, 4, 5, 6, 6, 6];
 
 static D20_DECODE: [u32; 48] = [
     0, 1, 2, 3, 4, 6, 8, 12, 16, 24, 32, 48, 64, 96, 128, 192, 256, 384, 512, 768, 1024, 1536,
-    2048, 3072, 4096, 6144, 8192, 12288, 16384, 24576, 32768, 49152, 65536, 98304, 131072,
-    196608, 262144, 327680, 393216, 458752, 524288, 589824, 655360, 720896, 786432, 851968,
-    917504, 983040,
+    2048, 3072, 4096, 6144, 8192, 12288, 16384, 24576, 32768, 49152, 65536, 98304, 131072, 196608,
+    262144, 327680, 393216, 458752, 524288, 589824, 655360, 720896, 786432, 851968, 917504, 983040,
 ];
 static D20_BITS: [u32; 48] = [
-    0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12,
-    13, 13, 14, 14, 15, 15, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16,
+    0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13,
+    13, 14, 14, 15, 15, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16,
 ];
 
 // ------------------------------------------------------------------
@@ -526,7 +523,7 @@ impl Unpacker30 {
         dest_unp_size: i64,
         win_size: usize,
     ) -> Result<Vec<u8>, ArchiveError> {
-        let win = win_size.max(0x40000).min(0x4000_0000);
+        let win = win_size.clamp(0x40000, 0x4000_0000);
         if !solid || self.window.is_empty() {
             self.max_win_size = win;
             self.window = vec![0u8; win];
@@ -683,8 +680,8 @@ impl Unpacker30 {
                     let block_end = block_start.wrapping_add(block_length) & mask;
                     let (first, second) = if block_start < block_end || block_end == 0 {
                         (
-                            self.window
-                                [block_start as usize..block_start as usize + block_length as usize]
+                            self.window[block_start as usize
+                                ..block_start as usize + block_length as usize]
                                 .to_vec(),
                             Vec::new(),
                         )
@@ -719,8 +716,8 @@ impl Unpacker30 {
                             break;
                         }
                         let nf = self.prg_stack[i + 1].clone().expect("checked");
-                        let chunk = self.vm.mem[filtered_offset..filtered_offset + filtered_size]
-                            .to_vec();
+                        let chunk =
+                            self.vm.mem[filtered_offset..filtered_offset + filtered_size].to_vec();
                         self.vm.set_memory(0, &chunk);
                         let mut init_r = nf.init_r;
                         init_r[6] = self.written_file_size as u32;
@@ -822,10 +819,8 @@ impl Unpacker30 {
             self.first_win_done |= self.prev_ptr > self.unp_ptr;
             self.prev_ptr = self.unp_ptr;
 
-            if self.inp.in_addr as isize > self.inp.read_border {
-                if !self.inp.unp_read_buf() {
-                    break;
-                }
+            if self.inp.in_addr as isize > self.inp.read_border && !self.inp.unp_read_buf() {
+                break;
             }
             if self.wr_ptr.wrapping_sub(self.unp_ptr) & self.mask() <= MAX3_INC_LZ_MATCH
                 && self.wr_ptr != self.unp_ptr
@@ -1041,19 +1036,14 @@ impl Unpacker30 {
     fn read_tables30(&mut self) -> bool {
         let mut bit_length = [0u8; BC30];
         let mut table = [0u8; HUFF_TABLE_SIZE30];
-        if self.inp.in_addr as isize > self.inp.read_top as isize - 25 {
-            if !self.inp.unp_read_buf() {
-                return false;
-            }
+        if self.inp.in_addr as isize > self.inp.read_top as isize - 25 && !self.inp.unp_read_buf() {
+            return false;
         }
         self.inp.addbits((8 - self.inp.in_bit) & 7);
         let bit_field = self.inp.getbits();
         if bit_field & 0x8000 != 0 {
             self.block_type = BlockType::Ppm;
             let ok = self.ppm.decode_init(&mut self.inp, &mut self.ppm_esc_char);
-            if std::env::var("OZIP_DBG").is_ok() {
-                eprintln!("TABLES30->PPM decode_init={ok}");
-            }
             return ok;
         }
         self.block_type = BlockType::Lz;
@@ -1091,10 +1081,10 @@ impl Unpacker30 {
 
         let mut i = 0usize;
         while i < HUFF_TABLE_SIZE30 {
-            if self.inp.in_addr as isize > self.inp.read_top as isize - 5 {
-                if !self.inp.unp_read_buf() {
-                    return false;
-                }
+            if self.inp.in_addr as isize > self.inp.read_top as isize - 5
+                && !self.inp.unp_read_buf()
+            {
+                return false;
             }
             let number = decode_number(&mut self.inp, &self.tables.bd);
             if number < 16 {
@@ -1150,11 +1140,7 @@ impl Unpacker30 {
             &mut self.tables.ldd,
             LDC30,
         );
-        make_decode_tables(
-            &table[NC30 + DC30 + LDC30..],
-            &mut self.tables.rd,
-            RC30,
-        );
+        make_decode_tables(&table[NC30 + DC30 + LDC30..], &mut self.tables.rd, RC30);
         self.unp_old_table = table;
         true
     }
@@ -1358,10 +1344,10 @@ impl Unpacker30 {
             self.first_win_done |= self.prev_ptr > self.unp_ptr;
             self.prev_ptr = self.unp_ptr;
 
-            if self.inp.in_addr as isize > self.inp.read_top as isize - 30 {
-                if !self.inp.unp_read_buf() {
-                    break;
-                }
+            if self.inp.in_addr as isize > self.inp.read_top as isize - 30
+                && !self.inp.unp_read_buf()
+            {
+                break;
             }
             if self.wr_ptr.wrapping_sub(self.unp_ptr) & self.mask() < 270
                 && self.wr_ptr != self.unp_ptr
@@ -1369,8 +1355,7 @@ impl Unpacker30 {
                 self.unp_write_buf20();
             }
             if self.unp_audio_block {
-                let audio_number =
-                    decode_number(&mut self.inp, &self.md[self.unp_cur_channel]);
+                let audio_number = decode_number(&mut self.inp, &self.md[self.unp_cur_channel]);
                 if audio_number == 256 {
                     if !self.read_tables20() {
                         break;
@@ -1471,10 +1456,8 @@ impl Unpacker30 {
     fn read_tables20(&mut self) -> bool {
         let mut bit_length = [0u8; BC20];
         let mut table = [0u8; MC20 * 4];
-        if self.inp.in_addr as isize > self.inp.read_top as isize - 25 {
-            if !self.inp.unp_read_buf() {
-                return false;
-            }
+        if self.inp.in_addr as isize > self.inp.read_top as isize - 25 && !self.inp.unp_read_buf() {
+            return false;
         }
         let bit_field = self.inp.getbits();
         self.unp_audio_block = bit_field & 0x8000 != 0;
@@ -1502,10 +1485,10 @@ impl Unpacker30 {
         make_decode_tables(&bit_length, &mut self.tables.bd, BC20);
         let mut i = 0usize;
         while i < table_size {
-            if self.inp.in_addr as isize > self.inp.read_top as isize - 5 {
-                if !self.inp.unp_read_buf() {
-                    return false;
-                }
+            if self.inp.in_addr as isize > self.inp.read_top as isize - 5
+                && !self.inp.unp_read_buf()
+            {
+                return false;
             }
             let number = decode_number(&mut self.inp, &self.tables.bd);
             if number < 16 {
@@ -1549,11 +1532,7 @@ impl Unpacker30 {
         }
         if self.unp_audio_block {
             for c in 0..self.unp_channels {
-                make_decode_tables(
-                    &table[c * MC20..(c + 1) * MC20],
-                    &mut self.md[c],
-                    MC20,
-                );
+                make_decode_tables(&table[c * MC20..(c + 1) * MC20], &mut self.md[c], MC20);
             }
         } else {
             make_decode_tables(&table[..NC20], &mut self.tables.ld, NC20);
@@ -1889,7 +1868,8 @@ impl Unpacker30 {
                 }
                 let length = if bit_field & 0x4000 != 0 { 4 } else { 3 };
                 self.inp.addbits(1);
-                let distance = self.decode_num(self.inp.getbits(), Self::START_HF2, &DEC_HF2, &POS_HF2);
+                let distance =
+                    self.decode_num(self.inp.getbits(), Self::START_HF2, &DEC_HF2, &POS_HF2);
                 let distance = (distance << 5) | (self.inp.getbits() >> 11);
                 self.inp.addbits(5);
                 self.copy_string15(distance, length);
@@ -1933,12 +1913,10 @@ impl Unpacker30 {
 
     fn short_lz(&mut self) {
         static SHORT_XOR1: [u32; 15] = [
-            0, 0xA0, 0xD0, 0xE0, 0xF0, 0xF8, 0xFC, 0xFE, 0xFF, 0xC0, 0x80, 0x90, 0x98, 0x9C,
-            0xB0,
+            0, 0xA0, 0xD0, 0xE0, 0xF0, 0xF8, 0xFC, 0xFE, 0xFF, 0xC0, 0x80, 0x90, 0x98, 0x9C, 0xB0,
         ];
         static SHORT_XOR2: [u32; 15] = [
-            0, 0x40, 0x60, 0xA0, 0xD0, 0xE0, 0xF0, 0xF8, 0xFC, 0xC0, 0x80, 0x90, 0x98, 0x9C,
-            0xB0,
+            0, 0x40, 0x60, 0xA0, 0xD0, 0xE0, 0xF0, 0xF8, 0xFC, 0xC0, 0x80, 0x90, 0x98, 0x9C, 0xB0,
         ];
 
         self.num_huf = 0;
@@ -1968,8 +1946,7 @@ impl Unpacker30 {
                 }
                 length += 1;
             }
-            self.inp
-                .addbits(Self::get_short_len1(length, self.buf60));
+            self.inp.addbits(Self::get_short_len1(length, self.buf60));
         } else {
             loop {
                 if length as usize >= SHORT_XOR2.len() {
@@ -1981,8 +1958,7 @@ impl Unpacker30 {
                 }
                 length += 1;
             }
-            self.inp
-                .addbits(Self::get_short_len2(length, self.buf60));
+            self.inp.addbits(Self::get_short_len2(length, self.buf60));
         }
 
         if length >= 9 {
@@ -1995,7 +1971,8 @@ impl Unpacker30 {
             }
             if length == 14 {
                 self.l_count = 0;
-                let length = self.decode_num(self.inp.getbits(), Self::START_L2, &DEC_L2, &POS_L2) + 5;
+                let length =
+                    self.decode_num(self.inp.getbits(), Self::START_L2, &DEC_L2, &POS_L2) + 5;
                 let distance = (self.inp.getbits() >> 1) | 0x8000;
                 self.inp.addbits(15);
                 self.last_length = length;
@@ -2006,11 +1983,9 @@ impl Unpacker30 {
 
             self.l_count = 0;
             let save_length = length;
-            let distance = self.old_dist[(self.old_dist_ptr + 4)
-                .wrapping_sub(length as usize - 9)
-                & 3] as u32;
-            let length =
-                self.decode_num(self.inp.getbits(), Self::START_L1, &DEC_L1, &POS_L1) + 2;
+            let distance =
+                self.old_dist[(self.old_dist_ptr + 4).wrapping_sub(length as usize - 9) & 3] as u32;
+            let length = self.decode_num(self.inp.getbits(), Self::START_L1, &DEC_L1, &POS_L1) + 2;
             if length == 0x101 && save_length == 10 {
                 self.buf60 ^= 1;
                 return;
