@@ -116,6 +116,43 @@ impl DirectoryRecord {
         None
     }
 
+    /// Rock Ridge SL symlink target from the system-use area.
+    #[must_use]
+    pub fn rock_ridge_symlink(&self) -> Option<String> {
+        for entry in susp_entries(&self.system_use) {
+            if entry.len() >= 5 && &entry[0..2] == b"SL" {
+                let mut target = String::new();
+                let mut pos = 5; // entry[4] is the SL flags byte
+                while pos + 1 < entry.len() {
+                    let cflags = entry[pos];
+                    let clen = entry[pos + 1] as usize;
+                    pos += 2;
+                    let data = entry.get(pos..pos + clen)?;
+                    pos += clen;
+                    let comp = if cflags & 0x02 != 0 {
+                        ".".to_string()
+                    } else if cflags & 0x04 != 0 {
+                        "..".to_string()
+                    } else if clen == 0 {
+                        String::new()
+                    } else {
+                        String::from_utf8_lossy(data).into_owned()
+                    };
+                    if comp.is_empty() {
+                        target.push('/');
+                    } else {
+                        if !target.is_empty() && !target.ends_with('/') {
+                            target.push('/');
+                        }
+                        target.push_str(&comp);
+                    }
+                }
+                return Some(target);
+            }
+        }
+        None
+    }
+
     /// Rock Ridge PX (mode, uid, gid) from the system-use area.
     #[must_use]
     pub fn rock_ridge_mode(&self) -> Option<u32> {
@@ -137,7 +174,8 @@ fn susp_entries(su: &[u8]) -> impl Iterator<Item = &[u8]> {
         while su.get(pos) == Some(&0) {
             pos += 1;
         }
-        let len = su.get(pos).copied().unwrap_or(0) as usize;
+        // Entry layout: signature(2) + length(1) + version(1).
+        let len = su.get(pos + 2).copied().unwrap_or(0) as usize;
         if len < 4 || pos + len > su.len() {
             return None;
         }
@@ -230,7 +268,9 @@ pub fn parse_volume_descriptor(
         && sector[90] == 0x45;
     let carries_tree = type_ == vd_type::PRIMARY || type_ == vd_type::SUPPLEMENTARY;
     let root = if carries_tree {
-        parse_record(&sector[156..190], 0, joliet)
+        // The root record may carry a system-use area (mkisofs-style
+        // SP entry) that extends past the 34-byte field.
+        parse_record(&sector[156..], 0, joliet)
             .ok_or_else(|| ArchiveError::InvalidArchive("iso: bad root record".into()))?
     } else {
         DirectoryRecord::default()
