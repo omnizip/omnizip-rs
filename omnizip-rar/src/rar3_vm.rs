@@ -50,9 +50,9 @@ pub fn read_data(inp: &mut InBuf30) -> u32 {
         }
         _ => {
             inp.addbits(2);
-            let mut v = u32::from(inp.getbits()) << 16;
+            let mut v = inp.getbits() << 16;
             inp.addbits(16);
-            v |= u32::from(inp.getbits());
+            v |= inp.getbits();
             inp.addbits(16);
             v
         }
@@ -121,10 +121,7 @@ impl RarVm {
         let mut r = [0u32; 8];
         r[..7].copy_from_slice(init_r);
         if filter == VmFilter::None {
-            return VmOutput {
-                offset: 0,
-                size: 0,
-            };
+            return VmOutput { offset: 0, size: 0 };
         }
         let success = self.execute_standard_filter(filter, &r);
         let block_size = (r[4] as usize) & VM_MEMMASK;
@@ -153,11 +150,7 @@ impl RarVm {
                     return false;
                 }
                 const FILE_SIZE: u32 = 0x1000_0000;
-                let cmp_byte2: u8 = if filter == VmFilter::E8e9 {
-                    0xE9
-                } else {
-                    0xE8
-                };
+                let cmp_byte2: u8 = if filter == VmFilter::E8e9 { 0xE9 } else { 0xE8 };
                 let mut cur_pos = 0usize;
                 let mut ptr = 0usize;
                 while cur_pos < data_size as usize - 4 {
@@ -166,9 +159,8 @@ impl RarVm {
                     cur_pos += 1;
                     if cur_byte == 0xE8 || cur_byte == cmp_byte2 {
                         let offset = (cur_pos as u32).wrapping_add(file_offset);
-                        let addr = u32::from_le_bytes(
-                            self.mem[ptr..ptr + 4].try_into().expect("4"),
-                        );
+                        let addr =
+                            u32::from_le_bytes(self.mem[ptr..ptr + 4].try_into().expect("4"));
                         if addr & 0x8000_0000 != 0 {
                             if addr.wrapping_add(offset) & 0x8000_0000 == 0 {
                                 self.mem[ptr..ptr + 4]
@@ -293,8 +285,7 @@ impl RarVm {
                 while i < border {
                     let g = self.mem[dest_base + i + 1];
                     self.mem[dest_base + i] = self.mem[dest_base + i].wrapping_add(g);
-                    self.mem[dest_base + i + 2] =
-                        self.mem[dest_base + i + 2].wrapping_add(g);
+                    self.mem[dest_base + i + 2] = self.mem[dest_base + i + 2].wrapping_add(g);
                     i += 3;
                 }
                 true
@@ -324,8 +315,7 @@ impl RarVm {
                         d2 = prev_delta - d1;
                         d1 = prev_delta;
 
-                        let mut predicted =
-                            8 * prev_byte as i32 + k1 * d1 + k2 * d2 + k3 * d3;
+                        let mut predicted = 8 * prev_byte as i32 + k1 * d1 + k2 * d2 + k3 * d3;
                         predicted = (predicted >> 3) & 0xFF;
 
                         let cur_byte = self.mem[src];
