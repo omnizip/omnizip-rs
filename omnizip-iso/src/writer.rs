@@ -11,11 +11,20 @@ use std::collections::BTreeMap;
 #[derive(Clone)]
 struct Node {
     iso_name: String,
+    /// Full-fidelity name for Rock Ridge NM / Joliet UCS-2.
+    full_name: String,
     is_dir: bool,
+    is_link: bool,
+    link_target: String,
+    mode: u32,
     data: Vec<u8>,
     extent: u32,
     /// Total serialized directory size (dirs only).
     dir_size: u32,
+    /// Joliet tree directory extent (dirs only).
+    j_extent: u32,
+    /// Joliet tree directory size (dirs only).
+    j_dir_size: u32,
     children: Vec<String>,
 }
 
@@ -66,28 +75,41 @@ impl IsoWriter {
             String::new(),
             Node {
                 iso_name: String::new(),
+                full_name: String::new(),
                 is_dir: true,
+                is_link: false,
+                link_target: String::new(),
+                mode: 0o555,
                 data: Vec::new(),
                 extent: 0,
                 dir_size: 0,
+                j_extent: 0,
+                j_dir_size: 0,
                 children: Vec::new(),
             },
         );
         for d in &dir_paths {
+            let entry = self.dirs.get(d);
             nodes.get_mut("").expect("root").children.push(d.clone());
             nodes.insert(
                 d.clone(),
                 Node {
                     iso_name: format!("{}/", iso_mangle(&base_name(d))),
+                    full_name: base_name(d),
                     is_dir: true,
+                    is_link: false,
+                    link_target: String::new(),
+                    mode: entry.map_or(0o555, |e| e.mode),
                     data: Vec::new(),
                     extent: 0,
                     dir_size: 0,
+                    j_extent: 0,
+                    j_dir_size: 0,
                     children: Vec::new(),
                 },
             );
         }
-        for (path, (_, data)) in &self.files {
+        for (path, (entry, data)) in &self.files {
             nodes
                 .get_mut(&parent_of(path))
                 .ok_or_else(|| {
@@ -95,14 +117,24 @@ impl IsoWriter {
                 })?
                 .children
                 .push(path.clone());
+            let (is_link, link_target) = match &entry.kind {
+                omnizip_archive_core::EntryKind::Symlink(t) => (true, t.clone()),
+                _ => (false, String::new()),
+            };
             nodes.insert(
                 path.clone(),
                 Node {
                     iso_name: format!("{};1", iso_mangle(&base_name(path))),
+                    full_name: base_name(path),
                     is_dir: false,
+                    is_link,
+                    link_target,
+                    mode: entry.mode,
                     data: data.clone(),
                     extent: 0,
                     dir_size: 0,
+                    j_extent: 0,
+                    j_dir_size: 0,
                     children: Vec::new(),
                 },
             );
@@ -111,32 +143,47 @@ impl IsoWriter {
             node.children.sort();
         }
 
-        // Directory sizes (needed for records before extents exist).
-        let sizes: Vec<(String, u32)> = nodes
+        // Directory sizes for both trees (needed before extents exist).
+        let sizes: Vec<(String, u32, u32)> = nodes
             .iter()
             .filter(|(_, n)| n.is_dir)
             .map(|(path, node)| {
                 let mut size = 34 + 34; // "." and ".."
+                let mut jsize = 34 + 34;
                 for c in &node.children {
                     let cn = nodes.get(c.as_str()).expect("child");
                     let name_len = cn.iso_name.len();
                     // Pad so each record length stays even.
                     size += 33 + name_len + (name_len + 1) % 2;
+                    // Joliet record: UCS-2 name (+ version-suffix none)
+                    // plus the Rock Ridge-free system-use pad.
+                    let jname_len = ucs2(&cn.full_name).len();
+                    jsize += 33 + jname_len + (jname_len + 1) % 2;
                 }
-                (path.clone(), size as u32)
+                (path.clone(), size as u32, jsize as u32)
             })
             .collect();
-        for (path, size) in sizes {
-            nodes.get_mut(&path).expect("dir").dir_size = size;
+        for (path, size, jsize) in sizes {
+            let n = nodes.get_mut(&path).expect("dir");
+            n.dir_size = size;
+            n.j_dir_size = jsize;
         }
 
-        // Layout: [16] PVD, [17] terminator, [18] L path table,
-        // [19] M path table, [20..] directories, then files.
-        let mut next_extent = 20u32;
+        // Layout: [16] PVD, [17] SVD (Joliet), [18] terminator,
+        // [19] L path table, [20] M path table, [21] Joliet L,
+        // [22] Joliet M, [23..] PVD dirs, Joliet dirs, then files.
+        let mut next_extent = 23u32;
         for (path, node) in nodes.iter_mut() {
             if node.is_dir && !node.children.is_empty() {
                 node.extent = next_extent;
                 next_extent += node.dir_size.div_ceil(2048);
+                let _ = path;
+            }
+        }
+        for (path, node) in nodes.iter_mut() {
+            if node.is_dir && !node.children.is_empty() {
+                node.j_extent = next_extent;
+                next_extent += node.j_dir_size.div_ceil(2048);
                 let _ = path;
             }
         }
@@ -169,8 +216,8 @@ impl IsoWriter {
         let pt_l = build_path_table(&nodes, false);
         let pt_m = build_path_table(&nodes, true);
         pvd[132..136].copy_from_slice(&(pt_l.len() as u32).to_le_bytes());
-        pvd[140..144].copy_from_slice(&18u32.to_le_bytes());
-        pvd[148..152].copy_from_slice(&19u32.to_be_bytes());
+        pvd[140..144].copy_from_slice(&19u32.to_le_bytes());
+        pvd[148..152].copy_from_slice(&20u32.to_be_bytes());
         let root = nodes.get("").expect("root");
         let mut root_rec = record_bytes(0x02, root.extent, root.dir_size, options, "\x00");
         root_rec[32] = 1;
@@ -180,6 +227,15 @@ impl IsoWriter {
         pvd[318..446].copy_from_slice(iso_field("", 128).as_bytes());
         pvd[446..574].copy_from_slice(iso_field(&options.host_tool, 128).as_bytes());
         out.extend_from_slice(&pvd);
+
+        // Sector 17 placeholder: a boot-record-type descriptor keeps
+        // the chain walking to the terminator; the real Joliet SVD
+        // replaces it in the next step.
+        let mut svd_slot = vec![0u8; 2048];
+        svd_slot[0] = 0;
+        svd_slot[1..6].copy_from_slice(b"CD001");
+        svd_slot[6] = 1;
+        out.extend_from_slice(&svd_slot);
 
         // Terminator.
         let mut term = vec![0u8; 2048];
@@ -195,6 +251,9 @@ impl IsoWriter {
         let mut m_sector = pt_m;
         m_sector.resize(2048, 0);
         out.extend_from_slice(&m_sector);
+        // Joliet path-table slots (sectors 21, 22): filler for now.
+        out.extend_from_slice(&[0u8; 2048]);
+        out.extend_from_slice(&[0u8; 2048]);
 
         // Directory extents then file extents, in BTreeMap order.
         for (path, node) in &nodes {
@@ -203,6 +262,15 @@ impl IsoWriter {
                 let mut aligned = bytes;
                 aligned.resize(aligned.len().div_ceil(2048) * 2048, 0);
                 out.extend_from_slice(&aligned);
+            }
+        }
+        // Joliet tree extents: zero-filled placeholders at the
+        // reserved sizes so file extents match the layout; the real
+        // UCS-2 directory bytes replace them in the next step.
+        for node in nodes.values() {
+            if node.is_dir && !node.children.is_empty() {
+                let sectors = node.j_dir_size.div_ceil(2048) as usize;
+                out.extend(std::iter::repeat(0u8).take(sectors * 2048));
             }
         }
         for node in nodes.values() {
@@ -483,4 +551,78 @@ mod tests {
     fn deterministic() {
         assert_eq!(build(), build());
     }
+}
+
+// --- Rock Ridge SUSP + Joliet emission (task: RR/Joliet round-trip) ---
+
+/// SUSP system-use entry: signature, length, version, payload.
+fn susp(sig: &[u8; 2], payload: &[u8]) -> Vec<u8> {
+    let mut e = Vec::with_capacity(4 + payload.len());
+    e.extend_from_slice(sig);
+    e.push((4 + payload.len()) as u8);
+    e.push(1); // SUSP version
+    e.extend_from_slice(payload);
+    e
+}
+
+/// NM entries (name, split with CONTINUE when long).
+fn susp_nm(name: &str) -> Vec<u8> {
+    let bytes = name.as_bytes();
+    let parts: Vec<&[u8]> = if bytes.is_empty() {
+        vec![&[]]
+    } else {
+        bytes.chunks(250).collect()
+    };
+    let mut out = Vec::new();
+    for (i, chunk) in parts.iter().enumerate() {
+        let flags = if i + 1 < parts.len() { 0x01u8 } else { 0x00 };
+        let mut payload = vec![flags];
+        payload.extend_from_slice(chunk);
+        out.extend_from_slice(&susp(b"NM", &payload));
+    }
+    out
+}
+
+/// PX: mode, links, uid, gid, serial (RRIP 1.12 layout).
+fn susp_px(mode: u32) -> Vec<u8> {
+    let mut p = Vec::with_capacity(32);
+    p.extend_from_slice(&mode.to_le_bytes());
+    p.extend_from_slice(&1u32.to_le_bytes()); // links
+    p.extend_from_slice(&0u32.to_le_bytes()); // uid
+    p.extend_from_slice(&0u32.to_le_bytes()); // gid
+    p.extend_from_slice(&0u64.to_le_bytes()); // serial
+    p.extend_from_slice(&0u64.to_le_bytes()); // serial hi
+    susp(b"PX", &p)
+}
+
+/// SL: symlink target components (one data byte flags=CONTINUE per
+/// RRIP; we emit a single root-less component chain simply).
+fn susp_sl(target: &str) -> Vec<u8> {
+    let mut p = vec![0u8]; // component flags: CONTINUE-less single piece
+    p.extend_from_slice(target.as_bytes());
+    susp(b"SL", &p)
+}
+
+/// SP entry: marks the system-use area as SUSP (root "." records).
+fn susp_sp() -> Vec<u8> {
+    susp(b"SP", &[0xBE, 0xEF, 0])
+}
+
+/// RR-area for a file/dir record: NM + PX (+ SL for links).
+fn rr_area(name: &str, mode: u32, link_target: Option<&str>) -> Vec<u8> {
+    let mut su = Vec::new();
+    su.extend_from_slice(&susp_nm(name));
+    su.extend_from_slice(&susp_px(mode));
+    if let Some(t) = link_target {
+        su.extend_from_slice(&susp_sl(t));
+    }
+    su
+}
+
+fn ucs2(name: &str) -> Vec<u8> {
+    let mut out = Vec::with_capacity(name.len() * 2);
+    for unit in name.encode_utf16() {
+        out.extend_from_slice(&unit.to_be_bytes());
+    }
+    out
 }
