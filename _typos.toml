@@ -11,6 +11,10 @@ cpy = "cpy"
 CLEN = "CLEN"
 uncompressible = "uncompressible"
 ful = "ful"
+nto = "nto"
+nd = "nd"
+lits = "lits"
+indx = "indx"
 
 # Exclude binary dictionary files and generated tables
 [files]
