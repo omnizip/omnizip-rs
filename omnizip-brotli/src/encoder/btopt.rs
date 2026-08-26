@@ -20,14 +20,14 @@
 //!   allows it, else a short-code distance symbol;
 //! - every H10 match-list entry (shared collection with
 //!   [`zopfli_hq`], including the q11 short-match scan), swept at all
-//!   lengths with the MaxZopfliLen long-copy jump;
+//!   lengths with the `MaxZopfliLen` long-copy jump;
 //! - static-dictionary references (identity LUT probe) as first-class
 //!   transitions — the q10/11 tier had none.
 //!
 //! Two passes: pass 0 rides the sliding-window literal model; pass 1
 //! re-prices commands/distances from pass 0's histogram (rep-code
 //! feedback — the round-22 lesson) and literals from per-context
-//! SetCost tables. The parse is a CANDIDATE for the exact-emission
+//! `SetCost` tables. The parse is a CANDIDATE for the exact-emission
 //! contest in `from_spec_encoder`: it ships only when its measured
 //! metablock is smaller than the reference zopfli port's, so the
 //! tier's output can only improve.
@@ -35,6 +35,18 @@
 //! Determinism: a pure function of (input, quality) — no clocks, no
 //! unordered containers, single-threaded, fixed float evaluation
 //! order.
+
+// Port-typical shape (see omnizip-lzma/src/encoder/optimum.rs): index
+// arithmetic with deliberate narrowing casts and LZMA-style terse
+// loop variables, kept diffable against the reference structure.
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss,
+    clippy::similar_names,
+    clippy::too_many_arguments
+)]
 
 use crate::encoder::context::{compute_context_id, is_text_like};
 use crate::encoder::zopfli_hq::{
@@ -47,7 +59,7 @@ const K_INFINITY: f32 = 1.7e38;
 /// Upstream caps DP copy lengths at 1951 (`kMaxMatchLen` bucketing in
 /// `UpdateNodes`).
 const MATCH_LEN_CAP: usize = 1951;
-/// MAX_ZOPFLI_LEN_QUALITY_10 / _11.
+/// `MAX_ZOPFLI_LEN_QUALITY_10` / `_11`.
 const MAX_ZOPFLI_LEN: [usize; 2] = [150, 325];
 
 /// Back-pointer encoding: 0..=15 = distance short code (0 = rep0,
@@ -76,6 +88,10 @@ fn push_ring(ring: &[u32; 4], d: u32) -> [u32; 4] {
     [d, ring[0], ring[1], ring[2]]
 }
 
+/// Short-code delta order for codes 4-9 (rep0 ± d) and 10-15 (rep1 ±
+/// d), matching `RepBuffer::find_short_code`.
+const SHORT_CODE_DELTAS: [i32; 6] = [-1, 1, -2, 2, -3, 3];
+
 /// Cheapest distance short code reproducing `dist` from `ring`
 /// (mirror of `RepBuffer::find_short_code`'s fixed search order).
 #[inline]
@@ -85,15 +101,14 @@ fn short_code_for(dist: u32, ring: &[u32; 4]) -> Option<u32> {
             return Some(code);
         }
     }
-    const DELTAS: [i32; 6] = [-1, 1, -2, 2, -3, 3];
     let rep0 = ring[0] as i32;
-    for (k, &d) in DELTAS.iter().enumerate() {
+    for (k, &d) in SHORT_CODE_DELTAS.iter().enumerate() {
         if rep0 + d == dist as i32 && rep0 + d >= 1 {
             return Some(4 + k as u32);
         }
     }
     let rep1 = ring[1] as i32;
-    for (k, &d) in DELTAS.iter().enumerate() {
+    for (k, &d) in SHORT_CODE_DELTAS.iter().enumerate() {
         if rep1 + d == dist as i32 && rep1 + d >= 1 {
             return Some(10 + k as u32);
         }
@@ -101,7 +116,7 @@ fn short_code_for(dist: u32, ring: &[u32; 4]) -> Option<u32> {
     None
 }
 
-/// Context-partitioned per-position literal costs (pass 1): SetCost
+/// Context-partitioned per-position literal costs (pass 1): `SetCost`
 /// tables per (p1, p2) context over the whole input, mode matching
 /// the emission's (`UTF8` for text, `LSB6` otherwise). The context of
 /// a byte depends only on its position, so the table is
@@ -238,7 +253,7 @@ fn dp_pass(
     matches: &[(u32, u32)],
 ) -> Vec<Command> {
     let n = input.len();
-    let tier = if quality >= 11 { 1 } else { 0 };
+    let tier = usize::from(quality >= 11);
     let max_z = MAX_ZOPFLI_LEN[tier];
     let cmd_table = &model.cost_cmd;
     let dist_table = &model.cost_dist;
@@ -526,6 +541,7 @@ pub(crate) fn parse_btopt_with(
 }
 
 /// Standalone entry (own collection) — tests and diagnostics.
+#[must_use]
 pub fn parse_btopt(input: &[u8], quality: i32) -> Vec<Command> {
     let n = input.len();
     if n < 8 {
@@ -628,5 +644,22 @@ mod tests {
         assert!(a.iter().zip(&b).all(|(x, y)| x.insert_len == y.insert_len
             && x.copy_len == y.copy_len
             && x.distance == y.distance));
+    }
+
+    /// End-to-end determinism + round-trip through the q10/11 routing
+    /// (the exact-emission contest and winner-reuse path).
+    #[test]
+    fn encode_deterministic_and_round_trips_q10_q11() {
+        let input: Vec<u8> = (0..1500)
+            .map(|i| format!("row {},{},value_{}\n", i, i * 3, i % 9))
+            .collect::<String>()
+            .into_bytes();
+        for q in [10, 11] {
+            let a = crate::from_spec_encoder::compress_with_quality(&input, q);
+            let b = crate::from_spec_encoder::compress_with_quality(&input, q);
+            assert_eq!(a, b, "q{q} encode must be byte-deterministic");
+            let decoded = crate::decoder::decode(&a).expect("decode");
+            assert_eq!(decoded, input, "q{q} round-trip");
+        }
     }
 }
