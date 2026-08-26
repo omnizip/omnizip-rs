@@ -98,6 +98,30 @@ fn double_create_is_byte_identical_all_writers() {
         ))
     );
 
+    let build_7z_solid_enc = |mut w: omnizip_sevenzip::writer::SevenZipWriter| {
+        for (name, data) in &fs {
+            w.add_file(&NewEntry::file(name.clone(), &o), data, &o)
+                .unwrap();
+        }
+        w.finish_bytes(&o).unwrap()
+    };
+    assert_eq!(
+        build_7z_solid_enc(
+            omnizip_sevenzip::writer::SevenZipWriter::new(
+                omnizip_sevenzip::writer::SevenZipMethod::Lzma2
+            )
+            .with_solid(true)
+            .with_password("det")
+        ),
+        build_7z_solid_enc(
+            omnizip_sevenzip::writer::SevenZipWriter::new(
+                omnizip_sevenzip::writer::SevenZipMethod::Lzma2
+            )
+            .with_solid(true)
+            .with_password("det")
+        )
+    );
+
     let build_iso = |mut w: omnizip_iso::writer::IsoWriter| {
         for (name, data) in &fs {
             w.add_file(&NewEntry::file(name.clone(), &o), data, &o)

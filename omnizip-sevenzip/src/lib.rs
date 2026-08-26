@@ -1,14 +1,14 @@
-//! 7z archive container — TODO.containers task 06. Port of the Ruby
-//! `formats/seven_zip/` module: the 6-byte signature + 32-byte start
-//! header (with CRC verification), the property-encoded metadata
-//! header (pack/unpack/substreams/files infos), folder coder chains
-//! mapped onto the in-house codecs (Copy, LZMA, LZMA2, BZip2, Deflate
-//! + delta/BCJ filters), solid-block extraction with caching, and
-//! deterministic writing (task 17: fixed FILETIME mtimes, sorted
-//! entries, one folder per file for the non-solid writer).
+//! 7z archive container — TODO.containers task 06: the 6-byte
+//! signature + 32-byte start header (with CRC verification), the
+//! property-encoded metadata header (pack/unpack/substreams/files
+//! infos), folder coder chains mapped onto the in-house codecs (Copy,
+//! LZMA, LZMA2, BZip2, Deflate + delta/BCJ filters), solid-block
+//! extraction with caching, and deterministic writing (fixed FILETIME
+//! mtimes, sorted entries, non-solid or one solid folder, 7zAES
+//! stream/header encryption, multi-volume splits).
 //!
-//! Phase A (read) + Phase B (non-solid write). Phase C (solid write,
-//! multi-volume, encrypted-header writing) is future work; reading
+//! Phases A (read), B (non-solid write) and C (solid write,
+//! multi-volume, encrypted-header writing) are complete; reading
 //! AES-encrypted archives is supported.
 #![forbid(unsafe_code)]
 
@@ -231,30 +231,42 @@ pub const fn unix_to_filetime(unix: u64) -> u64 {
     (unix + 11_644_473_600) * 10_000_000
 }
 
-/// The 7z AES key derivation: SHA-256 applied 2^cycles_power times
-/// over `salt || password`, first pass seeded over the buffer.
-/// Returns the (key, iv) pair — 32 + 16 bytes.
+/// The 7z AES key derivation (7zAes.cpp `CKeyInfo::CalcKey`, 7-Zip
+/// 24+): a single running SHA-256 over `2^cycles_power` replicas of
+/// `salt || password-UTF-16LE || LE32(i) || 4×0`, `i` counting the
+/// replicas from 0. `cycles_power == 0x3F` skips the KDF (key =
+/// `salt || password`, zero-padded to 32 bytes).
+///
+/// The password enters as UTF-16LE because 7-Zip carries passwords as
+/// `wchar_t` strings and calls `CryptoSetPassword` with the raw UTF-16
+/// bytes (verified against 7zz 26.00-written archives).
 #[must_use]
-pub fn aes256_kdf(password: &[u8], salt: &[u8], cycles_power: u8) -> ([u8; 32], [u8; 16]) {
-    let seed_len = salt.len() + password.len();
-    let mut buf = vec![0u8; seed_len.max(32)];
-    if seed_len > 0 {
-        buf[..salt.len()].copy_from_slice(salt);
-        buf[salt.len()..seed_len].copy_from_slice(password);
-    }
+pub fn aes256_kdf(password: &str, salt: &[u8], cycles_power: u8) -> [u8; 32] {
+    let pw16: Vec<u8> = password.encode_utf16().flat_map(u16::to_le_bytes).collect();
     if cycles_power == 0x3F {
-        // Rare no-KDF mode.
-        buf.truncate(seed_len);
-    } else {
-        for _ in 0..(1u64 << cycles_power) {
-            buf = omnizip_crypto::sha256(&buf).to_vec();
+        let mut key = [0u8; 32];
+        for (slot, &b) in key.iter_mut().zip(salt.iter().chain(pw16.iter())) {
+            *slot = b;
         }
+        return key;
     }
-    let mut key = [0u8; 32];
-    key.copy_from_slice(&buf[..32]);
-    let mut iv = [0u8; 16];
-    if buf.len() >= 48 {
-        iv.copy_from_slice(&buf[32..48]);
+    let num_rounds = 1u64 << cycles_power;
+    let unroll = num_rounds.min(64) as u32;
+    let mut sha = omnizip_crypto::Sha256::new();
+    // One replica block per update, mirroring the reference's 64x
+    // unroll; chunking does not change the digest.
+    let mut block = Vec::with_capacity(unroll as usize * (salt.len() + pw16.len() + 8));
+    let mut r: u32 = 0;
+    while r < num_rounds as u32 {
+        block.clear();
+        for i in r..r + unroll {
+            block.extend_from_slice(salt);
+            block.extend_from_slice(&pw16);
+            block.extend_from_slice(&i.to_le_bytes());
+            block.extend_from_slice(&[0u8; 4]);
+        }
+        sha.update(&block);
+        r += unroll;
     }
-    (key, iv)
+    sha.finalize()
 }

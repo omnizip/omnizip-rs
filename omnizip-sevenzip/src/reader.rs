@@ -315,111 +315,147 @@ impl ArchiveReader for SevenZipReader {
 }
 
 /// Decode one folder's packed stream through its coder chain.
+///
+/// The coders form a linear chain (7-Zip writes `[AES, LZMA2]`,
+/// `[Delta, LZMA2]`-style folders whose bind pairs order the
+/// pipeline): the pack stream feeds the first coder's free input, and
+/// each coder's output flows into the input named by a bind pair
+/// until an unbound (main) output stream is reached. Coders are
+/// applied in that pipeline order, NOT in reversed list order.
 pub fn decode_folder(
     folder: &Folder,
     packed: &[u8],
     password: Option<&str>,
     unpack_size: usize,
 ) -> Result<Vec<u8>, ArchiveError> {
-    // The chain: [filters...] + [compression] (+ [AES] first when
-    // encrypted). Decode in reverse order over the single data path.
-    let mut data = packed.to_vec();
-    let mut decoded_any = false;
+    // Global in-stream index owned by coder i.
+    let mut in_base: Vec<u64> = Vec::with_capacity(folder.coders.len());
+    let mut out_base: Vec<u64> = Vec::with_capacity(folder.coders.len());
+    let mut ins = 0u64;
+    let mut outs = 0u64;
+    for c in &folder.coders {
+        in_base.push(ins);
+        out_base.push(outs);
+        ins += c.num_in_streams;
+        outs += c.num_out_streams;
+    }
 
-    for coder in folder.coders.iter().rev() {
-        match coder.method_id {
-            method::COPY => {
-                decoded_any = true;
-            }
-            method::LZMA2 => {
-                let (out, _consumed) = omnizip_lzma::lzma2::decode_lzma2_stream(&data)
-                    .map_err(|e| ArchiveError::InvalidArchive(format!("7z LZMA2: {e}")))?;
-                data = out;
-                decoded_any = true;
-            }
-            method::LZMA => {
-                let (lc, lp, pb, dict_size) = lzma_props(&coder.properties)?;
-                let mut decoder =
-                    omnizip_lzma::decoder::lzma1::Lzma1Decoder::new(lc, lp, pb, dict_size);
-                // 7z LZMA streams carry no EOPM; the size is exact.
-                data = decoder
-                    .decode(&data, Some(unpack_size as u64), false)
-                    .map_err(|e| ArchiveError::InvalidArchive(format!("7z LZMA: {e}")))?;
-                decoded_any = true;
-            }
-            method::BZIP2 => {
-                data = omnizip_bzip2::decompress_framed(&data)
-                    .map_err(|e| ArchiveError::InvalidArchive(format!("7z BZip2: {e}")))?;
-                decoded_any = true;
-            }
-            method::DEFLATE => {
-                let mut hint = (data.len() * 6).max(64);
-                loop {
-                    match omnizip_libdeflate::inflate::inflate(&data, hint) {
-                        Ok(d) => {
-                            data = d;
-                            break;
-                        }
-                        Err(_) if hint < (1 << 32) => hint = hint.saturating_mul(4),
-                        Err(e) => {
-                            return Err(ArchiveError::InvalidArchive(format!("7z Deflate: {e}")))
-                        }
-                    }
-                }
-                decoded_any = true;
-            }
-            method::DELTA => {
-                let distance = coder.properties.first().copied().unwrap_or(0) as usize + 1;
-                data = omnizip_filters::Filter::decode(
-                    &omnizip_filters::DeltaFilter::new(distance),
-                    &data,
-                );
-                decoded_any = true;
-            }
-            method::BCJ_X86 => {
-                data = omnizip_filters::Filter::decode(&omnizip_filters::BcjX86Filter, &data);
-                decoded_any = true;
-            }
-            method::BCJ_ARM => {
-                data = omnizip_filters::Filter::decode(&omnizip_filters::BcjArmFilter, &data);
-                decoded_any = true;
-            }
-            method::BCJ_PPC => {
-                data = omnizip_filters::Filter::decode(&omnizip_filters::BcjPowerPcFilter, &data);
-                decoded_any = true;
-            }
-            method::BCJ_IA64 => {
-                data = omnizip_filters::Filter::decode(&omnizip_filters::BcjIa64Filter, &data);
-                decoded_any = true;
-            }
-            method::BCJ_SPARC => {
-                data = omnizip_filters::Filter::decode(&omnizip_filters::BcjSparcFilter, &data);
-                decoded_any = true;
-            }
-            method::BCJ2 => {
-                return Err(ArchiveError::UnsupportedFeature {
-                    reason: "7z: BCJ2 multi-stream folders are not supported".into(),
-                });
-            }
-            method::AES => {
-                let password = password.ok_or_else(|| {
-                    ArchiveError::Security("7z: archive is AES-encrypted; supply a password".into())
-                })?;
-                data = decode_aes_stream(&data, &coder.properties, password)?;
-            }
-            other => {
-                return Err(ArchiveError::UnsupportedFeature {
-                    reason: format!("7z: method {} not supported", method::name(other)),
-                });
-            }
+    let mut data = packed.to_vec();
+    let Some(&start_in) = folder.pack_stream_indices.first() else {
+        return Err(ArchiveError::InvalidArchive(
+            "7z: folder without a pack stream".into(),
+        ));
+    };
+    let mut current_in = start_in;
+    // The pack stream must feed an input that no bind pair claims;
+    // from there on, bound inputs are reached by following edges.
+    if folder.bind_pairs.iter().any(|&(bin, _)| bin == current_in) {
+        return Err(ArchiveError::UnsupportedFeature {
+            reason: "7z: branching coder chains are not supported".into(),
+        });
+    }
+    loop {
+        // The coder whose in-stream range covers current_in.
+        let coder_idx = folder
+            .coders
+            .iter()
+            .enumerate()
+            .find(|(i, _)| {
+                let base = in_base[*i];
+                current_in >= base && current_in < base + folder.coders[*i].num_in_streams
+            })
+            .map(|(i, _)| i)
+            .ok_or_else(|| ArchiveError::InvalidArchive("7z: bad pack stream index".into()))?;
+        let coder = &folder.coders[coder_idx];
+        let _ = current_in - in_base[coder_idx]; // single free input per chain coder
+        let out = out_base[coder_idx]; // single out stream per coder in a chain
+        let expected = folder
+            .unpack_sizes
+            .get(out as usize)
+            .copied()
+            .unwrap_or(unpack_size as u64);
+        data = decode_coder(coder, data, password, expected as usize)?;
+        match folder.bind_pairs.iter().find(|&&(_, bout)| bout == out) {
+            Some(&(next_in, _)) => current_in = next_in,
+            None => return Ok(data),
         }
     }
-    if !decoded_any {
-        return Err(ArchiveError::InvalidArchive(
-            "7z: folder has no decoders".into(),
-        ));
+}
+
+fn decode_coder(
+    coder: &crate::CoderInfo,
+    data: Vec<u8>,
+    password: Option<&str>,
+    unpack_size: usize,
+) -> Result<Vec<u8>, ArchiveError> {
+    match coder.method_id {
+        method::COPY => Ok(data),
+        method::LZMA2 => {
+            let (out, _consumed) = omnizip_lzma::lzma2::decode_lzma2_stream(&data)
+                .map_err(|e| ArchiveError::InvalidArchive(format!("7z LZMA2: {e}")))?;
+            Ok(out)
+        }
+        method::LZMA => {
+            let (lc, lp, pb, dict_size) = lzma_props(&coder.properties)?;
+            let mut decoder =
+                omnizip_lzma::decoder::lzma1::Lzma1Decoder::new(lc, lp, pb, dict_size);
+            // 7z LZMA streams carry no EOPM; the size is exact.
+            decoder
+                .decode(&data, Some(unpack_size as u64), false)
+                .map_err(|e| ArchiveError::InvalidArchive(format!("7z LZMA: {e}")))
+        }
+        method::BZIP2 => omnizip_bzip2::decompress_framed(&data)
+            .map_err(|e| ArchiveError::InvalidArchive(format!("7z BZip2: {e}"))),
+        method::DEFLATE => {
+            let mut hint = (data.len() * 6).max(64);
+            loop {
+                match omnizip_libdeflate::inflate::inflate(&data, hint) {
+                    Ok(d) => return Ok(d),
+                    Err(_) if hint < (1 << 32) => hint = hint.saturating_mul(4),
+                    Err(e) => return Err(ArchiveError::InvalidArchive(format!("7z Deflate: {e}"))),
+                }
+            }
+        }
+        method::DELTA => {
+            let distance = coder.properties.first().copied().unwrap_or(0) as usize + 1;
+            Ok(omnizip_filters::Filter::decode(
+                &omnizip_filters::DeltaFilter::new(distance),
+                &data,
+            ))
+        }
+        method::BCJ_X86 => Ok(omnizip_filters::Filter::decode(
+            &omnizip_filters::BcjX86Filter,
+            &data,
+        )),
+        method::BCJ_ARM => Ok(omnizip_filters::Filter::decode(
+            &omnizip_filters::BcjArmFilter,
+            &data,
+        )),
+        method::BCJ_PPC => Ok(omnizip_filters::Filter::decode(
+            &omnizip_filters::BcjPowerPcFilter,
+            &data,
+        )),
+        method::BCJ_IA64 => Ok(omnizip_filters::Filter::decode(
+            &omnizip_filters::BcjIa64Filter,
+            &data,
+        )),
+        method::BCJ_SPARC => Ok(omnizip_filters::Filter::decode(
+            &omnizip_filters::BcjSparcFilter,
+            &data,
+        )),
+        method::AES => {
+            let password = password.ok_or_else(|| {
+                ArchiveError::Security("7z: archive is AES-encrypted; supply a password".into())
+            })?;
+            decode_aes_stream(&data, &coder.properties, password)
+        }
+        method::BCJ2 => Err(ArchiveError::UnsupportedFeature {
+            reason: "7z: BCJ2 multi-stream folders are not supported".into(),
+        }),
+        other => Err(ArchiveError::UnsupportedFeature {
+            reason: format!("7z: method {} not supported", method::name(other)),
+        }),
     }
-    Ok(data)
 }
 
 /// LZMA coder properties: [lc/lp/pb byte][dict u32 LE].
@@ -438,38 +474,52 @@ fn lzma_props(props: &[u8]) -> Result<(u32, u32, u32, u32), ArchiveError> {
     Ok((lc, u32::from(rem % 5), u32::from(rem / 5), dict))
 }
 
-/// AES-encrypted stream: properties = [salt_len][cycles_power] (with
-/// the salt-length high bits per the 7z AES coder spec).
+/// AES-encrypted stream: coder properties per 7zAes.cpp
+/// `SetDecoderProperties2` —
+///
+/// ```text
+/// b0 = cycles | (salt present ? 0x80 : 0) | (iv present ? 0x40 : 0)
+/// b1 = (salt_len - 1) << 4 | (iv_len - 1)      [only when set flags]
+/// salt bytes, iv bytes (zero-padded to 16)
+/// ```
+///
+/// The whole packed stream is AES-256-CBC ciphertext (the encoder
+/// pads to a block; trailing pad bytes are ignored — later coders
+/// stop at their declared unpack sizes).
 fn decode_aes_stream(packed: &[u8], props: &[u8], password: &str) -> Result<Vec<u8>, ArchiveError> {
-    let (&first, rest) = props
+    let (&b0, rest) = props
         .split_first()
         .ok_or_else(|| ArchiveError::InvalidArchive("7z: AES coder without properties".into()))?;
-    let salt_len = u32::from(first & 0x7F);
-    let salt_len = if salt_len == 0 && first & 0x80 != 0 {
-        // High bit set with low 7 zero is unused; 0x7F = 0 means none.
-        0
-    } else {
-        salt_len
-    };
-    let salt_len = (salt_len.min(16)) as usize;
-    let cycles_power = *rest
-        .first()
-        .ok_or_else(|| ArchiveError::InvalidArchive("7z: AES properties missing cycles".into()))?;
-    let salt = packed.get(..salt_len).ok_or_else(|| {
-        ArchiveError::InvalidArchive("7z: AES stream shorter than its salt".into())
-    })?;
-    let iv = packed
-        .get(salt_len..salt_len + 16)
-        .ok_or_else(|| ArchiveError::InvalidArchive("7z: AES stream missing IV".into()))?;
-    let body = &packed[salt_len + 16..];
-
-    let (key, mut iv_arr) = crate::aes256_kdf(password.as_bytes(), salt, cycles_power);
-    iv_arr.copy_from_slice(
-        iv.try_into()
-            .map_err(|_| ArchiveError::InvalidArchive("7z: bad AES IV".into()))?,
-    );
-    let mut buf = body.to_vec();
-    omnizip_crypto::AesCbc256Decrypt::new(&key, &iv_arr).decrypt(&mut buf);
+    let cycles = b0 & 0x3F;
+    if cycles > 24 && cycles != 0x3F {
+        return Err(ArchiveError::UnsupportedFeature {
+            reason: format!("7z: AES cycles power {cycles} exceeds the supported 24"),
+        });
+    }
+    let mut salt: &[u8] = &[];
+    let mut iv = [0u8; 16];
+    if b0 & 0xC0 != 0 {
+        let (&b1, body) = rest
+            .split_first()
+            .ok_or_else(|| ArchiveError::InvalidArchive("7z: AES properties truncated".into()))?;
+        let salt_len = (usize::from(b0 >> 7 & 1) + usize::from(b1 >> 4)).min(16);
+        let iv_len = (usize::from(b0 >> 6 & 1) + usize::from(b1 & 0x0F)).min(16);
+        if body.len() != salt_len + iv_len {
+            return Err(ArchiveError::InvalidArchive(
+                "7z: AES salt/IV sizes do not match the property length".into(),
+            ));
+        }
+        salt = &body[..salt_len];
+        iv[..iv_len].copy_from_slice(&body[salt_len..]);
+    }
+    if packed.len() % 16 != 0 {
+        return Err(ArchiveError::InvalidArchive(
+            "7z: AES stream is not block aligned".into(),
+        ));
+    }
+    let key = crate::aes256_kdf(password, salt, cycles);
+    let mut buf = packed.to_vec();
+    omnizip_crypto::AesCbc256Decrypt::new(&key, &iv).decrypt(&mut buf);
     Ok(buf)
 }
 

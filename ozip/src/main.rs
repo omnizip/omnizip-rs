@@ -163,6 +163,8 @@ fn usage(codecs: &[CodecSpec]) {
     println!("    -o FILE  output name (single input only)");
     println!("    -f FMT   container format override (tar, tar.gz, zip, cpio, ...)");
     println!("    -C DIR   extraction directory (ozip x)");
+    println!("    -p PASS  archive password (7z encrypted streams/headers)");
+    println!("    --volume N  split 7z output into N-byte .001/.002 parts (ozip c)");
     println!();
     println!("CODECS:");
     for c in codecs {
@@ -365,6 +367,8 @@ fn run_container(args: &[String]) -> Result<(), String> {
     let mut out_dir: Option<PathBuf> = None;
     let mut paths: Vec<PathBuf> = Vec::new();
 
+    let mut password: Option<String> = None;
+    let mut volume: Option<usize> = None;
     let mut i = 1usize;
     while i < args.len() {
         let a = &args[i];
@@ -383,6 +387,21 @@ fn run_container(args: &[String]) -> Result<(), String> {
             i += 2;
             continue;
         }
+        if a == "-p" {
+            password = args.get(i + 1).cloned();
+            i += 2;
+            continue;
+        }
+        if a == "--volume" {
+            volume = Some(
+                args.get(i + 1)
+                    .ok_or_else(|| "--volume needs a byte size".to_string())?
+                    .parse()
+                    .map_err(|_| format!("bad volume size {}", args[i + 1]))?,
+            );
+            i += 2;
+            continue;
+        }
         if a.starts_with('-') {
             return Err(format!("unknown option {a}"));
         }
@@ -393,12 +412,22 @@ fn run_container(args: &[String]) -> Result<(), String> {
     if paths.is_empty() {
         return Err(format!("ozip {command}: an archive path is required"));
     }
+    if command != "c" && volume.is_some() {
+        return Err("--volume only applies to ozip c".into());
+    }
     let archive = paths.remove(0);
     match command {
-        "c" => container::create(&archive, &paths, format.as_deref(), level),
-        "x" => container::extract(&archive, out_dir.as_deref()),
-        "t" => container::list(&archive, false),
-        "l" => container::list(&archive, true),
+        "c" => container::create(
+            &archive,
+            &paths,
+            format.as_deref(),
+            level,
+            password.as_deref(),
+            volume,
+        ),
+        "x" => container::extract(&archive, out_dir.as_deref(), password.as_deref()),
+        "t" => container::list(&archive, false, password.as_deref()),
+        "l" => container::list(&archive, true, password.as_deref()),
         _ => unreachable!(),
     }
 }

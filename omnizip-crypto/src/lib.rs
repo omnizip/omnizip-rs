@@ -41,6 +41,37 @@ pub fn sha256(data: &[u8]) -> [u8; 32] {
     sha2::Sha256::digest(data).into()
 }
 
+/// Incremental SHA-256 (the 7z AES KDF repeats a small seed 2^cycles
+/// times — hashing it in blocks instead of materializing the stream).
+#[derive(Clone)]
+pub struct Sha256 {
+    inner: sha2::Sha256,
+}
+
+impl Sha256 {
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            inner: sha2::Sha256::new(),
+        }
+    }
+
+    pub fn update(&mut self, data: &[u8]) {
+        Digest::update(&mut self.inner, data);
+    }
+
+    #[must_use]
+    pub fn finalize(self) -> [u8; 32] {
+        <sha2::Sha256 as Digest>::finalize(self.inner).into()
+    }
+}
+
+impl Default for Sha256 {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 fn hex(bytes: &[u8]) -> String {
     let mut s = String::with_capacity(bytes.len() * 2);
     for b in bytes {
@@ -400,5 +431,24 @@ mod tests {
         let keys = winzip_aes_keys(b"secret", &[0xAA; 16], 32);
         assert_eq!(keys.enc.len(), 32);
         assert_eq!(keys.auth.len(), 32);
+    }
+
+    #[test]
+    fn sha256_stream_matches_one_shot() {
+        let mut c = Sha256::new();
+        c.update(b"abcdbcde");
+        c.update(b"cdefdefgefghfghighij");
+        c.update(b"hijkijkljklmklmnlmnomnopnopq");
+        assert_eq!(
+            c.finalize(),
+            [
+                0x24, 0x8d, 0x6a, 0x61, 0xd2, 0x06, 0x38, 0xb8, 0xe5, 0xc0, 0x26, 0x93, 0x0c, 0x3e,
+                0x60, 0x39, 0xa3, 0x3c, 0xe4, 0x59, 0x64, 0xff, 0x21, 0x67, 0xf6, 0xec, 0xed, 0xd4,
+                0x19, 0xdb, 0x06, 0xc1
+            ]
+        );
+        let mut c = Sha256::new();
+        c.update(b"streaming");
+        assert_eq!(c.finalize(), sha256(b"streaming"));
     }
 }
