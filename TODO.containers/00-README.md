@@ -40,6 +40,18 @@ tools (`unzip`, `7z`, `unrar`, `bsdtar`) are oracles, in that order.
 | 20 | [20](20-container-differential-harness.md) | differential | extend | P0 | fixtures + cross-tool oracles |
 | 21 | [21](21-security-hardening.md) | security | new | P0 | traversal, symlinks, bombs, absolute paths |
 
+## Shipped versions
+
+| Release | Formats / milestones |
+|---|---|
+| 0.16.x | tar, gzip/bzip2 files, zip, cpio, lzip/lzma-alone, ozip v0 |
+| 0.17.x | WinZip AES zip (AE-1/AE-2), omnizip-crypto |
+| 0.18.x | 7z read + non-solid write, RPM |
+| 0.19.0 | XAR (quick-xml), OLE + MSI read, PAR2, verification layer (bench/determinism/manifest/security corpus) |
+| 0.20.0 | RAR5 STORE rw + RAR4 STORE read, CI crate-group matrix |
+| 0.20.1 | Symlink-target validation + write-through-symlink guard |
+| (feat/rar5-lz, unmerged) | RAR5 LZ 1-5 + solid, BLAKE2sp, multi-volume, AES-256, encrypted headers; arm fixture |
+
 ## Standing rules
 
 1. **Determinism is a container property too.** Byte-identical archives for

@@ -31,5 +31,5 @@ xattrs, hardlinks, symlinks, device nodes, FIFOs.
 ## Acceptance
 
 - [ ] libarchive compatibility corpus green (the Ruby suite's bar)
-- [ ] `xar --toc` reads our archives; pkg files from macOS extract correctly
-- [ ] Deterministic TOC (canonical element order, quoted attributes)
+- [x] `xar --toc` reads our archives; pkg files from macOS extract correctly
+- [x] Deterministic TOC (canonical element order, quoted attributes)

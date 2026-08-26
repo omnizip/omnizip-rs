@@ -31,6 +31,6 @@ normalizations, default on).
 ## Acceptance
 
 - [ ] Smoke-level CLI parity with the Ruby CLI's feature matrix
-- [ ] `ozip c` → reference tool verify → `ozip x` byte-exact, for every
+- [x] `ozip c` → reference tool verify → `ozip x` byte-exact, for every
       registered format, in CI
 - [ ] Windows/macOS/Linux CI runners all green

@@ -23,7 +23,7 @@ determinism rules ([17](17-determinism-normalization.md)) get proven.
 ## Acceptance
 
 - [ ] Round-trips every fixture under `omnizip/spec/fixtures/tar/`
-- [ ] `bsdtar -t` / `tar -tf` list our archives identically to the Ruby ones
+- [x] `bsdtar -t` / `tar -tf` list our archives identically to the Ruby ones
 - [ ] pax/GNU long names, modes, symlinks, dirs preserved
-- [ ] Deterministic: same tree + options ⇒ byte-identical `.tar` (mtime
+- [x] Deterministic: same tree + options ⇒ byte-identical `.tar` (mtime
       normalization flags per [17](17-determinism-normalization.md))

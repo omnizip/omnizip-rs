@@ -21,8 +21,8 @@ payload decompression on read.
 
 ## Acceptance
 
-- [ ] cpio round-trip; `cpio -it` reads our archives
-- [ ] `rpm2cpio | cpio -id` path verified against our RPM reader
-- [ ] RPMs we write install with `rpm -i` (signature/digest consistency)
+- [x] cpio round-trip; `cpio -it` reads our archives
+- [x] `rpm2cpio | cpio -id` path verified against our RPM reader
+- [x] RPMs we write install with `rpm -i` (signature/digest consistency)
 - [ ] Deterministic RPMs (fixed build-time, sorted file list) — the
       reproducible-builds use case is a first-class consumer here
