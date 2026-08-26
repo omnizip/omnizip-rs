@@ -8,6 +8,10 @@
 #![forbid(unsafe_code)]
 
 pub mod rar3;
+pub mod rar3_crypto;
+pub mod rar3_ppmd;
+pub mod rar3_unpack;
+pub mod rar3_vm;
 pub mod rar5;
 pub mod rar5_crypto;
 pub mod rar5_unpack;

@@ -275,6 +275,39 @@ impl AesCbc256Decrypt {
     }
 }
 
+/// AES-128-CBC decryption (RAR3 file/header encryption). Chaining
+/// state persists across `decrypt` calls like unrar's Rijndael does.
+pub struct AesCbc128Decrypt {
+    cipher: aes::Aes128,
+    prev: [u8; 16],
+}
+
+impl AesCbc128Decrypt {
+    #[must_use]
+    pub fn new(key: &[u8; 16], iv: &[u8; 16]) -> Self {
+        use aes::cipher::KeyInit;
+        Self {
+            cipher: aes::Aes128::new(key.into()),
+            prev: *iv,
+        }
+    }
+
+    /// Decrypt whole blocks in place (len must be a multiple of 16).
+    pub fn decrypt(&mut self, data: &mut [u8]) {
+        use aes::cipher::BlockCipherDecrypt;
+        assert_eq!(data.len() % 16, 0, "CBC input must be block-aligned");
+        for chunk in data.chunks_exact_mut(16) {
+            let cipher_block: [u8; 16] = chunk.try_into().expect("16 bytes");
+            let block: &mut [u8; 16] = chunk.try_into().expect("16 bytes");
+            self.cipher.decrypt_block(block.into());
+            for (b, p) in chunk.iter_mut().zip(self.prev) {
+                *b ^= p;
+            }
+            self.prev = cipher_block;
+        }
+    }
+}
+
 /// WinZip AES key schedule: PBKDF2-HMAC-SHA1, 1000 iterations, over
 /// `password` + `salt`, producing `2*key_len + 2` bytes laid out per
 /// the WinZip AES spec (byte-verified against 7-Zip's WzAes):
