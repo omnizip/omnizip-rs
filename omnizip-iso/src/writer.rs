@@ -148,17 +148,20 @@ impl IsoWriter {
             .iter()
             .filter(|(_, n)| n.is_dir)
             .map(|(path, node)| {
-                let mut size = 34 + 34; // "." and ".."
-                let mut jsize = 34 + 34;
+                // "." carries SP; ".." is bare. Both trees mirror the
+                // Rock Ridge area so either tree yields the metadata.
+                let mut size = record_len(1, dot_su().len()) + 34;
+                let mut jsize = record_len(1, dot_su().len()) + 34;
                 for c in &node.children {
                     let cn = nodes.get(c.as_str()).expect("child");
-                    let name_len = cn.iso_name.len();
-                    // Pad so each record length stays even.
-                    size += 33 + name_len + (name_len + 1) % 2;
-                    // Joliet record: UCS-2 name (+ version-suffix none)
-                    // plus the Rock Ridge-free system-use pad.
-                    let jname_len = ucs2(&cn.full_name).len();
-                    jsize += 33 + jname_len + (jname_len + 1) % 2;
+                    let su = rr_area(
+                        &cn.full_name,
+                        cn.mode,
+                        cn.is_dir,
+                        cn.is_link.then_some(cn.link_target.as_str()),
+                    );
+                    size += record_len(cn.iso_name.len(), su.len());
+                    jsize += record_len(ucs2(&cn.full_name).len(), su.len());
                 }
                 (path.clone(), size as u32, jsize as u32)
             })
@@ -213,29 +216,60 @@ impl IsoWriter {
         pvd[126..128].copy_from_slice(&1u16.to_be_bytes());
         pvd[128..130].copy_from_slice(&2048u16.to_le_bytes());
         pvd[130..132].copy_from_slice(&2048u16.to_be_bytes());
-        let pt_l = build_path_table(&nodes, false);
-        let pt_m = build_path_table(&nodes, true);
+        let pt_l = build_path_table(&nodes, false, false);
+        let pt_m = build_path_table(&nodes, true, false);
         pvd[132..136].copy_from_slice(&(pt_l.len() as u32).to_le_bytes());
+        pvd[136..140].copy_from_slice(&(pt_l.len() as u32).to_be_bytes());
         pvd[140..144].copy_from_slice(&19u32.to_le_bytes());
         pvd[148..152].copy_from_slice(&20u32.to_be_bytes());
-        let root = nodes.get("").expect("root");
-        let mut root_rec = record_bytes(0x02, root.extent, root.dir_size, options, "\x00");
-        root_rec[32] = 1;
-        pvd[156..190].copy_from_slice(&root_rec[..34]);
         pvd[881] = 1; // file structure version
         pvd[190..318].copy_from_slice(iso_field("", 128).as_bytes());
         pvd[318..446].copy_from_slice(iso_field("", 128).as_bytes());
         pvd[446..574].copy_from_slice(iso_field(&options.host_tool, 128).as_bytes());
+        let root = nodes.get("").expect("root");
+        let mut root_rec = record_bytes(0x02, root.extent, root.dir_size, options, b"\x00", &[]);
+        root_rec[32] = 1;
+        pvd[156..156 + root_rec.len()].copy_from_slice(&root_rec);
         out.extend_from_slice(&pvd);
 
-        // Sector 17 placeholder: a boot-record-type descriptor keeps
-        // the chain walking to the terminator; the real Joliet SVD
-        // replaces it in the next step.
-        let mut svd_slot = vec![0u8; 2048];
-        svd_slot[0] = 0;
-        svd_slot[1..6].copy_from_slice(b"CD001");
-        svd_slot[6] = 1;
-        out.extend_from_slice(&svd_slot);
+        // Sector 17: Joliet supplementary descriptor (escape bytes
+        // 88..91 = "%/E" mark the UCS-2 level-3 tree).
+        let jpt_l = build_path_table(&nodes, false, true);
+        let jpt_m = build_path_table(&nodes, true, true);
+        let mut svd = vec![0u8; 2048];
+        svd[0] = 2;
+        svd[1..6].copy_from_slice(b"CD001");
+        svd[6] = 1;
+        svd[88] = 0x25;
+        svd[89] = 0x2F;
+        svd[90] = 0x45;
+        svd[8..40].copy_from_slice(&ucs2(&iso_field("", 16)));
+        svd[40..72].copy_from_slice(&ucs2(&iso_field(&self.volume_id, 16)));
+        svd[80..84].copy_from_slice(&volume_space.to_le_bytes());
+        svd[84..88].copy_from_slice(&volume_space.to_be_bytes());
+        svd[120..122].copy_from_slice(&1u16.to_le_bytes());
+        svd[122..124].copy_from_slice(&1u16.to_be_bytes());
+        svd[124..126].copy_from_slice(&1u16.to_le_bytes());
+        svd[126..128].copy_from_slice(&1u16.to_be_bytes());
+        svd[128..130].copy_from_slice(&2048u16.to_le_bytes());
+        svd[130..132].copy_from_slice(&2048u16.to_be_bytes());
+        svd[132..136].copy_from_slice(&(jpt_l.len() as u32).to_le_bytes());
+        svd[136..140].copy_from_slice(&(jpt_l.len() as u32).to_be_bytes());
+        svd[140..144].copy_from_slice(&21u32.to_le_bytes());
+        svd[148..152].copy_from_slice(&22u32.to_be_bytes());
+        let jroot = nodes.get("").expect("root");
+        let mut jroot_rec = record_bytes(
+            0x02,
+            jroot.j_extent,
+            jroot.j_dir_size,
+            options,
+            b"\x00",
+            &[],
+        );
+        jroot_rec[32] = 1;
+        svd[156..156 + jroot_rec.len()].copy_from_slice(&jroot_rec);
+        svd[881] = 1;
+        out.extend_from_slice(&svd);
 
         // Terminator.
         let mut term = vec![0u8; 2048];
@@ -251,9 +285,12 @@ impl IsoWriter {
         let mut m_sector = pt_m;
         m_sector.resize(2048, 0);
         out.extend_from_slice(&m_sector);
-        // Joliet path-table slots (sectors 21, 22): filler for now.
-        out.extend_from_slice(&[0u8; 2048]);
-        out.extend_from_slice(&[0u8; 2048]);
+        let mut jl_sector = jpt_l;
+        jl_sector.resize(2048, 0);
+        out.extend_from_slice(&jl_sector);
+        let mut jm_sector = jpt_m;
+        jm_sector.resize(2048, 0);
+        out.extend_from_slice(&jm_sector);
 
         // Directory extents then file extents, in BTreeMap order.
         for (path, node) in &nodes {
@@ -264,13 +301,12 @@ impl IsoWriter {
                 out.extend_from_slice(&aligned);
             }
         }
-        // Joliet tree extents: zero-filled placeholders at the
-        // reserved sizes so file extents match the layout; the real
-        // UCS-2 directory bytes replace them in the next step.
-        for node in nodes.values() {
+        for (path, node) in &nodes {
             if node.is_dir && !node.children.is_empty() {
-                let sectors = node.j_dir_size.div_ceil(2048) as usize;
-                out.extend(std::iter::repeat(0u8).take(sectors * 2048));
+                let bytes = joliet_directory_bytes(&nodes, path, options);
+                let mut aligned = bytes;
+                aligned.resize(aligned.len().div_ceil(2048) * 2048, 0);
+                out.extend_from_slice(&aligned);
             }
         }
         for node in nodes.values() {
@@ -349,11 +385,31 @@ fn iso_date(unix: u64) -> [u8; 7] {
     ]
 }
 
-/// One directory record (34-byte header + name + pad).
-fn record_bytes(flags: u8, extent: u32, size: u32, options: &WriteOptions, name: &str) -> Vec<u8> {
+/// Serialized record length: 33 + name (+pad) + su (+pad), even.
+fn record_len(name_len: usize, su_len: usize) -> usize {
+    let mut l = 33 + name_len;
+    if name_len % 2 == 0 {
+        l += 1;
+    }
+    l += su_len;
+    if l % 2 != 0 {
+        l += 1;
+    }
+    l
+}
+
+/// One directory record (33-byte header + name + pad + system use).
+fn record_bytes(
+    flags: u8,
+    extent: u32,
+    size: u32,
+    options: &WriteOptions,
+    name: &[u8],
+    su: &[u8],
+) -> Vec<u8> {
     let date = iso_date(options.mtime);
     let name_len = name.len();
-    let mut rec = Vec::with_capacity(34 + name_len);
+    let mut rec = Vec::with_capacity(record_len(name_len, su.len()));
     rec.push(0); // length, fixed below
     rec.push(0); // extended attr length
     rec.extend_from_slice(&extent.to_le_bytes());
@@ -367,8 +423,12 @@ fn record_bytes(flags: u8, extent: u32, size: u32, options: &WriteOptions, name:
     rec.extend_from_slice(&1u16.to_le_bytes());
     rec.extend_from_slice(&1u16.to_be_bytes());
     rec.push(name_len as u8);
-    rec.extend_from_slice(name.as_bytes());
+    rec.extend_from_slice(name);
     if name_len % 2 == 0 {
+        rec.push(0);
+    }
+    rec.extend_from_slice(su);
+    if rec.len() % 2 != 0 {
         rec.push(0);
     }
     rec[0] = rec.len() as u8;
@@ -389,17 +449,38 @@ fn directory_bytes(nodes: &BTreeMap<String, Node>, path: &str, options: &WriteOp
         .map_or(own, |n| n.extent);
 
     let mut out = Vec::new();
-    out.extend_from_slice(&record_bytes(0x02, own, node.dir_size, options, "\x00"));
-    out.extend_from_slice(&record_bytes(0x02, parent, node.dir_size, options, "\x01"));
+    out.extend_from_slice(&record_bytes(
+        0x02,
+        own,
+        node.dir_size,
+        options,
+        b"\x00",
+        &dot_su(),
+    ));
+    out.extend_from_slice(&record_bytes(
+        0x02,
+        parent,
+        node.dir_size,
+        options,
+        b"\x01",
+        &[],
+    ));
     for child in &node.children {
         let cn = &nodes[child.as_str()];
+        let su = rr_area(
+            &cn.full_name,
+            cn.mode,
+            cn.is_dir,
+            cn.is_link.then_some(cn.link_target.as_str()),
+        );
         if cn.is_dir {
             out.extend_from_slice(&record_bytes(
                 0x02,
                 cn.extent,
                 cn.dir_size,
                 options,
-                &cn.iso_name,
+                cn.iso_name.as_bytes(),
+                &su,
             ));
         } else {
             out.extend_from_slice(&record_bytes(
@@ -407,7 +488,74 @@ fn directory_bytes(nodes: &BTreeMap<String, Node>, path: &str, options: &WriteOp
                 cn.extent,
                 cn.data.len() as u32,
                 options,
-                &cn.iso_name,
+                cn.iso_name.as_bytes(),
+                &su,
+            ));
+        }
+    }
+    out
+}
+
+/// Joliet directory extent bytes: UCS-2BE names, `j_extent` tree,
+/// same Rock Ridge system-use area as the primary tree.
+fn joliet_directory_bytes(
+    nodes: &BTreeMap<String, Node>,
+    path: &str,
+    options: &WriteOptions,
+) -> Vec<u8> {
+    let node = nodes.get(path).expect("dir");
+    let own = node.j_extent;
+    let parent_path = match path.rfind('/') {
+        Some(i) => path[..i].to_string(),
+        None => String::new(),
+    };
+    let parent = nodes
+        .get(&parent_path)
+        .filter(|n| n.j_extent != 0)
+        .map_or(own, |n| n.j_extent);
+
+    let mut out = Vec::new();
+    out.extend_from_slice(&record_bytes(
+        0x02,
+        own,
+        node.j_dir_size,
+        options,
+        b"\x00",
+        &dot_su(),
+    ));
+    out.extend_from_slice(&record_bytes(
+        0x02,
+        parent,
+        node.j_dir_size,
+        options,
+        b"\x01",
+        &[],
+    ));
+    for child in &node.children {
+        let cn = &nodes[child.as_str()];
+        let su = rr_area(
+            &cn.full_name,
+            cn.mode,
+            cn.is_dir,
+            cn.is_link.then_some(cn.link_target.as_str()),
+        );
+        if cn.is_dir {
+            out.extend_from_slice(&record_bytes(
+                0x02,
+                cn.j_extent,
+                cn.j_dir_size,
+                options,
+                &ucs2(&cn.full_name),
+                &su,
+            ));
+        } else {
+            out.extend_from_slice(&record_bytes(
+                0x00,
+                cn.extent,
+                cn.data.len() as u32,
+                options,
+                &ucs2(&cn.full_name),
+                &su,
             ));
         }
     }
@@ -416,7 +564,7 @@ fn directory_bytes(nodes: &BTreeMap<String, Node>, path: &str, options: &WriteOp
 
 /// Path table (root + every non-empty directory); `be` selects the
 /// big-endian (M) encoding.
-fn build_path_table(nodes: &BTreeMap<String, Node>, be: bool) -> Vec<u8> {
+fn build_path_table(nodes: &BTreeMap<String, Node>, be: bool, joliet: bool) -> Vec<u8> {
     let dirs: Vec<&String> = nodes
         .keys()
         .filter(|k| !k.is_empty())
@@ -459,11 +607,15 @@ fn build_path_table(nodes: &BTreeMap<String, Node>, be: bool) -> Vec<u8> {
             None => "",
         };
         let node = nodes.get(d.as_str()).expect("dir");
-        let name = &node.iso_name;
+        let name = if joliet {
+            ucs2(&node.full_name)
+        } else {
+            node.iso_name.as_bytes().to_vec()
+        };
         out.push(name.len() as u8);
-        out.extend_from_slice(&ext(node.extent));
+        out.extend_from_slice(&ext(if joliet { node.j_extent } else { node.extent }));
         out.extend_from_slice(&num16(number.get(parent).copied().unwrap_or(1)));
-        out.extend_from_slice(name.as_bytes());
+        out.extend_from_slice(&name);
         if name.len() % 2 != 0 {
             out.push(0);
         }
@@ -494,12 +646,12 @@ impl ArchiveWriter for IsoWriter {
 
     fn add_symlink(
         &mut self,
-        _entry: &NewEntry,
+        entry: &NewEntry,
         _options: &WriteOptions,
     ) -> Result<(), ArchiveError> {
-        Err(ArchiveError::UnsupportedFeature {
-            reason: "iso: symlinks need Rock Ridge; not supported by the level-1 writer".into(),
-        })
+        self.files
+            .insert(entry.name.clone(), (entry.clone(), Vec::new()));
+        Ok(())
     }
 
     fn finish(&mut self) -> Result<(), ArchiveError> {
@@ -512,7 +664,7 @@ impl ArchiveWriter for IsoWriter {
 mod tests {
     use super::*;
     use crate::reader::IsoReader;
-    use omnizip_archive_core::ArchiveReader;
+    use omnizip_archive_core::{ArchiveReader, EntryKind};
 
     fn build() -> Vec<u8> {
         let opts = WriteOptions::deterministic().with_mtime(1_700_000_000);
@@ -537,14 +689,61 @@ mod tests {
         assert_eq!(r.volume_identifier(), "TESTVOL");
         let entries = r.entries().unwrap();
         let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
-        assert_eq!(names, vec!["DOCS", "DOCS/README.TXT", "HELLO.DAT"]);
-        let readme = names.iter().position(|n| n.contains("README")).unwrap();
+        assert_eq!(names, vec!["docs", "docs/readme.txt", "hello.dat"]);
+        let readme = names.iter().position(|n| n.contains("readme")).unwrap();
         assert_eq!(
             r.read_entry(readme).unwrap(),
             b"iso round trip\n".repeat(40)
         );
-        let hello = names.iter().position(|n| *n == "HELLO.DAT").unwrap();
+        let hello = names.iter().position(|n| *n == "hello.dat").unwrap();
         assert_eq!(r.read_entry(hello).unwrap(), vec![0x42; 4096]);
+    }
+
+    #[test]
+    fn round_trip_rock_ridge_joliet() {
+        let opts = WriteOptions::deterministic().with_mtime(1_700_000_000);
+        let mut w = IsoWriter::new("MixedCaseVol");
+        let long_name = "a-very-long-mixed-case-name-0123456789.txt";
+        w.add_file(
+            &NewEntry::file(format!("Deep/Sub {long_name}"), &opts),
+            b"deep data".as_slice(),
+            &opts,
+        )
+        .unwrap();
+        let mut link_opts = WriteOptions::deterministic().with_mtime(1_700_000_000);
+        link_opts.file_mode = 0o755;
+        w.add_symlink(
+            &NewEntry::symlink(
+                "Deep/alias",
+                "../a-very-long-mixed-case-name-0123456789.txt",
+                &link_opts,
+            ),
+            &link_opts,
+        )
+        .unwrap();
+        let bytes = w.finish_bytes(&opts).unwrap();
+
+        let mut r = IsoReader::from_bytes(&bytes).unwrap();
+        assert_eq!(r.volume_identifier(), "MixedCaseVol");
+        let entries = r.entries().unwrap();
+        let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["Deep", &format!("Deep/Sub {long_name}"), "Deep/alias",]
+        );
+        let file_idx = names
+            .iter()
+            .position(|n| n.starts_with("Deep/Sub"))
+            .expect("file");
+        assert_eq!(r.read_entry(file_idx).unwrap(), b"deep data".to_vec());
+        assert_eq!(entries[file_idx].mode, Some(0o644), "PX mode from RR area");
+        let link_idx = names.iter().position(|n| *n == "Deep/alias").expect("link");
+        assert_eq!(
+            entries[link_idx].kind,
+            EntryKind::Symlink(format!("../{long_name}")),
+            "SL target recovered"
+        );
+        assert_eq!(entries[link_idx].mode, Some(0o755));
     }
 
     #[test]
@@ -583,7 +782,9 @@ fn susp_nm(name: &str) -> Vec<u8> {
     out
 }
 
-/// PX: mode, links, uid, gid, serial (RRIP 1.12 layout).
+/// PX: full st_mode (type + permission bits), links, uid, gid,
+/// serial (RRIP 1.12 layout). Consumers such as libarchive replace
+/// the mode wholesale, so the POSIX type bits must be present.
 fn susp_px(mode: u32) -> Vec<u8> {
     let mut p = Vec::with_capacity(32);
     p.extend_from_slice(&mode.to_le_bytes());
@@ -595,11 +796,29 @@ fn susp_px(mode: u32) -> Vec<u8> {
     susp(b"PX", &p)
 }
 
-/// SL: symlink target components (one data byte flags=CONTINUE per
-/// RRIP; we emit a single root-less component chain simply).
+/// SL: symlink target as RRIP components (flags byte, then
+/// per-component cflags + length + data; empty first component marks
+/// an absolute path).
 fn susp_sl(target: &str) -> Vec<u8> {
-    let mut p = vec![0u8]; // component flags: CONTINUE-less single piece
-    p.extend_from_slice(target.as_bytes());
+    let mut p = vec![0u8]; // SL flags: no CONTINUE
+    if target.starts_with('/') {
+        p.extend_from_slice(&[0u8, 0]); // root
+    }
+    let parts: Vec<&str> = target.split('/').filter(|s| !s.is_empty()).collect();
+    if parts.is_empty() {
+        p.extend_from_slice(&[0u8, 0]);
+    }
+    for part in parts {
+        match part {
+            "." => p.extend_from_slice(&[0x02, 0]),
+            ".." => p.extend_from_slice(&[0x04, 0]),
+            _ => {
+                p.push(0);
+                p.push(part.len().clamp(1, 250) as u8);
+                p.extend_from_slice(part.as_bytes());
+            }
+        }
+    }
     susp(b"SL", &p)
 }
 
@@ -608,11 +827,27 @@ fn susp_sp() -> Vec<u8> {
     susp(b"SP", &[0xBE, 0xEF, 0])
 }
 
+/// "."-record system use: SP followed by the RR marker, so SUSP
+/// consumers find a well-formed entry after SP (libarchive requires
+/// one; a lone pad byte there disables Rock Ridge entirely).
+fn dot_su() -> Vec<u8> {
+    let mut su = susp_sp();
+    su.extend_from_slice(&susp(b"RR", &[0]));
+    su
+}
+
 /// RR-area for a file/dir record: NM + PX (+ SL for links).
-fn rr_area(name: &str, mode: u32, link_target: Option<&str>) -> Vec<u8> {
+fn rr_area(name: &str, mode: u32, is_dir: bool, link_target: Option<&str>) -> Vec<u8> {
+    let type_bits = if link_target.is_some() {
+        0o120_000 // S_IFLNK
+    } else if is_dir {
+        0o040_000 // S_IFDIR
+    } else {
+        0o100_000 // S_IFREG
+    };
     let mut su = Vec::new();
     su.extend_from_slice(&susp_nm(name));
-    su.extend_from_slice(&susp_px(mode));
+    su.extend_from_slice(&susp_px(mode | type_bits));
     if let Some(t) = link_target {
         su.extend_from_slice(&susp_sl(t));
     }

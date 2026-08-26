@@ -166,10 +166,10 @@ impl ArchiveReader for IsoReader {
                 mode: r
                     .rock_ridge_mode()
                     .or(Some(if r.is_directory() { 0o755 } else { 0o644 })),
-                kind: if r.is_directory() {
-                    EntryKind::Directory
-                } else {
-                    EntryKind::Regular
+                kind: match r.rock_ridge_symlink() {
+                    Some(target) => EntryKind::Symlink(target),
+                    None if r.is_directory() => EntryKind::Directory,
+                    None => EntryKind::Regular,
                 },
                 uid: None,
                 gid: None,
