@@ -501,7 +501,7 @@ pub fn compress_with_quality(input: &[u8], quality: i32) -> Vec<u8> {
     // per-quality log.
     let hash_log = if let Ok(v) = std::env::var("BROTLI_HASH_LOG") {
         v.parse().unwrap_or(hash_log)
-    } else if (((q >= 4 && q < 10 && is_text_like(input)) || (q >= 4 && q < 8))
+    } else if (((q >= 2 && q < 10 && is_text_like(input)) || (q >= 2 && q < 8))
         && input.len() >= 1 << 20)
         || env_flag!("BROTLI_GREEDY_TIER")
     {
@@ -510,10 +510,9 @@ pub fn compress_with_quality(input: &[u8], quality: i32) -> Vec<u8> {
     } else {
         hash_log
     };
-    // Cross-chunk MF reuse for Q4+ (any content type). The optimal
-    // parser has a cost model that correctly evaluates cross-chunk
-    // distances, so this is safe for all data types.
-    if q >= 4 {
+    // Cross-chunk MF reuse for Q2+ (any content type). The parse
+    // dispatch inside the chunk body handles every quality.
+    if q >= 2 {
         // Shared MF path: one match finder over the full input.
         let mf_config = omnizip_codecs::HashChainConfig {
             dict_size: MAX_BACKWARD_DISTANCE,
@@ -529,7 +528,7 @@ pub fn compress_with_quality(input: &[u8], quality: i32) -> Vec<u8> {
         // bucket scans instead of prev[] chain walks, with the 16
         // short-code distance probes and BackwardReferenceScore
         // matching the reference hashers.
-        let mut shared_bank = if q >= 4
+        let mut shared_bank = if q >= 2
             && q < 10
             && !env_flag!("BROTLI_NO_BANK")
             && !env_flag!("BROTLI_NO_TEXT_BANK")
@@ -6635,10 +6634,15 @@ fn parse_input_with_offset_impl(
     // 644,612B/3.4s vs zopfli 859,006/16.8s vs ref 1,058,795), while
     // below ~1 MiB the DP's global pricing wins (100KB: +12%).
     // BROTLI_GREEDY_TIER forces on, BROTLI_NO_GREEDY_TIER forces off.
-    let greedy_tier = quality >= 4
+    // q2-9 span. The >= 1 MiB bar applies to the WHOLE input, not
+    // per chunk: continuation chunks (mlen_offset > 0) of a large
+    // input stay on the greedy walk (a DP-parsed tail chunk measured
+    // +50 KB on 2 MiB CSV q2), while genuinely small standalone
+    // inputs keep the DP's global pricing (100KB: DP wins +12%).
+    let greedy_tier = quality >= 2
         && quality < 10
         && !env_flag!("BROTLI_NO_GREEDY_TIER")
-        && (env_flag!("BROTLI_GREEDY_TIER") || input.len() >= 1 << 20);
+        && (env_flag!("BROTLI_GREEDY_TIER") || mlen_offset > 0 || input.len() >= (1 << 20) - 1);
     let use_dict = if greedy_tier && env_flag!("BROTLI_GREEDY_NODICT") {
         false
     } else {
