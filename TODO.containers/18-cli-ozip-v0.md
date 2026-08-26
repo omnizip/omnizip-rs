@@ -38,7 +38,7 @@ exit codes matching xz(1)/zstd(1) conventions.
 
 ## Acceptance
 
-- [ ] Round-trip every codec; `ozip xz -6 f` decodable by `xz -d` and vice versa
+- [x] Round-trip every codec; `ozip xz -6 f` decodable by `xz -d` and vice versa
 - [ ] `--help` docs every codec + level range from the registry
 - [ ] Release pipeline produces signed-tagged binaries; binstall works
-- [ ] This is also the website's install story (`brew install omnizip/tap/ozip`)
+- [x] This is also the website's install story (`brew install omnizip/tap/ozip`)

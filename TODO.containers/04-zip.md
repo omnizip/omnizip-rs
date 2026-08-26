@@ -22,7 +22,7 @@ data descriptors, UTF-8 names. Encryption is a separate task
 
 ## Acceptance
 
-- [ ] Round-trips the Ruby ZIP fixture corpus byte-correctly
-- [ ] `unzip -t` clean + `unzip` byte-exact on outputs; `zip -9` inputs decode
-- [ ] ZIP64 exercised at >4 GiB and >65,535 entries
-- [ ] Deterministic archives per [17](17-determinism-normalization.md)
+- [x] Round-trips the Ruby ZIP fixture corpus byte-correctly
+- [x] `unzip -t` clean + `unzip` byte-exact on outputs; `zip -9` inputs decode
+- [x] ZIP64 exercised at >4 GiB and >65,535 entries
+- [x] Deterministic archives per [17](17-determinism-normalization.md)
