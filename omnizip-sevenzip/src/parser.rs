@@ -310,8 +310,9 @@ impl<'a> HeaderParser<'a> {
         } else {
             for (fi, folder) in info.folders.iter().enumerate() {
                 if info.num_unpack_streams_in_folders[fi] == 1 {
-                    let size = folder.unpack_sizes.iter().sum();
-                    info.unpack_sizes.push(size);
+                    // The main output stream, not the sum over every
+                    // coder in the chain (AES out + method out).
+                    info.unpack_sizes.push(folder.uncompressed_size());
                 }
             }
         }
@@ -368,7 +369,12 @@ impl<'a> HeaderParser<'a> {
                         .collect();
                     let bits = self.bit_vector(empties.len())?;
                     for (i, bit) in empties.into_iter().zip(bits) {
-                        entries[i].is_empty = bit == 0;
+                        // Set bit: empty file; clear bit: directory
+                        // (7zIn.cpp `isDir = !emptyFiles[i]`).
+                        entries[i].is_empty = bit != 0;
+                        if bit != 0 {
+                            entries[i].is_dir = false;
+                        }
                     }
                 }
                 property::ANTI => {
@@ -388,7 +394,7 @@ impl<'a> HeaderParser<'a> {
                 property::CTIME | property::ATIME => self.timestamps(&mut entries)?,
                 property::WIN_ATTRIB => {
                     let _size = self.number()?;
-                    let defined = self.bit_vector(num_files)?;
+                    let defined = self.digest_defined_vector(num_files)?;
                     let external = self.byte()?;
                     if external == 0 {
                         for (entry, d) in entries.iter_mut().zip(defined) {
@@ -434,7 +440,9 @@ impl<'a> HeaderParser<'a> {
 
     fn timestamps(&mut self, entries: &mut [FileEntry]) -> Result<(), ArchiveError> {
         let _size = self.number()?;
-        let defined = self.bit_vector(entries.len())?;
+        // kMTime/kCTime/kATime use the all-defined marker before the
+        // values (`ReadUInt64DefVector` → ReadBoolVector2).
+        let defined = self.digest_defined_vector(entries.len())?;
         let external = self.byte()?;
         if external == 0 {
             for (entry, d) in entries.iter_mut().zip(defined) {
@@ -516,8 +524,7 @@ pub fn streams_info(p: &mut HeaderParser) -> Result<StreamInfo, ArchiveError> {
     if info.num_unpack_streams_in_folders.is_empty() {
         info.num_unpack_streams_in_folders = vec![1; info.folders.len()];
         for folder in &info.folders {
-            let size = folder.unpack_sizes.iter().sum();
-            info.unpack_sizes.push(size);
+            info.unpack_sizes.push(folder.uncompressed_size());
         }
     }
     Ok(info)

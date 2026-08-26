@@ -258,16 +258,22 @@ fn walk_dir(
 }
 
 /// `ozip c ARCHIVE INPUTS...` — create a deterministic archive.
+/// `-p` (encryption) and `--volume` (multi-volume split) apply to 7z.
 pub fn create(
     archive: &Path,
     inputs: &[PathBuf],
     format: Option<&str>,
     level: Option<u8>,
+    password: Option<&str>,
+    volume: Option<usize>,
 ) -> Result<(), String> {
     if inputs.is_empty() {
         return Err("create needs at least one input file or directory".into());
     }
     let output = infer_output(archive, format)?;
+    if (password.is_some() || volume.is_some()) && !matches!(output, OutputFormat::SevenZip) {
+        return Err("-p/--volume are only supported for 7z output".into());
+    }
     let level = level.unwrap_or(6);
     let options = WriteOptions::deterministic();
     let staged = stage(inputs, &options)?;
@@ -326,10 +332,27 @@ pub fn create(
             w.finish_bytes().map_err(|e| e.to_string())?
         }
         OutputFormat::SevenZip => {
-            let mut w = omnizip_sevenzip::writer::SevenZipWriter::new(
-                omnizip_sevenzip::writer::SevenZipMethod::Deflate,
-            );
+            // Solid by default; level 0 stores, everything else LZMA2.
+            let method = if level == 0 {
+                omnizip_sevenzip::writer::SevenZipMethod::Copy
+            } else {
+                omnizip_sevenzip::writer::SevenZipMethod::Lzma2
+            };
+            let mut w = omnizip_sevenzip::writer::SevenZipWriter::new(method).with_solid(true);
+            if let Some(pw) = password {
+                w = w.with_password(pw);
+            }
             write_all(&mut w, &staged, &options)?;
+            if let Some(volume_size) = volume {
+                let parts = w
+                    .finish_volumes(&options, volume_size)
+                    .map_err(|e| e.to_string())?;
+                for (i, part) in parts.iter().enumerate() {
+                    let name = format!("{}.{:03}", archive.display(), i + 1);
+                    std::fs::write(&name, part).map_err(|e| format!("{name}: {e}"))?;
+                }
+                return Ok(());
+            }
             w.finish_bytes(&options).map_err(|e| e.to_string())?
         }
         OutputFormat::Rpm => {
@@ -440,12 +463,29 @@ impl Opened {
     }
 }
 
-fn open_archive(archive: &Path) -> Result<Opened, String> {
+fn open_archive(archive: &Path, password: Option<&str>) -> Result<Opened, String> {
+    let name = archive
+        .file_name()
+        .map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+    if name.len() > 4 && name.ends_with(".001") {
+        // Multi-volume split: concatenate .001/.002/... parts in order.
+        let base = name[..name.len() - 3].to_string();
+        let dir = archive.parent().unwrap_or_else(|| Path::new("."));
+        let mut data = std::fs::read(archive).map_err(|e| format!("{}: {e}", archive.display()))?;
+        for part in 2.. {
+            let path = dir.join(format!("{base}{part:03}"));
+            let Ok(bytes) = std::fs::read(&path) else {
+                break;
+            };
+            data.extend_from_slice(&bytes);
+        }
+        return open_bytes(&data, password);
+    }
     let data = std::fs::read(archive).map_err(|e| format!("{}: {e}", archive.display()))?;
-    open_bytes(&data)
+    open_bytes(&data, password)
 }
 
-fn open_bytes(data: &[u8]) -> Result<Opened, String> {
+fn open_bytes(data: &[u8], password: Option<&str>) -> Result<Opened, String> {
     match detect_format(data) {
         FormatKind::Tar => omnizip_tar::TarReader::from_bytes(data)
             .map(|r| Opened::Tar(Box::new(r)))
@@ -456,9 +496,11 @@ fn open_bytes(data: &[u8]) -> Result<Opened, String> {
         FormatKind::Cpio => omnizip_cpio::CpioReader::from_bytes(data)
             .map(|r| Opened::Cpio(Box::new(r)))
             .map_err(|e| e.to_string()),
-        FormatKind::SevenZip => omnizip_sevenzip::reader::SevenZipReader::from_bytes(data)
-            .map(|r| Opened::SevenZip(Box::new(r)))
-            .map_err(|e| e.to_string()),
+        FormatKind::SevenZip => {
+            omnizip_sevenzip::reader::SevenZipReader::from_bytes_with_password(data, password)
+                .map(|r| Opened::SevenZip(Box::new(r)))
+                .map_err(|e| e.to_string())
+        }
         FormatKind::Rar5 => omnizip_rar::rar5::Rar5Reader::from_bytes(data)
             .map(|r| Opened::Rar5(Box::new(r)))
             .map_err(|e| e.to_string()),
@@ -483,7 +525,7 @@ fn open_bytes(data: &[u8]) -> Result<Opened, String> {
         FormatKind::Gzip => {
             let inner = omnizip_archive_core::formats::gzip::decompress(data)
                 .map_err(|e| format!("gzip: {e}"))?;
-            match open_bytes(&inner)? {
+            match open_bytes(&inner, None)? {
                 opened @ Opened::Tar(_) => Ok(opened),
                 _ => Err("gzip payload is not a tar archive".into()),
             }
@@ -491,14 +533,14 @@ fn open_bytes(data: &[u8]) -> Result<Opened, String> {
         FormatKind::Bzip2 => {
             let inner = omnizip_archive_core::formats::bzip2_file::decompress(data)
                 .map_err(|e| format!("bzip2: {e}"))?;
-            match open_bytes(&inner)? {
+            match open_bytes(&inner, None)? {
                 opened @ Opened::Tar(_) => Ok(opened),
                 _ => Err("bzip2 payload is not a tar archive".into()),
             }
         }
         FormatKind::Xz => {
             let inner = omnizip_lzma::xz_decompress(data).map_err(|e| format!("xz: {e}"))?;
-            match open_bytes(&inner)? {
+            match open_bytes(&inner, None)? {
                 opened @ Opened::Tar(_) => Ok(opened),
                 _ => Err("xz payload is not a tar archive".into()),
             }
@@ -506,7 +548,7 @@ fn open_bytes(data: &[u8]) -> Result<Opened, String> {
         FormatKind::Zstd => {
             let inner =
                 omnizip_zstd::decompress(data, u32::MAX).map_err(|e| format!("zstd: {e}"))?;
-            match open_bytes(&inner)? {
+            match open_bytes(&inner, None)? {
                 opened @ Opened::Tar(_) => Ok(opened),
                 _ => Err("zstd payload is not a tar archive".into()),
             }
@@ -534,16 +576,20 @@ fn open_bytes(data: &[u8]) -> Result<Opened, String> {
 }
 
 /// `ozip x ARCHIVE [-C DIR]` — extract under DIR (default `.`).
-pub fn extract(archive: &Path, out_dir: Option<&Path>) -> Result<(), String> {
-    let mut opened = open_archive(archive)?;
+pub fn extract(
+    archive: &Path,
+    out_dir: Option<&Path>,
+    password: Option<&str>,
+) -> Result<(), String> {
+    let mut opened = open_archive(archive, password)?;
     let dir = out_dir.unwrap_or_else(|| Path::new("."));
     std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     opened.extract_to(dir)
 }
 
 /// `ozip t` / `ozip l` — short and long listings.
-pub fn list(archive: &Path, long: bool) -> Result<(), String> {
-    let mut opened = open_archive(archive)?;
+pub fn list(archive: &Path, long: bool, password: Option<&str>) -> Result<(), String> {
+    let mut opened = open_archive(archive, password)?;
     let entries = opened.entries()?;
     for entry in &entries {
         if long {
