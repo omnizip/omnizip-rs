@@ -766,7 +766,7 @@ fn insert_range(ms: &mut MatchState, src: &[u8], start: usize, len: usize) {
 
 /// Rotate the repeat offset array when a new offset is used.
 /// The new offset becomes rep[0], the old rep[0] becomes rep[1], etc.
-fn rotate_reps(reps: &mut [u32; REP_NUM], new_offset: u32) {
+pub(crate) fn rotate_reps(reps: &mut [u32; REP_NUM], new_offset: u32) {
     if reps[0] == new_offset {
         // Same as rep[0] — no rotation needed.
     } else if reps[1] == new_offset {

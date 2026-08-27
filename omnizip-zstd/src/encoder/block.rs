@@ -201,6 +201,24 @@ fn encode_frame_into(
         match_state.disable_chain();
     }
 
+    // The optimal parser (btopt/btultra/btultra2) uses its own
+    // binary-tree state and does not consume LDM sequences; the tree
+    // window already covers everything the windowLog allows.
+    let uses_opt = matches!(
+        params.strategy,
+        crate::encoder::cparams::Strategy::Btopt
+            | crate::encoder::cparams::Strategy::Btultra
+            | crate::encoder::cparams::Strategy::Btultra2
+    );
+    let ldm_enabled = ldm_enabled && !uses_opt;
+    let mut opt_state = uses_opt.then(|| {
+        let opt_level = match params.strategy {
+            crate::encoder::cparams::Strategy::Btopt => 0,
+            _ => 2,
+        };
+        crate::encoder::opt::OptState::new(params, plaintext.len(), opt_level)
+    });
+
     // Cross-block matching for ALL non-LDM strategies: use absolute
     // positions with `_with_prefix` match finders. The hash table
     // persists across blocks, enabling matches up to 128 KiB back
@@ -281,6 +299,7 @@ fn encode_frame_into(
                     &mut rep_offsets,
                     params,
                     &mut last_huf_weights,
+                    &mut opt_state,
                 )?;
                 sub = sub_end;
             }
@@ -363,6 +382,19 @@ pub fn encode_frame_with_dict(
     let mut out = Vec::with_capacity(plaintext.len() / 2 + 64);
     let mut match_state = MatchState::new(params.hash_log);
 
+    let uses_opt = matches!(
+        params.strategy,
+        Strategy::Btopt | Strategy::Btultra | Strategy::Btultra2
+    );
+    let mut opt_state = uses_opt.then(|| {
+        let opt_level = if params.strategy == Strategy::Btopt {
+            0
+        } else {
+            2
+        };
+        crate::encoder::opt::OptState::new(&params, virtual_stream.len(), opt_level)
+    });
+
     // Seed the hash table with dictionary positions.
     if prefix_len >= 4 {
         match_state.seed_prefix(&virtual_stream, prefix_len);
@@ -415,6 +447,19 @@ pub fn encode_frame_with_dict(
                         &mut seq_store,
                         &mut match_state,
                         min_match,
+                    );
+                }
+                crate::encoder::cparams::Strategy::Btopt
+                | crate::encoder::cparams::Strategy::Btultra
+                | crate::encoder::cparams::Strategy::Btultra2 => {
+                    let st = opt_state
+                        .as_mut()
+                        .expect("opt state exists for opt strategies");
+                    crate::encoder::opt::compress_block_opt_with_prefix(
+                        &virtual_stream[..offset + chunk_size],
+                        offset,
+                        &mut seq_store,
+                        st,
                     );
                 }
                 _ => {
@@ -732,6 +777,7 @@ fn write_block_cross(
     rep_offsets: &mut [u32; 3],
     params: &crate::encoder::cparams::CompressionParams,
     last_huf_weights: &mut Option<Vec<u8>>,
+    opt_state: &mut Option<crate::encoder::opt::OptState>,
 ) -> Result<(), ZstdError> {
     let initial_reps = *rep_offsets;
     let chunk = &plaintext[block_start..block_end];
@@ -752,11 +798,18 @@ fn write_block_cross(
         Strategy::Lazy => {
             compress_block_lazy_with_prefix(src, block_start, &mut seq_store, ms, min_match);
         }
-        Strategy::Lazy2
-        | Strategy::Btlazy2
-        | Strategy::Btopt
-        | Strategy::Btultra
-        | Strategy::Btultra2 => {
+        Strategy::Btopt | Strategy::Btultra | Strategy::Btultra2 => {
+            let st = opt_state
+                .as_mut()
+                .expect("opt state exists for opt strategies");
+            crate::encoder::opt::compress_block_opt_with_prefix(
+                src,
+                block_start,
+                &mut seq_store,
+                st,
+            );
+        }
+        Strategy::Lazy2 | Strategy::Btlazy2 => {
             compress_block_lazy2_with_prefix(src, block_start, &mut seq_store, ms, min_match);
         }
         _ => {

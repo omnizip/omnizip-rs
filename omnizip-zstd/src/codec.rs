@@ -145,4 +145,46 @@ mod tests {
             .expect("decode");
         assert_eq!(decompressed, input);
     }
+
+    /// omnizip issue #315 residual (BUGREPORT-zstd-315-residual.md): the
+    /// 163-byte mixed text+binary input whose frame (identical 172 B at
+    /// levels 1/3/5/9) our own decoder mis-reconstructed at 0.16.78.
+    /// Fixed by the 0.16.87-0.16.96 sequence/literal section rewrites;
+    /// pinned so the few-sequences/small-block edge can't regress.
+    #[test]
+    fn issue_315_blob_round_trips_all_levels() {
+        const B64: &str = "LwjOGAEAAAAEpQAAAGR1cGxpY2F0ZSBpbmxpbmUgY29udGVuaGUgc2FtZSAyMDAtaXNoIGJ5dGVzIGluIHRocmVlIGZpbGVzLCBzbyB0aGUgd3JpdGVyJ2VzIG9uIGV2ZXJ5IHJlYWxpc3RpYyB0cmVlLiBQYWQAAAAF6UCBLwjOAQAAAADSf+9PzA2Fv8RqcmiN5Gtx/fn2pu5LCCNiKcneAQ==";
+        fn b64(s: &str) -> Vec<u8> {
+            let s: Vec<u8> = s.bytes().filter(|b| !b.is_ascii_whitespace()).collect();
+            let (mut out, mut acc, mut nbits) = (Vec::with_capacity(s.len() / 4 * 3), 0u32, 0);
+            for b in s {
+                if b == b'=' {
+                    break;
+                }
+                let v = match b {
+                    b'A'..=b'Z' => b - b'A',
+                    b'a'..=b'z' => b - b'a' + 26,
+                    b'0'..=b'9' => b - b'0' + 52,
+                    b'+' => 62,
+                    b'/' => 63,
+                    _ => panic!("bad b64"),
+                } as u32;
+                acc = (acc << 6) | v;
+                nbits += 6;
+                if nbits >= 8 {
+                    nbits -= 8;
+                    out.push(((acc >> nbits) & 0xFF) as u8);
+                }
+            }
+            out
+        }
+        let raw = b64(B64);
+        assert_eq!(raw.len(), 163);
+        let codec = ZstdCodec::new();
+        for lv in [1u8, 3, 5, 9, 19] {
+            let c = codec.compress(&raw, CompressionLevel::new(lv)).unwrap();
+            let out = codec.decompress(&c, raw.len() as u32).unwrap();
+            assert_eq!(out, raw, "round trip failed at level {}", lv);
+        }
+    }
 }
