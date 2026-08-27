@@ -1014,11 +1014,15 @@ fn emit_metablock_from_commands(
     // Below q10 the literal-tree assignment is the decided static map
     // (block-INdependent trees): literal block splits then only pay
     // switch-code overhead — a single literal block is both smaller
-    // and faster. BROTLI_FORCE_LIT_SPLIT overrides.
+    // and faster. BROTLI_FORCE_LIT_SPLIT overrides; the q10/11 parse
+    // contest sets the thread-local override to measure BOTH
+    // assignments per candidate (either can win depending on the
+    // corpus: the decided map wins on real CSV, the splitter wins by
+    // ~25% of literal bits on strongly periodic text).
     let decided_early: Option<(usize, Vec<u8>)> = if quality >= 5
         && use_context
         && is_text_like(input)
-        && !env_flag!("BROTLI_FORCE_LIT_SPLIT")
+        && !lit_split_forced_now()
     {
         decide_literal_contexts(input, quality, mlen_offset + input.len())
     } else {
@@ -4787,6 +4791,26 @@ fn zopfli_parse_ext(
 /// Header bits for ISLAST and MLEN are constant across candidates, so
 /// the comparison is unaffected by the is_last/ctx_in approximations.
 #[allow(clippy::type_complexity)]
+thread_local! {
+    /// Transient literal-assignment override for the q10/11 contest:
+    /// Some(true) forces the splitter (decided map off), None follows
+    /// the env/default. Only set around emission measurements.
+    static LIT_SPLIT_OVERRIDE: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+}
+
+fn lit_split_forced_now() -> bool {
+    LIT_SPLIT_OVERRIDE
+        .with(|c| c.get())
+        .unwrap_or_else(|| env_flag!("BROTLI_FORCE_LIT_SPLIT"))
+}
+
+fn with_lit_split_override<T>(forced: bool, f: impl FnOnce() -> T) -> T {
+    LIT_SPLIT_OVERRIDE.with(|c| c.set(Some(forced)));
+    let out = f();
+    LIT_SPLIT_OVERRIDE.with(|c| c.set(None));
+    out
+}
+
 fn measure_emission_bits(
     commands: &[Command],
     input: &[u8],
@@ -6699,13 +6723,27 @@ fn parse_input_with_offset_impl(
             &num_matches,
             &matches,
         );
-        let (hq_bits, hq_bw) =
-            measure_emission_bits(&hq, input, mlen_offset, quality, is_last, ctx_in);
-        let (bt_bits, bt_bw) =
-            measure_emission_bits(&bt, input, mlen_offset, quality, is_last, ctx_in);
+        // Literal-assignment contest (q10/11): the decided static map
+        // and the reference splitter trade wins by corpus, so each
+        // parse candidate is measured under BOTH and the smallest
+        // metablock ships.
+        let (hq_bits, hq_bw, hq_split) = {
+            let a = measure_emission_bits(&hq, input, mlen_offset, quality, is_last, ctx_in);
+            let b = with_lit_split_override(true, || {
+                measure_emission_bits(&hq, input, mlen_offset, quality, is_last, ctx_in)
+            });
+            if b.0 < a.0 { (b.0, b.1, true) } else { (a.0, a.1, false) }
+        };
+        let (bt_bits, bt_bw, bt_split) = {
+            let a = measure_emission_bits(&bt, input, mlen_offset, quality, is_last, ctx_in);
+            let b = with_lit_split_override(true, || {
+                measure_emission_bits(&bt, input, mlen_offset, quality, is_last, ctx_in)
+            });
+            if b.0 < a.0 { (b.0, b.1, true) } else { (a.0, a.1, false) }
+        };
         if env_flag!("BROTLI_BTOPT_DUMP") {
             eprintln!(
-                "BTOPT chunk@{mlen_offset} n={n} hq={hq_bits} bt={bt_bits} winner={}",
+                "BTOPT chunk@{mlen_offset} n={n} hq={hq_bits}(split={hq_split}) bt={bt_bits}(split={bt_split}) winner={}",
                 if bt_bits < hq_bits { "BT" } else { "HQ" }
             );
         }
