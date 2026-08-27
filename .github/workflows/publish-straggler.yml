@@ -1,0 +1,49 @@
+# One-off publisher for crates that release-plz cannot order.
+#
+# release-plz's publish order only follows REGULAR dependencies; cargo
+# publish still verifies dev-dependencies against the registry, so a
+# crate with a dev-dep on a not-yet-published workspace member fails
+# its packaging step (omnizip-filters dev-depends on omnizip-lz4).
+# Publishing the dev-dep target first via this workflow, then re-run
+# the Release workflow, completes the wave idempotently.
+#
+# Auth is crates.io trusted publishing (OIDC) — no registry token.
+
+name: Publish straggler
+
+permissions:
+  contents: read
+
+on:
+  workflow_dispatch:
+    inputs:
+      crate:
+        description: "Crate to publish (e.g. omnizip-lz4)"
+        required: true
+        type: string
+
+jobs:
+  publish:
+    name: Publish ${{ inputs.crate }}
+    runs-on: ubuntu-latest
+    # Must match the crates.io trusted-publisher bindings:
+    # (omnizip/omnizip-rs, workflow release.yml, environment crates-io)
+    # — this workflow is covered by the wildcard binding configured
+    # alongside them (repository-level, any workflow, crates-io env).
+    environment: crates-io
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: crates.io login (OIDC)
+        id: login
+        uses: rust-lang/crates-io-auth-action@v1
+
+      - name: cargo publish
+        run: cargo publish -p "${{ inputs.crate }}" --token "${{ steps.login.outputs.token }}"
