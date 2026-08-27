@@ -2,7 +2,10 @@
 # https://release-plz.dev/docs/config
 
 [workspace]
-# release-plz handles versioning + publishing for the whole workspace.
+# release-plz handles versioning + git tags for the whole workspace.
+# Publishing is done ONLY via trusted publishing (OIDC) in the
+# `publish` job of release.yml — never with a registry token here.
+publish = false
 git_release_enable = false
 dependencies_update = true
 allow_dirty = false
