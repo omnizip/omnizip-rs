@@ -6,6 +6,10 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Unified single-file compressor/decompressor CLI for the omnizip pure-Rust codecs (xz, zstd, gzip, bzip2, lzip, lzma-alone)"
+# The CLI is distributed from the repository, not crates.io: it
+# path-depends on the unpublished container crates (archive-core etc.),
+# which cannot appear in a published manifest.
+publish = false
 
 [[bin]]
 name = "ozip"
