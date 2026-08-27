@@ -29,19 +29,19 @@ omnizip-cpio = { path = "../omnizip-cpio" }
 omnizip-zip = { path = "../omnizip-zip" }
 omnizip-tar = { path = "../omnizip-tar" }
 omnizip-archive-core = { path = "../omnizip-archive-core" }
-omnizip-codecs = { path = "../omnizip-codecs", version = "0.21.7" }
-omnizip-lzma = { path = "../omnizip-lzma", version = "0.21.7" }
-omnizip-zstd = { path = "../omnizip-zstd", version = "0.21.7" }
-omnizip-snappy = { path = "../omnizip-snappy", version = "0.21.7" }
-omnizip-lz4 = { path = "../omnizip-lz4", version = "0.21.7" }
-omnizip-deflate = { path = "../omnizip-deflate", version = "0.21.7" }
-omnizip-deflate64 = { path = "../omnizip-deflate64", version = "0.21.7" }
-omnizip-brotli = { path = "../omnizip-brotli", version = "0.21.7" }
-omnizip-bzip2 = { path = "../omnizip-bzip2", version = "0.21.7" }
-omnizip-ppmd = { path = "../omnizip-ppmd", version = "0.21.7" }
-omnizip-zpaq = { path = "../omnizip-zpaq", version = "0.21.7" }
-omnizip-glza = { path = "../omnizip-glza", version = "0.21.7" }
-omnizip-flac = { path = "../omnizip-flac", version = "0.21.7" }
+omnizip-codecs = { path = "../omnizip-codecs", version = "0.21.8" }
+omnizip-lzma = { path = "../omnizip-lzma", version = "0.21.8" }
+omnizip-zstd = { path = "../omnizip-zstd", version = "0.21.8" }
+omnizip-snappy = { path = "../omnizip-snappy", version = "0.21.8" }
+omnizip-lz4 = { path = "../omnizip-lz4", version = "0.21.8" }
+omnizip-deflate = { path = "../omnizip-deflate", version = "0.21.8" }
+omnizip-deflate64 = { path = "../omnizip-deflate64", version = "0.21.8" }
+omnizip-brotli = { path = "../omnizip-brotli", version = "0.21.8" }
+omnizip-bzip2 = { path = "../omnizip-bzip2", version = "0.21.8" }
+omnizip-ppmd = { path = "../omnizip-ppmd", version = "0.21.8" }
+omnizip-zpaq = { path = "../omnizip-zpaq", version = "0.21.8" }
+omnizip-glza = { path = "../omnizip-glza", version = "0.21.8" }
+omnizip-flac = { path = "../omnizip-flac", version = "0.21.8" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 clap = { version = "4.5", features = ["derive"] }
