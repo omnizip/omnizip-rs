@@ -324,6 +324,13 @@ fn splice_encrypted_headers(data: &[u8], password: &[u8]) -> Result<Vec<u8>, Arc
         if size < 7 {
             return Err(ArchiveError::InvalidArchive("rar4: bad block size".into()));
         }
+        if pos + size > data.len() {
+            // Truncated tail: a later block header was really file data
+            // (no END block) or the archive is cut short. Pass through
+            // so the regular parser reports the truncation — never
+            // panic on a bad declared size.
+            break;
+        }
         out.extend_from_slice(&data[pos..pos + size]);
         pos += size;
         if kind == rar4_block::ARCHIVE {
@@ -538,12 +545,25 @@ impl Rar4Reader {
         while self.consumed <= index {
             let i = self.consumed;
             let out = if self.entries[i].is_dir {
-                Vec::new()
+                Some(Vec::new())
             } else {
-                self.decode_entry(i)?
+                match self.decode_entry(i) {
+                    Ok(out) => Some(out),
+                    Err(err) if i == index => return Err(err),
+                    // A failing member before the requested one must not
+                    // lock out later entries (libarchive's partially
+                    // encrypted fixture keeps its plaintext file
+                    // readable). Non-solid entries reset all unpacker
+                    // state themselves; a solid continuation past a
+                    // failure cannot be reconstructed anyway and fails
+                    // its own CRC check. The failure is not cached so a
+                    // direct later read of that entry re-runs and
+                    // reports the real error.
+                    Err(_) => None,
+                }
             };
             self.consumed = i + 1;
-            self.cached = Some((i, out.clone()));
+            self.cached = out.map(|o| (i, o));
         }
         Ok(self
             .cached
