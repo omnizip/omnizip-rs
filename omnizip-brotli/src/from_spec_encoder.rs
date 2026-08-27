@@ -544,14 +544,17 @@ pub fn compress_with_quality(input: &[u8], quality: i32) -> Vec<u8> {
             let (block_bits, dists) = if let Some(b) = env_block {
                 (b as u32, 4u32)
             } else if is_text_like(input) {
-                let b = if q >= 9 { 8 } else { (q - 1).min(9) };
-                let d = if q < 7 {
-                    4
-                } else if q < 9 {
-                    10
-                } else {
-                    16
-                };
+                // q8-9 hold the q7 shape: the candidate inflation that
+                // was q8+ defaults (block 7-8, dists 10/16, hash5)
+                // measurably REGRESSES the rep-chain-driven parse
+                // (271-292K class vs 214-220K) — every extra
+                // explicit-distance candidate seduces the greedy walk
+                // off the periodic structure's rep continuations.
+                let b = if q >= 6 { 5 } else { (q - 1).min(9) };
+                let d = std::env::var("BROTLI_DISTS")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(4);
                 (b as u32, d)
             } else {
                 // Binary: a 2-slot bank. Measured on FITS 4MB q5, the
@@ -598,14 +601,12 @@ pub fn compress_with_quality(input: &[u8], quality: i32) -> Vec<u8> {
             let hash5 = match std::env::var("BROTLI_HASH5").as_deref() {
                 Ok("0") | Ok("false") => false,
                 Ok("1") | Ok("true") => true,
-                // q8+ only: the 5-byte secondary hash REGRESSES the
-                // rep-ring-driven parse at q5-7 (measured on 2 MiB CSV:
-                // q5 210,167 without vs 271,893 with — a hash5 hit at a
-                // random distance wins scoring, pays an explicit
-                // distance code, and breaks the periodic structure's
-                // rep chains) while it pays at q8-9 (dists 10/16,
-                // offset probes live: 280,657 vs 297,755).
-                _ => is_text && n >= 1 << 20 && q >= 8,
+                // Text default OFF at every quality: with the q7-shape
+                // bank (block 6, dists 4) hash5 regresses q8 217,019 ->
+                // 274,515 (2 MiB CSV) — same explicit-distance
+                // candidate-displacement mechanism as the old q5-7
+                // cliff. Environments still force it for experiments.
+                _ => false,
             };
             if hash5 {
                 bank.enable_hash5();
