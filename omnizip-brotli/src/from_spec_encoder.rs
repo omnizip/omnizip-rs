@@ -1019,15 +1019,12 @@ fn emit_metablock_from_commands(
     // assignments per candidate (either can win depending on the
     // corpus: the decided map wins on real CSV, the splitter wins by
     // ~25% of literal bits on strongly periodic text).
-    let decided_early: Option<(usize, Vec<u8>)> = if quality >= 5
-        && use_context
-        && is_text_like(input)
-        && !lit_split_forced_now()
-    {
-        decide_literal_contexts(input, quality, mlen_offset + input.len())
-    } else {
-        None
-    };
+    let decided_early: Option<(usize, Vec<u8>)> =
+        if quality >= 5 && use_context && is_text_like(input) && !lit_split_forced_now() {
+            decide_literal_contexts(input, quality, mlen_offset + input.len())
+        } else {
+            None
+        };
     let lit_split_on = quality >= 4
         && stream.literals.len() >= 4096
         && use_context
@@ -6732,14 +6729,22 @@ fn parse_input_with_offset_impl(
             let b = with_lit_split_override(true, || {
                 measure_emission_bits(&hq, input, mlen_offset, quality, is_last, ctx_in)
             });
-            if b.0 < a.0 { (b.0, b.1, true) } else { (a.0, a.1, false) }
+            if b.0 < a.0 {
+                (b.0, b.1, true)
+            } else {
+                (a.0, a.1, false)
+            }
         };
         let (bt_bits, bt_bw, bt_split) = {
             let a = measure_emission_bits(&bt, input, mlen_offset, quality, is_last, ctx_in);
             let b = with_lit_split_override(true, || {
                 measure_emission_bits(&bt, input, mlen_offset, quality, is_last, ctx_in)
             });
-            if b.0 < a.0 { (b.0, b.1, true) } else { (a.0, a.1, false) }
+            if b.0 < a.0 {
+                (b.0, b.1, true)
+            } else {
+                (a.0, a.1, false)
+            }
         };
         if env_flag!("BROTLI_BTOPT_DUMP") {
             eprintln!(
