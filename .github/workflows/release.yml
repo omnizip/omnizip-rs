@@ -23,6 +23,13 @@ jobs:
   release-plz:
     name: Release-plz
     runs-on: ubuntu-latest
+    # crates.io trusted publishing binding:
+    # (omnizip/omnizip-rs, release.yml, environment crates-io).
+    environment: crates-io
+    permissions:
+      id-token: write
+      contents: write
+      pull-requests: write
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -40,101 +47,3 @@ jobs:
           # 403 because GitHub Actions isn't permitted to create PRs here.
           # Use `release` only.
           command: release
-
-  publish:
-    name: Publish (trusted publishing)
-    needs: release-plz
-    # Run even if release-plz failed: already-published versions are
-    # skipped by the action, so this is idempotent and always safe.
-    if: ${{ !cancelled() && github.ref == 'refs/heads/main' }}
-    runs-on: ubuntu-latest
-    # Bound on crates.io: (omnizip/omnizip-rs, release.yml, crates-io).
-    environment: crates-io
-    permissions:
-      id-token: write
-      contents: read
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-        with:
-          # release-plz may have just committed version bumps to main;
-          # publish from the freshest manifests.
-          ref: main
-          fetch-depth: 0
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-      - name: Publish omnizip-codecs
-        uses: rust-lang/crates-io-actions/publish@v3
-        with:
-          path: ./omnizip-codecs
-      - name: Publish omnizip-bzip2
-        uses: rust-lang/crates-io-actions/publish@v3
-        with:
-          path: ./omnizip-bzip2
-      - name: Publish omnizip-libdeflate
-        uses: rust-lang/crates-io-actions/publish@v3
-        with:
-          path: ./omnizip-libdeflate
-      - name: Publish omnizip-lzma
-        uses: rust-lang/crates-io-actions/publish@v3
-        with:
-          path: ./omnizip-lzma
-      - name: Publish omnizip-zstd
-        uses: rust-lang/crates-io-actions/publish@v3
-        with:
-          path: ./omnizip-zstd
-      - name: Publish omnizip-lz4
-        uses: rust-lang/crates-io-actions/publish@v3
-        with:
-          path: ./omnizip-lz4
-      - name: Publish omnizip-brotli
-        uses: rust-lang/crates-io-actions/publish@v3
-        with:
-          path: ./omnizip-brotli
-      - name: Publish omnizip-snappy
-        uses: rust-lang/crates-io-actions/publish@v3
-        with:
-          path: ./omnizip-snappy
-      - name: Publish omnizip-ppmd
-        uses: rust-lang/crates-io-actions/publish@v3
-        with:
-          path: ./omnizip-ppmd
-      - name: Publish omnizip-deflate64
-        uses: rust-lang/crates-io-actions/publish@v3
-        with:
-          path: ./omnizip-deflate64
-      - name: Publish omnizip-zpaq
-        uses: rust-lang/crates-io-actions/publish@v3
-        with:
-          path: ./omnizip-zpaq
-      - name: Publish omnizip-glza
-        uses: rust-lang/crates-io-actions/publish@v3
-        with:
-          path: ./omnizip-glza
-      - name: Publish omnizip-fsst
-        uses: rust-lang/crates-io-actions/publish@v3
-        with:
-          path: ./omnizip-fsst
-      - name: Publish omnizip-flac
-        uses: rust-lang/crates-io-actions/publish@v3
-        with:
-          path: ./omnizip-flac
-      - name: Publish omnizip-ricepp
-        uses: rust-lang/crates-io-actions/publish@v3
-        with:
-          path: ./omnizip-ricepp
-      - name: Publish omnizip-blosc
-        uses: rust-lang/crates-io-actions/publish@v3
-        with:
-          path: ./omnizip-blosc
-      - name: Publish omnizip-deflate
-        uses: rust-lang/crates-io-actions/publish@v3
-        with:
-          path: ./omnizip-deflate
-      # LAST: depends on lz4 via an explicit path dep that
-      # release-plz ordering cannot see.
-      - name: Publish omnizip-filters
-        uses: rust-lang/crates-io-actions/publish@v3
-        with:
-          path: ./omnizip-filters

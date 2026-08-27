@@ -2,10 +2,10 @@
 # https://release-plz.dev/docs/config
 
 [workspace]
-# release-plz handles versioning + git tags for the whole workspace.
-# Publishing is done ONLY via trusted publishing (OIDC) in the
-# `publish` job of release.yml — never with a registry token here.
-publish = false
+# release-plz handles versioning + publishing for the whole workspace,
+# publishing via crates.io TRUSTED PUBLISHING (OIDC): the job runs with
+# id-token: write under the crates-io environment and no registry token
+# (release-plz issues and revokes ephemeral tokens itself).
 git_release_enable = false
 dependencies_update = true
 allow_dirty = false
