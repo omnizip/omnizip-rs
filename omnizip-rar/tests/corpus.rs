@@ -211,6 +211,117 @@ fn arm_fixture_decodes_completely() {
 }
 
 #[test]
+fn rar4_encrypted_fixtures_decrypt() {
+    let root = std::path::Path::new(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../omnizip/spec/fixtures/rar/libarchive_reference/rar4"
+    ));
+    if !root.exists() {
+        return;
+    }
+    // Password truth: libarchive commit f31a5a0272 ("Detect encrypted
+    // archive entries (ZIP, RAR, 7Zip)", 2013-07-01) generated these
+    // fixtures as `rar a -p12345678` (data / partially: encrypted
+    // entries, plaintext headers) and `rar a -hp12345678` (header:
+    // encrypted headers + entries). Expected content comes from the
+    // same commit's recipe: "data of foo.txt\n" / "data of bar.txt\n".
+    // Every entry below decodes byte-identical to the unrar 7.10
+    // reference (`unrar x -p12345678`), including the -hp archive.
+    const FOO: &str = "data of foo.txt\n";
+    const BAR: &str = "data of bar.txt\n";
+
+    // Encrypted entries, plaintext headers.
+    let mut r = Rar4Reader::from_bytes(
+        &std::fs::read(root.join("test_read_format_rar_encryption_data.rar")).unwrap(),
+    )
+    .unwrap()
+    .with_password("12345678");
+    let entries = r.entries().unwrap();
+    assert_eq!(entries.len(), 2);
+    for (i, name) in ["foo.txt", "bar.txt"].iter().enumerate() {
+        let data = r.read_entry(i).unwrap_or_else(|e| panic!("{name}: {e}"));
+        assert_eq!(
+            &String::from_utf8_lossy(&data),
+            if *name == "foo.txt" { FOO } else { BAR }
+        );
+    }
+
+    // Partially encrypted: foo.txt encrypted, bar.txt plaintext. Both
+    // decode with the password, and — per libarchive's
+    // test_read_format_rar_encryption_partially.c — bar.txt stays
+    // readable with NO password while foo.txt fails closed.
+    let mut r = Rar4Reader::from_bytes(
+        &std::fs::read(root.join("test_read_format_rar_encryption_partially.rar")).unwrap(),
+    )
+    .unwrap()
+    .with_password("12345678");
+    let entries = r.entries().unwrap();
+    assert_eq!(entries.len(), 2);
+    let data = r.read_entry(0).unwrap();
+    assert_eq!(&String::from_utf8_lossy(&data), FOO);
+    let data = r.read_entry(1).unwrap();
+    assert_eq!(&String::from_utf8_lossy(&data), BAR);
+
+    let mut nopw = Rar4Reader::from_bytes(
+        &std::fs::read(root.join("test_read_format_rar_encryption_partially.rar")).unwrap(),
+    )
+    .unwrap();
+    assert!(
+        nopw.read_entry(0).is_err(),
+        "encrypted foo.txt without password"
+    );
+    let data = nopw
+        .read_entry(1)
+        .unwrap_or_else(|e| panic!("plaintext bar.txt: {e}"));
+    assert_eq!(&String::from_utf8_lossy(&data), BAR);
+
+    // Skipping a failed member must not poison the reader: reading the
+    // plaintext entry first and then the failed one still reports the
+    // real error (the skipped decode is never cached as success).
+    let mut reorder = Rar4Reader::from_bytes(
+        &std::fs::read(root.join("test_read_format_rar_encryption_partially.rar")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        &String::from_utf8_lossy(&reorder.read_entry(1).unwrap()),
+        BAR
+    );
+    assert!(
+        reorder.read_entry(0).is_err(),
+        "skipped entry must still fail on direct read"
+    );
+
+    // Encrypted headers (-hp): the whole header stream is AES-CBC with
+    // the archive salt; both files decode after the header splice.
+    let hdr = std::fs::read(root.join("test_read_format_rar_encryption_header.rar")).unwrap();
+    let mut r = Rar4Reader::from_bytes_with_password(&hdr, "12345678").unwrap();
+    let entries = r.entries().unwrap();
+    assert_eq!(entries.len(), 2);
+    for (i, name) in ["foo.txt", "bar.txt"].iter().enumerate() {
+        let data = r.read_entry(i).unwrap_or_else(|e| panic!("{name}: {e}"));
+        assert_eq!(
+            &String::from_utf8_lossy(&data),
+            if *name == "foo.txt" { FOO } else { BAR }
+        );
+    }
+
+    // Wrong password fails closed everywhere: -hp headers reject at
+    // open, encrypted entries fail their decode/CRC.
+    assert!(Rar4Reader::from_bytes_with_password(&hdr, "wrong").is_err());
+    let mut wrong = Rar4Reader::from_bytes(
+        &std::fs::read(root.join("test_read_format_rar_encryption_data.rar")).unwrap(),
+    )
+    .unwrap()
+    .with_password("wrong");
+    for i in 0..2 {
+        assert!(
+            wrong.read_entry(i).is_err(),
+            "wrong password must not decode entry {i}"
+        );
+    }
+}
+
+#[test]
 fn rar4_corpus_walks_cleanly() {
     use omnizip_rar::rar3::Rar4Reader;
     let root = std::path::Path::new(concat!(
@@ -252,9 +363,11 @@ fn rar4_corpus_walks_cleanly() {
     // Major fixtures (1 MB LZ+PPMd, 20 MB multi-block, 20 KB PPMd,
     // 241 MB PPMd→LZ, plus the small store/compress samples) decode
     // byte-perfect (CRCs match the unrar/libarchive reference).
-    // Everything else (corrupt PPMd UAFs, E8-filter CRC delta,
-    // encrypted-header / entry-AES samples) yields a clean
-    // structured error — no panics.
+    // Everything else (corrupt PPMd UAFs, E8-filter CRC delta) yields
+    // a clean structured error — no panics. The three encrypted
+    // fixtures also land here because this walk passes no password;
+    // with their real password (12345678, see
+    // `rar4_encrypted_fixtures_decrypt`) they decode byte-exact.
     assert!(
         parsed >= 30,
         "expected major RAR4 fixtures to decode: {parsed}"
