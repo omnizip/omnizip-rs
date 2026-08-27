@@ -1009,6 +1009,7 @@ impl<'a> BankMatchFinder<'a> {
 
     /// H68 8-byte hash: LOAD64LE * (kHashMul64 << 24) >> 41 gives 23
     /// bits: a 15-bit key (hash >> 8) plus an 8-bit tag (hash & 0xFF).
+    #[inline(always)]
     fn key_tag(&self, pos: usize) -> (usize, u8) {
         let look = self.lookahead();
         if pos + look > self.data.len() {
@@ -1146,7 +1147,13 @@ impl<'a> BankMatchFinder<'a> {
     /// `a + limit <= data.len()` and `b < a` (candidate positions are
     /// always older than the current one), so every byte access below
     /// is in bounds by construction — the generic `match_length`
-    /// re-checks both bounds per step.
+    /// re-checks both bounds per step. Each window is sliced out ONCE
+    /// (one bounds check per side) and the stepping runs on
+    /// equal-length slice iterators with no per-step checks; indexing
+    /// the data slice per step kept four panicking bounds checks per
+    /// 8-byte step even after full inlining (LLVM cannot see the
+    /// clamp through the u32 cast).
+    #[inline(always)]
     fn match_len_scan(&self, a: usize, b: usize, limit: u32) -> u32 {
         // Upstream FindMatchLengthWithLimit shape: u32 first (short
         // rep matches — the common case — cost one load pair), then
@@ -1155,27 +1162,30 @@ impl<'a> BankMatchFinder<'a> {
         // 2-8 byte matches).
         let data = self.data;
         let max = limit as usize;
+        let sa = &data[a..a + max];
+        let sb = &data[b..b + max];
         let mut len = 0usize;
         if max >= 4 {
-            let wa = u32::from_le_bytes(data[a..a + 4].try_into().unwrap());
-            let wb = u32::from_le_bytes(data[b..b + 4].try_into().unwrap());
+            let wa = u32::from_le_bytes([sa[0], sa[1], sa[2], sa[3]]);
+            let wb = u32::from_le_bytes([sb[0], sb[1], sb[2], sb[3]]);
             if wa != wb {
-                let diff = wa ^ wb;
-                return diff.trailing_zeros() / 8;
+                return (wa ^ wb).trailing_zeros() / 8;
             }
             len = 4;
         }
-        while len + 8 <= max {
-            let wa = u64::from_le_bytes(data[a + len..a + len + 8].try_into().unwrap());
-            let wb = u64::from_le_bytes(data[b + len..b + len + 8].try_into().unwrap());
+        for (xa, xb) in sa[len..].chunks_exact(8).zip(sb[len..].chunks_exact(8)) {
+            let wa = u64::from_le_bytes(xa.try_into().unwrap());
+            let wb = u64::from_le_bytes(xb.try_into().unwrap());
             if wa == wb {
                 len += 8;
             } else {
-                let diff = wa ^ wb;
-                return (len + diff.trailing_zeros() as usize / 8) as u32;
+                return (len + (wa ^ wb).trailing_zeros() as usize / 8) as u32;
             }
         }
-        while len < max && data[a + len] == data[b + len] {
+        for (&xa, &xb) in sa[len..].iter().zip(sb[len..].iter()) {
+            if xa != xb {
+                break;
+            }
             len += 1;
         }
         len as u32
@@ -1363,55 +1373,51 @@ impl<'a> BankMatchFinder<'a> {
         min_len_hint: u32,
     ) -> Option<(u32, u32, u64)> {
         // match_len_scan assumes `pos + max_len <= data.len()`; clamp
-        // once here so every caller shape satisfies it.
-        let max_len = max_len.min((self.data.len() - pos) as u32);
-        // (distance-cache index, offset) per short code — upstream
-        // kDistanceCacheIndex/kDistanceCacheOffset.
-        const CACHE_INDEX: [u8; 16] = [0, 1, 2, 3, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1];
-        const CACHE_OFFSET: [i8; 16] = [0, 0, 0, 0, -1, 1, -2, 2, -3, 3, -1, 1, -2, 2, -3, 3];
-        // Short-code cost deltas from SCORE_BASE (upstream
-        // kDistanceShortCodeCost); the H9 score is
-        // (SCORE_BASE + delta + 540·len) >> 2.
-        const SHORT_CODE_DELTA: [i32; 16] = [
-            60, -95, -117, -127, -93, -93, -96, -96, -99, -99, -105, -105, -115, -115, -125, -125,
-        ];
+        // once here so every caller shape satisfies it. With that
+        // invariant, match_len_scan's slice accesses are in bounds by
+        // construction (candidates are always older than `pos`), which
+        // lets the inlined bounds checks fold away.
+        let data = self.data;
+        let max_len = max_len.min((data.len() - pos) as u32);
         // Upstream seeds the search result with kMinScore: a candidate
         // only "found" if it strictly beats it.
         let mut best_score = K_MIN_SCORE;
         let mut best: Option<(u32, u32)> = None;
+        // Reject gate for probes and scan entries: the byte at the
+        // current best length (upstream prev_best_val shape). Starts at
+        // 2 (the shortest candidate the rep codes can carry).
+        let mut cur_best = 2usize;
+        let ndists = self.num_last_dists.min(16);
 
-        // Exact-rep-only mode for shallow configs (upstream H5 probes
-        // only distance_cache[0]; we keep all 4 exact reps — they are
-        // worth 5.8pt on periodic data — but skip the ±1-3 offset
-        // variants, which add a command per drifting chain position).
-        let exact_only = self.num_last_dists <= 4;
-        for i in 0..self.num_last_dists.min(16) {
-            if exact_only && CACHE_OFFSET[i] != 0 {
-                continue;
-            }
-            let base = *last_dists.get(usize::from(CACHE_INDEX[i])).unwrap_or(&0);
-            let v = i64::from(base) + i64::from(CACHE_OFFSET[i]);
-            if v < 1 || v as usize > pos {
-                continue;
-            }
-            let d = v as u32;
-            let prev = pos - v as usize;
-            let cur_best = best.map_or(2, |(_, l)| l) as usize;
-            if pos + cur_best < self.data.len()
-                && prev + cur_best < self.data.len()
-                && self.data[pos + cur_best] != self.data[prev + cur_best]
-            {
-                continue;
-            }
-            let len = self.match_len_scan(pos, prev, max_len);
-            // Upstream: >= 3 always, len 2 only for the two exact-rep
-            // codes (rep0/rep1 ride 1-2 bit codes).
-            if len < 3 && !(len == 2 && i < 2) {
-                continue;
-            }
-            let score = if self.h9_scoring {
-                (7680i64 + i64::from(SHORT_CODE_DELTA[i]) + 540 * i64::from(len)) >> 2
-            } else {
+        // Exact-rep-only mode for shallow configs (num_last_dists <= 4,
+        // i.e. every text tier and binary q4-6): CACHE_INDEX[i] == i,
+        // CACHE_OFFSET[i] == 0, and h9_scoring is necessarily false (it
+        // requires num_last_dists >= 16) — probe the distance ring
+        // directly. This is the q2-9 text hot path; the generic
+        // 16-short-code loop below only serves the wide binary tiers.
+        if self.num_last_dists <= 4 {
+            for i in 0..ndists {
+                let base = if i < last_dists.len() { last_dists[i] } else { 0 };
+                let v = base as usize;
+                if v == 0 || v > pos {
+                    continue;
+                }
+                let prev = pos - v;
+                // prev < pos, so one bound implies the other. Skipping
+                // the compare when out of bounds matches the generic
+                // path's behavior (fall through to the full scan).
+                if cur_best < data.len() - pos
+                    && prev + cur_best < data.len()
+                    && data[pos + cur_best] != data[prev + cur_best]
+                {
+                    continue;
+                }
+                let len = self.match_len_scan(pos, prev, max_len);
+                // Upstream: >= 3 always, len 2 only for the two exact-rep
+                // codes (rep0/rep1 ride 1-2 bit codes).
+                if len < 3 && !(len == 2 && i < 2) {
+                    continue;
+                }
                 // H5/H6: BackwardReferenceScoreUsingLastDistance
                 // (135·len + 1935) − per-index penalty (0x1ca10-based)
                 // for i > 0.
@@ -1420,66 +1426,81 @@ impl<'a> BankMatchFinder<'a> {
                 } else {
                     0
                 };
-                135 * i64::from(len) + 1935 - penalty
-            };
-            if score > best_score as i64 {
-                best_score = score as u64;
-                best = Some((d, len));
+                let score = 135 * i64::from(len) + 1935 - penalty;
+                if score > best_score as i64 {
+                    best_score = score as u64;
+                    best = Some((base, len));
+                    cur_best = len as usize;
+                }
+            }
+        } else {
+            // (distance-cache index, offset) per short code — upstream
+            // kDistanceCacheIndex/kDistanceCacheOffset.
+            const CACHE_INDEX: [u8; 16] =
+                [0, 1, 2, 3, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1];
+            const CACHE_OFFSET: [i8; 16] = [0, 0, 0, 0, -1, 1, -2, 2, -3, 3, -1, 1, -2, 2, -3, 3];
+            // Short-code cost deltas from SCORE_BASE (upstream
+            // kDistanceShortCodeCost); the H9 score is
+            // (SCORE_BASE + delta + 540·len) >> 2.
+            const SHORT_CODE_DELTA: [i32; 16] = [
+                60, -95, -117, -127, -93, -93, -96, -96, -99, -99, -105, -105, -115, -115, -125,
+                -125,
+            ];
+            for i in 0..ndists {
+                let idx = usize::from(CACHE_INDEX[i]);
+                let base = if idx < last_dists.len() { last_dists[idx] } else { 0 };
+                let v = i64::from(base) + i64::from(CACHE_OFFSET[i]);
+                if v < 1 || v as usize > pos {
+                    continue;
+                }
+                let d = v as u32;
+                let prev = pos - v as usize;
+                if cur_best < data.len() - pos
+                    && prev + cur_best < data.len()
+                    && data[pos + cur_best] != data[prev + cur_best]
+                {
+                    continue;
+                }
+                let len = self.match_len_scan(pos, prev, max_len);
+                // Upstream: >= 3 always, len 2 only for the two exact-rep
+                // codes (rep0/rep1 ride 1-2 bit codes).
+                if len < 3 && !(len == 2 && i < 2) {
+                    continue;
+                }
+                let score = if self.h9_scoring {
+                    (7680i64 + i64::from(SHORT_CODE_DELTA[i]) + 540 * i64::from(len)) >> 2
+                } else {
+                    let penalty = if i > 0 {
+                        39 + ((0x1c_a10u64 >> (i & 0x0e)) & 0x0e) as i64
+                    } else {
+                        0
+                    };
+                    135 * i64::from(len) + 1935 - penalty
+                };
+                if score > best_score as i64 {
+                    best_score = score as u64;
+                    best = Some((d, len));
+                    cur_best = len as usize;
+                }
             }
         }
 
-        // Bucket scan, newest-first. The ring is walked as at most two
-        // CONTIGUOUS slice segments (newest→0, mask→oldest) so the
-        // per-entry loop runs on slice iterators without per-entry
-        // bounds checks. The entry body is a macro: a capturing
-        // closure defeated inlining and dominated the scan.
-        macro_rules! consider {
-            ($e:expr, $data:ident, $cur_best:ident, $pos_val:ident) => {{
-                let prev = $e as usize;
-                let backward = pos.wrapping_sub(prev);
-                // Skip the self-entry (find_insert scans before
-                // inserting, but the advance()+find() callers insert
-                // first) and entries beyond the window — older ring
-                // entries are then also beyond (arrival order,
-                // scanned newest-first).
-                if backward != 0 && backward as u32 <= self.max_distance {
-                    // In-bounds by construction: prev < pos and
-                    // pos + cur_best < len, so prev + cur_best < len.
-                    if $data[prev + $cur_best] != $pos_val {
-                        continue;
-                    }
-                    // Upstream requires len >= 4 from the bucket scan
-                    // (FindMatchLengthWithLimitMin4).
-                    let len = self.match_len_scan(pos, prev, max_len);
-                    if len >= 4 {
-                        let score = 7680u64
-                            .wrapping_add(540u64.wrapping_mul(u64::from(len)))
-                            .wrapping_sub(120u64
-                                .wrapping_mul(u64::from(log2_floor(backward as u64))))
-                            >> 2;
-                        if score > best_score {
-                            best_score = score;
-                            best = Some((backward as u32, len));
-                            let nb = len as usize;
-                            if nb > $cur_best && pos + nb < $data.len() {
-                                $cur_best = nb;
-                                $pos_val = $data[pos + nb];
-                            }
-                        }
-                    }
-                }
-            }};
-        }
-
+        // Bucket scan, newest-first. One loop over the ring indices
+        // (newest → oldest): before wrap the live slots are [0, count);
+        // after wrap the slot for insert ordinal j is j & mask — the
+        // same entry sequence the previous two-segment split visited,
+        // in the same order.
         let bank = 1usize << self.block_bits;
         let mask = bank - 1;
         let count = self.num[key] as usize;
         let base = key << self.block_bits;
         let bucket = &self.buckets[base..base + bank];
-        let data = self.data;
         // Reject byte at the current best length, loaded once and
         // refreshed only when best changes (upstream prev_best_val).
-        let mut cur_best = (best.map_or(3, |(_, l)| l)).max(min_len_hint) as usize;
+        // Note the seed differs from the rep loop: no rep match means
+        // no candidate below the scan's len-4 floor, so 3 (the exact
+        // original seed).
+        cur_best = best.map_or(3, |(_, l)| l as usize).max(min_len_hint as usize);
         let mut pos_val = if pos + cur_best < data.len() {
             data[pos + cur_best]
         } else {
@@ -1487,24 +1508,44 @@ impl<'a> BankMatchFinder<'a> {
         };
 
         let down = count.saturating_sub(bank);
-        if count <= bank {
-            // Ring not yet wrapped: entry i lives at slot i.
-            for &e in bucket[down..count].iter().rev() {
-                consider!(e, data, cur_best, pos_val);
-            }
-        } else {
-            // Wrapped: full ring, two segments newest→0 and mask→oldest.
-            let newest = (count - 1) & mask;
-            for &e in bucket[0..=newest].iter().rev() {
-                consider!(e, data, cur_best, pos_val);
-            }
-            for &e in bucket[newest + 1..].iter().rev() {
-                consider!(e, data, cur_best, pos_val);
+        let mut j = count;
+        while j > down {
+            j -= 1;
+            let prev = bucket[j & mask] as usize;
+            let backward = pos.wrapping_sub(prev);
+            // Skip the self-entry (find_insert scans before
+            // inserting, but the advance()+find() callers insert
+            // first) and entries beyond the window — older ring
+            // entries are then also beyond (arrival order,
+            // scanned newest-first).
+            if backward != 0 && backward as u32 <= self.max_distance {
+                // In-bounds by construction: prev < pos and
+                // pos + cur_best <= len (guarded via pos_val's load).
+                if prev + cur_best < data.len() && data[prev + cur_best] != pos_val {
+                    continue;
+                }
+                // Upstream requires len >= 4 from the bucket scan
+                // (FindMatchLengthWithLimitMin4).
+                let len = self.match_len_scan(pos, prev, max_len);
+                if len >= 4 {
+                    let score = 7680u64
+                        .wrapping_add(540u64.wrapping_mul(u64::from(len)))
+                        .wrapping_sub(120u64.wrapping_mul(u64::from(log2_floor(backward as u64))))
+                        >> 2;
+                    if score > best_score {
+                        best_score = score;
+                        best = Some((backward as u32, len));
+                        let nb = len as usize;
+                        if nb > cur_best && pos + nb < data.len() {
+                            cur_best = nb;
+                            pos_val = data[pos + nb];
+                        }
+                    }
+                }
             }
         }
         best.map(|(d, l)| (d, l, best_score))
-    }
-}
+    }}
 
 #[cfg(test)]
 mod bank_tests {
