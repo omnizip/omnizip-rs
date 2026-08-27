@@ -1183,62 +1183,53 @@ fn emit_metablock_from_commands(
     let mut ntrees = ntrees_l as usize;
     let mut lit_freqs: Vec<Vec<u32>> = vec![vec![0u32; 256]; ntrees];
 
-    // Simulate output to get correct per-position context.
-    // For dictionary references (distance > output.len()), the copy
-    // produces bytes from the static dictionary, not the output buffer.
-    // For transforms that change word length (prefix/suffix/omit), the
-    // actual copy output length differs from cmd.copy_len (= word_length).
-    // We precompute the actual copy advance for each command so subsequent
+    // Precompute the actual copy advance for each command so subsequent
     // loops (frequency counting, encoding) advance correctly.
-    let mut output_sim: Vec<u8> = Vec::with_capacity(input.len());
+    //
+    // Only the running output LENGTH is needed — the frequency loop
+    // below reads the original input bytes (decoder output == input),
+    // and every non-dictionary copy advances by exactly copy_len
+    // (in-chunk, cross-chunk and the overrun zero-fill all add
+    // copy_len bytes). Dictionary references are the one case where
+    // the transformed length differs from cmd.copy_len (= word
+    // length), so only they need the lookup. The previous revision
+    // simulated the entire metablock byte-by-byte through a Vec to
+    // derive these lengths (one push per literal + a per-byte copy
+    // loop; measured at several % of q2 encode time).
     let mut cmd_copy_advances: Vec<usize> = Vec::with_capacity(commands.len());
-    let mut lit_idx = 0usize;
+    let mut dict_bytes: Vec<u8> = Vec::new();
+    // Simulated output length so far == literals emitted + copy
+    // advances (the position dictionary_lookup's is_dict check and
+    // max_dist are computed against).
+    let mut sim_len = 0usize;
     for cmd in commands {
-        for _ in 0..cmd.insert_len {
-            output_sim.push(stream.literals[lit_idx]);
-            lit_idx += 1;
-        }
+        sim_len += cmd.insert_len as usize;
         let copy_advance = if cmd.copy_len > 0 {
-            let before = output_sim.len();
-            let copy_start_global = mlen_offset + output_sim.len();
+            let copy_start_global = mlen_offset + sim_len;
             let max_dist = (copy_start_global as u32).min(MAX_BACKWARD_DISTANCE);
             // Use GLOBAL position for is_dict check. Cross-chunk LZ77
-            // references have distance > local output_sim.len() but ≤
+            // references have distance > local output length but ≤
             // global position. Using local position misidentifies them
-            // as dict references, corrupting the simulated output bytes
+            // as dict references, corrupting the advance accounting
             // and causing context ID mismatches between encoder and decoder.
             let is_dict =
                 (cmd.distance as usize) > copy_start_global.min(MAX_BACKWARD_DISTANCE as usize);
             if is_dict {
-                let mut dict_bytes = Vec::with_capacity(cmd.copy_len as usize);
+                dict_bytes.clear();
                 if dictionary_lookup(&mut dict_bytes, cmd.copy_len, cmd.distance as i32, max_dist)
                     .is_some()
                 {
-                    output_sim.extend_from_slice(&dict_bytes);
+                    dict_bytes.len()
                 } else {
-                    output_sim.extend(std::iter::repeat(0u8).take(cmd.copy_len as usize));
-                }
-            } else if (cmd.distance as usize) > output_sim.len() {
-                // Cross-chunk LZ77 reference: source data is in a previous
-                // chunk not present in output_sim. Since decoder output
-                // equals the original input, use input bytes directly.
-                let out_pos = output_sim.len();
-                let copy_len = cmd.copy_len as usize;
-                if out_pos + copy_len <= input.len() {
-                    output_sim.extend_from_slice(&input[out_pos..out_pos + copy_len]);
-                } else {
-                    output_sim.extend(std::iter::repeat(0u8).take(copy_len));
+                    cmd.copy_len as usize
                 }
             } else {
-                let src = output_sim.len() - cmd.distance as usize;
-                for i in 0..cmd.copy_len as usize {
-                    output_sim.push(output_sim[src + i]);
-                }
+                cmd.copy_len as usize
             }
-            output_sim.len() - before
         } else {
             0
         };
+        sim_len += copy_advance;
         cmd_copy_advances.push(copy_advance);
     }
 
@@ -2169,7 +2160,7 @@ fn emit_metablock_from_commands(
     // --- Encode commands + literals with per-context tree selection ---
     let mut dist_iter = stream.dist_symbols.iter().zip(stream.dist_extras.iter());
     (p1, p2) = ctx_in;
-    lit_idx = 0;
+    let mut lit_idx = 0usize;
     out_pos = 0;
     let mut lit_blk = 0usize;
     let mut lit_block_remaining: usize =
