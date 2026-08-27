@@ -76,14 +76,12 @@ impl DistanceConfig {
         // cheapest. NPOSTFIX=1 halves the effective alphabet for
         // pair-clustered distances (the reference's H5/H6 hashers
         // naturally produce these).
-        let dists: Vec<u32> = commands
-            .iter()
-            .filter(|c| c.copy_len > 0 && c.distance > 0)
-            .map(|c| c.distance)
-            .collect();
-        if dists.is_empty() {
-            return Self::new(0, 0);
-        }
+        //
+        // The estimate is a pure function of the per-candidate symbol
+        // histogram (order-independent), so all five histograms are
+        // built in ONE pass over the commands — the previous shape
+        // allocated one Vec per candidate and walked the distance
+        // stream five times (~4% of q2 encode time).
         let candidates = [
             Self::new(0, 0),
             Self::new(0, 12),
@@ -91,11 +89,37 @@ impl DistanceConfig {
             Self::new(1, 3),
             Self::new(2, 0),
         ];
+        let mut freqs = [[0u32; 256]; 5];
+        let mut any = false;
+        for c in commands.iter() {
+            if c.copy_len > 0 && c.distance > 0 {
+                any = true;
+                for (k, cfg) in candidates.iter().enumerate() {
+                    let alphabet = cfg.alphabet_size();
+                    let idx = (symbol_for_cost(c.distance, cfg) as usize).min(alphabet - 1);
+                    freqs[k][idx] += 1;
+                }
+            }
+        }
+        if !any {
+            return Self::new(0, 0);
+        }
         let mut best = candidates[0];
         let mut best_cost = u64::MAX;
-        for cfg in &candidates {
-            let syms: Vec<u32> = dists.iter().map(|&d| symbol_for_cost(d, cfg)).collect();
-            let cost = huffman_cost_estimate(&syms, cfg.alphabet_size());
+        for (k, cfg) in candidates.iter().enumerate() {
+            let alphabet = cfg.alphabet_size();
+            let total: u32 = freqs[k][..alphabet].iter().sum();
+            if total == 0 {
+                continue;
+            }
+            let mut bits = 0u64;
+            for &f in freqs[k][..alphabet].iter() {
+                if f > 0 {
+                    let p = f as f64 / total as f64;
+                    bits += (f as u64) * (-p.log2()).ceil() as u64;
+                }
+            }
+            let cost = bits;
             if cost < best_cost {
                 best_cost = cost;
                 best = *cfg;

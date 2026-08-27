@@ -2624,11 +2624,15 @@ pub(crate) fn build_symbol_stream(
     mlen_offset: usize,
     dist_cfg: &DistanceConfig,
 ) -> Option<SymbolStream> {
-    let mut literals = Vec::new();
+    // Literals ≈ a third of the stream on text; explicit distances a
+    // bit over half the commands (the rest ride implicit-rep0). The
+    // exact hint does not affect output — only the realloc/memcpy
+    // churn (measured ~2% of q2 encode in allocator samples).
+    let mut literals = Vec::with_capacity(commands.len() / 2 + 16);
     let mut cmd_symbols = Vec::with_capacity(commands.len());
-    let mut dist_symbols = Vec::new();
-    let mut dist_extras = Vec::new();
-    let mut dist_ctxs: Vec<u8> = Vec::new();
+    let mut dist_symbols = Vec::with_capacity(commands.len() * 5 / 8 + 16);
+    let mut dist_extras = Vec::with_capacity(commands.len() * 5 / 8 + 16);
+    let mut dist_ctxs: Vec<u8> = Vec::with_capacity(commands.len() * 5 / 8 + 16);
 
     // Track the 4-distance ring buffer (TODO 245). Lets us emit
     // explicit distance codes 0-3 for rep0/1/2/3 matches, saving
@@ -6595,7 +6599,10 @@ fn parse_input_with_offset_impl(
     // Content classification is O(n) — a per-position call (as the
     // lazy lookahead had) is O(n^2) and dwarfs everything else.
     let is_text_input = is_text_like(input);
-    let mut commands = Vec::new();
+    // The greedy parse emits roughly one command per 6-8 input bytes on
+    // text; reserving here avoids the doubling realloc+memcpy churn
+    // (measured ~2% of q2 encode time in allocator/memmove samples).
+    let mut commands = Vec::with_capacity(input.len() / 5 + 16);
 
     // At Q4+, always use the text config (deeper chains, dict, lazy2)
     // regardless of content type. FSST-transformed data and other
@@ -6966,6 +6973,11 @@ fn parse_input_with_offset_impl(
                         let next_pos = pos + 1;
                         let next_global = mlen_offset + next_pos;
                         if delayed_in_row < 4 && next_pos + 4 <= n {
+                            // Decision-only re-search: only the
+                            // `s2 >= bank_hit_score + 175` comparison
+                            // uses the result, so the scan aborts the
+                            // moment a candidate crosses the threshold
+                            // (identical defer decisions, less scanning).
                             let m2 = bank_mf.as_deref().and_then(|bank| {
                                 // Reference pre-seeds the lazy re-search
                                 // at sr.len-1: most candidates then
@@ -6973,7 +6985,7 @@ fn parse_input_with_offset_impl(
                                 // Reference pre-seeds the lazy re-search
                                 // at sr.len-1 ONLY below q5; at q5+ the
                                 // re-search starts empty (sr2.len = 0).
-                                bank.find_with_floor(
+                                bank.find_with_floor_stop(
                                     next_global,
                                     &last_dists[..last_dist_len],
                                     (n - next_pos) as u32,
@@ -6982,6 +6994,7 @@ fn parse_input_with_offset_impl(
                                     } else {
                                         3
                                     },
+                                    bank_hit_score + 175,
                                 )
                             });
                             if let Some((_, _, s2)) = m2 {

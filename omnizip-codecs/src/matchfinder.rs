@@ -943,6 +943,20 @@ pub struct BankMatchFinder<'a> {
 /// every candidate must strictly beat to count as a found match).
 const K_MIN_SCORE: u64 = 2020;
 
+/// Refresh the reject-byte gate after a best-length change: a
+/// macro so the reload inlines into the probe loops without a
+/// capturing closure (which defeats inlining — measured).
+macro_rules! gate_guard {
+    ($gate_on:ident, $cur_best:ident, $data:ident, $pos:ident, $rep_val:ident) => {{
+        $gate_on = $cur_best < $data.len() - $pos;
+        $rep_val = if $gate_on {
+            $data[$pos + $cur_best]
+        } else {
+            0xFF
+        };
+    }};
+}
+
 impl<'a> BankMatchFinder<'a> {
     #[must_use]
     pub fn new(data: &'a [u8], bucket_bits: u32, block_bits: u32, num_last_dists: usize) -> Self {
@@ -1126,7 +1140,7 @@ impl<'a> BankMatchFinder<'a> {
         // rep probes inside the scan instead of serializing after
         // them. Measured ~3x per-find cost without it on text.
         std::hint::black_box(self.buckets[key << self.block_bits]);
-        let result = self.scan_with_key(key, pos, last_dists, max_len, min_len_hint);
+        let result = self.scan_with_key(key, pos, last_dists, max_len, min_len_hint, u64::MAX);
         if insert && pos < self.data.len() {
             let mask = (1usize << self.block_bits) - 1;
             let base = key << self.block_bits;
@@ -1219,7 +1233,33 @@ impl<'a> BankMatchFinder<'a> {
         }
         let key = self.key(pos);
         std::hint::black_box(self.buckets[key << self.block_bits]);
-        self.scan_with_key(key, pos, last_dists, max_len, min_len_hint)
+        self.scan_with_key(key, pos, last_dists, max_len, min_len_hint, u64::MAX)
+    }
+
+    /// Decision-only variant of [`find_with_floor`](Self::find_with_floor)
+    /// for the lazy re-search: the scan aborts as soon as the best
+    /// score reaches `stop_above`. When the caller only compares the
+    /// returned score against `stop_above` (>=), the decision is
+    /// identical to a full scan — an early return means the full scan
+    /// would also have finished at or above the threshold, and without
+    /// an early return the scan ran to completion. The returned
+    /// distance/length are the abort-time best, NOT necessarily the
+    /// full-scan best — do not use them for parse decisions.
+    #[must_use]
+    pub fn find_with_floor_stop(
+        &self,
+        pos: usize,
+        last_dists: &[u32],
+        max_len: u32,
+        min_len_hint: u32,
+        stop_above: u64,
+    ) -> Option<(u32, u32, u64)> {
+        if pos + self.lookahead() > self.data.len() || max_len < 2 {
+            return None;
+        }
+        let key = self.key(pos);
+        std::hint::black_box(self.buckets[key << self.block_bits]);
+        self.scan_with_key(key, pos, last_dists, max_len, min_len_hint, stop_above)
     }
 
     /// H68 scan (hash_longest_match64_simd_inc.h FindLongestMatch):
@@ -1364,6 +1404,11 @@ impl<'a> BankMatchFinder<'a> {
         best.map(|(d, l)| (d, l, best_score))
     }
 
+    // The H5/H6 rep scores are i64 by upstream shape and compared
+    // against the u64 best_score; both are small positives, so the
+    // cast cannot wrap. (Keeps clippy quiet without restructuring the
+    // reference arithmetic.)
+    #[allow(clippy::cast_possible_wrap)]
     fn scan_with_key(
         &self,
         key: usize,
@@ -1371,6 +1416,7 @@ impl<'a> BankMatchFinder<'a> {
         last_dists: &[u32],
         max_len: u32,
         min_len_hint: u32,
+        stop_above: u64,
     ) -> Option<(u32, u32, u64)> {
         // match_len_scan assumes `pos + max_len <= data.len()`; clamp
         // once here so every caller shape satisfies it. With that
@@ -1382,6 +1428,10 @@ impl<'a> BankMatchFinder<'a> {
         // Upstream seeds the search result with kMinScore: a candidate
         // only "found" if it strictly beats it.
         let mut best_score = K_MIN_SCORE;
+        // Early-abort ceiling for decision-only callers (the lazy
+        // re-search): once best_score reaches it, no later candidate
+        // can change the caller's >= comparison, so the scan stops.
+        // u64::MAX (all full-scan callers) can never be reached.
         let mut best: Option<(u32, u32)> = None;
         // Reject gate for probes and scan entries: the byte at the
         // current best length (upstream prev_best_val shape). Starts at
@@ -1396,20 +1446,38 @@ impl<'a> BankMatchFinder<'a> {
         // directly. This is the q2-9 text hot path; the generic
         // 16-short-code loop below only serves the wide binary tiers.
         if self.num_last_dists <= 4 {
+            // Reject byte at pos + cur_best, reloaded only when the
+            // best length changes (upstream prev_best_val). When
+            // cur_best runs past the window the gate is disabled,
+            // matching the bounds-check fall-through. prev < pos, so
+            // the single pos-side check subsumes the prev-side one.
+            let mut gate_on = cur_best < data.len() - pos;
+            let mut rep_val = if gate_on { data[pos + cur_best] } else { 0xFF };
+            // Steady-state shape (ring full): unrolled four exact
+            // probes with constant penalties — the steady state is
+            // ~99% of calls, and the unrolled form drops the per-probe
+            // ring bounds check and penalty arithmetic.
+            let penalties = [
+                0i64,
+                39 + ((0x1c_a10u64) & 0x0e) as i64,
+                39 + ((0x1c_a10u64 >> 2) & 0x0e) as i64,
+                39 + ((0x1c_a10u64 >> 2) & 0x0e) as i64,
+            ];
             for i in 0..ndists {
-                let base = if i < last_dists.len() { last_dists[i] } else { 0 };
+                let base = if i < last_dists.len() {
+                    last_dists[i]
+                } else {
+                    0
+                };
                 let v = base as usize;
                 if v == 0 || v > pos {
                     continue;
                 }
                 let prev = pos - v;
-                // prev < pos, so one bound implies the other. Skipping
-                // the compare when out of bounds matches the generic
-                // path's behavior (fall through to the full scan).
-                if cur_best < data.len() - pos
-                    && prev + cur_best < data.len()
-                    && data[pos + cur_best] != data[prev + cur_best]
-                {
+                // Skipping the compare when out of bounds matches the
+                // generic path's behavior (fall through to the full
+                // scan).
+                if gate_on && rep_val != data[prev + cur_best] {
                     continue;
                 }
                 let len = self.match_len_scan(pos, prev, max_len);
@@ -1421,23 +1489,21 @@ impl<'a> BankMatchFinder<'a> {
                 // H5/H6: BackwardReferenceScoreUsingLastDistance
                 // (135·len + 1935) − per-index penalty (0x1ca10-based)
                 // for i > 0.
-                let penalty = if i > 0 {
-                    39 + ((0x1c_a10u64 >> (i & 0x0e)) & 0x0e) as i64
-                } else {
-                    0
-                };
-                let score = 135 * i64::from(len) + 1935 - penalty;
+                let score = 135 * i64::from(len) + 1935 - penalties[i];
                 if score > best_score as i64 {
                     best_score = score as u64;
                     best = Some((base, len));
                     cur_best = len as usize;
+                    gate_guard!(gate_on, cur_best, data, pos, rep_val);
+                    if best_score >= stop_above {
+                        return best.map(|(d, l)| (d, l, best_score));
+                    }
                 }
             }
         } else {
             // (distance-cache index, offset) per short code — upstream
             // kDistanceCacheIndex/kDistanceCacheOffset.
-            const CACHE_INDEX: [u8; 16] =
-                [0, 1, 2, 3, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1];
+            const CACHE_INDEX: [u8; 16] = [0, 1, 2, 3, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1];
             const CACHE_OFFSET: [i8; 16] = [0, 0, 0, 0, -1, 1, -2, 2, -3, 3, -1, 1, -2, 2, -3, 3];
             // Short-code cost deltas from SCORE_BASE (upstream
             // kDistanceShortCodeCost); the H9 score is
@@ -1448,7 +1514,11 @@ impl<'a> BankMatchFinder<'a> {
             ];
             for i in 0..ndists {
                 let idx = usize::from(CACHE_INDEX[i]);
-                let base = if idx < last_dists.len() { last_dists[idx] } else { 0 };
+                let base = if idx < last_dists.len() {
+                    last_dists[idx]
+                } else {
+                    0
+                };
                 let v = i64::from(base) + i64::from(CACHE_OFFSET[i]);
                 if v < 1 || v as usize > pos {
                     continue;
@@ -1481,6 +1551,9 @@ impl<'a> BankMatchFinder<'a> {
                     best_score = score as u64;
                     best = Some((d, len));
                     cur_best = len as usize;
+                    if best_score >= stop_above {
+                        return best.map(|(d, l)| (d, l, best_score));
+                    }
                 }
             }
         }
@@ -1500,7 +1573,9 @@ impl<'a> BankMatchFinder<'a> {
         // Note the seed differs from the rep loop: no rep match means
         // no candidate below the scan's len-4 floor, so 3 (the exact
         // original seed).
-        cur_best = best.map_or(3, |(_, l)| l as usize).max(min_len_hint as usize);
+        cur_best = best
+            .map_or(3, |(_, l)| l as usize)
+            .max(min_len_hint as usize);
         let mut pos_val = if pos + cur_best < data.len() {
             data[pos + cur_best]
         } else {
@@ -1540,12 +1615,16 @@ impl<'a> BankMatchFinder<'a> {
                             cur_best = nb;
                             pos_val = data[pos + nb];
                         }
+                        if best_score >= stop_above {
+                            return best.map(|(d, l)| (d, l, best_score));
+                        }
                     }
                 }
             }
         }
         best.map(|(d, l)| (d, l, best_score))
-    }}
+    }
+}
 
 #[cfg(test)]
 mod bank_tests {
