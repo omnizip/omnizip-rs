@@ -50,13 +50,13 @@ const OF_DEFAULT_NORM: [i16; 29] = [
 ];
 
 /// LL code → number of extra bits (from C's `LL_bits`).
-const LL_BITS: [u8; 36] = [
+pub(crate) const LL_BITS: [u8; 36] = [
     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 3, 3, 4, 6, 7, 8, 9, 10, 11,
     12, 13, 14, 15, 16,
 ];
 
 /// ML code → number of extra bits (from C's `ML_bits`).
-const ML_BITS: [u8; 53] = [
+pub(crate) const ML_BITS: [u8; 53] = [
     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
     1, 1, 1, 1, 2, 2, 3, 3, 4, 4, 5, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16,
 ];
@@ -75,7 +75,7 @@ const ML_BASE: [u32; 53] = [
 ];
 
 /// Find the LL code for a given literal length. Returns (code, `extra_bits_value`).
-fn ll_code(lit_len: u32) -> (u8, u32) {
+pub(crate) fn ll_code(lit_len: u32) -> (u8, u32) {
     for code in (0..36).rev() {
         if LL_BASE[code] <= lit_len {
             return (code as u8, lit_len - LL_BASE[code]);
@@ -85,7 +85,7 @@ fn ll_code(lit_len: u32) -> (u8, u32) {
 }
 
 /// Find the ML code for a given match length. Returns (code, `extra_bits_value`).
-fn ml_code(match_len: u32) -> (u8, u32) {
+pub(crate) fn ml_code(match_len: u32) -> (u8, u32) {
     for code in (0..53).rev() {
         if ML_BASE[code] <= match_len {
             return (code as u8, match_len - ML_BASE[code]);

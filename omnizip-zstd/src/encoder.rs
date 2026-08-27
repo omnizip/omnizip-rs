@@ -16,6 +16,7 @@ pub mod block;
 pub mod cparams;
 pub mod ldm;
 pub mod match_finder;
+pub mod opt;
 pub mod sequences;
 
 use crate::{ZstdError, ZstdLevel};
