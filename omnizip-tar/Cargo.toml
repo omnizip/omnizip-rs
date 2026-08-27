@@ -1,4 +1,5 @@
 [package]
+publish = false
 name = "omnizip-tar"
 version.workspace = true
 edition.workspace = true

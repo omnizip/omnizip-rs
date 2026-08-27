@@ -1,4 +1,5 @@
 [package]
+publish = false
 name = "omnizip-archive-core"
 version.workspace = true
 edition.workspace = true
@@ -8,9 +9,9 @@ repository.workspace = true
 description = "Shared archive-container layer: entry model, reader/writer traits, security boundary, format detection, gzip/bzip2 single-file formats"
 
 [dependencies]
-omnizip-libdeflate = { path = "../omnizip-libdeflate" }
-omnizip-lzma = { path = "../omnizip-lzma" }
-omnizip-bzip2 = { path = "../omnizip-bzip2" }
+omnizip-libdeflate = { path = "../omnizip-libdeflate", version = "0.21.7" }
+omnizip-lzma = { path = "../omnizip-lzma", version = "0.21.7" }
+omnizip-bzip2 = { path = "../omnizip-bzip2", version = "0.21.7" }
 
 [lints]
 workspace = true
