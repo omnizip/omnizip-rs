@@ -501,12 +501,18 @@ fn open_bytes(data: &[u8], password: Option<&str>) -> Result<Opened, String> {
                 .map(|r| Opened::SevenZip(Box::new(r)))
                 .map_err(|e| e.to_string())
         }
-        FormatKind::Rar5 => omnizip_rar::rar5::Rar5Reader::from_bytes(data)
-            .map(|r| Opened::Rar5(Box::new(r)))
-            .map_err(|e| e.to_string()),
-        FormatKind::Rar4 => omnizip_rar::rar3::Rar4Reader::from_bytes(data)
-            .map(|r| Opened::Rar4(Box::new(r)))
-            .map_err(|e| e.to_string()),
+        FormatKind::Rar5 => match password {
+            Some(pw) => omnizip_rar::rar5::Rar5Reader::from_bytes_with_password(data, pw),
+            None => omnizip_rar::rar5::Rar5Reader::from_bytes(data),
+        }
+        .map(|r| Opened::Rar5(Box::new(r)))
+        .map_err(|e| e.to_string()),
+        FormatKind::Rar4 => match password {
+            Some(pw) => omnizip_rar::rar3::Rar4Reader::from_bytes_with_password(data, pw),
+            None => omnizip_rar::rar3::Rar4Reader::from_bytes(data),
+        }
+        .map(|r| Opened::Rar4(Box::new(r)))
+        .map_err(|e| e.to_string()),
         _ if data.starts_with(&[0xED, 0xAB, 0xEE, 0xDB]) => {
             omnizip_rpm::reader::RpmReader::from_bytes(data)
                 .map(|r| Opened::Rpm(Box::new(r)))
