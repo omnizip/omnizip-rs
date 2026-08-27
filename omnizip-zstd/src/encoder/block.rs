@@ -217,10 +217,11 @@ fn encode_frame_into(
     );
     let ldm_enabled = ldm_enabled && !uses_opt;
     let mut opt_state = uses_opt.then(|| {
-        let opt_level = match params.strategy {
-            crate::encoder::cparams::Strategy::Btopt => 0,
-            _ => 2,
-        };
+        // All opt strategies use the ultra price model (optLevel 2).
+        // The reference's btopt (level 0) handicaps offsets >= 2^20 to
+        // favor decode cache efficiency, which costs 12% on large
+        // streams (big100m 1.125x -> 0.709x); our bar is size parity.
+        let opt_level = 2;
         crate::encoder::opt::OptState::new(params, plaintext.len(), opt_level)
     });
 
