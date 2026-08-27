@@ -53,108 +53,97 @@ fn canonicalizing_writers_ignore_insertion_order() {
     assert_eq!(build_ole(&[0, 1, 2, 3]), build_ole(&[2, 0, 3, 1]));
 }
 
+// NOTE on the shape of these build closures: every writer is
+// constructed INSIDE the closure. An earlier revision passed the
+// writer in by value (`|mut w: TarWriter| ...` +
+// `build(TarWriter::new())` twice), and that shape trips a rustc
+// MIR-GVN miscompilation (reproduced on 1.85, 1.94 and nightly): the
+// two constructor calls are CSE'd into ONE argument tuple which is
+// then reused across both `Fn::call`s — the second call receives the
+// FIRST call's already-finished, emptied writer (the second tar came
+// out 1024 bytes short: no end-of-archive trailer). Writers are not
+// Copy, so no source-level semantics can justify the reuse; the
+// unoptimized MIR (`-Zmir-opt-level=0`) builds two distinct tuples
+// and the program is correct there. Constructing inside the closure
+// removes the shared argument tuple entirely.
 #[test]
 fn double_create_is_byte_identical_all_writers() {
     let o = opts();
     let fs = files();
 
-    let build = |mut w: omnizip_tar::TarWriter| {
+    let build_tar = || {
+        let mut w = omnizip_tar::TarWriter::new();
         for (name, data) in &fs {
             w.add_file(&NewEntry::file(name.clone(), &o), data, &o)
                 .unwrap();
         }
         w.finish_bytes().unwrap()
     };
-    assert_eq!(
-        build(omnizip_tar::TarWriter::new()),
-        build(omnizip_tar::TarWriter::new())
-    );
+    assert_eq!(build_tar(), build_tar());
 
-    let build_zip = |mut w: omnizip_zip::ZipWriter| {
+    let build_zip = || {
+        let mut w = omnizip_zip::ZipWriter::new();
         for (name, data) in &fs {
             w.add_file(&NewEntry::file(name.clone(), &o), data, &o)
                 .unwrap();
         }
         w.finish_bytes().unwrap()
     };
-    assert_eq!(
-        build_zip(omnizip_zip::ZipWriter::new()),
-        build_zip(omnizip_zip::ZipWriter::new())
-    );
+    assert_eq!(build_zip(), build_zip());
 
-    let build_7z = |mut w: omnizip_sevenzip::writer::SevenZipWriter| {
+    let build_7z = || {
+        let mut w = omnizip_sevenzip::writer::SevenZipWriter::new(
+            omnizip_sevenzip::writer::SevenZipMethod::Deflate,
+        );
         for (name, data) in &fs {
             w.add_file(&NewEntry::file(name.clone(), &o), data, &o)
                 .unwrap();
         }
         w.finish_bytes(&o).unwrap()
     };
-    assert_eq!(
-        build_7z(omnizip_sevenzip::writer::SevenZipWriter::new(
-            omnizip_sevenzip::writer::SevenZipMethod::Deflate
-        )),
-        build_7z(omnizip_sevenzip::writer::SevenZipWriter::new(
-            omnizip_sevenzip::writer::SevenZipMethod::Deflate
-        ))
-    );
+    assert_eq!(build_7z(), build_7z());
 
-    let build_7z_solid_enc = |mut w: omnizip_sevenzip::writer::SevenZipWriter| {
-        for (name, data) in &fs {
-            w.add_file(&NewEntry::file(name.clone(), &o), data, &o)
-                .unwrap();
-        }
-        w.finish_bytes(&o).unwrap()
-    };
-    assert_eq!(
-        build_7z_solid_enc(
-            omnizip_sevenzip::writer::SevenZipWriter::new(
-                omnizip_sevenzip::writer::SevenZipMethod::Lzma2
-            )
-            .with_solid(true)
-            .with_password("det")
-        ),
-        build_7z_solid_enc(
-            omnizip_sevenzip::writer::SevenZipWriter::new(
-                omnizip_sevenzip::writer::SevenZipMethod::Lzma2
-            )
-            .with_solid(true)
-            .with_password("det")
+    let build_7z_solid_enc = || {
+        let mut w = omnizip_sevenzip::writer::SevenZipWriter::new(
+            omnizip_sevenzip::writer::SevenZipMethod::Lzma2,
         )
-    );
-
-    let build_iso = |mut w: omnizip_iso::writer::IsoWriter| {
+        .with_solid(true)
+        .with_password("det");
         for (name, data) in &fs {
             w.add_file(&NewEntry::file(name.clone(), &o), data, &o)
                 .unwrap();
         }
         w.finish_bytes(&o).unwrap()
     };
-    assert_eq!(
-        build_iso(omnizip_iso::writer::IsoWriter::new("DET")),
-        build_iso(omnizip_iso::writer::IsoWriter::new("DET"))
-    );
+    assert_eq!(build_7z_solid_enc(), build_7z_solid_enc());
 
-    let build_xar = |mut w: omnizip_xar::writer::XarWriter| {
+    let build_iso = || {
+        let mut w = omnizip_iso::writer::IsoWriter::new("DET");
         for (name, data) in &fs {
             w.add_file(&NewEntry::file(name.clone(), &o), data, &o)
                 .unwrap();
         }
         w.finish_bytes(&o).unwrap()
     };
-    assert_eq!(
-        build_xar(omnizip_xar::writer::XarWriter::new()),
-        build_xar(omnizip_xar::writer::XarWriter::new())
-    );
+    assert_eq!(build_iso(), build_iso());
 
-    let build_rar5 = |mut w: omnizip_rar::rar5::Rar5Writer| {
+    let build_xar = || {
+        let mut w = omnizip_xar::writer::XarWriter::new();
         for (name, data) in &fs {
             w.add_file(&NewEntry::file(name.clone(), &o), data, &o)
                 .unwrap();
         }
         w.finish_bytes(&o).unwrap()
     };
-    assert_eq!(
-        build_rar5(omnizip_rar::rar5::Rar5Writer::new()),
-        build_rar5(omnizip_rar::rar5::Rar5Writer::new())
-    );
+    assert_eq!(build_xar(), build_xar());
+
+    let build_rar5 = || {
+        let mut w = omnizip_rar::rar5::Rar5Writer::new();
+        for (name, data) in &fs {
+            w.add_file(&NewEntry::file(name.clone(), &o), data, &o)
+                .unwrap();
+        }
+        w.finish_bytes(&o).unwrap()
+    };
+    assert_eq!(build_rar5(), build_rar5());
 }
