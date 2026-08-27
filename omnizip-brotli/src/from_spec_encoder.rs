@@ -598,7 +598,14 @@ pub fn compress_with_quality(input: &[u8], quality: i32) -> Vec<u8> {
             let hash5 = match std::env::var("BROTLI_HASH5").as_deref() {
                 Ok("0") | Ok("false") => false,
                 Ok("1") | Ok("true") => true,
-                _ => is_text && n >= 1 << 20 && q >= 5,
+                // q8+ only: the 5-byte secondary hash REGRESSES the
+                // rep-ring-driven parse at q5-7 (measured on 2 MiB CSV:
+                // q5 210,167 without vs 271,893 with — a hash5 hit at a
+                // random distance wins scoring, pays an explicit
+                // distance code, and breaks the periodic structure's
+                // rep chains) while it pays at q8-9 (dists 10/16,
+                // offset probes live: 280,657 vs 297,755).
+                _ => is_text && n >= 1 << 20 && q >= 8,
             };
             if hash5 {
                 bank.enable_hash5();
