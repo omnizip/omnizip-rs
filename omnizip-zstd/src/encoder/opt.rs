@@ -767,7 +767,11 @@ pub fn compress_block_opt_with_prefix(
     let istart = prefix_len;
     let iend = src.len();
     let min_match = if st.mf.min_match == 3 { 3 } else { 4 };
-    let sufficient_len = st.target_length.min(OPT_NUM as u32 - 1);
+    // The C uses targetLength (16 at L8-11) purely as a SPEED knob to
+    // cut DP exploration; at 16 it fragments long matches on tiny
+    // repetitive inputs (L9 worse than L1 measured). Floor at the
+    // L12+ value.
+    let sufficient_len = st.target_length.clamp(32, OPT_NUM as u32 - 1);
 
     if iend < istart + min_match + 8 {
         seq_store.literals.extend_from_slice(&src[istart..]);
