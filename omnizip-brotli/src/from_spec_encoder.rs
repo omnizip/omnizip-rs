@@ -557,15 +557,21 @@ pub fn compress_with_quality(input: &[u8], quality: i32) -> Vec<u8> {
                     .unwrap_or(4);
                 (b as u32, d)
             } else {
-                // Binary: a 2-slot bank. Measured on FITS 4MB q5, the
-                // reference-shaped 16-slot bank is pure waste — the
-                // reject byte kills nearly every extra entry
-                // (extends/find = 1.5) while the scan dominates
-                // encode time: block_bits 4 -> 1 keeps the output
-                // size-neutral (2,660,465 vs 2,660,549) and cuts the
-                // bank scan ~3x. Text keeps the reference params.
+                // Binary: 16-slot bank at q5-8 (block_bits=4). The old
+                // 2-slot setting was measured on the pre-2026-08-27
+                // FITS where it was "size-neutral"; the regenerated
+                // fixture shows bits=4 saves 160KB on FITS and 15KB on
+                // bin1 at q5 (the noise pattern changed which entries
+                // the reject byte kills). Time cost: ~25% encode at
+                // q5 (0.18→0.23s on FITS).
                 (
-                    if q >= 9 { 8 } else { 1 } as u32,
+                    if q >= 9 {
+                        8
+                    } else if q >= 6 {
+                        6
+                    } else {
+                        4
+                    } as u32,
                     if q < 7 {
                         4
                     } else if q < 9 {
