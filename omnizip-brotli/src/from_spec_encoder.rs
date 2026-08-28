@@ -6694,7 +6694,7 @@ fn parse_input_with_offset_impl(
             mf.set_nice_match(256);
         }
         // fall through to the lazy path below
-    } else if quality >= 10 && !env_flag!("BROTLI_OLD_ZOPFLI") {
+    } else if quality >= 10 && !env_flag!("BROTLI_OLD_ZOPFLI") && n >= 8 {
         // Reference port: BrotliCreate(Hq)ZopfliBackwardReferences —
         // q10 single pass, q11 two passes with the StartPosQueue.
         // BROTLI_OLD_ZOPFLI restores the in-house iterative DP.
