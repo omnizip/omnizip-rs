@@ -14,8 +14,8 @@
 use crate::constants::{BLOCK_TYPE_COMPRESSED, BLOCK_TYPE_RAW, BLOCK_TYPE_RLE};
 use crate::encoder::ldm::LdmHashTable;
 use crate::encoder::match_finder::{
-    compress_block_fast_with_prefix, compress_block_lazy, compress_block_lazy2,
-    compress_block_lazy2_with_ldm, compress_block_lazy2_with_prefix,
+    compress_block_dfast_with_prefix, compress_block_fast_with_prefix, compress_block_lazy,
+    compress_block_lazy2, compress_block_lazy2_with_ldm, compress_block_lazy2_with_prefix,
     compress_block_lazy_with_prefix, compress_block_with_min_match, MatchState, SeqStore,
 };
 use crate::encoder::sequences::encode_section;
@@ -204,13 +204,14 @@ fn encode_frame_into(
     // The optimal parser (btopt/btultra/btultra2) uses its own
     // binary-tree state and does not consume LDM sequences; the tree
     // window already covers everything the windowLog allows.
-    // Lazy2/Btlazy2 (L8-15) share the optimal parser with Btopt+ (the
-    // reference runs lazy2 tiers there; our lazy2 is hash-chain and
-    // plateaued at ~1.11x, while the price-parse DP beats the
-    // reference: measured 0.97x on FITS).
+    // Lazy and up (L5+) share the optimal parser with Btopt+ (the
+    // reference runs lazy tiers there; our hash-chain lazy/lazy2
+    // plateaued at 1.07-2.45x across a broad corpus sweep, while the
+    // price-parse DP meets or beats the reference everywhere).
     let uses_opt = matches!(
         params.strategy,
-        crate::encoder::cparams::Strategy::Lazy2
+        crate::encoder::cparams::Strategy::Lazy
+            | crate::encoder::cparams::Strategy::Lazy2
             | crate::encoder::cparams::Strategy::Btlazy2
             | crate::encoder::cparams::Strategy::Btopt
             | crate::encoder::cparams::Strategy::Btultra
@@ -234,6 +235,13 @@ fn encode_frame_into(
 
     if cross_block {
         match_state.disable_chain();
+    }
+
+    // Double-fast tier: the long-range table (classic DFast reuses
+    // chainLog as the long hash log, clamped to the input).
+    if params.strategy == crate::encoder::cparams::Strategy::DoubleFast {
+        let input_log = (usize::BITS - plaintext.len().max(1).leading_zeros()).max(8);
+        match_state.enable_long_table(params.chain_log.min(input_log));
     }
 
     // In LDM mode, the distance cap is the full frame window. For
@@ -371,8 +379,8 @@ pub fn encode_frame_with_dict(
 ) -> Result<Vec<u8>, ZstdError> {
     use crate::encoder::cparams::Strategy;
     use crate::encoder::match_finder::{
-        compress_block_fast_with_prefix, compress_block_lazy2_with_prefix,
-        compress_block_lazy_with_prefix,
+        compress_block_dfast_with_prefix, compress_block_fast_with_prefix,
+        compress_block_lazy2_with_prefix, compress_block_lazy_with_prefix,
     };
 
     let dict_content = dict.content();
@@ -440,10 +448,17 @@ pub fn encode_frame_with_dict(
             let min_match = params.min_match.max(5) as usize;
 
             match params.strategy {
-                Strategy::Fast | Strategy::DoubleFast | Strategy::Greedy => {
-                    // For Fast/DoubleFast/Greedy, the fast parser
-                    // suffices (no look-ahead).
+                Strategy::Fast | Strategy::Greedy => {
                     compress_block_fast_with_prefix(
+                        &virtual_stream[..offset + chunk_size],
+                        offset,
+                        &mut seq_store,
+                        &mut match_state,
+                        min_match,
+                    );
+                }
+                Strategy::DoubleFast => {
+                    compress_block_dfast_with_prefix(
                         &virtual_stream[..offset + chunk_size],
                         offset,
                         &mut seq_store,
@@ -806,10 +821,8 @@ fn write_block_cross(
     let src = &plaintext[..block_end];
     use crate::encoder::cparams::Strategy;
     match params.strategy {
-        Strategy::Lazy => {
-            compress_block_lazy_with_prefix(src, block_start, &mut seq_store, ms, min_match);
-        }
-        Strategy::Lazy2
+        Strategy::Lazy
+        | Strategy::Lazy2
         | Strategy::Btlazy2
         | Strategy::Btopt
         | Strategy::Btultra
@@ -823,6 +836,9 @@ fn write_block_cross(
                 &mut seq_store,
                 st,
             );
+        }
+        Strategy::DoubleFast => {
+            compress_block_dfast_with_prefix(src, block_start, &mut seq_store, ms, min_match);
         }
         _ => {
             compress_block_fast_with_prefix(src, block_start, &mut seq_store, ms, min_match);
