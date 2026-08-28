@@ -12,10 +12,10 @@ name = "regression"
 path = "regression.rs"
 
 [dev-dependencies]
-omnizip-codecs = { path = "../../omnizip-codecs", version = "0.21.12" }
-omnizip-brotli = { path = "../../omnizip-brotli", version = "0.21.12" }
-omnizip-zstd = { path = "../../omnizip-zstd", version = "0.21.12" }
-omnizip-lzma = { path = "../../omnizip-lzma", version = "0.21.12" }
-omnizip-lz4 = { path = "../../omnizip-lz4", version = "0.21.12" }
+omnizip-codecs = { path = "../../omnizip-codecs", version = "0.21.13" }
+omnizip-brotli = { path = "../../omnizip-brotli", version = "0.21.13" }
+omnizip-zstd = { path = "../../omnizip-zstd", version = "0.21.13" }
+omnizip-lzma = { path = "../../omnizip-lzma", version = "0.21.13" }
+omnizip-lz4 = { path = "../../omnizip-lz4", version = "0.21.13" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
