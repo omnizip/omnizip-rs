@@ -14,8 +14,8 @@
 use crate::constants::{BLOCK_TYPE_COMPRESSED, BLOCK_TYPE_RAW, BLOCK_TYPE_RLE};
 use crate::encoder::ldm::LdmHashTable;
 use crate::encoder::match_finder::{
-    compress_block_dfast_with_prefix, compress_block_fast_with_prefix, compress_block_lazy,
-    compress_block_lazy2, compress_block_lazy2_with_ldm, compress_block_lazy2_with_prefix,
+    compress_block_fast_with_prefix, compress_block_lazy, compress_block_lazy2,
+    compress_block_lazy2_with_ldm, compress_block_lazy2_with_prefix,
     compress_block_lazy_with_prefix, compress_block_with_min_match, MatchState, SeqStore,
 };
 use crate::encoder::sequences::encode_section;
@@ -210,7 +210,8 @@ fn encode_frame_into(
     // price-parse DP meets or beats the reference everywhere).
     let uses_opt = matches!(
         params.strategy,
-        crate::encoder::cparams::Strategy::Lazy
+        crate::encoder::cparams::Strategy::DoubleFast
+            | crate::encoder::cparams::Strategy::Lazy
             | crate::encoder::cparams::Strategy::Lazy2
             | crate::encoder::cparams::Strategy::Btlazy2
             | crate::encoder::cparams::Strategy::Btopt
@@ -235,13 +236,6 @@ fn encode_frame_into(
 
     if cross_block {
         match_state.disable_chain();
-    }
-
-    // Double-fast tier: the long-range table (classic DFast reuses
-    // chainLog as the long hash log, clamped to the input).
-    if params.strategy == crate::encoder::cparams::Strategy::DoubleFast {
-        let input_log = (usize::BITS - plaintext.len().max(1).leading_zeros()).max(8);
-        match_state.enable_long_table(params.chain_log.min(input_log));
     }
 
     // In LDM mode, the distance cap is the full frame window. For
@@ -379,8 +373,8 @@ pub fn encode_frame_with_dict(
 ) -> Result<Vec<u8>, ZstdError> {
     use crate::encoder::cparams::Strategy;
     use crate::encoder::match_finder::{
-        compress_block_dfast_with_prefix, compress_block_fast_with_prefix,
-        compress_block_lazy2_with_prefix, compress_block_lazy_with_prefix,
+        compress_block_fast_with_prefix, compress_block_lazy2_with_prefix,
+        compress_block_lazy_with_prefix,
     };
 
     let dict_content = dict.content();
@@ -457,15 +451,7 @@ pub fn encode_frame_with_dict(
                         min_match,
                     );
                 }
-                Strategy::DoubleFast => {
-                    compress_block_dfast_with_prefix(
-                        &virtual_stream[..offset + chunk_size],
-                        offset,
-                        &mut seq_store,
-                        &mut match_state,
-                        min_match,
-                    );
-                }
+
                 Strategy::Lazy => {
                     compress_block_lazy_with_prefix(
                         &virtual_stream[..offset + chunk_size],
@@ -821,7 +807,8 @@ fn write_block_cross(
     let src = &plaintext[..block_end];
     use crate::encoder::cparams::Strategy;
     match params.strategy {
-        Strategy::Lazy
+        Strategy::DoubleFast
+        | Strategy::Lazy
         | Strategy::Lazy2
         | Strategy::Btlazy2
         | Strategy::Btopt
@@ -836,9 +823,6 @@ fn write_block_cross(
                 &mut seq_store,
                 st,
             );
-        }
-        Strategy::DoubleFast => {
-            compress_block_dfast_with_prefix(src, block_start, &mut seq_store, ms, min_match);
         }
         _ => {
             compress_block_fast_with_prefix(src, block_start, &mut seq_store, ms, min_match);
