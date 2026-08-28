@@ -1441,7 +1441,7 @@ fn emit_metablock_from_commands(
         let mut cost_r = f64::INFINITY;
         let mut cmap_r: Vec<u8> = Vec::new();
         let mut count_r = 0usize;
-        if env_flag!("BROTLI_REF_CLUST") {
+        if quality >= 10 || env_flag!("BROTLI_REF_CLUST") {
             let hists: Vec<crate::encoder::block_splitter::Hist> = bc_hists
                 .iter()
                 .map(|h| {
