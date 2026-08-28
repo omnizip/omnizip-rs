@@ -204,13 +204,14 @@ fn encode_frame_into(
     // The optimal parser (btopt/btultra/btultra2) uses its own
     // binary-tree state and does not consume LDM sequences; the tree
     // window already covers everything the windowLog allows.
-    // Btlazy2 (L13-15) shares the optimal parser with Btopt+ (the
-    // reference runs lazy2 over its binary tree there; our lazy2 is
-    // hash-chain and plateaued at ~1.11x, while the price-parse DP
-    // beats the reference: measured 0.97x on FITS).
+    // Lazy2/Btlazy2 (L8-15) share the optimal parser with Btopt+ (the
+    // reference runs lazy2 tiers there; our lazy2 is hash-chain and
+    // plateaued at ~1.11x, while the price-parse DP beats the
+    // reference: measured 0.97x on FITS).
     let uses_opt = matches!(
         params.strategy,
-        crate::encoder::cparams::Strategy::Btlazy2
+        crate::encoder::cparams::Strategy::Lazy2
+            | crate::encoder::cparams::Strategy::Btlazy2
             | crate::encoder::cparams::Strategy::Btopt
             | crate::encoder::cparams::Strategy::Btultra
             | crate::encoder::cparams::Strategy::Btultra2
@@ -390,7 +391,11 @@ pub fn encode_frame_with_dict(
 
     let uses_opt = matches!(
         params.strategy,
-        Strategy::Btlazy2 | Strategy::Btopt | Strategy::Btultra | Strategy::Btultra2
+        Strategy::Lazy2
+            | Strategy::Btlazy2
+            | Strategy::Btopt
+            | Strategy::Btultra
+            | Strategy::Btultra2
     );
     let mut opt_state = uses_opt.then(|| {
         let opt_level = if params.strategy == Strategy::Btopt {
@@ -804,7 +809,11 @@ fn write_block_cross(
         Strategy::Lazy => {
             compress_block_lazy_with_prefix(src, block_start, &mut seq_store, ms, min_match);
         }
-        Strategy::Btlazy2 | Strategy::Btopt | Strategy::Btultra | Strategy::Btultra2 => {
+        Strategy::Lazy2
+        | Strategy::Btlazy2
+        | Strategy::Btopt
+        | Strategy::Btultra
+        | Strategy::Btultra2 => {
             let st = opt_state
                 .as_mut()
                 .expect("opt state exists for opt strategies");
@@ -814,9 +823,6 @@ fn write_block_cross(
                 &mut seq_store,
                 st,
             );
-        }
-        Strategy::Lazy2 => {
-            compress_block_lazy2_with_prefix(src, block_start, &mut seq_store, ms, min_match);
         }
         _ => {
             compress_block_fast_with_prefix(src, block_start, &mut seq_store, ms, min_match);
