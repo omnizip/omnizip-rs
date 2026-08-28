@@ -150,11 +150,6 @@ pub struct MatchState {
     pub(crate) hash_log: u32,
     /// Hash chain for deeper match search. Lazily allocated.
     pub(crate) chain: Vec<u32>,
-    /// Long-range 8-byte hash table for the double-fast parser
-    /// (classic DFast: the C reuses chainLog as the long hash log).
-    /// Empty when the double-fast tier is not active.
-    pub(crate) long_table: Vec<u32>,
-    pub(crate) long_log: u32,
     /// Max chain entries to walk (0 = single probe only).
     pub(crate) max_chain: u32,
     /// Next position to insert into the hash table.
@@ -170,8 +165,6 @@ impl MatchState {
             hash_table: vec![0; size],
             hash_log,
             chain: Vec::new(),
-            long_table: Vec::new(),
-            long_log: 0,
             max_chain: 0,
             next_to_update: 0,
         }
@@ -188,15 +181,6 @@ impl MatchState {
     /// Disable chain walking (revert to single-probe).
     pub fn disable_chain(&mut self) {
         self.max_chain = 0;
-    }
-
-    /// Enable the long-range table for the double-fast parser.
-    /// `long_log` is the base-2 table size (clamped to the input).
-    pub fn enable_long_table(&mut self, long_log: u32) {
-        self.long_log = long_log;
-        if self.long_table.len() != 1usize << long_log {
-            self.long_table = vec![0; 1usize << long_log];
-        }
     }
 
     /// Default hash log for level-1 fast mode. ZSTD uses ~hashLog 6-7
@@ -236,9 +220,6 @@ impl MatchState {
         self.hash_table.fill(0);
         if !self.chain.is_empty() {
             self.chain.fill(0);
-        }
-        if !self.long_table.is_empty() {
-            self.long_table.fill(0);
         }
         self.next_to_update = 0;
     }
@@ -1175,134 +1156,6 @@ fn insert_range_absolute(ms: &mut MatchState, src: &[u8], start: usize, len: usi
         ms.hash_table[h as usize] = pos as u32;
     }
 }
-
-fn hash8(data: &[u8], pos: usize, h_bits: u32) -> u32 {
-    if pos + 8 > data.len() {
-        return 0;
-    }
-    let v = u64::from_le_bytes(data[pos..pos + 8].try_into().unwrap());
-    ((v.wrapping_mul(0xCF1B_BCDC_B7A5_6463) >> (64 - h_bits)) as u32) & ((1u32 << h_bits) - 1)
-}
-
-/// Classic double-fast parser: a short (min-match) hash table plus a
-/// long 8-byte hash table that catches distant matches the short
-/// table cannot — the reference's DFast tier (L3/L4).
-#[allow(clippy::too_many_lines)]
-pub fn compress_block_dfast_with_prefix(
-    src: &[u8],
-    prefix_len: usize,
-    seq_store: &mut SeqStore,
-    ms: &mut MatchState,
-    min_match: usize,
-) -> usize {
-    let mm = min_match.max(MIN_MATCH);
-    if src.len() < prefix_len + 8 {
-        seq_store.literals.extend_from_slice(&src[prefix_len..]);
-        return src.len() - prefix_len;
-    }
-    let h_bits = ms.hash_log;
-    let l_bits = ms.long_log;
-    let mut anchor: usize = prefix_len;
-    let mut ip: usize = if prefix_len == 0 { 1 } else { prefix_len };
-    let limit = src.len().saturating_sub(mm);
-
-    while ip < limit {
-        // Long table first: an 8-byte-verified distant match is the
-        // highest-quality candidate (classic DFast order).
-        let hl = hash8(src, ip, l_bits) as usize;
-        let long_cand = ms.long_table[hl] as usize;
-        ms.long_table[hl] = ip as u32;
-        let mut matched = false;
-
-        if ip + 8 <= src.len()
-            && long_cand > 0
-            && long_cand < ip
-            && ip - long_cand < BLOCK_MAX_SIZE
-            && src[ip..ip + 8] == src[long_cand..long_cand + 8]
-        {
-            let mut m_len = 8 + count_match(src, ip + 8, src, long_cand + 8, limit + mm - ip - 8);
-            let mut back = 0usize;
-            while ip > anchor + back
-                && long_cand > back
-                && src[ip - 1 - back] == src[long_cand - 1 - back]
-            {
-                back += 1;
-            }
-            m_len += back;
-            ip -= back;
-            let lit_len = (ip - anchor) as u32;
-            seq_store.literals.extend_from_slice(&src[anchor..ip]);
-            seq_store.sequences.push(RawSequence {
-                literal_length: lit_len,
-                match_length: m_len as u32,
-                offset: (ip + back - long_cand) as u32,
-            });
-            rotate_reps(&mut seq_store.rep_offsets, (ip - long_cand) as u32);
-            insert_range_absolute(ms, src, ip, m_len);
-            ip += m_len;
-            anchor = ip;
-            matched = true;
-        }
-
-        if !matched {
-            // Short table + repcode path (same shape as the fast
-            // parser).
-            let h = hash4(src, ip, h_bits);
-            let candidate = ms.hash_table[h as usize] as usize;
-            ms.hash_table[h as usize] = ip as u32;
-
-            if candidate > 0 && candidate < ip {
-                let dist = ip - candidate;
-                if dist < BLOCK_MAX_SIZE
-                    && candidate + MIN_MATCH <= src.len()
-                    && src[ip..ip + MIN_MATCH] == src[candidate..candidate + MIN_MATCH]
-                {
-                    let mut m_len = MIN_MATCH;
-                    m_len += count_match(
-                        src,
-                        ip + m_len,
-                        src,
-                        candidate + m_len,
-                        limit + MIN_MATCH - ip - m_len,
-                    );
-                    let mut back = 0usize;
-                    while ip > anchor + back
-                        && candidate > back
-                        && src[ip - 1 - back] == src[candidate - 1 - back]
-                    {
-                        back += 1;
-                    }
-                    m_len += back;
-                    if m_len >= min_match {
-                        ip -= back;
-                        let lit_len = (ip - anchor) as u32;
-                        // ip was decremented by `back`; the distance is
-                        // measured from the pre-extension position.
-                        let dist = (ip + back - candidate) as u32;
-                        seq_store.literals.extend_from_slice(&src[anchor..ip]);
-                        seq_store.sequences.push(RawSequence {
-                            literal_length: lit_len,
-                            match_length: m_len as u32,
-                            offset: dist,
-                        });
-                        rotate_reps(&mut seq_store.rep_offsets, dist);
-                        insert_range_absolute(ms, src, ip, m_len);
-                        ip += m_len;
-                        anchor = ip;
-                        continue;
-                    }
-                }
-            }
-            ip += 1;
-        }
-    }
-
-    if anchor < src.len() {
-        seq_store.literals.extend_from_slice(&src[anchor..]);
-    }
-    src.len() - anchor
-}
-
 // ---------------------------------------------------------------------------
 // LDM (Long-Distance Matching) parser — for ZSTD levels ≥ 19.
 //
