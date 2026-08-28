@@ -801,6 +801,335 @@ pub(crate) fn rotate_reps(reps: &mut [u32; REP_NUM], new_offset: u32) {
 
 /// Fast (greedy, single-match) parser over `src[prefix_len..]`,
 /// treating `src[..prefix_len]` as pre-seeded dictionary content.
+/// Faithful port of ZSTD_compressBlock_fast_noDict_generic (the
+/// 1.5.x 4-position pipeline): ip0/ip1 adjacent with ip2/ip3 at the
+/// step offset, repcode probing ahead at ip2, dual rep offsets with
+/// the post-match rep2 chain, and kSearchStrength step acceleration.
+/// Post-match table fill (current0+2 and ip0-2) plus the immediate
+/// rep2 ride: while read32(ip0) == read32(ip0 - rep2), store a
+/// swapped-rep sequence (the C's rep_offset2 chain after matches).
+#[allow(clippy::too_many_arguments)]
+fn post_match_fill_and_reps(
+    src: &[u8],
+    seq_store: &mut SeqStore,
+    ms: &mut MatchState,
+    ip0: &mut usize,
+    anchor: &mut usize,
+    rep1: &mut u32,
+    rep2: &mut u32,
+    hash_at: &dyn Fn(usize) -> usize,
+    ilimit: usize,
+    iend: usize,
+) -> bool {
+    let _ = anchor;
+    if *ip0 <= ilimit {
+        let p1 = (*ip0).saturating_sub(2);
+        ms.hash_table[hash_at(p1)] = p1 as u32;
+        while *rep2 > 0 && *ip0 + 4 <= iend && *ip0 >= *rep2 as usize {
+            let r = read32_at(src, *ip0);
+            if r != read32_at(src, *ip0 - *rep2 as usize) {
+                break;
+            }
+            let mut r_length = 4 + count_match(
+                src,
+                *ip0 + 4,
+                src,
+                *ip0 + 4 - *rep2 as usize,
+                iend - *ip0 - 4,
+            );
+            let tmp = *rep2;
+            *rep2 = *rep1;
+            *rep1 = tmp;
+            ms.hash_table[hash_at(*ip0)] = *ip0 as u32;
+            *ip0 += r_length;
+            // Store a zero-literal rep1 sequence (offset = the
+            // promoted rep value; rotate is a no-op since it equals
+            // reps[0]).
+            seq_store.sequences.push(RawSequence {
+                literal_length: 0,
+                match_length: r_length as u32,
+                offset: tmp,
+            });
+            r_length = 0;
+            let _ = r_length;
+        }
+    }
+    true
+}
+
+fn read32_at(src: &[u8], p: usize) -> u32 {
+    u32::from_le_bytes(src[p..p + 4].try_into().unwrap())
+}
+
+pub fn compress_block_fast4_with_prefix(
+    src: &[u8],
+    prefix_len: usize,
+    seq_store: &mut SeqStore,
+    ms: &mut MatchState,
+    min_match: usize,
+) -> usize {
+    let mm = min_match.max(MIN_MATCH);
+    if src.len() < prefix_len + 16 {
+        seq_store.literals.extend_from_slice(&src[prefix_len..]);
+        return src.len() - prefix_len;
+    }
+    let h_bits = ms.hash_log;
+    // C ZSTD_hashPtr keyed on mls (5/6/7 at L1-4, 4 otherwise).
+    let hash_at = |p: usize| -> usize {
+        let avail = (src.len() - p).min(mm.max(4));
+        if avail < 4 {
+            return 0;
+        }
+        let mut buf = [0u8; 8];
+        buf[..avail].copy_from_slice(&src[p..p + avail]);
+        let v64 = match mm {
+            5 => (u64::from_le_bytes(buf) << 24).wrapping_mul(889_523_592_379),
+            6 => (u64::from_le_bytes(buf) << 16).wrapping_mul(227_718_039_650_203),
+            7 => (u64::from_le_bytes(buf) << 8).wrapping_mul(58_295_818_150_454_627),
+            _ => {
+                return (((u32::from_le_bytes(buf[..4].try_into().unwrap())
+                    .wrapping_mul(2_654_435_761))
+                    >> (32 - h_bits.min(32))) as usize)
+                    & ((1usize << h_bits.min(32)) - 1)
+            }
+        };
+        (((v64 >> (64 - h_bits)) as usize) & ((1usize << h_bits) - 1)).min((1usize << h_bits) - 1)
+    };
+    let read32 = |p: usize| -> u32 { u32::from_le_bytes(src[p..p + 4].try_into().unwrap()) };
+
+    let step_size = 2usize; // targetLength 0 at L1/L2 => 0 + !(0) + 1
+    let k_step_incr = 128usize;
+    let iend = src.len();
+    let ilimit = iend.saturating_sub(8);
+    let mut anchor = prefix_len;
+    let mut ip0 = if prefix_len == 0 { 1 } else { prefix_len };
+    let mut rep1 = seq_store.rep_offsets[0];
+    let mut rep2 = seq_store.rep_offsets[1];
+    let (offset_saved1, offset_saved2) = if prefix_len == 0 {
+        // Frame start: reps are the spec defaults, never "restored".
+        (rep1, rep2)
+    } else {
+        (rep1, rep2)
+    };
+
+    'outer: while ip0 + 3 < ilimit {
+        let mut step = step_size;
+        let mut next_step = ip0 + k_step_incr;
+        let mut ip1 = ip0 + 1;
+        let mut ip2 = ip0 + step;
+        let mut ip3 = ip2 + 1;
+        if ip3 >= ilimit {
+            break;
+        }
+        let mut hash0 = hash_at(ip0);
+        let mut hash1 = hash_at(ip1);
+        let mut match_idx = ms.hash_table[hash0] as usize;
+        let mut current0;
+
+        loop {
+            // Repcode probe at ip2 (reads 4 bytes at ip2 - rep1).
+            if rep1 > 0
+                && ip2 >= rep1 as usize
+                && ip2 + 4 <= iend
+                && read32(ip2) == read32(ip2 - rep1 as usize)
+            {
+                ip0 = ip2;
+                let mut match0 = ip0 - rep1 as usize;
+                // mLength = (ip0[-1] == match0[-1]) ? 5 : 4, pre-shifted.
+                let back =
+                    usize::from(ip0 > anchor && match0 > 0 && src[ip0 - 1] == src[match0 - 1]);
+                ip0 -= back;
+                match0 -= back;
+                let mut m_length = 4 + back;
+                m_length += count_match(
+                    src,
+                    ip0 + m_length,
+                    src,
+                    match0 + m_length,
+                    iend - ip0 - m_length,
+                );
+                store_seq(
+                    src,
+                    seq_store,
+                    &mut anchor,
+                    ip0,
+                    rep1 as u32,
+                    m_length as u32,
+                );
+                // hash1 write: ip1 < ip2, safe pre-write.
+                ms.hash_table[hash1] = ip1 as u32;
+                ip0 += m_length;
+                // Post-match fill + immediate rep2 chain.
+                if post_match_fill_and_reps(
+                    src,
+                    seq_store,
+                    ms,
+                    &mut ip0,
+                    &mut anchor,
+                    &mut rep1,
+                    &mut rep2,
+                    &hash_at,
+                    ilimit,
+                    iend,
+                ) {
+                    anchor = ip0;
+                    continue 'outer;
+                }
+                anchor = ip0;
+                continue 'outer;
+            }
+
+            // Hash match at ip0 (4-byte compare like the C).
+            if match_idx > 0
+                && ip0 - match_idx < BLOCK_MAX_SIZE
+                && match_idx + 4 <= iend
+                && read32(ip0) == read32(match_idx)
+            {
+                ms.hash_table[hash1] = ip1 as u32;
+                let mut m0 = match_idx;
+                let new_off = (ip0 - m0) as u32;
+                rep2 = rep1;
+                rep1 = new_off;
+                let mut m_length = 4usize;
+                while ip0 > anchor && m0 > 0 && src[ip0 - 1] == src[m0 - 1] {
+                    ip0 -= 1;
+                    m0 -= 1;
+                    m_length += 1;
+                }
+                m_length += count_match(
+                    src,
+                    ip0 + m_length,
+                    src,
+                    m0 + m_length,
+                    iend - ip0 - m_length,
+                );
+                store_seq(src, seq_store, &mut anchor, ip0, new_off, m_length as u32);
+                ip0 += m_length;
+                if post_match_fill_and_reps(
+                    src,
+                    seq_store,
+                    ms,
+                    &mut ip0,
+                    &mut anchor,
+                    &mut rep1,
+                    &mut rep2,
+                    &hash_at,
+                    ilimit,
+                    iend,
+                ) {
+                    anchor = ip0;
+                    continue 'outer;
+                }
+                anchor = ip0;
+                continue 'outer;
+            }
+
+            // Advance pipeline: lookup ip1, hash ip2, shift positions.
+            match_idx = ms.hash_table[hash1] as usize;
+            hash0 = hash1;
+            hash1 = hash_at(ip2);
+            ip0 = ip1;
+            ip1 = ip2;
+            ip2 = ip3;
+            current0 = ip0;
+            ms.hash_table[hash0] = current0 as u32;
+
+            // Hash match at the (new) ip0.
+            if match_idx > 0
+                && ip0 - match_idx < BLOCK_MAX_SIZE
+                && match_idx + 4 <= iend
+                && read32(ip0) == read32(match_idx)
+            {
+                if step <= 4 {
+                    ms.hash_table[hash1] = ip1 as u32;
+                }
+                let mut m0 = match_idx;
+                let new_off = (ip0 - m0) as u32;
+                rep2 = rep1;
+                rep1 = new_off;
+                let mut m_length = 4usize;
+                while ip0 > anchor && m0 > 0 && src[ip0 - 1] == src[m0 - 1] {
+                    ip0 -= 1;
+                    m0 -= 1;
+                    m_length += 1;
+                }
+                m_length += count_match(
+                    src,
+                    ip0 + m_length,
+                    src,
+                    m0 + m_length,
+                    iend - ip0 - m_length,
+                );
+                store_seq(src, seq_store, &mut anchor, ip0, new_off, m_length as u32);
+                ip0 += m_length;
+                if post_match_fill_and_reps(
+                    src,
+                    seq_store,
+                    ms,
+                    &mut ip0,
+                    &mut anchor,
+                    &mut rep1,
+                    &mut rep2,
+                    &hash_at,
+                    ilimit,
+                    iend,
+                ) {
+                    anchor = ip0;
+                    continue 'outer;
+                }
+                anchor = ip0;
+                continue 'outer;
+            }
+
+            match_idx = ms.hash_table[hash1] as usize;
+            hash0 = hash1;
+            hash1 = hash_at(ip2);
+            ip0 = ip1;
+            ip1 = ip2;
+            ip2 = ip0 + step;
+            ip3 = ip1 + step;
+            if ip2 >= next_step {
+                step += 1;
+                next_step += k_step_incr;
+            }
+            if ip3 >= ilimit {
+                break;
+            }
+        }
+        break;
+    }
+
+    // Restore/propagate reps (the C's offsetSaved dance collapses to
+    // carrying forward whatever is current for our block model).
+    seq_store.rep_offsets[0] = if rep1 > 0 { rep1 } else { offset_saved1 };
+    seq_store.rep_offsets[1] = if rep2 > 0 { rep2 } else { offset_saved2 };
+    seq_store.rep_offsets[2] = 8; // unchanged by this parser
+    if anchor < iend {
+        seq_store.literals.extend_from_slice(&src[anchor..iend]);
+    }
+    iend - anchor
+}
+
+/// `ZSTD_storeSeq` equivalent: literals [anchor..ip), sequence with
+/// the real offset, rep rotation.
+fn store_seq(
+    src: &[u8],
+    seq_store: &mut SeqStore,
+    anchor: &mut usize,
+    ip: usize,
+    offset: u32,
+    m_len: u32,
+) {
+    seq_store.literals.extend_from_slice(&src[*anchor..ip]);
+    seq_store.sequences.push(RawSequence {
+        literal_length: (ip - *anchor) as u32,
+        match_length: m_len,
+        offset,
+    });
+    rotate_reps(&mut seq_store.rep_offsets, offset);
+    *anchor = ip;
+}
+
 pub fn compress_block_fast_with_prefix(
     src: &[u8],
     prefix_len: usize,
