@@ -50,11 +50,12 @@ fn map_encode_error(e: LzmaError) -> OmnizipError {
 }
 
 /// Level threshold above which the optimal (DP) parser is used.
-/// Below this, the faster lazy parser is selected.
+/// Below this, the fast parser (xz's `LZMA_MODE_FAST` port) is selected.
 ///
-/// Matches liblzma's convention where level ≥ 4 uses NORMAL mode
-/// (optimal parsing); levels 1-3 are FAST mode.
-const OPTIMAL_PARSER_LEVEL_THRESHOLD: u8 = 4;
+/// Level 1 keeps the fast parse (its tier exists for speed); levels 2+
+/// measure smaller through the optimal parser on every corpus swept
+/// (TODO.remaining/01).
+const OPTIMAL_PARSER_LEVEL_THRESHOLD: u8 = 2;
 
 /// Map a compression level to match-finder tuning knobs.
 ///
@@ -281,10 +282,12 @@ mod tests {
     fn level_threshold_selects_optimal_parser() {
         // Level below threshold → use_optimal_parser = false.
         let mut opts = LzmaOptions::default();
-        opts.use_optimal_parser = LzmaCodec::uses_optimal_parser(3);
-        assert!(!opts.use_optimal_parser, "level 3 must use lazy");
+        opts.use_optimal_parser = LzmaCodec::uses_optimal_parser(1);
+        assert!(!opts.use_optimal_parser, "level 1 must use fast parse");
 
         // Level at/above threshold → use_optimal_parser = true.
+        opts.use_optimal_parser = LzmaCodec::uses_optimal_parser(2);
+        assert!(opts.use_optimal_parser, "level 2 must use optimal");
         opts.use_optimal_parser = LzmaCodec::uses_optimal_parser(6);
         assert!(opts.use_optimal_parser, "level 6 must use optimal");
         opts.use_optimal_parser = LzmaCodec::uses_optimal_parser(9);

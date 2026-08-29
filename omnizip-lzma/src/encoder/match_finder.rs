@@ -29,11 +29,30 @@ pub fn new_lzma_match_finder(data: &[u8], dict_size: u32) -> MatchFinder<'_> {
         min_match: 3,
         max_chain_length: 256,
         nice_match: 0,
-        hash_log: 18,
+        hash_log: lzma_hash_log(dict_size),
         max_match_length: 273, // MATCH_LEN_MAX: cap to avoid O(N²) on repetitive data,
         hash_bytes: 4,
     };
     HashChainMatchFinder::new(data, config)
+}
+
+/// 4-byte hash table bits — port of the sizing in xz's
+/// `lz_encoder.c` (round dict down to 2^k, halve, floor at 2^16,
+/// halve once more above 2^24). Smaller tables (the old fixed 2^18)
+/// collide enough to lose recall against the reference on text.
+#[must_use]
+pub const fn lzma_hash_log(dict_size: u32) -> u32 {
+    let mut hs = dict_size.saturating_sub(1);
+    hs |= hs >> 1;
+    hs |= hs >> 2;
+    hs |= hs >> 4;
+    hs |= hs >> 8;
+    hs >>= 1;
+    hs |= 0xFFFF;
+    if hs > (1 << 24) {
+        hs >>= 1;
+    }
+    (hs + 1).trailing_zeros()
 }
 
 #[cfg(test)]

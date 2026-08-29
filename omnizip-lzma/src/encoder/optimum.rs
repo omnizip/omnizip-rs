@@ -986,8 +986,7 @@ impl Lzma1Encoder {
     /// carry — the LZMA2 reset level 0 continuation).
     pub(crate) fn take_range_encoder(&mut self) -> Vec<u8> {
         self.range_encoder.flush();
-        let mut next = crate::range_coder::RangeEncoder::new();
-        next.set_pad_flush();
+        let next = crate::range_coder::RangeEncoder::new();
         std::mem::replace(&mut self.range_encoder, next).finish()
     }
 

@@ -12,6 +12,7 @@
 use crate::bit_model::BitModel;
 use crate::coder::{DistanceEncoder, LengthEncoder, LiteralEncoder};
 use crate::constants::NUM_LEN_TO_POS_STATES;
+use crate::encoder::fast_parse::{FastCommand, FastParseState};
 use crate::encoder::match_finder::new_lzma_match_finder;
 use crate::range_coder::RangeEncoder;
 use crate::state::{LzmaState, NUM_STATES};
@@ -128,7 +129,6 @@ impl Lzma1Encoder {
     #[must_use]
     pub fn without_eopm(mut self) -> Self {
         self.emit_eopm = false;
-        self.range_encoder.set_pad_flush();
         self
     }
 
@@ -285,66 +285,13 @@ impl Lzma1Encoder {
         self.range_encoder.finish()
     }
 
-    /// Lazy parser (look-ahead-1).
-    fn encode_via_lazy(mut self, input: &[u8]) -> Vec<u8> {
-        let mut mf = new_lzma_match_finder(input, self.dict_size);
-
-        while let Some(pos) = mf.advance() {
-            let m1 = if pos + FULL_MATCH_LEN_MIN as usize <= input.len() {
-                mf.find_match(pos)
-            } else {
-                None
-            };
-
-            if let Some(m1) = m1 {
-                // Lazy: check if position+1 has a better match.
-                let better_at_next = if pos + 1 < input.len() {
-                    let m2 = if pos + 1 + FULL_MATCH_LEN_MIN as usize <= input.len() {
-                        mf.find_match(pos + 1)
-                    } else {
-                        None
-                    };
-                    match m2 {
-                        Some(m2) => m2.length > m1.length + 1,
-                        None => false,
-                    }
-                } else {
-                    false
-                };
-
-                if better_at_next {
-                    let prev_byte = if pos > 0 {
-                        input[pos - 1]
-                    } else {
-                        self.base_prev_byte
-                    };
-                    let match_byte = self.get_match_byte(input, pos);
-                    self.encode_literal_byte(input[pos], prev_byte, match_byte, pos);
-                } else {
-                    self.encode_match(m1.distance, m1.length.min(MATCH_LEN_MAX), pos);
-                    for _ in 0..m1.length.min(MATCH_LEN_MAX).saturating_sub(1) {
-                        if mf.advance().is_none() {
-                            break;
-                        }
-                    }
-                }
-            } else {
-                let prev_byte = if pos > 0 {
-                    input[pos - 1]
-                } else {
-                    self.base_prev_byte
-                };
-                let match_byte = self.get_match_byte(input, pos);
-                self.encode_literal_byte(input[pos], prev_byte, match_byte, pos);
-            }
-        }
-
-        self.encode_eopm_if_enabled(input.len());
-        self.range_encoder.flush();
-        self.range_encoder.finish()
+    /// Lazy parser (look-ahead-1) — xz's `LZMA_MODE_FAST` parse
+    /// (port of `lzma_encoder_optimum_fast.c`).
+    fn encode_via_lazy(self, input: &[u8]) -> Vec<u8> {
+        self.encode_via_lazy_tuned(input, 0, 0)
     }
 
-    /// Lazy parser with explicit match-finder tuning.
+    /// Fast parse with explicit match-finder tuning.
     fn encode_via_lazy_tuned(
         mut self,
         input: &[u8],
@@ -355,49 +302,43 @@ impl Lzma1Encoder {
         if max_chain_length > 0 {
             mf.set_max_chain_length(max_chain_length);
         }
-        if nice_match > 0 {
-            mf.set_nice_match(nice_match);
+        self.encode_fast_stream(input, &mut mf, nice_match);
+        self.encode_eopm_if_enabled(input.len());
+        self.range_encoder.flush();
+        self.range_encoder.finish()
+    }
+
+    /// Drive the fast parse over `input`, emitting via the range
+    /// encoder. Shared by [`Self::encode_via_lazy_tuned`].
+    fn encode_fast_stream(
+        &mut self,
+        input: &[u8],
+        mf: &mut crate::encoder::match_finder::MatchFinder<'_>,
+        nice_match: u32,
+    ) {
+        let nice = if nice_match > 0 {
+            nice_match.min(MATCH_LEN_MAX)
+        } else {
+            MATCH_LEN_MAX
+        };
+        let mut fast = FastParseState::new();
+        let mut pos = 0usize;
+        while pos < input.len() {
+            while mf.position() <= pos {
+                mf.advance();
+            }
+            let reps = [self.rep0, self.rep1, self.rep2, self.rep3];
+            let decision = fast.decide(input, mf, pos, reps, nice);
+            let cmd = decision.command;
+            self.emit_fast_command(input, pos, cmd);
+            pos += cmd.consumed() as usize;
         }
+    }
 
-        while let Some(pos) = mf.advance() {
-            let m1 = if pos + FULL_MATCH_LEN_MIN as usize <= input.len() {
-                mf.find_match(pos)
-            } else {
-                None
-            };
-
-            if let Some(m1) = m1 {
-                let better_at_next = if pos + 1 < input.len() {
-                    let m2 = if pos + 1 + FULL_MATCH_LEN_MIN as usize <= input.len() {
-                        mf.find_match(pos + 1)
-                    } else {
-                        None
-                    };
-                    match m2 {
-                        Some(m2) => m2.length > m1.length + 1,
-                        None => false,
-                    }
-                } else {
-                    false
-                };
-
-                if better_at_next {
-                    let prev_byte = if pos > 0 {
-                        input[pos - 1]
-                    } else {
-                        self.base_prev_byte
-                    };
-                    let match_byte = self.get_match_byte(input, pos);
-                    self.encode_literal_byte(input[pos], prev_byte, match_byte, pos);
-                } else {
-                    self.encode_match(m1.distance, m1.length.min(MATCH_LEN_MAX), pos);
-                    for _ in 0..m1.length.min(MATCH_LEN_MAX).saturating_sub(1) {
-                        if mf.advance().is_none() {
-                            break;
-                        }
-                    }
-                }
-            } else {
+    /// Emit one fast-parse command at `pos`.
+    fn emit_fast_command(&mut self, input: &[u8], pos: usize, cmd: FastCommand) {
+        match cmd {
+            FastCommand::Literal => {
                 let prev_byte = if pos > 0 {
                     input[pos - 1]
                 } else {
@@ -406,11 +347,9 @@ impl Lzma1Encoder {
                 let match_byte = self.get_match_byte(input, pos);
                 self.encode_literal_byte(input[pos], prev_byte, match_byte, pos);
             }
+            FastCommand::Rep { index, length } => self.encode_rep_match(index, length, pos),
+            FastCommand::Match { distance, length } => self.encode_match(distance, length, pos),
         }
-
-        self.encode_eopm_if_enabled(input.len());
-        self.range_encoder.flush();
-        self.range_encoder.finish()
     }
 
     /// Lazy parse+encode over a RANGE of the full input, using a
@@ -437,83 +376,35 @@ impl Lzma1Encoder {
         if max_chain_length > 0 {
             mf.set_max_chain_length(max_chain_length);
         }
-        if nice_match > 0 {
-            mf.set_nice_match(nice_match);
-        }
+        let nice = if nice_match > 0 {
+            nice_match.min(MATCH_LEN_MAX)
+        } else {
+            MATCH_LEN_MAX
+        };
+        let mut fast = FastParseState::new();
         let mut end = start;
+        let mut pos = start;
         let mut stop = false;
-        while !stop {
-            let Some(pos) = mf.advance() else { break };
-            if pos < start {
-                continue;
+        while !stop && pos < input.len() {
+            while mf.position() <= pos {
+                mf.advance();
             }
-            let m1 = if pos + FULL_MATCH_LEN_MIN as usize <= input.len() {
-                mf.find_match(pos)
-            } else {
-                None
-            };
-
-            if let Some(m1) = m1 {
-                let better_at_next = if pos + 1 < input.len() {
-                    let m2 = if pos + 1 + FULL_MATCH_LEN_MIN as usize <= input.len() {
-                        mf.find_match(pos + 1)
-                    } else {
-                        None
-                    };
-                    match m2 {
-                        Some(m2) => m2.length > m1.length + 1,
-                        None => false,
-                    }
-                } else {
-                    false
-                };
-
-                if better_at_next {
-                    let prev_byte = if pos > 0 {
-                        input[pos - 1]
-                    } else {
-                        self.base_prev_byte
-                    };
-                    let match_byte = self.get_match_byte(input, pos);
-                    self.encode_literal_byte(input[pos], prev_byte, match_byte, pos);
-                    end = pos + 1;
-                } else {
-                    let len = m1.length.min(MATCH_LEN_MAX);
-                    if m1.distance == self.rep0.wrapping_add(1) && len >= 2 {
-                        // Recurring distance: a rep0 match costs a
-                        // couple of bits once the models train, versus
-                        // a full distance-slot encoding. This is where
-                        // nearly all the ratio on line-oriented data
-                        // (CSV and friends) comes from.
-                        self.encode_rep0_match(len, pos);
-                    } else {
-                        self.encode_match(m1.distance, len, pos);
-                    }
-                    for _ in 0..len.saturating_sub(1) {
-                        if mf.advance().is_none() {
-                            break;
-                        }
-                    }
-                    end = pos + len as usize;
-                }
-            } else {
-                let prev_byte = if pos > 0 {
-                    input[pos - 1]
-                } else {
-                    self.base_prev_byte
-                };
-                let match_byte = self.get_match_byte(input, pos);
-                self.encode_literal_byte(input[pos], prev_byte, match_byte, pos);
-                end = pos + 1;
+            let reps = [self.rep0, self.rep1, self.rep2, self.rep3];
+            let decision = fast.decide(input, mf, pos, reps, nice);
+            let cmd = decision.command;
+            self.emit_fast_command(input, pos, cmd);
+            pos += cmd.consumed() as usize;
+            end = pos;
+            if end - start >= budget {
+                stop = true;
             }
-            if end - start >= budget || self.range_encoder.bytes_for_decode() >= max_compressed {
+            if self.range_encoder.bytes_for_decode() >= max_compressed {
                 stop = true;
             }
         }
         self.encode_eopm_if_enabled(end);
         self.range_encoder.flush();
-        let mut next_rc = RangeEncoder::new();
-        next_rc.set_pad_flush();
+        let next_rc = RangeEncoder::new();
         let bytes = std::mem::replace(&mut self.range_encoder, next_rc).finish();
         (bytes, end)
     }
