@@ -16,10 +16,12 @@ where `DropId = BLAKE3(plaintext)`. Codec non-determinism breaks dedup, so
 **every encoder must produce byte-identical output for the same input + level
 across runs, machines, and Rust versions.**
 
-Two source-of-truth docs you must read before any porting work:
+Three source-of-truth docs you must read before any porting work:
 - [`PLAN.md`](PLAN.md) — Ruby → Rust module map and phased delivery for LZMA + ZSTD.
 - [`TODO.omnizip-rs/README.md`](TODO.omnizip-rs/README.md) — MECE task breakdown
   for the entire workspace, with priorities and dependencies.
+- [`CONTEXT.md`](CONTEXT.md) — domain glossary (codec families, containers,
+  parity/ratio/sweep/tier/bank vocabulary) with ADR cross-references.
 
 ## Build, test, lint
 
