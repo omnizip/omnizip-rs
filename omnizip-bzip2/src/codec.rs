@@ -117,18 +117,10 @@ impl Codec for Bzip2Codec {
                 max: 9,
             });
         }
-
-        if plaintext.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        let block_size = Self::block_size_for(lv);
-
-        let mut out = Vec::new();
-        for chunk in plaintext.chunks(block_size) {
-            encode_block(chunk, &mut out);
-        }
-        Ok(out)
+        // Standard `.bz2` wire format (multi-table sendMTFValues) —
+        // decodable by `bzip2 -d`. The Ruby-parity custom container
+        // remains available via the module-private `encode_block`.
+        crate::bz2::compress(plaintext, lv)
     }
 
     fn decompress(&self, compressed: &[u8], expected_len: u32) -> Result<Vec<u8>, OmnizipError> {
@@ -148,7 +140,7 @@ impl Codec for Bzip2Codec {
             });
         }
 
-        let out = decompress_all_blocks(compressed)?;
+        let out = crate::bz2::decompress::decompress_framed(compressed)?;
         if out.len() != expected_us {
             return Err(OmnizipError::LengthMismatch {
                 codec: CodecId::BZIP2,
@@ -232,17 +224,8 @@ impl Bzip2Compressor {
                 max: 9,
             });
         }
-        if input.is_empty() {
-            self.out.clear();
-            return Ok(Vec::new());
-        }
-        let block_size = Bzip2Codec::block_size_for(lv);
-        self.out.clear();
-        for chunk in input.chunks(block_size) {
-            encode_block(chunk, &mut self.out);
-        }
-        // Clone out for the caller; we keep the capacity for the next call.
-        Ok(self.out.clone())
+        let _ = &self.out;
+        crate::bz2::compress(input, lv)
     }
 }
 

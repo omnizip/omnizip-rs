@@ -17,7 +17,7 @@ pub mod mtf;
 pub mod rle2;
 
 use bitwriter::Bz2BitWriter;
-use huffman::{canonical_codes, code_lengths};
+use huffman::{canonical_codes, code_lengths_capped};
 use mtf::{build_seed, mtf_encode_with_seed};
 
 use crate::bwt::bwt_encode;
@@ -29,11 +29,16 @@ const BLOCK_MAGIC: u64 = 0x3141_5926_5359;
 const EOS_MAGIC: u64 = 0x1772_4538_5090;
 /// Always 0 — modern bzip2 doesn't randomise blocks.
 const RANDOMISED_FLAG: bool = false;
-/// Number of Huffman tables. bzip2's range is 2..=6. We use 2 (the
-/// minimum) and write the same table twice.
-const N_GROUPS: u8 = 2;
-/// Symbols per selector chunk (~50 in upstream bzip2).
+/// Initial per-table cost symbols (upstream's `BZ_LESSER/GREATER_ICOST`).
+const LESSER_ICOST: u8 = 0;
+const GREATER_ICOST: u8 = 15;
+/// Symbols per selector chunk (upstream bzip2's `BZ_G_SIZE`).
 const GROUP_SIZE: usize = 50;
+/// Table refinement passes (upstream bzip2's `BZ_N_ITERS`).
+const N_ITERS: usize = 4;
+/// Transmit-table code-length cap (upstream's hbMakeCodeLengths uses
+/// 17 since bzip2 1.0.3).
+const MAX_TABLE_CODE_LENGTH: u8 = 17;
 
 /// Compress `input` into a standard `.bz2` stream compatible with
 /// `bzip2 -d`. `level` selects the block size `100_000..=900_000` in
@@ -61,17 +66,10 @@ pub fn compress(input: &[u8], level: u8) -> Result<Vec<u8>, OmnizipError> {
     let level_digit = b'0' + level;
     writer.write_bits(u32::from(level_digit), 8);
 
-    if input.is_empty() {
-        // Per bzip2: even an empty stream must end with the EOS magic.
-        // No blocks, no CRC.
-        writer.write48(EOS_MAGIC);
-        return Ok(writer.finish());
-    }
-
     // bzip2 combines block CRCs into a running 32-bit checksum:
     // combined = rotate_left(combined, 1) XOR block_crc, starting at 0.
     let mut combined: u32 = 0;
-    for chunk in input.chunks(block_size) {
+    for chunk in block_chunks(input, block_size.saturating_sub(19)) {
         let block_crc = crc32::crc32(chunk);
         combined = combined.rotate_left(1) ^ block_crc;
         encode_block(chunk, &mut writer);
@@ -83,6 +81,82 @@ pub fn compress(input: &[u8], level: u8) -> Result<Vec<u8>, OmnizipError> {
     Ok(writer.finish())
 }
 
+/// Split `input` into block slices whose RLE1 output fits the wire
+/// budget `cap` (upstream: `nblockMAX = 100000 * level - 19` — the
+/// decoder rejects blocks whose decoded RLE1 stream is longer).
+/// Chunking by INPUT bytes instead lets low-redundancy data overflow
+/// the budget, which `bzip2 -d` rejects with a data-integrity error.
+///
+/// Cutting mirrors upstream's incremental filling: a run straddling
+/// the budget is split between blocks (the tail re-runs in the next
+/// block). RLE1 emits 4 copies + 1 count byte per chunk of up to 259
+/// run bytes, plus literals for any remainder below 4.
+fn block_chunks(input: &[u8], cap: usize) -> Vec<&[u8]> {
+    let enc = |mut r: usize| -> usize {
+        let mut out = 0usize;
+        while r >= 4 {
+            r -= r.min(259);
+            out += 5;
+        }
+        out + r
+    };
+    let mut chunks = Vec::new();
+    let mut start = 0usize;
+    let mut rlen = 0usize;
+    let mut i = 0usize;
+    while i < input.len() {
+        let byte = input[i];
+        let mut run = 1usize;
+        while i + run < input.len() && input[i + run] == byte {
+            run += 1;
+        }
+        if rlen + enc(run) <= cap {
+            rlen += enc(run);
+            i += run;
+            continue;
+        }
+        // Largest prefix of this run whose RLE1 output still fits
+        // (enc is nondecreasing, so binary-search the boundary).
+        let avail = cap - rlen;
+        let mut lo = 0usize;
+        let mut hi = run;
+        while lo < hi {
+            let mid = (lo + hi).div_ceil(2);
+            if enc(mid) <= avail {
+                lo = mid;
+            } else {
+                hi = mid - 1;
+            }
+        }
+        // `take` is 0 only when not even one literal byte fits; cut
+        // an empty slice then to guarantee progress on the next block.
+        if lo == 0 {
+            chunks.push(&input[start..i]);
+            start = i;
+            rlen = 0;
+            continue;
+        }
+        chunks.push(&input[start..i + lo]);
+        start = i + lo;
+        i += lo;
+        rlen = 0;
+    }
+    if start < input.len() {
+        chunks.push(&input[start..]);
+    }
+    chunks
+}
+
+// encode_block ports upstream's sendMTFValues whole: the nPart
+// partition runs `ge` from `gs - 1` (-1 on the first slice, hence the
+// i64 arithmetic), the selector MTF keeps upstream's manual rotate,
+// and the whole function mirrors the C control flow.
+#[allow(
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss,
+    clippy::manual_swap,
+    clippy::too_many_lines
+)]
 fn encode_block(block: &[u8], writer: &mut Bz2BitWriter) {
     // Pipeline: RLE1 → BWT → MTF (seeded with active bytes) → RLE2 → Huffman.
     let rle1 = rle_encode(block);
@@ -109,33 +183,133 @@ fn encode_block(block: &[u8], writer: &mut Bz2BitWriter) {
         writer.write_bits(u32::from(*g), 16);
     }
 
-    // nGroups (3 bits) + nSelectors (15 bits).
-    let n_symbols = symbols.len();
-    let n_selectors = n_symbols.div_ceil(GROUP_SIZE).max(1).min(18_002);
-    writer.write_bits(u32::from(N_GROUPS), 3);
-    writer.write_bits(n_selectors as u32, 15);
-    // Selectors are MTF-coded. MTF value N emits N '1' bits then a '0'.
-    // All our selectors = 0 (always use table 0) → single '0' bit each.
-    for _ in 0..n_selectors {
-        writer.write_bit(false);
-    }
-
-    // Build Huffman code lengths over the alphabet of size n_in_use + 2.
+    // Port of upstream bzip2's sendMTFValues: 2..=6 Huffman tables,
+    // each 50-symbol group coded by its cheapest table, 4 refinement
+    // iterations, MTF-coded selectors, delta-coded table lengths.
+    let n_mtf = symbols.len();
     let alphabet_size = n_in_use + 2;
+    let n_groups = if n_mtf < 200 {
+        2
+    } else if n_mtf < 600 {
+        3
+    } else if n_mtf < 1200 {
+        4
+    } else if n_mtf < 2400 {
+        5
+    } else {
+        6
+    };
+
+    // Symbol frequencies.
     let mut freqs = vec![0u32; alphabet_size];
     for &sym in &symbols {
         freqs[usize::from(sym)] += 1;
     }
-    let lengths = code_lengths(&freqs);
-    let codes = canonical_codes(&lengths);
 
-    // Write the Huffman table N_GROUPS times (identical tables).
-    for _ in 0..N_GROUPS {
-        write_huffman_table(writer, &lengths);
+    // Initial tables: partition the alphabet into roughly equal-
+    // frequency slices (upstream's nPart loop).
+    let mut lengths = vec![vec![GREATER_ICOST; alphabet_size]; n_groups];
+    {
+        let mut n_part = n_groups;
+        let mut rem_f = n_mtf as u32;
+        let mut gs = 0usize;
+        while n_part > 0 {
+            let t_freq = rem_f / n_part as u32;
+            let mut ge = gs as i64 - 1;
+            let mut a_freq = 0u32;
+            while a_freq < t_freq && ge < alphabet_size as i64 - 1 {
+                ge += 1;
+                a_freq += freqs[ge as usize];
+            }
+            if ge > gs as i64 && n_part != n_groups && n_part != 1 && (n_groups - n_part) % 2 == 1 {
+                a_freq -= freqs[ge as usize];
+                ge -= 1;
+            }
+            for (v, len) in lengths[n_part - 1].iter_mut().enumerate() {
+                *len = if v >= gs && v as i64 <= ge {
+                    LESSER_ICOST
+                } else {
+                    GREATER_ICOST
+                };
+            }
+            n_part -= 1;
+            gs = ge as usize + 1;
+            rem_f -= a_freq;
+        }
     }
 
-    // Encode each chunk using table 0's codes.
-    for chunk in symbols.chunks(GROUP_SIZE) {
+    // Refinement: 4 passes of (assign groups to cheapest table,
+    // rebuild tables from the assigned frequencies).
+    let mut selectors: Vec<u8> = Vec::with_capacity(n_mtf.div_ceil(GROUP_SIZE));
+    for _ in 0..N_ITERS {
+        let mut rfreq = vec![vec![0u32; alphabet_size]; n_groups];
+        selectors.clear();
+        let mut gs = 0usize;
+        while gs < n_mtf {
+            let mut ge = gs + GROUP_SIZE - 1;
+            if ge >= n_mtf {
+                ge = n_mtf - 1;
+            }
+            let mut best_t = 0usize;
+            let mut best_cost = u64::MAX;
+            for (t, lengths_t) in lengths.iter().enumerate() {
+                let mut cost = 0u64;
+                for &sym in &symbols[gs..=ge] {
+                    cost += u64::from(lengths_t[usize::from(sym)]);
+                }
+                if cost < best_cost {
+                    best_cost = cost;
+                    best_t = t;
+                }
+            }
+            selectors.push(best_t as u8);
+            for &sym in &symbols[gs..=ge] {
+                rfreq[best_t][usize::from(sym)] += 1;
+            }
+            gs = ge + 1;
+        }
+        for (lengths_t, rfreq_t) in lengths.iter_mut().zip(&rfreq) {
+            *lengths_t = code_lengths_capped(rfreq_t, MAX_TABLE_CODE_LENGTH);
+        }
+    }
+
+    // Selector MTF (upstream's pos[] shuffle).
+    let mut pos: Vec<u8> = (0..n_groups as u8).collect();
+    let mut selector_mtf = vec![0u8; selectors.len()];
+    for (i, &sel) in selectors.iter().enumerate() {
+        let mut j = 0usize;
+        let mut tmp = pos[0];
+        while sel != tmp {
+            j += 1;
+            let tmp2 = tmp;
+            tmp = pos[j];
+            pos[j] = tmp2;
+        }
+        pos[0] = tmp;
+        selector_mtf[i] = j as u8;
+    }
+
+    // nGroups (3 bits) + nSelectors (15 bits) + MTF-coded selectors.
+    let n_selectors = selector_mtf.len();
+    writer.write_bits(n_groups as u32, 3);
+    writer.write_bits(n_selectors as u32, 15);
+    for &m in &selector_mtf {
+        for _ in 0..m {
+            writer.write_bit(true);
+        }
+        writer.write_bit(false);
+    }
+
+    // Tables (delta-coded lengths) + their canonical codes.
+    let mut codes_per_table = Vec::with_capacity(n_groups);
+    for lengths_t in &lengths {
+        write_huffman_table(writer, lengths_t);
+        codes_per_table.push(canonical_codes(lengths_t));
+    }
+
+    // Block data: each 50-symbol group uses its selected table.
+    for (chunk, &sel) in symbols.chunks(GROUP_SIZE).zip(&selectors) {
+        let codes = &codes_per_table[usize::from(sel)];
         for &sym in chunk {
             let (code, len) = codes[usize::from(sym)];
             writer.write_bits(code, u32::from(len));

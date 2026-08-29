@@ -6,21 +6,20 @@
 
 #![forbid(unsafe_code)]
 
-/// Maximum allowed Huffman code length in bzip2.
-pub const MAX_CODE_LENGTH: u8 = 23;
-
-/// Build canonical Huffman code lengths for `freqs` (indexed by symbol).
+/// Build canonical Huffman code lengths for `freqs` (indexed by
+/// symbol), capped at `max_code_length`.
 ///
 /// Returns `Vec<u8>` of length `alphabet_size`. All symbols are
 /// assigned a non-zero length (matching bzip2's behaviour of replacing
-/// zero frequencies with 1 so every symbol has a valid code). Lengths
-/// are guaranteed ≤ [`MAX_CODE_LENGTH`].
+/// zero frequencies with 1 so every symbol has a valid code). Upstream
+/// bzip2's `hbMakeCodeLengths` caps the transmit tables at 17 since
+/// 1.0.3; the wire format allows up to 23.
 ///
 /// Algorithm: standard binary-heap Huffman with iterative rescaling
-/// if any length exceeds [`MAX_CODE_LENGTH`]. Deterministic and
-/// correct at the cost of slight suboptimality on extreme skews.
+/// if any length exceeds the cap. Deterministic and correct at the
+/// cost of slight suboptimality on extreme skews.
 #[must_use]
-pub fn code_lengths(freqs: &[u32]) -> Vec<u8> {
+pub fn code_lengths_capped(freqs: &[u32], max_code_length: u8) -> Vec<u8> {
     let n = freqs.len();
     if n == 0 {
         return Vec::new();
@@ -57,14 +56,14 @@ pub fn code_lengths(freqs: &[u32]) -> Vec<u8> {
     loop {
         let lengths = build_huffman_lengths(&active, n);
         let max_len = lengths.iter().copied().max().unwrap_or(0);
-        if max_len <= MAX_CODE_LENGTH {
+        if max_len <= max_code_length {
             return lengths;
         }
         if !scale(&mut active) {
             // Can't reduce further; clamp lengths.
             return lengths
                 .into_iter()
-                .map(|l| l.min(MAX_CODE_LENGTH))
+                .map(|l| l.min(max_code_length))
                 .collect();
         }
     }
@@ -184,14 +183,14 @@ mod tests {
 
     #[test]
     fn empty_returns_empty() {
-        assert!(code_lengths(&[]).is_empty());
+        assert!(code_lengths_capped(&[], 23).is_empty());
     }
 
     #[test]
     fn single_active_symbol_gets_length_one() {
         // bzip2 replaces zero freqs with 1 so every symbol gets a code.
         let f = vec![0u32, 5, 0];
-        let l = code_lengths(&f);
+        let l = code_lengths_capped(&f, 23);
         // All three symbols get a length (no zeros); the active one
         // gets the shortest code.
         assert!(l.iter().all(|&x| x >= 1));
@@ -201,7 +200,7 @@ mod tests {
     #[test]
     fn two_symbols_get_length_one_each() {
         let f = vec![5u32, 3];
-        let l = code_lengths(&f);
+        let l = code_lengths_capped(&f, 23);
         assert_eq!(l, vec![1, 1]);
     }
 
@@ -211,16 +210,16 @@ mod tests {
         // should always succeed even for very skewed distributions.
         let mut f = vec![1u32; 200];
         f[0] = 1_000_000;
-        let l = code_lengths(&f);
+        let l = code_lengths_capped(&f, 23);
         let max_len = l.iter().copied().max().unwrap_or(0);
-        assert!(max_len <= MAX_CODE_LENGTH);
+        assert!(max_len <= 23);
     }
 
     #[test]
     fn lengths_satisfy_kraft_inequality() {
         // For valid Huffman codes: sum(2^-len) == 1.
         let f = vec![10u32, 5, 8, 1, 2, 6, 3];
-        let l = code_lengths(&f);
+        let l = code_lengths_capped(&f, 23);
         let mut sum: f64 = 0.0;
         for &len in &l {
             if len > 0 {
@@ -233,7 +232,7 @@ mod tests {
     #[test]
     fn canonical_codes_are_unique_and_have_correct_lengths() {
         let f = vec![8u32, 5, 3, 1, 1, 1];
-        let l = code_lengths(&f);
+        let l = code_lengths_capped(&f, 23);
         let codes = canonical_codes(&l);
         let active: Vec<_> = codes.iter().filter(|(_, len)| *len > 0).collect();
         // All codes distinct.
