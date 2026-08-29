@@ -34,7 +34,8 @@ fn empty_input() {
     let compressed = c
         .compress(b"", CompressionLevel::new(9))
         .expect("compress empty");
-    assert!(compressed.is_empty());
+    // Empty input produces a valid empty .bz2 member (like `bzip2`).
+    assert_eq!(&compressed[..3], b"BZh");
     let decompressed = c.decompress(&compressed, 0).expect("decompress empty");
     assert!(decompressed.is_empty());
 }
@@ -167,4 +168,66 @@ fn truncated_input_errors() {
     compressed.truncate(compressed.len() - 1);
     let result = c.decompress(&compressed, data.len() as u32);
     assert!(result.is_err(), "should reject truncated input");
+}
+
+/// Check whether the reference `bzip2` CLI is available on PATH.
+fn system_bzip2_available() -> bool {
+    std::process::Command::new("bzip2")
+        .arg("--version")
+        .output()
+        .is_ok_and(|o| o.status.success())
+}
+
+/// Our `.bz2` output must decode byte-identically in the reference
+/// implementation. Regression gate for two bugs found by the
+/// broad-corpus sweep: blocks whose RLE1 stream exceeded the wire
+/// budget (bzip2: data-integrity error on low-redundancy data), and
+/// single-table Huffman losing 5-23% ratio.
+#[test]
+fn interop_with_system_bzip2() {
+    if !system_bzip2_available() {
+        eprintln!("skipping: system bzip2 not found");
+        return;
+    }
+    let mut periodic = Vec::new();
+    for i in 0..2600u32 {
+        periodic
+            .extend_from_slice(format!("{i},user_{i},city_{i},cc,{i},-180.0,0.0,{i}\n").as_bytes());
+    }
+    periodic.extend(std::iter::repeat(b'z').take(700));
+    let inputs: Vec<&[u8]> = vec![b"hello hello hello world", &periodic, &[0u8; 10_000]];
+    for input in inputs {
+        for lv in [1u8, 9] {
+            let compressed = codec()
+                .compress(input, CompressionLevel::new(lv))
+                .unwrap_or_else(|e| panic!("encode lv{lv}: {e}"));
+            let out = std::process::Command::new("bzip2")
+                .arg("-d")
+                .arg("-c")
+                .arg("-")
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .spawn()
+                .and_then(|mut c| {
+                    use std::io::Write as _;
+                    c.stdin.take().unwrap().write_all(&compressed)?;
+                    c.wait_with_output().map_err(std::io::Error::other)
+                });
+            let out = match out {
+                Ok(o) => o,
+                Err(e) => panic!("spawn bzip2 lv{lv}: {e}"),
+            };
+            assert!(
+                out.status.success(),
+                "bzip2 -d rejected our output (lv{lv}, {} B input): {}",
+                input.len(),
+                String::from_utf8_lossy(&out.stderr)
+            );
+            assert_eq!(
+                &out.stdout[..],
+                input,
+                "bzip2 -d decoded data mismatch (lv{lv})"
+            );
+        }
+    }
 }
