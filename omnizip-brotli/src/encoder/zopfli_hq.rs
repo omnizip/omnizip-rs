@@ -820,7 +820,7 @@ fn update_nodes(
         // which the DP over-copies massively.
         let mut len = min_len;
         for &(dist, mlen) in matches.iter().take(num_matches as usize) {
-            let max_match_len = (mlen as usize).min(max_len).min(65_536);
+            let max_match_len = (mlen as usize).min(max_len).min(1951);
             let sym = long_dist_symbol(dist);
             let dist_extra_bits = ((sym as u32 - 16) >> 1) + 1;
             let dist_cost = base_cost + dist_extra_bits as f32 + model.dist_cost(sym);
