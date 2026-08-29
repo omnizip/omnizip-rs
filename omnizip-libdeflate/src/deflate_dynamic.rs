@@ -28,7 +28,7 @@
 #![forbid(unsafe_code)]
 #![allow(clippy::cast_possible_truncation)]
 
-use super::deflate_lz77::{collect_tokens, Lz77Token};
+use super::deflate_lz77::{collect_tokens_with, params_for_level, Lz77Token};
 use omnizip_codecs::OmnizipError;
 
 /// Maximum Huffman code length for literal/length and distance codes
@@ -42,33 +42,63 @@ const CL_ORDER: [usize; 19] = [
     16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15,
 ];
 
-/// Encode `input` as a single RFC 1951 dynamic-Huffman block.
+/// Symbols per dynamic block — zlib's `lit_bufsize - 1` (16K default
+/// memLevel): each block gets its own Huffman tables, which matters
+/// on heterogeneous input where one stream-wide table pays for the
+/// far half of the file on every near-half symbol.
+const BLOCK_SYMBOLS: usize = 16_383;
+
+/// Encode `input` as RFC 1951 dynamic-Huffman blocks.
 ///
-/// Returns the raw DEFLATE bytes (no zlib wrapper). The block has
-/// `BFINAL=1, BTYPE=2`.
+/// Returns the raw DEFLATE bytes (no zlib wrapper). The last block
+/// has `BFINAL=1`; every block carries `BTYPE=2`.
 ///
 /// Returns `None` if the input is too small for dynamic Huffman to
 /// pay off — the caller should fall back to fixed or stored.
 pub fn deflate_dynamic_huffman(input: &[u8]) -> Result<Option<Vec<u8>>, OmnizipError> {
+    deflate_dynamic_huffman_at(input, 6)
+}
+
+/// [`deflate_dynamic_huffman`] under an explicit zlib level tier.
+///
+/// # Errors
+///
+/// Returns [`OmnizipError::Corrupt`] only on arithmetic overflow
+/// (shouldn't happen for any plausible input).
+pub fn deflate_dynamic_huffman_at(
+    input: &[u8],
+    level: u8,
+) -> Result<Option<Vec<u8>>, OmnizipError> {
     if input.len() < 32 {
         return Ok(None);
     }
 
-    let tokens = collect_tokens(input);
+    let tokens = collect_tokens_with(input, &params_for_level(level));
     if tokens.is_empty() {
         return Ok(None);
     }
 
+    let mut writer = BitWriter::new();
+    let n_blocks = tokens.len().div_ceil(BLOCK_SYMBOLS);
+    for (block, chunk) in tokens.chunks(BLOCK_SYMBOLS).enumerate() {
+        emit_dynamic_block(&mut writer, chunk, block + 1 == n_blocks);
+    }
+    writer.flush_byte_aligned();
+    Ok(Some(writer.finish()))
+}
+
+/// Emit one dynamic-Huffman block (header, tables, symbols, EOB).
+fn emit_dynamic_block(writer: &mut BitWriter, tokens: &[Lz77Token], bfinal: bool) {
     let mut lit_freqs = [0u32; 286];
     let mut dist_freqs = [0u32; 30];
     lit_freqs[256] = 1; // End-of-block symbol, always emitted once.
 
-    for tok in &tokens {
-        match tok {
-            Lz77Token::Literal(b) => lit_freqs[usize::from(*b)] += 1,
+    for tok in tokens {
+        match *tok {
+            Lz77Token::Literal(b) => lit_freqs[usize::from(b)] += 1,
             Lz77Token::Match { length, distance } => {
-                let len_sym = length_to_symbol(*length);
-                let dist_sym = distance_to_symbol(*distance);
+                let len_sym = length_to_symbol(length);
+                let dist_sym = distance_to_symbol(distance);
                 lit_freqs[len_sym] += 1;
                 dist_freqs[dist_sym] += 1;
             }
@@ -106,9 +136,8 @@ pub fn deflate_dynamic_huffman(input: &[u8]) -> Result<Option<Vec<u8>>, OmnizipE
     let hclen_count = compute_hclen(&cl_lengths);
 
     // ---- Emit the block. ----
-    let mut writer = BitWriter::new();
-    // Block header: BFINAL=1, BTYPE=2 (dynamic).
-    writer.write_bits(1, 1); // BFINAL
+    // Block header: BFINAL (last block only), BTYPE=2 (dynamic).
+    writer.write_bits(u64::from(bfinal), 1);
     writer.write_bits(2, 2); // BTYPE = dynamic
 
     writer.write_bits((hlit_count - 257) as u64, 5);
@@ -154,19 +183,18 @@ pub fn deflate_dynamic_huffman(input: &[u8]) -> Result<Option<Vec<u8>>, OmnizipE
     let dist_codes = canonical_codes(&dist_lengths, MAX_CODE_LEN);
 
     // Emit the tokens.
-    for tok in &tokens {
-        match tok {
+    for tok in tokens {
+        match *tok {
             Lz77Token::Literal(b) => {
-                writer.write_huffman_code(lit_codes[usize::from(*b)], lit_lengths[usize::from(*b)]);
+                writer.write_huffman_code(lit_codes[usize::from(b)], lit_lengths[usize::from(b)]);
             }
             Lz77Token::Match { length, distance } => {
-                let (len_sym, len_extra_bits, len_extra_val) = length_to_symbol_full(*length);
+                let (len_sym, len_extra_bits, len_extra_val) = length_to_symbol_full(length);
                 writer.write_huffman_code(lit_codes[len_sym], lit_lengths[len_sym]);
                 if len_extra_bits > 0 {
                     writer.write_bits(u64::from(len_extra_val), len_extra_bits);
                 }
-                let (dist_sym, dist_extra_bits, dist_extra_val) =
-                    distance_to_symbol_full(*distance);
+                let (dist_sym, dist_extra_bits, dist_extra_val) = distance_to_symbol_full(distance);
                 writer.write_huffman_code(dist_codes[dist_sym], dist_lengths[dist_sym]);
                 if dist_extra_bits > 0 {
                     writer.write_bits(u64::from(dist_extra_val), dist_extra_bits);
@@ -176,125 +204,18 @@ pub fn deflate_dynamic_huffman(input: &[u8]) -> Result<Option<Vec<u8>>, OmnizipE
     }
     // End of block.
     writer.write_huffman_code(lit_codes[256], lit_lengths[256]);
-
-    writer.flush_byte_aligned();
-    Ok(Some(writer.finish()))
 }
 
-/// Build canonical Huffman code lengths via the package-merge algorithm.
+/// Build canonical Huffman code lengths, capped at `max_len`.
 ///
-/// Build canonical Huffman code lengths via the standard min-heap
-/// algorithm, then cap at `max_len` using the zlib CPI approach.
+/// Delegates to the shared package-merge builder in `omnizip-codecs`
+/// (Kraft-exact). The previous local limiter (zlib-CPI repair) could
+/// leave the length set over-subscribed by one 2^-max unit on skewed
+/// distributions with 250+ symbols, writing block headers the
+/// reference decoder rejects ("invalid literal/lengths set").
 fn build_huffman_lengths(freqs: &[u32], max_len: u8, lengths: &mut [u8]) {
-    let symbols: Vec<(u32, usize)> = freqs
-        .iter()
-        .enumerate()
-        .filter(|(_, &f)| f > 0)
-        .map(|(i, &f)| (f, i))
-        .collect();
-    let m = symbols.len();
-    if m == 0 {
-        return;
-    }
-    if m == 1 {
-        lengths[symbols[0].1] = 1;
-        return;
-    }
-
-    // Standard Huffman via iterative merge (two-smallest selection).
-    struct Node {
-        freq: u64,
-        leaves: Vec<(usize, u8)>, // (symbol_index, depth_from_root)
-    }
-
-    let mut nodes: Vec<Node> = symbols
-        .iter()
-        .map(|&(f, i)| Node {
-            freq: u64::from(f),
-            leaves: vec![(i, 0u8)],
-        })
-        .collect();
-
-    while nodes.len() > 1 {
-        nodes.sort_by(|a, b| a.freq.cmp(&b.freq));
-        let mut right = nodes.remove(1);
-        let mut left = nodes.remove(0);
-        for (_, d) in &mut left.leaves {
-            *d += 1;
-        }
-        for (_, d) in &mut right.leaves {
-            *d += 1;
-        }
-        let merged_freq = left.freq + right.freq;
-        let mut merged_leaves = left.leaves;
-        merged_leaves.append(&mut right.leaves);
-        nodes.push(Node {
-            freq: merged_freq,
-            leaves: merged_leaves,
-        });
-    }
-
-    // Extract lengths.
-    for (sym, depth) in &nodes[0].leaves {
-        lengths[*sym] = (*depth);
-    }
-
-    // Length limiting: zlib CPI overflow algorithm (deflate.c
-    // gen_bitlen). The previous level-by-level variant re-processed
-    // inflow counts, doubling them into each lower level until the
-    // u32 counter overflowed on skewed inputs (debug builds panic;
-    // release builds corrupted the code lengths).
-    let mut overflow = 0u32;
-    let mut bl_count = [0u32; 256];
-    for &l in lengths.iter() {
-        if l == 0 {
-            continue;
-        }
-        if l > max_len {
-            overflow += 1;
-        } else {
-            bl_count[l as usize] += 1;
-        }
-    }
-    if overflow > 0 {
-        // Park the overlong leaves at max_len, then move a leaf down
-        // one level per iteration to make room for two of them —
-        // bounded by the overflow count, unlike a full re-walk.
-        bl_count[max_len as usize] += overflow;
-        while overflow > 0 {
-            let mut bits = max_len as usize - 1;
-            while bits > 0 && bl_count[bits] == 0 {
-                bits -= 1;
-            }
-            if bits == 0 {
-                break;
-            }
-            bl_count[bits] -= 1;
-            bl_count[bits + 1] += 2;
-            bl_count[max_len as usize] -= 1;
-            overflow = overflow.saturating_sub(2);
-        }
-    }
-
-    // Reassign lengths: highest-frequency symbols get shortest codes.
-    let mut sorted_syms: Vec<(usize, u32)> = freqs
-        .iter()
-        .enumerate()
-        .filter(|(_, &f)| f > 0)
-        .map(|(i, &f)| (i, f))
-        .collect();
-    sorted_syms.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
-
-    let mut code_idx = 0;
-    for len in 1..=max_len as usize {
-        for _ in 0..bl_count[len] {
-            if code_idx >= sorted_syms.len() {
-                break;
-            }
-            lengths[sorted_syms[code_idx].0] = len as u8;
-            code_idx += 1;
-        }
-    }
+    let built = omnizip_codecs::huffman::HuffmanLengths::build(freqs, max_len);
+    lengths.copy_from_slice(&built.lengths);
 }
 
 /// Generate canonical Huffman codes from code lengths (RFC 1951 §3.2.7).
@@ -672,6 +593,52 @@ mod tests {
         let has_16 = syms.iter().any(|s| s.symbol == 16);
         assert!(has_18, "long zero run should use symbol 18");
         assert!(has_16, "4-repeat should use symbol 16");
+    }
+
+    /// Regression: the pre-package-merge length limiter could leave a
+    /// 250+-symbol table over-subscribed by one 2^-max unit (skewed
+    /// frequencies, deep tree), writing headers the reference decoder
+    /// rejects. Every produced length set must be Kraft-complete.
+    #[test]
+    fn huffman_lengths_are_kraft_complete() {
+        // LCG so the distribution is deterministic.
+        let mut seed = 0x1234_5678u64;
+        let mut next = move || {
+            seed = seed
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            seed >> 33
+        };
+        for case in 0..24 {
+            let n = match case % 3 {
+                0 => 286,
+                1 => 30,
+                _ => 19,
+            };
+            let max_len: u8 = if n == 19 { 7 } else { 15 };
+            let mut freqs = vec![0u32; n];
+            let nonzero = 2 + (next() as usize % (n - 2));
+            for (idx, f) in freqs.iter_mut().enumerate().take(nonzero) {
+                // Zipf-ish skew: rare symbols force deep trees.
+                let r = 1 + (next() % 1000) as u32;
+                *f = r / (1 + idx as u32 / 8);
+            }
+            freqs[0] = freqs[0].max(1);
+            let mut lengths = vec![0u8; n];
+            build_huffman_lengths(&freqs, max_len, &mut lengths);
+            let total: u64 = lengths
+                .iter()
+                .filter(|&&l| l > 0)
+                .map(|&l| 1u64 << (max_len - l))
+                .sum();
+            let used: usize = freqs.iter().filter(|&&f| f > 0).count();
+            assert_eq!(
+                total,
+                1u64 << max_len,
+                "case {case}: Kraft sum {total} != 2^{max_len} ({used} symbols)"
+            );
+            assert!(lengths.iter().all(|&l| l <= max_len));
+        }
     }
 
     #[test]

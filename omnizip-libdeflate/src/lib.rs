@@ -87,16 +87,14 @@ impl Codec for LibdeflateCodec {
     }
 
     fn compress(&self, plaintext: &[u8], level: CompressionLevel) -> Result<Vec<u8>, OmnizipError> {
-        let _ = level;
-        // Strategy: try fixed-Huffman first, then stored. Pick the
-        // smallest valid output for each input. This mirrors what
-        // `gzip -1` does at a basic level.
-        //
-        // Dynamic-Huffman is also computed but only used when it's
-        // smaller AND the decoder supports it. The in-house inflate
-        // currently has edge cases with some dynamic-Huffman blocks
-        // (TODO 116); once the decoder is verified, the dynamic path
-        // becomes the default.
+        // Level 0 is zlib's "no compression": stored blocks only.
+        if level.as_u8() == 0 {
+            return Ok(wrap_zlib(&deflate::deflate_stored(plaintext)?));
+        }
+        // LZ77 tier follows zlib's level table (1-3 greedy, 4-9
+        // lazy); the smallest of dynamic / fixed / stored emission
+        // wins, mirroring what gzip does per block.
+        let tier = level.as_u8().min(9);
         let mut best: Option<Vec<u8>> = None;
         let mut pick = |candidate: Option<Vec<u8>>| {
             if let Some(c) = candidate {
@@ -107,9 +105,10 @@ impl Codec for LibdeflateCodec {
                 }
             }
         };
-        // Dynamic-Huffman re-enabled after round-trip verification.
-        pick(deflate_dynamic::deflate_dynamic_huffman(plaintext)?);
-        pick(deflate_lz77::deflate_fixed_huffman(plaintext)?);
+        pick(deflate_dynamic::deflate_dynamic_huffman_at(
+            plaintext, tier,
+        )?);
+        pick(deflate_lz77::deflate_fixed_huffman_at(plaintext, tier)?);
         pick(Some(deflate::deflate_stored(plaintext)?));
         Ok(wrap_zlib(&best.expect("at least stored always succeeds")))
     }
@@ -214,6 +213,64 @@ mod tests {
     fn codec_id_is_reserved_slot() {
         assert_eq!(LibdeflateCodec.id(), CodecId::LIBDEFLATE);
         assert_eq!(LibdeflateCodec.name(), "libdeflate");
+    }
+
+    /// Levels 1/6/9 must produce distinct, size-monotone outputs that
+    /// all round-trip (zlib's tier structure: 1-3 greedy, 4-9 lazy).
+    #[test]
+    fn level_tiers_are_distinct_monotone_and_round_trip() {
+        // Mixed corpus-in-miniature: text, long runs, binary noise —
+        // gives every tier something different to find.
+        let mut input: Vec<u8> = b"the quick brown fox jumps over the lazy dog. "
+            .iter()
+            .cycle()
+            .take(20_000)
+            .copied()
+            .collect();
+        input.extend_from_slice(&vec![0u8; 5_000]);
+        input.extend((0..10_000u32).map(|i| i.wrapping_mul(2_654_435_761) as u8));
+
+        let mut sizes = Vec::new();
+        for lv in [1u8, 6, 9] {
+            let c = LibdeflateCodec
+                .compress(&input, CompressionLevel::new(lv))
+                .expect("compress");
+            let d = LibdeflateCodec
+                .decompress(&c, input.len() as u32)
+                .unwrap_or_else(|e| panic!("decompress at level {lv}: {e:?}"));
+            assert_eq!(d, input, "round trip at level {lv}");
+            sizes.push((lv, c.len()));
+        }
+        assert!(
+            sizes[0].1 > sizes[2].1,
+            "level 1 must compress worse than level 9: {sizes:?}"
+        );
+        assert!(
+            sizes[0].1 >= sizes[1].1 && sizes[1].1 >= sizes[2].1,
+            "sizes must be monotone: {sizes:?}"
+        );
+        // Distinct parse tiers, not just distinct emission.
+        let t1 = deflate_lz77::collect_tokens_with(&input, &deflate_lz77::params_for_level(1));
+        let t9 = deflate_lz77::collect_tokens_with(&input, &deflate_lz77::params_for_level(9));
+        assert_ne!(t1, t9, "greedy and lazy tiers must parse differently");
+    }
+
+    /// Level 0 is zlib's stored tier: valid stream, zero LZ77.
+    #[test]
+    fn level_zero_is_stored() {
+        let input = b"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_vec();
+        let c0 = LibdeflateCodec
+            .compress(&input, CompressionLevel::new(0))
+            .expect("compress");
+        let d = LibdeflateCodec
+            .decompress(&c0, input.len() as u32)
+            .expect("decompress");
+        assert_eq!(d, input);
+        // Stored never beats LZ77 on compressible input.
+        let c1 = LibdeflateCodec
+            .compress(&input, CompressionLevel::new(1))
+            .expect("compress");
+        assert!(c1.len() < c0.len());
     }
 
     #[test]

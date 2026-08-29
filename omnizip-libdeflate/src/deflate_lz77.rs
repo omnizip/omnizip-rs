@@ -38,10 +38,101 @@ pub const WINDOW_SIZE: usize = 32 * 1024;
 /// Hash table size (16-bit hash, 64K entries).
 const HASH_BITS: u32 = 15;
 const HASH_SIZE: usize = 1 << HASH_BITS;
-/// Maximum chain walks per match attempt.
-const MAX_CHAIN: usize = 32;
+/// zlib's `TOO_FAR`: a 3-byte match this far back costs more than
+/// the token it saves.
+const TOO_FAR: usize = 4096;
 /// Threshold: inputs below this go through stored blocks instead.
 pub const LZ77_MIN_INPUT: usize = 128;
+
+/// Search-tier parameters, mirroring zlib's `configuration_table`
+/// (good_length, max_lazy, nice_length, max_chain) and its two
+/// strategy variants: levels 1-3 run `deflate_fast` (greedy), 4-9
+/// run `deflate_slow` (lazy matching).
+#[derive(Clone, Copy, Debug)]
+pub struct Lz77Params {
+    /// Reduce the chain budget to 1/4 once the pending match reaches
+    /// this length (it is already good enough).
+    pub good_len: usize,
+    /// zlib's `max_lazy_match`: matches longer than this skip
+    /// re-inserting their covered positions (stale entries).
+    pub max_lazy: usize,
+    /// Stop the chain walk once a match reaches this length.
+    pub nice_len: usize,
+    /// Maximum hash-chain walks per match attempt.
+    pub max_chain: usize,
+    /// Greedy variant (zlib `deflate_fast`) — take the first match.
+    pub greedy: bool,
+}
+
+/// Tier parameters for a zlib level (1..=9; higher clamps to 9).
+#[must_use]
+pub const fn params_for_level(level: u8) -> Lz77Params {
+    match level {
+        1 => Lz77Params {
+            good_len: 4,
+            max_lazy: 4,
+            nice_len: 8,
+            max_chain: 4,
+            greedy: true,
+        },
+        2 => Lz77Params {
+            good_len: 4,
+            max_lazy: 5,
+            nice_len: 16,
+            max_chain: 8,
+            greedy: true,
+        },
+        3 => Lz77Params {
+            good_len: 4,
+            max_lazy: 6,
+            nice_len: 32,
+            max_chain: 32,
+            greedy: true,
+        },
+        4 => Lz77Params {
+            good_len: 4,
+            max_lazy: 4,
+            nice_len: 16,
+            max_chain: 16,
+            greedy: false,
+        },
+        5 => Lz77Params {
+            good_len: 8,
+            max_lazy: 16,
+            nice_len: 32,
+            max_chain: 32,
+            greedy: false,
+        },
+        6 => Lz77Params {
+            good_len: 8,
+            max_lazy: 16,
+            nice_len: 128,
+            max_chain: 128,
+            greedy: false,
+        },
+        7 => Lz77Params {
+            good_len: 8,
+            max_lazy: 32,
+            nice_len: 128,
+            max_chain: 256,
+            greedy: false,
+        },
+        8 => Lz77Params {
+            good_len: 32,
+            max_lazy: 128,
+            nice_len: 258,
+            max_chain: 1024,
+            greedy: false,
+        },
+        _ => Lz77Params {
+            good_len: 32,
+            max_lazy: 258,
+            nice_len: 258,
+            max_chain: 4096,
+            greedy: false,
+        },
+    }
+}
 
 /// One LZ77 token — literal or back-reference. Codec-agnostic; the
 /// dynamic-Huffman and fixed-Huffman encoders consume the same token
@@ -54,61 +145,122 @@ pub enum Lz77Token {
     Match { length: u16, distance: u16 },
 }
 
-/// Run the hash-chain LZ77 match finder + lazy look-ahead and return
-/// the resulting token stream. Used by both the fixed-Huffman and
-/// dynamic-Huffman block writers so the match-finder logic stays in
-/// one place.
+/// [`collect_tokens_with`] at zlib level-6 parameters.
 #[must_use]
 pub fn collect_tokens(input: &[u8]) -> Vec<Lz77Token> {
+    collect_tokens_with(input, &params_for_level(6))
+}
+
+/// Run the LZ77 match finder under a zlib strategy tier and return
+/// the token stream. Used by both the fixed-Huffman and
+/// dynamic-Huffman block writers so the match-finder logic stays in
+/// one place.
+///
+/// `greedy` tiers port zlib's `deflate_fast` (take the first match,
+/// no deferral); lazy tiers port `deflate_slow`: the previous
+/// position's match is carried and emitted unless the current
+/// position finds something strictly longer, in which case the
+/// previous byte falls back to a literal.
+///
+/// # Panics
+///
+/// Never for well-formed input; slice indexing is the only panic
+/// source and the caller-provided slice drives every index.
+#[must_use]
+pub fn collect_tokens_with(input: &[u8], params: &Lz77Params) -> Vec<Lz77Token> {
     if input.is_empty() {
         return Vec::new();
     }
-    let mut mf = MatchFinder::new(input.len());
+    let mut mf = MatchFinder::new();
     let mut out = Vec::with_capacity(input.len() / 2);
     let mut i = 0;
-    while i < input.len() {
-        let m = mf.find_match(input, i);
-        mf.insert(input, i);
-        if let Some((dist, len)) = m {
-            // Lazy look-ahead: if i+1 has a strictly longer match, emit
-            // a literal at i and take the deferred match.
-            if i + 1 < input.len() {
-                if let Some((d2, l2)) = mf.find_match(input, i + 1) {
-                    if l2 > len + 1 {
-                        out.push(Lz77Token::Literal(input[i]));
-                        let len2 = l2.min(u16::MAX as usize) as u16;
-                        let dist2 = d2.min(u16::MAX as usize) as u16;
-                        out.push(Lz77Token::Match {
-                            length: len2,
-                            distance: dist2,
-                        });
-                        mf.insert(input, i + 1);
-                        for k in (i + 2)..(i + 1 + l2) {
-                            if k < input.len() {
-                                mf.insert(input, k);
-                            }
+
+    if params.greedy {
+        while i < input.len() {
+            let m = mf.find_match(input, i, params.max_chain, params.nice_len, 0);
+            mf.insert(input, i);
+            if let Some((dist, len)) = m {
+                out.push(Lz77Token::Match {
+                    length: len.min(u16::MAX as usize) as u16,
+                    distance: dist.min(u16::MAX as usize) as u16,
+                });
+                // zlib deflate_fast skips re-inserting covered
+                // positions when the match exceeds max_lazy.
+                if len <= params.max_lazy {
+                    for k in (i + 1)..(i + len) {
+                        if k < input.len() {
+                            mf.insert(input, k);
                         }
-                        i += 1 + l2;
-                        continue;
                     }
                 }
+                i += len;
+            } else {
+                out.push(Lz77Token::Literal(input[i]));
+                i += 1;
             }
-            let len16 = len.min(u16::MAX as usize) as u16;
-            let dist16 = dist.min(u16::MAX as usize) as u16;
-            out.push(Lz77Token::Match {
-                length: len16,
-                distance: dist16,
-            });
-            for k in (i + 1)..(i + len) {
-                if k < input.len() {
-                    mf.insert(input, k);
-                }
-            }
-            i += len;
+        }
+        return out;
+    }
+
+    // deflate_slow: `pending_match` is the best match at i-1;
+    // `pending_byte` marks that i-1's byte is still unresolved
+    // (zlib's `match_available`).
+    let mut pending_match: Option<(usize, usize)> = None;
+    let mut pending_byte = false;
+    while i < input.len() {
+        let chain = if pending_match.map_or(0, |m| m.1) >= params.good_len {
+            params.max_chain / 4
         } else {
-            out.push(Lz77Token::Literal(input[i]));
+            params.max_chain
+        };
+        // zlib skips the search when the pending match already
+        // reached max_lazy: it cannot be beaten cheaply enough.
+        let min_len = pending_match.map_or(0, |m| m.1);
+        let cur = if min_len >= params.max_lazy {
+            None
+        } else {
+            mf.find_match(input, i, chain, params.nice_len, min_len)
+        };
+        mf.insert(input, i);
+
+        let prev_wins = pending_byte
+            && match (pending_match, cur) {
+                (Some((_, pl)), Some((_, cl))) => cl <= pl,
+                (Some(_), None) => true,
+                (None, _) => false,
+            };
+        if let (true, Some((pd, pl))) = (prev_wins, pending_match) {
+            out.push(Lz77Token::Match {
+                length: pl.min(u16::MAX as usize) as u16,
+                distance: pd.min(u16::MAX as usize) as u16,
+            });
+            // Insert the match's covered positions (zlib: "strstart-1
+            // and strstart are already inserted"). Both i-1 (examined)
+            // and i (inserted at the top of this iteration) are in the
+            // table — re-inserting i would chain it to itself and
+            // self-loop the next walk through this bucket, burning the
+            // whole chain budget on one candidate.
+            let end = i - 1 + pl;
+            for k in (i + 1)..end.min(input.len()) {
+                mf.insert(input, k);
+            }
+            i = end;
+            pending_match = None;
+            pending_byte = false;
+        } else {
+            // The pending position's match was beaten (or there was
+            // none): its byte becomes a literal — unless it was
+            // already covered by the match just emitted.
+            if pending_byte {
+                out.push(Lz77Token::Literal(input[i - 1]));
+            }
+            pending_match = cur;
+            pending_byte = true;
             i += 1;
         }
+    }
+    if pending_byte {
+        out.push(Lz77Token::Literal(input[input.len() - 1]));
     }
     out
 }
@@ -124,11 +276,22 @@ pub fn collect_tokens(input: &[u8]) -> Vec<Lz77Token> {
 /// Returns [`OmnizipError::Corrupt`] only on arithmetic overflow
 /// (shouldn't happen for any plausible input).
 pub fn deflate_fixed_huffman(input: &[u8]) -> Result<Option<Vec<u8>>, OmnizipError> {
+    deflate_fixed_huffman_at(input, 6)
+}
+
+/// [`deflate_fixed_huffman`] under an explicit zlib level tier.
+///
+/// # Errors
+///
+/// Returns [`OmnizipError::Corrupt`] only on arithmetic overflow
+/// (shouldn't happen for any plausible input).
+pub fn deflate_fixed_huffman_at(input: &[u8], level: u8) -> Result<Option<Vec<u8>>, OmnizipError> {
     if input.len() < LZ77_MIN_INPUT {
         return Ok(None);
     }
+    let tokens = collect_tokens_with(input, &params_for_level(level));
     let mut encoder = Lz77Encoder::new(input.len() + 32);
-    encoder.encode_block(input)?;
+    encoder.encode_tokens(&tokens)?;
     Ok(Some(encoder.finish()))
 }
 
@@ -162,53 +325,18 @@ impl Lz77Encoder {
         self.out
     }
 
-    /// Encode one full block. The block header (BFINAL + BTYPE) is
-    /// written FIRST so it lands at the start of the bit stream —
-    /// the rest of the body is appended after.
-    fn encode_block(&mut self, input: &[u8]) -> Result<(), OmnizipError> {
-        // Write block header FIRST: BFINAL=1, BTYPE=01 (fixed Huffman).
-        // Bit 0: BFINAL = 1
-        // Bits 1-2: BTYPE = 01
-        // → 3 bits: 0b011 = 3 (packed LSB-first).
+    /// Emit one full block: header bits, then the token stream from
+    /// [`collect_tokens_with`] (the single LZ77 parse both block
+    /// writers share).
+    fn encode_tokens(&mut self, tokens: &[Lz77Token]) -> Result<(), OmnizipError> {
+        // BFINAL=1, BTYPE=01 (fixed Huffman) → 3 bits: 0b011 (LSB-first).
         self.write_bits(3, 3);
-
-        let mut mf = MatchFinder::new(input.len());
-        let mut i = 0;
-        while i < input.len() {
-            // Search BEFORE inserting so the hash table still has
-            // older positions to walk. (Same fix as the LZ4 HC encoder.)
-            let m = mf.find_match(input, i);
-            mf.insert(input, i);
-            if let Some((dist, len)) = m {
-                // Lazy look-ahead.
-                if i + 1 < input.len() {
-                    if let Some((d2, l2)) = mf.find_match(input, i + 1) {
-                        if l2 > len + 1 {
-                            // Take the better match at i+1; emit literal at i.
-                            self.emit_literal(input[i]);
-                            self.emit_match(d2, l2)?;
-                            // Skip past the match.
-                            mf.insert(input, i + 1);
-                            for k in (i + 2)..(i + 1 + l2) {
-                                if k < input.len() {
-                                    mf.insert(input, k);
-                                }
-                            }
-                            i += 1 + l2;
-                            continue;
-                        }
-                    }
+        for tok in tokens {
+            match *tok {
+                Lz77Token::Literal(b) => self.emit_literal(b),
+                Lz77Token::Match { length, distance } => {
+                    self.emit_match(usize::from(distance), usize::from(length))?;
                 }
-                self.emit_match(dist, len)?;
-                for k in (i + 1)..(i + len) {
-                    if k < input.len() {
-                        mf.insert(input, k);
-                    }
-                }
-                i += len;
-            } else {
-                self.emit_literal(input[i]);
-                i += 1;
             }
         }
         Ok(())
@@ -282,7 +410,7 @@ struct MatchFinder {
 }
 
 impl MatchFinder {
-    fn new(_input_len: usize) -> Self {
+    fn new() -> Self {
         Self {
             head: vec![-1; HASH_SIZE],
             chain: Vec::new(),
@@ -302,17 +430,24 @@ impl MatchFinder {
         self.head[h] = pos as i32;
     }
 
-    fn find_match(&self, input: &[u8], pos: usize) -> Option<(usize, usize)> {
+    fn find_match(
+        &self,
+        input: &[u8],
+        pos: usize,
+        max_chain: usize,
+        nice_len: usize,
+        min_len: usize,
+    ) -> Option<(usize, usize)> {
         if pos + MIN_MATCH > input.len() {
             return None;
         }
         let h = hash(input, pos);
         let mut candidate = self.head[h];
-        let mut best_len = 0usize;
+        let mut best_len = min_len;
         let mut best_dist = 0usize;
         let max_len = (input.len() - pos).min(MAX_MATCH);
 
-        for _ in 0..MAX_CHAIN {
+        for _ in 0..max_chain {
             if candidate < 0 {
                 break;
             }
@@ -335,11 +470,16 @@ impl MatchFinder {
                     best_len = len;
                     best_dist = dist;
                 }
+                if best_len >= nice_len {
+                    break;
+                }
             }
             candidate = self.chain[cand];
         }
 
-        if best_len >= MIN_MATCH {
+        // zlib rejects 3-byte matches beyond TOO_FAR: the token costs
+        // more than three literals.
+        if best_len >= MIN_MATCH && !(best_len == MIN_MATCH && best_dist > TOO_FAR) {
             Some((best_dist, best_len))
         } else {
             None
@@ -347,12 +487,13 @@ impl MatchFinder {
     }
 }
 
-/// 15-bit hash of 3 bytes (DEFLATE minimum match).
+/// 15-bit hash of 3 bytes (DEFLATE minimum match), mirroring zlib's
+/// `UPDATE_HASH`: h = (h << 5) ^ c over the 3 bytes.
 fn hash(input: &[u8], pos: usize) -> usize {
-    let v = u32::from(input[pos])
-        | (u32::from(input[pos + 1]) << 8)
-        | (u32::from(input[pos + 2]) << 16);
-    ((v.wrapping_mul(265_443_5761) >> (32 - HASH_BITS)) & ((HASH_SIZE - 1) as u32)) as usize
+    let v = (u32::from(input[pos]) << 10)
+        ^ (u32::from(input[pos + 1]) << 5)
+        ^ u32::from(input[pos + 2]);
+    (v & ((HASH_SIZE - 1) as u32)) as usize
 }
 
 /// Reverse the low `n` bits of `v`.
