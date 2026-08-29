@@ -121,7 +121,11 @@ pub trait ArchiveReader {
     ) -> Result<(), ArchiveError> {
         let entries = self.entries()?;
         for (index, entry) in entries.iter().enumerate() {
-            let safe = policy.validate_entry(&entry.name)?;
+            // Root-denoting entries (bsdtar's `./`) are skipped, not
+            // rejected — they name the output directory itself.
+            let Some(safe) = policy.sanitize_entry(&entry.name)? else {
+                continue;
+            };
             let dest = output_dir.join(&safe);
             // A previously extracted symlink must never sit on the
             // path of a later mkdir/write — that is the classic
