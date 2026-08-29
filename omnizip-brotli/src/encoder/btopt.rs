@@ -58,11 +58,13 @@ use crate::prefix::kCmdLut;
 const K_INFINITY: f32 = 1.7e38;
 /// Upstream caps DP copy lengths at 1951 (`kMaxMatchLen` bucketing in
 /// `UpdateNodes`).
-/// The wire can represent copies up to ~16M with extras; the DP cap
-/// guards against O(n) relaxation sweeps on repetitive data. The
-/// bucket-boundary stepping (SWEEP_BOUNDARIES) keeps the per-position
-/// work bounded even at large caps — measured: 65536 is safe.
-const MATCH_LEN_CAP: usize = 65_536;
+/// Upstream's kMaxMatchLen-class cap. The bucket-boundary stepping
+/// does NOT fully bound the sweep on repetitive content: LimniFS
+/// issue #388 — raising this to 65_536 hung CI on windows-latest
+/// (23+ min on tens-of-KB repetitive structured text where 1951
+/// completes in ms). The ~115-byte ratio gain on binary data does
+/// not justify the hang risk; revert to 1951.
+const MATCH_LEN_CAP: usize = 1951;
 /// `MAX_ZOPFLI_LEN_QUALITY_10` / `_11`.
 const MAX_ZOPFLI_LEN: [usize; 2] = [150, 325];
 
