@@ -193,6 +193,48 @@ mod tests {
         );
     }
 
+    /// Regression: bsdtar/GNU tar write a `./` root entry for
+    /// `tar -c -C dir .` archives; extraction must skip it, not abort
+    /// the whole archive with a security error.
+    #[test]
+    fn extracts_tar_with_dot_root_entry() {
+        fn header(name: &str, typeflag: u8, size: u32) -> [u8; 512] {
+            let mut h = [0u8; 512];
+            h[..name.len()].copy_from_slice(name.as_bytes());
+            h[100..108].copy_from_slice(b"0000755\0"); // mode
+            h[108..116].copy_from_slice(b"0000000\0"); // uid
+            h[116..124].copy_from_slice(b"0000000\0"); // gid
+            h[124..136].copy_from_slice(format!("{size:011o}\0").as_bytes());
+            h[136..148].copy_from_slice(b"00000000000\0"); // mtime
+            h[148..156].copy_from_slice(b"        ");
+            h[156] = typeflag;
+            let sum: u32 = h.iter().map(|&b| u32::from(b)).sum();
+            h[148..156].copy_from_slice(format!("{sum:06o}\0 ").as_bytes());
+            h
+        }
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&header("./", b'5', 0)); // bsdtar root
+        bytes.extend_from_slice(&header("./note.txt", b'0', 6));
+        bytes.extend_from_slice(b"hello\n");
+        bytes.extend_from_slice(&[0u8; 1024]); // two zero blocks
+
+        let mut r = TarReader::from_bytes(&bytes).unwrap();
+        let entries = r.entries().unwrap();
+        assert_eq!(entries.len(), 2);
+        let dir = std::env::temp_dir().join(format!("omnizip-tar-dotroot-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        r.extract_to(
+            &dir,
+            &omnizip_archive_core::security::SecurityPolicy::default(),
+        )
+        .expect("extract archive containing ./ root entry");
+        assert_eq!(
+            std::fs::read_to_string(dir.join("note.txt")).unwrap(),
+            "hello\n"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn reads_gnu_long_names() {
         let long_name = format!("deep/{}", "x".repeat(120));

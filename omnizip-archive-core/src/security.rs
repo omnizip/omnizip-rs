@@ -48,11 +48,29 @@ impl SecurityPolicy {
     ///
     /// [`ArchiveError::Security`] on traversal or absolute paths.
     pub fn validate_entry(&self, name: &str) -> Result<String, ArchiveError> {
+        match self.sanitize_entry(name)? {
+            Some(safe) => Ok(safe),
+            None => Err(ArchiveError::Security(format!(
+                "entry name reduces to nothing: {name}"
+            ))),
+        }
+    }
+
+    /// [`Self::validate_entry`] without rejecting names that normalize
+    /// to nothing. `Ok(None)` marks an entry that denotes the output
+    /// directory itself — e.g. the `./` root entry bsdtar and GNU tar
+    /// write for `tar -c -C dir .` archives — which extraction skips
+    /// rather than fails on.
+    ///
+    /// # Errors
+    ///
+    /// [`ArchiveError::Security`] on traversal or absolute paths.
+    pub fn sanitize_entry(&self, name: &str) -> Result<Option<String>, ArchiveError> {
         if name.is_empty() {
             return Err(ArchiveError::Security("entry has an empty name".into()));
         }
         if self.allow_absolute_paths {
-            return Ok(name.to_string());
+            return Ok(Some(name.to_string()));
         }
         let path = Path::new(name);
         if path.is_absolute() {
@@ -74,7 +92,7 @@ impl SecurityPolicy {
             )));
         }
         if self.allow_traversal {
-            return Ok(name.to_string());
+            return Ok(Some(name.to_string()));
         }
         // Walk components: anything but Normal is suspect; ParentDir
         // escapes, CurDir is noise, RootDir/Prefix are absolute.
@@ -95,12 +113,7 @@ impl SecurityPolicy {
                 }
             }
         }
-        if clean.is_empty() {
-            return Err(ArchiveError::Security(format!(
-                "entry name reduces to nothing: {name}"
-            )));
-        }
-        Ok(clean.join("/"))
+        Ok((!clean.is_empty()).then(|| clean.join("/")))
     }
 
     /// Validate a symlink target against the entry's sanitized name.
@@ -222,6 +235,21 @@ mod tests {
         assert!(p.validate_entry("/etc/passwd").is_err());
         assert!(p.validate_entry("C:\\Windows\\evil").is_err());
         assert!(p.validate_entry("\\\\server\\share").is_err());
+    }
+
+    #[test]
+    fn root_denoting_names_sanitize_to_skip() {
+        let p = SecurityPolicy::default();
+        assert_eq!(p.sanitize_entry("./").unwrap(), None);
+        assert_eq!(p.sanitize_entry(".").unwrap(), None);
+        assert_eq!(p.sanitize_entry("././.").unwrap(), None);
+        // validate_entry keeps rejecting them (unchanged public face).
+        assert!(p.validate_entry("./").is_err());
+        // Real members still resolve.
+        assert_eq!(
+            p.sanitize_entry("./file.txt").unwrap().as_deref(),
+            Some("file.txt")
+        );
     }
 
     #[test]
