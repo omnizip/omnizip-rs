@@ -2,6 +2,8 @@
 //!
 //! Implements the LZ4 block format described at
 //! <https://github.com/lz4/lz4/blob/dev/doc/lz4_Block_format.md>.
+//! The encoder is a port of the C reference's fast loop, so its output
+//! matches `lz4 -1` structurally (see [`compress_block`]).
 //!
 //! ## Block format
 //!
@@ -19,110 +21,174 @@
 
 /// Minimum match length (LZ4 spec).
 const MIN_MATCH: usize = 4;
-/// Maximum match length that fits in a single token nibble (15 + 3 = 18,
-/// but the extension allows up to 2^32 - 1 in practice).
-const MAX_MATCH: usize = 65535;
-/// Hash table size.
-const HASH_LOG: u32 = 16;
+/// Last 5 bytes of a block are always literals (`LASTLITERALS`).
+const LAST_LITERALS: usize = 5;
+/// A match must start at least 12 bytes before the end (`MFLIMIT`).
+const MF_LIMIT: usize = 12;
+/// Inputs below this length are emitted as literals only (`LZ4_minLength`).
+const LZ4_MIN_LENGTH: usize = MF_LIMIT + 1;
+/// Skip-stride shift: after 64 consecutive misses the fast loop starts
+/// skipping positions (`LZ4_skipTrigger`).
+const SKIP_TRIGGER: u32 = 6;
+/// `acceleration = 1` — the reference CLI's `-1` setting.
+const ACCELERATION: usize = 1;
+/// Maximum representable match offset.
+const DISTANCE_MAX: usize = 65535;
+/// Hash table log2 size — upstream's `LZ4_MEMORY_USAGE` (14) − 2.
+const HASH_LOG: u32 = 12;
 const HASH_SIZE: usize = 1 << HASH_LOG;
+/// `prime5bytes` from lz4.c's `LZ4_hash5`.
+const PRIME_5_BYTES: u64 = 889_523_592_379;
+/// `LZ4_MAX_INPUT_SIZE` — beyond this the C library refuses to compress
+/// (u32 hash indices would be ambiguous); we degrade to literals.
+const MAX_INPUT_SIZE: usize = 0x7E00_0000;
 
 /// Compress `input` into an LZ4 block (no size prefix, no frame wrapper).
-/// Fast mode: single-probe hash, no chain, no lazy look-ahead.
 ///
-/// Includes an incompressibility detector: if the first 1024 positions
-/// yield fewer than 2 matches, switches to literal-only mode for the
-/// remainder. This avoids wasting time on hash lookups for random data
-/// (the main cause of the 5.6× slowdown vs `lz4_flex` on random input).
+/// Line-by-line port of `LZ4_compress_generic` (lz4.c, `byU32` mode,
+/// `noDict`, `notLimited`, `acceleration = 1`) — the algorithm behind
+/// `lz4 -1`. Matching that reference exactly keeps ratio parity; the
+/// little-endian hash variant is pinned so output is identical across
+/// machines (`LimniFS` determinism).
+///
+/// Structure: a find-loop hashes each visited position with a 5-byte key
+/// into a 4096-entry table, growing its stride after every 64 misses
+/// (reset once a match is emitted — the fast exit on incompressible data);
+/// found matches are extended backwards into the literal run ("catch up"),
+/// then the byte right after a match is re-tested so consecutive matches
+/// can be emitted with zero literals between them.
+// The length and narrow casts mirror lz4.c's single-function structure;
+// every cast is bounded (positions < `MAX_INPUT_SIZE`, nibbles < 16).
+#[allow(clippy::too_many_lines, clippy::cast_possible_truncation)]
 #[must_use]
 pub fn compress_block(input: &[u8]) -> Vec<u8> {
     if input.is_empty() {
         return vec![0u8];
     }
-    if input.len() < MIN_MATCH + 5 {
-        let mut out = Vec::with_capacity(input.len() + 4);
-        write_token_literals(&mut out, input.len());
+    let iend = input.len();
+    let mut out = Vec::with_capacity(iend + iend / 255 + 16);
+    let mut anchor = 0usize;
+
+    if !(LZ4_MIN_LENGTH..=MAX_INPUT_SIZE).contains(&iend) {
+        write_token_literals(&mut out, iend);
         out.extend_from_slice(input);
         return out;
     }
 
-    let mut hash_table = vec![0u32; HASH_SIZE];
-    let mut out = Vec::with_capacity(input.len());
-    let mut anchor = 0usize;
-    let mut pos = 0usize;
-    let last_match_start = input.len().saturating_sub(MIN_MATCH);
+    let mflimit_plus_one = iend - (MF_LIMIT - 1);
+    let matchlimit = iend - LAST_LITERALS;
+    let mut table = [0u32; HASH_SIZE];
+    // Upstream inserts position 0 under its hash before advancing; a
+    // zero-initialized table holds 0 there anyway, so only the advance
+    // and the first forward hash remain.
+    let mut ip = 1usize;
+    let mut forward_h = hash5(input, 1);
 
-    // Incompressibility detector: count matches in the first 1024
-    // positions. If fewer than 2, switch to literal-only mode.
-    let probe_end = last_match_start.min(256);
-    let mut match_count = 0u32;
-    let mut probing = pos < probe_end;
+    'main: loop {
+        // Find a match: single hash probe per visited position; stride
+        // grows every SKIP_TRIGGER consecutive misses, then resets for
+        // the next round once this one succeeds.
+        let mut m_pos;
+        {
+            let mut forward_ip = ip;
+            let mut step = 1usize;
+            let mut search_match_nb = ACCELERATION << SKIP_TRIGGER;
+            let found;
+            loop {
+                let h = forward_h;
+                let current = forward_ip;
+                let match_index = table[h] as usize;
+                ip = forward_ip;
+                forward_ip += step;
+                step = search_match_nb >> SKIP_TRIGGER;
+                search_match_nb += 1;
 
-    while pos < last_match_start {
-        let h = hash4(input, pos);
-        let candidate = hash_table[h] as usize;
-        hash_table[h] = pos as u32;
-
-        if candidate > 0 && candidate < pos && pos - candidate <= 65535 {
-            // Fast byte check before full 4-byte comparison.
-            if input[candidate] == input[pos]
-                && input[candidate..candidate + MIN_MATCH] == input[pos..pos + MIN_MATCH]
-            {
-                let mut mlen = MIN_MATCH;
-                while pos + mlen < input.len()
-                    && mlen < MAX_MATCH
-                    && input[candidate + mlen] == input[pos + mlen]
-                {
-                    mlen += 1;
+                if forward_ip > mflimit_plus_one {
+                    break 'main;
                 }
+                forward_h = hash5(input, forward_ip);
+                table[h] = current as u32;
 
-                let lit_len = pos - anchor;
-                let offset = pos - candidate;
-                let match_code = mlen - MIN_MATCH;
-                let lit_code = lit_len.min(15);
-                let m_code = match_code.min(15);
-                out.push(((lit_code as u8) << 4) | (m_code as u8));
+                if match_index + DISTANCE_MAX < current {
+                    continue;
+                }
+                if input[match_index..match_index + MIN_MATCH] == input[ip..ip + MIN_MATCH] {
+                    found = match_index;
+                    break;
+                }
+            }
+            m_pos = found;
+        }
 
-                if lit_len >= 15 {
-                    write_length_ext(&mut out, lit_len - 15);
+        // Catch up: extend the match backwards through the literal run.
+        if m_pos > 0 && input[ip - 1] == input[m_pos - 1] {
+            loop {
+                ip -= 1;
+                m_pos -= 1;
+                if !(ip > anchor && m_pos > 0 && input[ip - 1] == input[m_pos - 1]) {
+                    break;
                 }
-                out.extend_from_slice(&input[anchor..pos]);
-                out.extend_from_slice(&(offset as u16).to_le_bytes());
-                if match_code >= 15 {
-                    write_length_ext(&mut out, match_code - 15);
-                }
-
-                let end = pos + mlen;
-                let mut ip = pos + 1;
-                while ip < end.min(last_match_start) {
-                    let h2 = hash4(input, ip);
-                    hash_table[h2] = ip as u32;
-                    ip += 1;
-                }
-                pos = end;
-                anchor = pos;
-                if probing {
-                    match_count += 1;
-                }
-                continue;
             }
         }
-        pos += 1;
 
-        // Check incompressibility after probing window.
-        if probing && pos >= probe_end {
-            probing = false;
-            if match_count < 1 {
-                // Incompressible: emit remaining as literals.
-                let lit_len = input.len() - anchor;
-                write_token_literals(&mut out, lit_len);
-                out.extend_from_slice(&input[anchor..]);
-                return out;
+        // Encode literals into a token, kept for the match-length nibble.
+        let lit_len = ip - anchor;
+        let mut token_pos = out.len();
+        out.push(0);
+        if lit_len >= 15 {
+            out[token_pos] = 15 << 4;
+            write_length_ext(&mut out, lit_len - 15);
+        } else {
+            out[token_pos] = (lit_len as u8) << 4;
+        }
+        out.extend_from_slice(&input[anchor..ip]);
+
+        // Encode match(es). After each one the very next position is
+        // re-tested; a hit there emits another match with zero literals
+        // (`token = 0`, upstream's `_next_match` retry).
+        loop {
+            let offset = ip - m_pos;
+            out.extend_from_slice(&(offset as u16).to_le_bytes());
+            let match_code = count_equal(input, ip + MIN_MATCH, m_pos + MIN_MATCH, matchlimit);
+            ip += match_code + MIN_MATCH;
+            if match_code >= 15 {
+                out[token_pos] |= 15;
+                write_length_ext(&mut out, match_code - 15);
+            } else {
+                out[token_pos] |= match_code as u8;
             }
+            anchor = ip;
+
+            if ip >= mflimit_plus_one {
+                break 'main;
+            }
+
+            // Fill table for ip-2 (a position skipped over by the match).
+            let h = hash5(input, ip - 2);
+            table[h] = (ip - 2) as u32;
+
+            // Test next position.
+            let h = hash5(input, ip);
+            let current = ip;
+            let match_index = table[h] as usize;
+            table[h] = current as u32;
+            if match_index + DISTANCE_MAX >= current
+                && input[match_index..match_index + MIN_MATCH] == input[ip..ip + MIN_MATCH]
+            {
+                m_pos = match_index;
+                token_pos = out.len();
+                out.push(0);
+                continue;
+            }
+
+            // Prepare next loop.
+            ip += 1;
+            forward_h = hash5(input, ip);
+            continue 'main;
         }
     }
 
-    let lit_len = input.len() - anchor;
-    write_token_literals(&mut out, lit_len);
+    write_token_literals(&mut out, iend - anchor);
     out.extend_from_slice(&input[anchor..]);
     out
 }
@@ -234,10 +300,34 @@ fn write_length_ext(out: &mut Vec<u8>, mut remaining: usize) {
     out.push(remaining as u8);
 }
 
-/// 4-byte hash into a 16-bit table.
-fn hash4(data: &[u8], pos: usize) -> usize {
-    let val = u32::from_le_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]);
-    ((val.wrapping_mul(2654435761) >> (32 - HASH_LOG)) as usize) & (HASH_SIZE - 1)
+/// 5-byte hash into the 4096-entry table (`LZ4_hash5`, little-endian
+/// variant — the byte order is fixed so every machine produces the same
+/// table and therefore the same output).
+fn hash5(data: &[u8], pos: usize) -> usize {
+    let mut seq = [0u8; 8];
+    seq.copy_from_slice(&data[pos..pos + 8]);
+    let sequence = u64::from_le_bytes(seq);
+    (((sequence << 24).wrapping_mul(PRIME_5_BYTES)) >> (64 - HASH_LOG)) as usize
+}
+/// Count equal bytes at `pin`/`pmatch` while `pin < limit` (`LZ4_count`).
+/// Compares 8 bytes at a time, then resolves the first differing byte
+/// via the low bit of the XOR (little-endian loads).
+fn count_equal(data: &[u8], mut pin: usize, mut pmatch: usize, limit: usize) -> usize {
+    let start = pin;
+    while pin + 8 <= limit {
+        let a = u64::from_le_bytes(data[pin..pin + 8].try_into().unwrap());
+        let b = u64::from_le_bytes(data[pmatch..pmatch + 8].try_into().unwrap());
+        if a != b {
+            return (pin - start) + ((a ^ b).trailing_zeros() / 8) as usize;
+        }
+        pin += 8;
+        pmatch += 8;
+    }
+    while pin < limit && data[pin] == data[pmatch] {
+        pin += 1;
+        pmatch += 1;
+    }
+    pin - start
 }
 
 #[cfg(test)]
@@ -289,6 +379,28 @@ mod tests {
             .map(|i| i.wrapping_mul(2654435761) as u8)
             .collect();
         let compressed = compress_block(&input);
+        let decompressed = decompress_block(&compressed, input.len()).expect("decode");
+        assert_eq!(decompressed, input);
+    }
+
+    /// Regression: the pre-port encoder bailed to literal-only mode for
+    /// the whole file when the first 256 positions looked incompressible
+    /// (e.g. a TTF table directory), forfeiting every later match. A
+    /// pseudo-random prefix must not stop the compressor from finding the
+    /// matches that follow it.
+    #[test]
+    fn incompressible_prefix_does_not_disable_matching() {
+        let mut input: Vec<u8> = (0..4096u32)
+            .map(|i| i.wrapping_mul(2654435761) as u8)
+            .collect();
+        input.extend_from_slice(&vec![b'z'; 100_000]);
+        let compressed = compress_block(&input);
+        assert!(
+            compressed.len() < input.len() / 2,
+            "100k run after 4k noise must compress: {} vs {}",
+            compressed.len(),
+            input.len()
+        );
         let decompressed = decompress_block(&compressed, input.len()).expect("decode");
         assert_eq!(decompressed, input);
     }

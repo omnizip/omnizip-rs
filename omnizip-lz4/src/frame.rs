@@ -11,7 +11,7 @@
 //! BD  (1 byte)
 //! [Content_Size (8 bytes)] — if FLG bit 3 set
 //! [Dict_ID (4 bytes)]      — if FLG bit 0 set
-//! [HC (1 byte)]            — if FLG bit 2 set
+//! HC (1 byte)              — always present
 //! Data blocks:
 //!   Block_Size (4 bytes LE, high bit = 1 for uncompressed)
 //!   Block_Data (Block_Size bytes)
@@ -20,6 +20,8 @@
 //! ```
 
 #![forbid(unsafe_code)]
+
+use omnizip_codecs::xxhash::xxhash32;
 
 use super::block;
 
@@ -40,6 +42,10 @@ pub fn compress_frame(input: &[u8]) -> Vec<u8> {
     out.extend_from_slice(&MAGIC);
     out.push(FLG_DEFAULT);
     out.push(BD_DEFAULT);
+    // HC is mandatory: second byte of XXH32 over the descriptor fields
+    // (FLG/BD + optional fields, magic excluded).
+    let hc = ((xxhash32(&out[4..]) >> 8) & 0xFF) as u8;
+    out.push(hc);
 
     // Single block containing the compressed data.
     let block = block::compress_block(input);
@@ -77,10 +83,15 @@ pub fn decompress_frame(compressed: &[u8]) -> Result<Vec<u8>, &'static str> {
     if flg & 0b0000_0001 != 0 {
         i += 4;
     }
-    // Optional HC.
-    if flg & 0b0000_0100 != 0 {
-        i += 1;
+    // Mandatory HC: second byte of XXH32 over compressed[4..i].
+    if i >= compressed.len() {
+        return Err("frame too short for header checksum");
     }
+    let expected_hc = ((xxhash32(&compressed[4..i]) >> 8) & 0xFF) as u8;
+    if compressed[i] != expected_hc {
+        return Err("bad header checksum");
+    }
+    i += 1;
 
     let mut out = Vec::new();
     loop {
@@ -158,5 +169,44 @@ mod tests {
         assert!(compressed.len() < input.len());
         let decompressed = decompress_frame(&compressed).expect("decode");
         assert_eq!(decompressed, input);
+    }
+
+    /// Wire-format gate: our frame output must be decodable by the
+    /// reference CLI. Skipped when `lz4` is not on PATH (not preinstalled
+    /// on every CI image).
+    #[test]
+    fn interop_with_system_lz4() {
+        use std::process::Command;
+        // Pseudo-random head (TTF-like), long zero run, periodic text:
+        // exercises skip-stride reset, catch-up and long-match extension.
+        let mut input: Vec<u8> = (0..4096u32)
+            .map(|i| i.wrapping_mul(2654435761) as u8)
+            .collect();
+        input.extend_from_slice(&vec![0u8; 100_000]);
+        let tail = b"the quick brown fox jumps over the lazy dog. ".repeat(2000);
+        input.extend_from_slice(&tail);
+        let compressed = compress_frame(&input);
+        // Via temp file: piping both stdin and stdout risks deadlock once
+        // output exceeds the pipe buffer.
+        let path = std::env::temp_dir().join(format!(
+            "omnizip-lz4-interop-{}-{}.lz4",
+            std::process::id(),
+            line!()
+        ));
+        std::fs::write(&path, &compressed).expect("write temp frame");
+        let output = match Command::new("lz4").args(["-d", "-c"]).arg(&path).output() {
+            Ok(output) => output,
+            Err(_) => {
+                let _ = std::fs::remove_file(&path);
+                return; // `lz4` not installed — skip
+            }
+        };
+        let _ = std::fs::remove_file(&path);
+        assert!(
+            output.status.success(),
+            "lz4 -d rejected our frame: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(output.stdout, input);
     }
 }
