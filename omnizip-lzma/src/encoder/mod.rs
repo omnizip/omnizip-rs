@@ -2,6 +2,7 @@
 
 pub mod alone;
 pub mod bt4_match_finder;
+pub mod fast_parse;
 pub mod lzip;
 pub mod lzma1;
 pub mod lzma2;

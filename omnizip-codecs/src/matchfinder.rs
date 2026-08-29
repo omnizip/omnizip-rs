@@ -164,6 +164,12 @@ impl<'a> HashChainMatchFinder<'a> {
         self.max_chain_length
     }
 
+    /// Maximum match distance (the configured dictionary size).
+    #[must_use]
+    pub const fn max_distance(&self) -> u32 {
+        self.max_distance
+    }
+
     #[must_use]
     pub const fn position(&self) -> usize {
         self.cur
