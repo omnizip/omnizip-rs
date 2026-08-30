@@ -20,7 +20,8 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 WORKSPACE="${1:-$ROOT}"
-REF="$(cat "$ROOT/tests/downstream/limnifs-ref.txt")"
+# LIMNIFS_REF overrides the pin (the canary runs against main).
+REF="${LIMNIFS_REF:-$(cat "$ROOT/tests/downstream/limnifs-ref.txt")}"
 REPO="https://github.com/limnifs/limnifs.git"
 CLONE="${CLONE_DIR:-$(mktemp -d "${TMPDIR:-/tmp}/omnizip-downstream-XXXXXX")}"
 

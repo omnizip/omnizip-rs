@@ -20,7 +20,24 @@ envelopes our unit tests don't. Instead of discovering that in the
 next downstream "Pass N" summary, this harness makes their suite our
 gate: it fails the PR that would have broken them.
 
-## How it works
+Three layers, each closing a distinct hole:
+
+1. **Pinned gate (below)** — their suite verbatim, reproducible,
+   blocks every PR.
+2. **Canary (`canary.sh` + the nightly/`main` workflow job)** — runs
+   their suite at `limnifs@main`. A pin only sees downstream tests a
+   human bumps it to; the canary sees their newest regression tests
+   within a day and, when green, opens the pin-bump PR itself. A red
+   canary means we broke something their newest tests catch —
+   investigate before the next release, never bump past it.
+3. **In-tree work budgets** — the #388/#408 class was a *work*
+   regression, invisible to round-trips and only fatal on slow
+   machines. `omnizip-brotli`'s `dp_work_budgets_on_pathological_
+   content` counts the knob-scaled DP loops and asserts fixed
+   budgets on the pathological content classes — deterministic,
+   machine-independent, part of every `cargo test`.
+
+## How the pinned gate works
 
 `run.sh`:
 
@@ -41,10 +58,11 @@ catch shows up as a timeout, which is a failure).
 
 ## Bumping the pin
 
-Update `limnifs-ref.txt` to the downstream commit you want to conform
-to. Bump it deliberately, when LimniFS lands new tests worth gating
-on (especially regression tests for newly-filed omnizip issues) —
-new downstream coverage should flow into this gate promptly.
+Prefer letting the canary do it: when `limnifs@main` passes against
+this workspace, `canary.sh` opens the bump PR automatically (nightly
+and after merges to main). Manual bumps are fine too — update
+`limnifs-ref.txt` to the downstream commit — but never bump past a
+red canary.
 
 ## In-tree companions
 

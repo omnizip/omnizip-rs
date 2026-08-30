@@ -798,11 +798,13 @@ fn update_nodes(
             while pos + l < n && data[pos + l] == data[prev + l] {
                 l += 1;
             }
+            crate::encoder::work_meter::add(l as u64);
             len = l;
             if len > best_len {
                 let dist_cost = base_cost + model.dist_cost(j);
                 let mut l2 = best_len + 1;
                 while l2 <= len {
+                    crate::encoder::work_meter::add(1);
                     let copycode = get_copy_length_code(l2);
                     let cmdcode = combine_length_codes(inscode, copycode, j == 0);
                     let cost = if cmdcode < 128 { base_cost } else { dist_cost }
@@ -846,6 +848,7 @@ fn update_nodes(
                 len = max_match_len;
             }
             while len <= max_match_len {
+                crate::encoder::work_meter::add(1);
                 let copycode = get_copy_length_code(len);
                 let cmdcode = combine_length_codes(inscode, copycode, false);
                 let cost =
@@ -1093,9 +1096,65 @@ mod mlen_cap_tests {
     /// so that class of change hangs HERE first.
     #[test]
     fn repetitive_structured_text_q11_completes_and_round_trips() {
-        let mut payload = String::with_capacity(256 * 1024);
+        let payload = log_line_fixture(256);
+        for q in [5, 11] {
+            let out = crate::from_spec_encoder::compress_with_quality(&payload, q);
+            let back = crate::decoder::decode(&out).unwrap_or_else(|e| panic!("q{q}: {e}"));
+            assert_eq!(back, payload, "q{q} round trip");
+        }
+    }
+
+    /// Deterministic hang guard: the #388/#408 incidents were WORK
+    /// regressions (per-position candidate/sweep work multiplied on
+    /// repetitive content), invisible to round-trip tests and only
+    /// fatal on slow machines. The work meter counts every iteration
+    /// of the knob-scaled DP loops; these budgets — calibrated at
+    /// ~4x the 2026-08-30 measurements (zeros at 2x; see below) —
+    /// fail a plain unit assertion the moment a change inflates DP
+    /// work on the pathological classes, on any machine.
+    ///
+    /// Calibrations (2026-08-30, cap 1951):
+    ///   loglines 16KB = 2.5M, 64KB = 11.9M, 256KB = 47.7M units
+    ///   zeros 256KB = 12.57B units — the known #312 pathology,
+    ///   budgeted at 2x to lock the floor while it remains open;
+    ///   shrinking it (boundary-stepped rep sweeps) would allow a
+    ///   much tighter budget.
+    #[test]
+    fn dp_work_budgets_on_pathological_content() {
+        for (kb, budget) in [
+            (16usize, 12_000_000u64),
+            (64, 50_000_000),
+            (256, 200_000_000),
+        ] {
+            let payload = log_line_fixture(kb);
+            crate::encoder::work_meter::reset();
+            let out = crate::from_spec_encoder::compress_with_quality(&payload, 11);
+            let units = crate::encoder::work_meter::units();
+            assert!(
+                units > 0 && units < budget,
+                "loglines {kb}KB q11: {units} work units >= budget {budget}                  (DP work inflated on repetitive content — see #388/#408)"
+            );
+            assert!(!out.is_empty());
+        }
+
+        // 32KB keeps the debug-mode suite fast: the #312 pathology's
+        // per-position cost is size-independent (~48K units/position),
+        // so any inflation is visible at any fixture size.
+        let zeros = vec![0u8; 32 * 1024];
+        crate::encoder::work_meter::reset();
+        let out = crate::from_spec_encoder::compress_with_quality(&zeros, 11);
+        let units = crate::encoder::work_meter::units();
+        assert!(
+            units < 3_200_000_000,
+            "zeros 32KB q11: {units} work units >= budget (the #312 pathology              grew — see the calibration note above)"
+        );
+        assert_eq!(out.len(), 16);
+    }
+
+    fn log_line_fixture(kb: usize) -> Vec<u8> {
+        let mut payload = String::with_capacity(kb * 1024);
         let mut line = 0usize;
-        while payload.len() < 256 * 1024 {
+        while payload.len() < kb * 1024 {
             use std::fmt::Write as _;
             let _ = writeln!(
                 payload,
@@ -1105,11 +1164,6 @@ mod mlen_cap_tests {
             );
             line += 1;
         }
-        let payload = payload.into_bytes();
-        for q in [5, 11] {
-            let out = crate::from_spec_encoder::compress_with_quality(&payload, q);
-            let back = crate::decoder::decode(&out).unwrap_or_else(|e| panic!("q{q}: {e}"));
-            assert_eq!(back, payload, "q{q} round trip");
-        }
+        payload.into_bytes()
     }
 }

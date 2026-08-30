@@ -18,9 +18,8 @@ on:
     branches: [main]
   pull_request:
   schedule:
-    # Weekly (and after downstream pins move) — catches drift between
-    # the pinned ref and the evergreen workspace.
-    - cron: "0 4 * * 1"
+    # Nightly — feeds the canary; a stale pin is a stale gate.
+    - cron: "0 4 * * *"
   workflow_dispatch:
 
 permissions:
@@ -43,3 +42,38 @@ jobs:
 
       - name: Run LimniFS suite against this workspace
         run: tests/downstream/run.sh
+
+  # Freshness layer: the pinned gate above is reproducible but can go
+  # stale — LimniFS can land a regression test for a fresh omnizip
+  # issue at any time, and a pin only sees it when a human bumps it.
+  # The canary runs their suite at main; green + pin trailing means
+  # auto-open the bump PR, red means we broke something their newest
+  # tests catch. Not tied to PRs (their main isn't reproducible);
+  # runs after our merges and nightly.
+  limnifs-canary:
+    name: downstream canary (limnifs@main)
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry + index
+        uses: Swatinem/rust-cache@v2
+
+      - name: Configure git for the bump PR
+        run: |
+          git config user.name "omnizip-ci"
+          git config user.email "ci@omnizip.invalid"
+
+      - name: Canary run (bump the pin when green)
+        run: tests/downstream/canary.sh
+        env:
+          GH_TOKEN: ${{ github.token }}
