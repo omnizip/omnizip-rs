@@ -82,17 +82,22 @@ const LONG_COPY_QUICK_STEP: usize = 16384;
 /// MAX_ZOPFLI_LEN_QUALITY_10 / _11 (quality.h).
 const MAX_ZOPFLI_LEN: [usize; 2] = [150, 325];
 
-/// Cap on a single relaxed match length. The reference takes
-/// monster matches whole (observed 122,894-byte copies on binary
-/// executables — long periodic regions); capping at 1951 (the
-/// longest copy-length code before the 24-bit extended forms) costs
-/// 8.7KB on bin1 and 3.7KB on rustsrc at q11. Default uncapped;
-/// BROTLI_MLEN_CAP restores the old ceiling.
+/// Cap on a single relaxed match length, and the reason it is BOUNDED
+/// by default (issues #388 and #408): the per-position work that
+/// scales with this cap — candidate length computation and sweep
+/// stepping on repetitive content — makes a large ceiling a
+/// content-dependent hang (a 65,536 cap was once claimed "measured
+/// safe" and hung windows-latest CI for 23+ minutes on tens-of-KB
+/// repetitive text; an uncapped 16.7M default was the same class).
+/// 1,951 is the longest copy-length code before the 24-bit extended
+/// forms. Larger values pay ratio on specific corpora (bin1 q11
+/// −8.7KB, rustsrc q11 −3.7KB) but that is a documented trade, not a
+/// default. Opt in per corpus with BROTLI_MLEN_CAP.
 fn match_len_cap() -> usize {
     std::env::var("BROTLI_MLEN_CAP")
         .ok()
         .and_then(|v| v.parse().ok())
-        .unwrap_or(16_779_211)
+        .unwrap_or(1_951)
 }
 /// StartPosQueue depth (1.2.0: `q_[8]`; 1.1 had 5).
 const SPQ_SIZE: usize = 8;
@@ -1060,4 +1065,51 @@ pub(crate) fn parse_hq_with(
         prev_commands = shortest_path_commands(input, &mut nodes);
     }
     prev_commands
+}
+
+#[cfg(test)]
+mod mlen_cap_tests {
+    use super::match_len_cap;
+
+    /// The default match-length cap MUST stay bounded. Two shipped
+    /// regressions came from raising it on fixture evidence alone:
+    /// #388 (1951 → 65,536 hung windows-latest CI for 23+ minutes on
+    /// tens-of-KB repetitive structured text) and #408 (an uncapped
+    /// 16.7M default, same class). Per-position candidate and sweep
+    /// work scales with this cap on repetitive content — "measured
+    /// safe on my corpus" does not generalize. Bumping this requires
+    /// a worst-case analysis on the pathological content class, not a
+    /// benchmark win.
+    #[test]
+    fn match_len_cap_default_is_bounded() {
+        // Guard against an inherited env var from a dev shell.
+        std::env::remove_var("BROTLI_MLEN_CAP");
+        assert_eq!(match_len_cap(), 1_951);
+    }
+
+    /// The #388/#408 content class: repetitive structured text
+    /// (LimniFS issue-195-style log lines). Whole-file q11 encode of
+    /// this shape hung CI when the cap was raised; this test exists
+    /// so that class of change hangs HERE first.
+    #[test]
+    fn repetitive_structured_text_q11_completes_and_round_trips() {
+        let mut payload = String::with_capacity(256 * 1024);
+        let mut line = 0usize;
+        while payload.len() < 256 * 1024 {
+            use std::fmt::Write as _;
+            let _ = writeln!(
+                payload,
+                "2026-08-26 service=api line={line} status={} bytes={}",
+                200 + (line % 3) * 100,
+                (line * 997) % 50_000
+            );
+            line += 1;
+        }
+        let payload = payload.into_bytes();
+        for q in [5, 11] {
+            let out = crate::from_spec_encoder::compress_with_quality(&payload, q);
+            let back = crate::decoder::decode(&out).unwrap_or_else(|e| panic!("q{q}: {e}"));
+            assert_eq!(back, payload, "q{q} round trip");
+        }
+    }
 }
