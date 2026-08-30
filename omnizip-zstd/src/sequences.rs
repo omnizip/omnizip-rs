@@ -208,6 +208,27 @@ pub fn decode_sequences_section(
         });
     }
 
+    if std::env::var("ZSTD_SEQ_STATS").is_ok() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static N: AtomicU64 = AtomicU64::new(0);
+        static LITS: AtomicU64 = AtomicU64::new(0);
+        static MBYTES: AtomicU64 = AtomicU64::new(0);
+        static MAXML: AtomicU64 = AtomicU64::new(0);
+        N.fetch_add(u64::try_from(sequences.len()).unwrap_or(0), Ordering::Relaxed);
+        for s2 in &sequences {
+            LITS.fetch_add(u64::from(s2.literal_length), Ordering::Relaxed);
+            MBYTES.fetch_add(u64::from(s2.match_length), Ordering::Relaxed);
+            MAXML.fetch_max(u64::from(s2.match_length), Ordering::Relaxed);
+        }
+        eprintln!(
+            "SEQ_STATS total: seqs={} lits={} mbytes={} max_ml={}",
+            N.load(Ordering::Relaxed),
+            LITS.load(Ordering::Relaxed),
+            MBYTES.load(Ordering::Relaxed),
+            MAXML.load(Ordering::Relaxed)
+        );
+    }
+
     Ok(SequencesSection {
         sequences,
         consumed: input.len(),
