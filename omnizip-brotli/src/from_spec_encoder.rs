@@ -1592,7 +1592,7 @@ fn emit_metablock_from_commands(
     // Default at q10+ (BROTLI_OLD_DSPLIT restores the in-house DP);
     // BROTLI_REF_DSPLIT forces it at any level.
     let ref_dist_split =
-        quality >= 10 && !env_flag!("BROTLI_OLD_DSPLIT") || env_flag!("BROTLI_REF_DSPLIT");
+        quality >= 5 && !env_flag!("BROTLI_OLD_DSPLIT") || env_flag!("BROTLI_REF_DSPLIT");
     let mut dist_block_types: Vec<u8> = Vec::new();
     let dist_boundaries: Vec<usize> = if !dist_split_on {
         dist_block_types.push(0);
@@ -1775,8 +1775,10 @@ fn emit_metablock_from_commands(
     };
     let cost_a = ent(&global_hist) + 70.0 + if dist_bc_ok { 0.0 } else { 1.0e9 };
     // Reference split clusters freely; the in-house DP's 4-tree cap
-    // was tuned to its 4 blocks.
-    let shared_k = if ref_dist_split && quality >= 10 {
+    // was tuned to its 4 blocks. Scaled tree counts pay off from q5
+    // on code-like text (rustsrc q9 -1.2KB, FITS q9 -5.9KB, csv-real
+    // q5/q9 -0.5/-0.7KB; 100KB CI fixtures neutral).
+    let shared_k = if ref_dist_split {
         (nb_d * 4).clamp(2, 32)
     } else {
         ntrees_d.min(4) as usize
