@@ -214,7 +214,10 @@ pub fn decode_sequences_section(
         static LITS: AtomicU64 = AtomicU64::new(0);
         static MBYTES: AtomicU64 = AtomicU64::new(0);
         static MAXML: AtomicU64 = AtomicU64::new(0);
-        N.fetch_add(u64::try_from(sequences.len()).unwrap_or(0), Ordering::Relaxed);
+        N.fetch_add(
+            u64::try_from(sequences.len()).unwrap_or(0),
+            Ordering::Relaxed,
+        );
         for s2 in &sequences {
             LITS.fetch_add(u64::from(s2.literal_length), Ordering::Relaxed);
             MBYTES.fetch_add(u64::from(s2.match_length), Ordering::Relaxed);
