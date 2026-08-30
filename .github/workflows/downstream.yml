@@ -1,0 +1,45 @@
+name: Downstream
+
+# Downstream conformance: run the LimniFS test suite against the
+# current omnizip-rs workspace.
+#
+# Rationale (#388, #408): every LimniFS validation pass has caught
+# omnizip regressions our own suites missed — most recently the
+# match-length-cap class, twice. Their whole-file drop tests exercise
+# content classes (repetitive structured text, pathological timing
+# envelopes) and integration shapes our unit tests don't. This job
+# clones LimniFS at the pin in tests/downstream/limnifs-ref.txt,
+# patches every omnizip-* dependency to this workspace, and runs the
+# full downstream suite. A failure here blocks the PR — that is the
+# point.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    # Weekly (and after downstream pins move) — catches drift between
+    # the pinned ref and the evergreen workspace.
+    - cron: "0 4 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  limnifs-conformance:
+    name: downstream (limnifs)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry + index
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run LimniFS suite against this workspace
+        run: tests/downstream/run.sh
