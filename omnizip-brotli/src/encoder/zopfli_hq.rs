@@ -81,6 +81,19 @@ const MAX_EFFECTIVE_DISTANCE_ALPHABET_SIZE: usize = 544;
 const LONG_COPY_QUICK_STEP: usize = 16384;
 /// MAX_ZOPFLI_LEN_QUALITY_10 / _11 (quality.h).
 const MAX_ZOPFLI_LEN: [usize; 2] = [150, 325];
+
+/// Cap on a single relaxed match length. The reference takes
+/// monster matches whole (observed 122,894-byte copies on binary
+/// executables — long periodic regions); capping at 1951 (the
+/// longest copy-length code before the 24-bit extended forms) costs
+/// 8.7KB on bin1 and 3.7KB on rustsrc at q11. Default uncapped;
+/// BROTLI_MLEN_CAP restores the old ceiling.
+fn match_len_cap() -> usize {
+    std::env::var("BROTLI_MLEN_CAP")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(16_779_211)
+}
 /// StartPosQueue depth (1.2.0: `q_[8]`; 1.1 had 5).
 const SPQ_SIZE: usize = 8;
 /// MaxZopfliCandidates: q10 = 1, q11 = 5.
@@ -820,7 +833,7 @@ fn update_nodes(
         // which the DP over-copies massively.
         let mut len = min_len;
         for &(dist, mlen) in matches.iter().take(num_matches as usize) {
-            let max_match_len = (mlen as usize).min(max_len).min(1951);
+            let max_match_len = (mlen as usize).min(max_len).min(match_len_cap());
             let sym = long_dist_symbol(dist);
             let dist_extra_bits = ((sym as u32 - 16) >> 1) + 1;
             let dist_cost = base_cost + dist_extra_bits as f32 + model.dist_cost(sym);
