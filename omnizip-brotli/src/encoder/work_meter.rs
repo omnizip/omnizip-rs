@@ -23,24 +23,50 @@
 
 use std::cell::Cell;
 
+/// Instrumented sites (order fixed; see `site_name`).
+pub const SITES: usize = 5;
+const NAMES: [&str; SITES] = [
+    "hq_rep_compare",
+    "hq_rep_sweep",
+    "hq_h10_sweep",
+    "bt_probe_compare",
+    "bt_relax",
+];
+
 thread_local! {
-    static WORK_UNITS: Cell<u64> = const { Cell::new(0) };
+    static WORK_UNITS: [Cell<u64>; SITES] = const { [const { Cell::new(0) }; SITES] };
 }
 
-/// Record `n` units of DP work (one call per loop iteration, or the
-/// batched length after a loop).
+/// Record `n` units of DP work at `site` (one call per loop
+/// iteration, or the batched length after a loop).
 #[inline]
-pub(crate) fn add(n: u64) {
-    WORK_UNITS.with(|w| w.set(w.get().wrapping_add(n)));
+pub(crate) fn add(site: usize, n: u64) {
+    WORK_UNITS.with(|w| w[site].set(w[site].get().wrapping_add(n)));
 }
 
-/// Total units since the last [`reset`] on this thread.
+/// Total units across sites since the last [`reset`] on this thread.
 #[must_use]
 pub fn units() -> u64 {
-    WORK_UNITS.with(Cell::get)
+    WORK_UNITS.with(|w| w.iter().map(Cell::get).sum())
+}
+
+/// Per-site totals since the last [`reset`].
+#[must_use]
+pub fn breakdown() -> [(&'static str, u64); SITES] {
+    WORK_UNITS.with(|w| {
+        let mut out = [("", 0); SITES];
+        for (i, slot) in w.iter().enumerate() {
+            out[i] = (NAMES[i], slot.get());
+        }
+        out
+    })
 }
 
 /// Reset the meter on this thread.
 pub fn reset() {
-    WORK_UNITS.with(|w| w.set(0));
+    WORK_UNITS.with(|w| {
+        for slot in w.iter() {
+            slot.set(0);
+        }
+    });
 }

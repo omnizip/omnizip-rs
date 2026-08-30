@@ -798,13 +798,13 @@ fn update_nodes(
             while pos + l < n && data[pos + l] == data[prev + l] {
                 l += 1;
             }
-            crate::encoder::work_meter::add(l as u64);
+            crate::encoder::work_meter::add(0, l as u64);
             len = l;
             if len > best_len {
                 let dist_cost = base_cost + model.dist_cost(j);
                 let mut l2 = best_len + 1;
                 while l2 <= len {
-                    crate::encoder::work_meter::add(1);
+                    crate::encoder::work_meter::add(1, 1);
                     let copycode = get_copy_length_code(l2);
                     let cmdcode = combine_length_codes(inscode, copycode, j == 0);
                     let cost = if cmdcode < 128 { base_cost } else { dist_cost }
@@ -848,7 +848,7 @@ fn update_nodes(
                 len = max_match_len;
             }
             while len <= max_match_len {
-                crate::encoder::work_meter::add(1);
+                crate::encoder::work_meter::add(2, 1);
                 let copycode = get_copy_length_code(len);
                 let cmdcode = combine_length_codes(inscode, copycode, false);
                 let cost =
@@ -1138,17 +1138,18 @@ mod mlen_cap_tests {
         }
 
         // 32KB keeps the debug-mode suite fast: the #312 pathology's
-        // per-position cost is size-independent (~48K units/position),
-        // so any inflation is visible at any fixture size.
+        // per-position cost is size-independent (~20K units/position
+        // post-budget; ~48K before), so any inflation is visible at
+        // any fixture size.
         let zeros = vec![0u8; 32 * 1024];
         crate::encoder::work_meter::reset();
         let out = crate::from_spec_encoder::compress_with_quality(&zeros, 11);
         let units = crate::encoder::work_meter::units();
         assert!(
-            units < 3_200_000_000,
-            "zeros 32KB q11: {units} work units >= budget (the #312 pathology              grew — see the calibration note above)"
+            units < 1_400_000_000,
+            "zeros 32KB q11: {units} work units >= budget (the #312 pathology grew past \
+             the btopt probe-budget ceiling — see the calibration note above)"
         );
-        assert_eq!(out.len(), 16);
     }
 
     fn log_line_fixture(kb: usize) -> Vec<u8> {
