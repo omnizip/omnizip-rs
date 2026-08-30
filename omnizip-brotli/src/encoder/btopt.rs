@@ -326,6 +326,7 @@ fn dp_pass(
             while i + len < n && len < probe_cap && input[i + len] == input[prev + len] {
                 len += 1;
             }
+            crate::encoder::work_meter::add(len as u64);
             if len > best_len {
                 sweep_lengths((best_len + 1).max(2), len, |l2| {
                     relax_copy(&mut dp, i, l2, dist, ilen, &reps, cmd_table, dist_table);
@@ -365,6 +366,7 @@ const SWEEP_BOUNDARIES: [usize; 5] = [134, 198, 326, 582, 1094];
 
 #[inline]
 fn sweep_lengths<F: FnMut(usize)>(lo: usize, hi: usize, mut f: F) {
+    crate::encoder::work_meter::add(1);
     if lo > hi {
         return;
     }
