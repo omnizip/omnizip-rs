@@ -1107,6 +1107,14 @@ pub fn compress_block_fast4_with_prefix(
     if anchor < iend {
         seq_store.literals.extend_from_slice(&src[anchor..iend]);
     }
+    if std::env::var("ZSTD_FAST_STATS").is_ok() {
+        let mbytes: u32 = seq_store.sequences.iter().map(|s| s.match_length).sum();
+        eprintln!(
+            "FAST4 mm={mm} hbits={h_bits} seqs={} lits={} mbytes={mbytes}",
+            seq_store.sequences.len(),
+            seq_store.literals.len(),
+        );
+    }
     iend - anchor
 }
 
