@@ -160,21 +160,30 @@ These are the traps noted in the task files:
 
 ## Invariants
 
-1. **`#![forbid(unsafe_code)]` is workspace-wide** and pre-existing in every
+1. **Bounded-work changes need worst-case analysis, not fixture
+   benchmarks.** Any change that raises or removes a bound on DP/loop
+   work (match-length caps, chain budgets, sweep limits) must be
+   analyzed on pathological content — all-zeros, long-period periodic,
+   small repetitive structured text — because "measured safe on my
+   corpus" hung downstream CI twice (#388: cap 1951→65,536;
+   #408: uncapped 16.7M default). Large values ship as opt-in env
+   knobs, never as defaults. LimniFS is the downstream gate: its
+   fixture class belongs in our regression tests before shipping.
+2. **`#![forbid(unsafe_code)]` is workspace-wide** and pre-existing in every
    crate. Don't add `unsafe` blocks; if a hot path genuinely needs SIMD, use
    `std::simd` (task [`32`](TODO.omnizip-rs/32-simd-acceleration.md)).
-2. **Determinism is a hard requirement.** No thread-scheduling-dependent block
+3. **Determinism is a hard requirement.** No thread-scheduling-dependent block
    boundaries, no `HashSet` iteration in encode paths, no time-seeded RNGs.
-3. **One `in_progress` task per crate at a time.** Move task status in the
+4. **One `in_progress` task per crate at a time.** Move task status in the
    TODO file header from `pending` → `in_progress` → `done` — done means its
    acceptance criteria pass in CI on linux + macOS + stable Rust with the
    differential harness green.
-4. **No shims, no stubs.** Placeholder functions (like the current
+5. **No shims, no stubs.** Placeholder functions (like the current
    `lzma2_compress` returning `LevelUnavailable`) are scaffolding to keep the
    crate compiling between phases; replace them with the real implementation
    when the corresponding phase ships.
-5. **Spec-first.** Wire-format and codec-id changes update `PLAN.md` +
+6. **Spec-first.** Wire-format and codec-id changes update `PLAN.md` +
    `TODO.omnizip-rs/README.md` before code.
-6. **Rebase-merge all PRs.** No direct pushes to `main` (also enforced by the
+7. **Rebase-merge all PRs.** No direct pushes to `main` (also enforced by the
    user's global git rules — never push tags, never push to main, never merge
    to main without explicit approval).
