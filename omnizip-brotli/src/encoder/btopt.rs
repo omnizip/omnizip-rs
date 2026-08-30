@@ -260,6 +260,9 @@ fn dp_pass(
 ) -> Vec<Command> {
     let n = input.len();
     let tier = usize::from(quality >= 11);
+    let mut probe_bytes: u64 = 0;
+    let probe_t1 = (n as u64) * 8_192;
+    let probe_t2 = (n as u64) * 16_384;
     let max_z = MAX_ZOPFLI_LEN[tier];
     let cmd_table = &model.cost_cmd;
     let dist_table = &model.cost_dist;
@@ -304,7 +307,22 @@ fn dp_pass(
         let mut seen = [0u32; 16];
         let mut seen_n = 0usize;
         let mut best_len = min_len.saturating_sub(1);
-        let probe_cap = (n - i).min(MATCH_LEN_CAP);
+        // Work budget (issues #388/#408 class, #312 pathology): the
+        // probe compares are the dominant cost on content where all
+        // 16 rep distances match maximally (all-zeros measures ~47K
+        // compare bytes per position — every probe runs its full cap
+        // at every position, even interior to monster copies). Normal
+        // content stays far below the first threshold (bin1, the
+        // heaviest measured, ~1.5K per position; the 8,192 stage
+        // sits 5.5x above it), so the parse is byte-identical there;
+        // pathological content degrades to a hard-bounded ceiling.
+        let probe_cap = (n - i).min(if probe_bytes >= probe_t2 {
+            64
+        } else if probe_bytes >= probe_t1 {
+            256
+        } else {
+            MATCH_LEN_CAP
+        });
         for jcode in 0..16usize {
             let raw = i64::from(reps[CACHE_INDEX[jcode]]) + i64::from(CACHE_OFFSET[jcode]);
             let dist = if raw >= 1 && raw <= i as i64 {
@@ -326,7 +344,8 @@ fn dp_pass(
             while i + len < n && len < probe_cap && input[i + len] == input[prev + len] {
                 len += 1;
             }
-            crate::encoder::work_meter::add(len as u64);
+            crate::encoder::work_meter::add(3, len as u64);
+            probe_bytes += len as u64;
             if len > best_len {
                 sweep_lengths((best_len + 1).max(2), len, |l2| {
                     relax_copy(&mut dp, i, l2, dist, ilen, &reps, cmd_table, dist_table);
@@ -366,7 +385,7 @@ const SWEEP_BOUNDARIES: [usize; 5] = [134, 198, 326, 582, 1094];
 
 #[inline]
 fn sweep_lengths<F: FnMut(usize)>(lo: usize, hi: usize, mut f: F) {
-    crate::encoder::work_meter::add(1);
+    crate::encoder::work_meter::add(4, 1);
     if lo > hi {
         return;
     }
