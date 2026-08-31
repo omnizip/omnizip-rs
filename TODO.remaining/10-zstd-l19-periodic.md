@@ -56,3 +56,33 @@ density — measured globally before shipping.
   worse at L18+ than mid levels
 - A global re-tune of the opt price model for short matches (must
   sweep the whole corpus, not just this cell)
+
+## Validated decomposition (2026-08-31, post Repeat_Mode fix)
+
+The earlier attempt to dump ref-side SEQ_STATS at L18 produced
+impossible numbers (6,139 seqs for 1.5 MB) — root cause: our decoder
+rejected sequence-table Repeat_Mode, panicking mid-stream; the stats
+came from a partial decode. Fixed in 0.21.32 (PR #421); reference
+stats below are from a full, byte-verified decode.
+
+| | ours L18 | ref L18 | delta |
+|---|---|---|---|
+| sequences | 233,746 | 282,595 | ours −17% |
+| literals | 208,450 | 114,726 | ours **1.82x** |
+| match bytes | 1,330,718 | 1,424,428 | −93,710 |
+| avg match len | 5.69 | 5.04 | ours longer |
+| max match len | 18 | 20 | |
+| off > 127K | 55,818 | 58,981 | similar |
+
+Confirms the qualitative read above, with a sharper shape: the
+reference's gain is *more* sequences (not longer ones) — it converts
+~94 KB of our literals into dense short matches (avg 5.0 B) while we
+emit fewer, slightly longer matches. Same shape as the brotli
+q9/q11 residuals. Any fix is a price-model change: lower the
+effective price of short ml at large offset codes (or raise literal
+price) — must sweep the whole corpus before shipping since the
+other 9 files sit at 1.00-1.02x.
+
+Interop note: decoder now decodes all 10 corpus files x ref levels
+1-19 (190 streams) byte-identical; regression fixture
+tests/fixtures/zstd/repeat-mode.zst.
