@@ -859,6 +859,25 @@ fn update_nodes(
                 }
                 len += 1;
             }
+            // Whole-match jump: when the finder saw past the DP cap,
+            // relax the FULL copy as a single command — the reference
+            // takes monster matches whole (up to 122,894 B on bin1)
+            // where the capped sweep re-pays the distance code every
+            // 1,951 bytes. One extra relaxation per candidate: the
+            // sweep length (the #388/#408 hang class) is untouched,
+            // and copy code 23's 24-bit extra prices the jump exactly.
+            let full_len = (mlen as usize).min(max_len);
+            if full_len > max_match_len {
+                crate::encoder::work_meter::add(2, 1);
+                let copycode = get_copy_length_code(full_len);
+                let cmdcode = combine_length_codes(inscode, copycode, false);
+                let cost =
+                    dist_cost + copy_extra(usize::from(copycode)) as f32 + model.cmd_cost(cmdcode);
+                if cost < nodes[pos + full_len].cost {
+                    update_node(nodes, pos, start, full_len, full_len, dist, 0, cost);
+                    result = result.max(full_len);
+                }
+            }
         }
     }
     result

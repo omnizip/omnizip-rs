@@ -367,6 +367,15 @@ fn dp_pass(
                 relax_copy(&mut dp, i, l, dist, ilen, &reps, cmd_table, dist_table);
             });
             len = maxlen + 1;
+            // Whole-match jump (see zopfli_hq): one relaxation at the
+            // full finder length when it exceeds the DP cap. Constant
+            // work per candidate; the capped sweep is untouched.
+            let full_len = (mlen as usize).min(n - i);
+            if full_len > maxlen {
+                relax_copy(
+                    &mut dp, i, full_len, dist, ilen, &reps, cmd_table, dist_table,
+                );
+            }
         }
     }
 
