@@ -86,3 +86,34 @@ other 9 files sit at 1.00-1.02x.
 Interop note: decoder now decodes all 10 corpus files x ref levels
 1-19 (190 streams) byte-identical; regression fixture
 tests/fixtures/zstd/repeat-mode.zst.
+
+## 2026-08-31 (0.21.33, PR #424): root cause was NOT the price model
+
+Position-diff evidence: on a 128KB slice the parses are IDENTICAL
+(19,638 vs 19,647 seqs, same literals/avg-ml) yet ours was 1.063x —
+the whole gap was entropy-coding locality. The reference emits ~1KB
+sub-blocks (43 per 128KB slice) with locally fitted tables reusing
+each other via Repeat_Mode/Treeless; we emitted one monolithic
+128KB block.
+
+Ported: post-parse block splitting (C ZSTD_deriveBlockSplits —
+recursive bisection on sequence indices, exact-measured sizes, gates
+strategy>=btopt && windowLog>=17, <300 seqs no split, <=196 splits)
++ Repeat_Mode sequence-table emission + partition threading.
+Result: csv2m L18 1.190x -> **1.093x**, L19 1.151x -> **1.046x**;
+every other sweep cell within 1.000-1.013x or beating (arial L22
+0.982x). 50 cells byte-verified by zstd -d.
+
+### Remaining residual (small, documented)
+
+- Reference still splits FINER (ref ~500 blocks on the full file vs
+  our ~150) and reuses literal Huffman tables more aggressively.
+- RLE-mode sequence tables unemitted: the C builds the single-state
+  table outside buildCTable (ZSTD_buildSeqTable set_rle); our
+  synthetic table_log=0 norm underflows build_ctable's delta math.
+  Worth ~44 B on csv2m — needs the special-cased table if ever
+  wanted.
+- The earlier "price model" hypothesis is retired: parse parity on
+  single blocks disproves it; the full-file seq-count difference
+  (233K vs 282K) is a byproduct of the reference's own finer block
+  boundaries, not a denser parser.
