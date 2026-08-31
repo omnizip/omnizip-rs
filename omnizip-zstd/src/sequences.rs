@@ -523,7 +523,17 @@ impl SequenceExecutor {
         let start_len = output.len();
         let mut lit_pos = 0usize;
 
+        let dump = std::env::var_os("ZSTD_SEQ_DUMP").is_some();
         for seq in sequences {
+            if dump {
+                eprintln!(
+                    "S {} {} {} {}",
+                    output.len(),
+                    seq.literal_length,
+                    seq.match_length,
+                    seq.offset
+                );
+            }
             // 1. Copy literal_length bytes from literals into output.
             let ll = seq.literal_length as usize;
             if ll > 0 {

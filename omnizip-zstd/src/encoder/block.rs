@@ -16,9 +16,10 @@ use crate::encoder::ldm::LdmHashTable;
 use crate::encoder::match_finder::{
     compress_block_fast_with_prefix, compress_block_lazy, compress_block_lazy2,
     compress_block_lazy2_with_ldm, compress_block_lazy2_with_prefix,
-    compress_block_lazy_with_prefix, compress_block_with_min_match, MatchState, SeqStore,
+    compress_block_lazy_with_prefix, compress_block_with_min_match, MatchState, RawSequence,
+    SeqStore,
 };
-use crate::encoder::sequences::encode_section;
+use crate::encoder::sequences::{encode_section, SeqTablesWire};
 use crate::xxhash;
 use crate::ZstdError;
 
@@ -246,6 +247,7 @@ fn encode_frame_into(
     // Blocks.
     let mut rep_offsets = [1u32, 4, 8];
     let mut last_huf_weights: Option<Vec<u8>> = None;
+    let mut last_seq_tables: Option<SeqTablesWire> = None;
     let mut offset = 0;
     while offset < plaintext.len() {
         let remaining = plaintext.len() - offset;
@@ -286,6 +288,7 @@ fn encode_frame_into(
                     &mut rep_offsets,
                     params,
                     &mut last_huf_weights,
+                    &mut last_seq_tables,
                     ldm_table
                         .as_ref()
                         .expect("ldm table exists when ldm_enabled"),
@@ -308,6 +311,7 @@ fn encode_frame_into(
                     &mut rep_offsets,
                     params,
                     &mut last_huf_weights,
+                    &mut last_seq_tables,
                     &mut opt_state,
                 )?;
                 sub = sub_end;
@@ -325,6 +329,7 @@ fn encode_frame_into(
                     &mut rep_offsets,
                     params,
                     &mut last_huf_weights,
+                    &mut last_seq_tables,
                 )?;
                 sub = sub_end;
             }
@@ -425,6 +430,7 @@ pub fn encode_frame_with_dict(
     // ms.clear()) so dictionary positions remain queryable.
     let mut rep_offsets = [1u32, 4, 8];
     let mut last_huf_weights: Option<Vec<u8>> = None;
+    let mut last_seq_tables: Option<SeqTablesWire> = None;
     let mut offset = prefix_len;
     let end = virtual_stream.len();
 
@@ -512,10 +518,12 @@ pub fn encode_frame_with_dict(
                 last_huf_weights = None;
             } else {
                 let mut compressed_content = Vec::new();
+                let mut block_tables = None;
                 let encode_result = encode_compressed_content(
                     &mut compressed_content,
                     &seq_store,
                     &mut last_huf_weights,
+                    &mut block_tables,
                     block_initial_reps,
                 );
                 let encode_ok = encode_result.is_ok();
@@ -639,6 +647,7 @@ fn write_block(
     rep_offsets: &mut [u32; 3],
     params: &crate::encoder::cparams::CompressionParams,
     last_huf_weights: &mut Option<Vec<u8>>,
+    last_seq_tables: &mut Option<SeqTablesWire>,
 ) -> Result<(), ZstdError> {
     let initial_reps = *rep_offsets;
 
@@ -699,25 +708,62 @@ fn write_block(
         }
     }
 
+    // Post-parse block splitting (C gate: strategy >= btopt &&
+    // windowLog >= 17). Tried first because its partitions reuse
+    // tables across boundaries; kept only when smaller.
+    let split_eligible = matches!(
+        params.strategy,
+        Strategy::Btopt | Strategy::Btultra | Strategy::Btultra2
+    ) && params.window_log >= 17
+        && seq_store.sequences.len() >= MIN_SEQUENCES_BLOCK_SPLITTING;
+
     let mut compressed_content = Vec::new();
+    let mut trial_huf = last_huf_weights.clone();
+    let mut trial_tables = last_seq_tables.clone();
     let encode_result = encode_compressed_content(
         &mut compressed_content,
         &seq_store,
-        last_huf_weights,
+        &mut trial_huf,
+        &mut trial_tables,
         initial_reps,
     );
     let use_compressed = encode_result.is_ok() && compressed_content.len() < chunk.len();
+
+    if use_compressed && split_eligible {
+        let mut pre_split_huf = last_huf_weights.clone();
+        let mut pre_split_tables = last_seq_tables.clone();
+        let mut split_out = Vec::new();
+        if let Ok(Some(total)) = write_split_blocks(
+            &mut split_out,
+            &seq_store,
+            is_last,
+            initial_reps,
+            &mut pre_split_huf,
+            &mut pre_split_tables,
+        ) {
+            if total < compressed_content.len() + 3 {
+                out.extend_from_slice(&split_out);
+                *last_huf_weights = pre_split_huf;
+                *last_seq_tables = pre_split_tables;
+                *rep_offsets = encode_result.unwrap_or(initial_reps);
+                return Ok(());
+            }
+        }
+    }
 
     if use_compressed {
         // Wire rep state for the next block: the sequence encoder's
         // final state. A raw block discards the encoded sequences and
         // leaves the decoder's rep slots at `initial_reps`.
         *rep_offsets = encode_result.as_ref().map_or(initial_reps, |&r| r);
+        *last_huf_weights = trial_huf;
+        *last_seq_tables = trial_tables;
         write_compressed_block_header(out, compressed_content.len(), is_last);
         out.extend_from_slice(&compressed_content);
     } else {
         write_raw_block(out, chunk, is_last);
         *last_huf_weights = None;
+        *last_seq_tables = None;
     }
 
     Ok(())
@@ -738,6 +784,7 @@ fn write_block_ldm(
     rep_offsets: &mut [u32; 3],
     params: &crate::encoder::cparams::CompressionParams,
     last_huf_weights: &mut Option<Vec<u8>>,
+    last_seq_tables: &mut Option<SeqTablesWire>,
     ldm: &LdmHashTable,
     max_distance: usize,
 ) -> Result<(), ZstdError> {
@@ -773,6 +820,7 @@ fn write_block_ldm(
         &mut compressed_content,
         &seq_store,
         last_huf_weights,
+        last_seq_tables,
         initial_reps,
     );
     let use_compressed = encode_result.is_ok() && compressed_content.len() < chunk.len();
@@ -805,6 +853,7 @@ fn write_block_cross(
     rep_offsets: &mut [u32; 3],
     params: &crate::encoder::cparams::CompressionParams,
     last_huf_weights: &mut Option<Vec<u8>>,
+    last_seq_tables: &mut Option<SeqTablesWire>,
     opt_state: &mut Option<crate::encoder::opt::OptState>,
 ) -> Result<(), ZstdError> {
     let initial_reps = *rep_offsets;
@@ -853,20 +902,56 @@ fn write_block_cross(
         }
     }
 
+    // Post-parse block splitting (C gate: strategy >= btopt &&
+    // windowLog >= 17). Tried first because its partitions reuse
+    // tables across boundaries; kept only when smaller.
+    let split_eligible = matches!(
+        params.strategy,
+        Strategy::Btopt | Strategy::Btultra | Strategy::Btultra2
+    ) && params.window_log >= 17
+        && seq_store.sequences.len() >= MIN_SEQUENCES_BLOCK_SPLITTING;
+
     let mut compressed_content = Vec::new();
+    let mut trial_huf = last_huf_weights.clone();
+    let mut trial_tables = last_seq_tables.clone();
     let encode_result = encode_compressed_content(
         &mut compressed_content,
         &seq_store,
-        last_huf_weights,
+        &mut trial_huf,
+        &mut trial_tables,
         initial_reps,
     );
     let use_compressed = encode_result.is_ok() && compressed_content.len() < chunk.len();
+
+    if use_compressed && split_eligible {
+        let mut pre_split_huf = last_huf_weights.clone();
+        let mut pre_split_tables = last_seq_tables.clone();
+        let mut split_out = Vec::new();
+        if let Ok(Some(total)) = write_split_blocks(
+            &mut split_out,
+            &seq_store,
+            is_last,
+            initial_reps,
+            &mut pre_split_huf,
+            &mut pre_split_tables,
+        ) {
+            if total < compressed_content.len() + 3 {
+                out.extend_from_slice(&split_out);
+                *last_huf_weights = pre_split_huf;
+                *last_seq_tables = pre_split_tables;
+                *rep_offsets = encode_result.unwrap_or(initial_reps);
+                return Ok(());
+            }
+        }
+    }
 
     if use_compressed {
         // Wire rep state for the next block: the sequence encoder's
         // final state. A raw block discards the encoded sequences and
         // leaves the decoder's rep slots at `initial_reps`.
         *rep_offsets = encode_result.as_ref().map_or(initial_reps, |&r| r);
+        *last_huf_weights = trial_huf;
+        *last_seq_tables = trial_tables;
         write_compressed_block_header(out, compressed_content.len(), is_last);
         out.extend_from_slice(&compressed_content);
     } else {
@@ -884,6 +969,249 @@ fn encode_compressed_content(
     out: &mut Vec<u8>,
     seq_store: &SeqStore,
     last_huf_weights: &mut Option<Vec<u8>>,
+    last_seq_tables: &mut Option<SeqTablesWire>,
+    initial_reps: [u32; 3],
+) -> Result<[u32; 3], ZstdError> {
+    encode_content_parts(
+        out,
+        &seq_store.literals,
+        &seq_store.sequences,
+        last_huf_weights,
+        last_seq_tables,
+        initial_reps,
+    )
+}
+
+/// zstd 1.5.6+ post-parse block splitting (C `ZSTD_deriveBlockSplits`):
+/// recursive bisection on sequence indices. A split is taken when the
+/// two halves — each with locally fitted tables, reusing the previous
+/// partition's tables via Treeless literals / Repeat_Mode sequences —
+/// measure smaller than the whole chunk under one table set. The C
+/// gates it at `strategy >= btopt && windowLog >= 17`.
+const MIN_SEQUENCES_BLOCK_SPLITTING: usize = 300;
+const MAX_NB_BLOCK_SPLITS: usize = 196;
+
+/// Entropy state threaded across emitted blocks: repeat-offset slots
+/// plus the decoder-side Huffman weights and sequence tables the next
+/// block may repeat.
+#[derive(Clone)]
+struct SplitEntropyState {
+    reps: [u32; 3],
+    huf: Option<Vec<u8>>,
+    tables: Option<SeqTablesWire>,
+}
+
+/// Encode one partition and return its emitted block size (content +
+/// 3-byte header) plus the entropy state after it. Measurement is the
+/// real encoder, so the splitter's estimates match the writer exactly.
+fn estimate_partition(
+    literals: &[u8],
+    sequences: &[RawSequence],
+    lit_from: usize,
+    lit_to: usize,
+    seq_from: usize,
+    seq_to: usize,
+    state: &SplitEntropyState,
+) -> Option<(usize, SplitEntropyState)> {
+    let mut scratch = Vec::new();
+    let mut huf = state.huf.clone();
+    let mut tables = state.tables.clone();
+    let reps = encode_content_parts(
+        &mut scratch,
+        &literals[lit_from..lit_to],
+        &sequences[seq_from..seq_to],
+        &mut huf,
+        &mut tables,
+        state.reps,
+    )
+    .ok()?;
+    Some((scratch.len() + 3, SplitEntropyState { reps, huf, tables }))
+}
+
+/// Recursive split search: records ascending midpoints in `splits`.
+#[allow(clippy::too_many_arguments)]
+fn derive_splits(
+    literals: &[u8],
+    sequences: &[RawSequence],
+    lit_prefix: &[usize],
+    tail_literals: usize,
+    start: usize,
+    end: usize,
+    state: &SplitEntropyState,
+    splits: &mut Vec<usize>,
+) {
+    if end - start < MIN_SEQUENCES_BLOCK_SPLITTING || splits.len() >= MAX_NB_BLOCK_SPLITS {
+        return;
+    }
+    let mid = (start + end) / 2;
+    // Literal span of sequences [0..i): prefix sum; the last partition
+    // also carries the block's trailing literals.
+    let lit_at = |i: usize| {
+        lit_prefix[i]
+            + if i == sequences.len() {
+                tail_literals
+            } else {
+                0
+            }
+    };
+    let Some((whole, _)) = estimate_partition(
+        literals,
+        sequences,
+        lit_at(start),
+        lit_at(end),
+        start,
+        end,
+        state,
+    ) else {
+        return;
+    };
+    let Some((first, first_state)) = estimate_partition(
+        literals,
+        sequences,
+        lit_at(start),
+        lit_at(mid),
+        start,
+        mid,
+        state,
+    ) else {
+        return;
+    };
+    let Some((second, _)) = estimate_partition(
+        literals,
+        sequences,
+        lit_at(mid),
+        lit_at(end),
+        mid,
+        end,
+        &first_state,
+    ) else {
+        return;
+    };
+    if first + second < whole {
+        derive_splits(
+            literals,
+            sequences,
+            lit_prefix,
+            tail_literals,
+            start,
+            mid,
+            state,
+            splits,
+        );
+        splits.push(mid);
+        derive_splits(
+            literals,
+            sequences,
+            lit_prefix,
+            tail_literals,
+            mid,
+            end,
+            &first_state,
+            splits,
+        );
+    }
+}
+
+/// Emit the split blocks for one parsed chunk. On success writes the
+/// partition blocks (headers included), advances the caller's entropy
+/// state, and returns the total emitted size. Returns `Ok(None)` when
+/// splitting does not apply (no splits, any partition incompressible —
+/// a Raw partition would desync the decoder's repeat-offset slots — or
+/// the recursion declined to split).
+fn write_split_blocks(
+    out: &mut Vec<u8>,
+    seq_store: &SeqStore,
+    is_last: bool,
+    initial_reps: [u32; 3],
+    last_huf_weights: &mut Option<Vec<u8>>,
+    last_seq_tables: &mut Option<SeqTablesWire>,
+) -> Result<Option<usize>, ZstdError> {
+    let sequences = &seq_store.sequences;
+    let literals = &seq_store.literals;
+    let n = sequences.len();
+    let mut lit_prefix = vec![0usize; n + 1];
+    for (i, seq) in sequences.iter().enumerate() {
+        lit_prefix[i + 1] = lit_prefix[i] + seq.literal_length as usize;
+    }
+    let tail_literals = literals.len() - lit_prefix[n];
+
+    // Partition emission starts from the wire rep state (the sequence
+    // encoder's carry), NOT the match finder's rotation — the two
+    // diverge and the decoder follows the wire state.
+    let state = SplitEntropyState {
+        reps: initial_reps,
+        huf: last_huf_weights.clone(),
+        tables: last_seq_tables.clone(),
+    };
+    let mut splits = Vec::new();
+    derive_splits(
+        literals,
+        sequences,
+        &lit_prefix,
+        tail_literals,
+        0,
+        n,
+        &state,
+        &mut splits,
+    );
+    if splits.is_empty() {
+        return Ok(None);
+    }
+
+    let mut bounds: Vec<usize> = Vec::with_capacity(splits.len() + 1);
+    bounds.push(0);
+    bounds.extend(&splits);
+    bounds.push(n);
+
+    let mut blocks: Vec<Vec<u8>> = Vec::with_capacity(bounds.len() - 1);
+    let mut cur = state.clone();
+    for (k, &from) in bounds.iter().take(bounds.len() - 1).enumerate() {
+        let to = bounds[k + 1];
+        let lit_to = lit_prefix[to] + if to == n { tail_literals } else { 0 };
+        let mut content = Vec::new();
+        let reps = encode_content_parts(
+            &mut content,
+            &literals[lit_prefix[from]..lit_to],
+            &sequences[from..to],
+            &mut cur.huf,
+            &mut cur.tables,
+            cur.reps,
+        )?;
+        // Incompressible partition: a Raw block would freeze the
+        // decoder's rep slots mid-parse; decline the whole split.
+        let plaintext = (lit_to - lit_prefix[from])
+            + sequences[from..to]
+                .iter()
+                .map(|sq| sq.match_length as usize)
+                .sum::<usize>();
+        if content.len() >= plaintext {
+            return Ok(None);
+        }
+        let mut block = Vec::with_capacity(content.len() + 3);
+        write_compressed_block_header(&mut block, content.len(), is_last && to == n);
+        block.extend_from_slice(&content);
+        cur.reps = reps;
+        blocks.push(block);
+    }
+    let total: usize = blocks.iter().map(Vec::len).sum();
+    *last_huf_weights = cur.huf;
+    *last_seq_tables = cur.tables;
+    for block in blocks {
+        out.extend_from_slice(&block);
+    }
+    Ok(Some(total))
+}
+
+/// Encode one block's content (literals section + sequences section)
+/// from borrowed parts; [`encode_compressed_content`] is the SeqStore
+/// adapter. The literals/sequences split lets the block splitter
+/// encode partitions without copying.
+fn encode_content_parts(
+    out: &mut Vec<u8>,
+    literals: &[u8],
+    sequences: &[RawSequence],
+    last_huf_weights: &mut Option<Vec<u8>>,
+    last_seq_tables: &mut Option<SeqTablesWire>,
     initial_reps: [u32; 3],
 ) -> Result<[u32; 3], ZstdError> {
     // Single-distinct-symbol literal sets: the RLE literals section
@@ -893,18 +1221,17 @@ fn encode_compressed_content(
     // for the wrong symbols — the real literal byte encoded as a
     // zero-bit code and decoded as a flood of 0x00 (the 100 MB Best
     // corruption: LDM parses leave long single-byte literal runs).
-    let single_symbol = seq_store
-        .literals
+    let single_symbol = literals
         .first()
-        .is_some_and(|&b| seq_store.literals.iter().all(|&x| x == b));
+        .is_some_and(|&b| literals.iter().all(|&x| x == b));
 
     // Build Raw literals section (always correct).
     let mut raw_literals = Vec::new();
-    write_raw_literals(&mut raw_literals, &seq_store.literals);
+    write_raw_literals(&mut raw_literals, literals);
 
     // Build Huffman literals section (Compressed, block_type=2).
     let (huf_literals, huf_weights) =
-        match crate::huffman::encoder::encode_literals_with_weights(&seq_store.literals, false) {
+        match crate::huffman::encoder::encode_literals_with_weights(literals, false) {
             Ok((data, weights)) => (data, Some(weights)),
             Err(_) => (Vec::new(), None),
         };
@@ -913,7 +1240,7 @@ fn encode_compressed_content(
     // Huffman table with identical weights.
     let treeless_literals = match (last_huf_weights.as_ref(), &huf_weights) {
         (Some(prev), Some(curr)) if prev == curr => {
-            crate::huffman::encoder::encode_literals_with_weights(&seq_store.literals, true)
+            crate::huffman::encoder::encode_literals_with_weights(literals, true)
                 .map(|(data, _)| data)
                 .unwrap_or_default()
         }
@@ -935,8 +1262,8 @@ fn encode_compressed_content(
 
     // RLE literals (single distinct symbol) always win when present.
     if single_symbol {
-        let b = seq_store.literals[0];
-        write_rle_literals(out, b, seq_store.literals.len());
+        let b = literals[0];
+        write_rle_literals(out, b, literals.len());
         // No Huffman table established for a successor Treeless block.
         *last_huf_weights = None;
     } else if let Some(tl) = treeless_len {
@@ -969,10 +1296,10 @@ fn encode_compressed_content(
 
     // Sequences section.
     let mut final_reps = initial_reps;
-    if seq_store.sequences.is_empty() && seq_store.literals.is_empty() {
+    if sequences.is_empty() && literals.is_empty() {
         out.push(0x00);
     } else {
-        final_reps = encode_section(out, seq_store, initial_reps)?;
+        final_reps = encode_section(out, sequences, initial_reps, last_seq_tables)?;
     }
 
     Ok(final_reps)
@@ -1046,6 +1373,31 @@ fn write_compressed_block_header(out: &mut Vec<u8>, content_size: usize, is_last
 mod tests {
     use super::*;
     use crate::decompress;
+
+    /// Post-parse block splitting (opt tiers) threads rep offsets and
+    /// entropy tables across partition boundaries; both were wrong on
+    /// first pass (the partitions started from the match finder's rep
+    /// rotation instead of the wire state — silent corruption on the
+    /// 8th top-level block of the periodic-CSV corpus). Round-trip a
+    /// multi-block periodic fixture through several split-eligible
+    /// levels.
+    #[test]
+    fn split_blocks_round_trip_high_levels() {
+        let mut input = Vec::with_capacity(300 * 1024);
+        let mut i = 0u32;
+        while input.len() < 300 * 1024 {
+            let row = format!("{i},user_{i},city_{},cc,41.90.{}.19,3\n", i % 40, i % 7);
+            input.extend_from_slice(row.as_bytes());
+            i += 1;
+        }
+        for level in [16u8, 18] {
+            let compressed =
+                encode_frame_compressed(&input, level).unwrap_or_else(|e| panic!("L{level}: {e}"));
+            let decompressed =
+                decompress(&compressed, 0).unwrap_or_else(|e| panic!("L{level}: {e}"));
+            assert_eq!(decompressed, input, "round trip diverged at L{level}");
+        }
+    }
 
     #[test]
     fn empty_input_round_trips() {

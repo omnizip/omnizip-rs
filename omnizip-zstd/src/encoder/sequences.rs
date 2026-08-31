@@ -19,15 +19,30 @@
 
 #![forbid(unsafe_code)]
 
-use crate::encoder::match_finder::SeqStore;
+use crate::encoder::match_finder::{RawSequence, SeqStore};
 use crate::fse::encoder::{
     build_ctable, normalize_count, optimal_table_log, write_ncount, BitCStream, CState, CTable,
 };
 use crate::ZstdError;
 
-/// Sequence-table mode codes.
+/// Sequence-table mode codes (RFC 8878 §3.1.1.3.2 Table 15).
 const MODE_PREDEFINED: u8 = 0;
 const MODE_FSE: u8 = 2;
+const MODE_REPEAT: u8 = 3;
+
+/// The effective table per symbol type as a decoder holds it after
+/// the last emitted block. `Repeat_Mode` re-sends this table with
+/// zero header bytes, which is what makes the reference's
+/// entropy-driven block splitting pay: consecutive sub-blocks with
+/// stable statistics reuse their tables instead of re-sending them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SeqTableOnWire {
+    Predefined,
+    Fse { norm: Vec<i16>, table_log: u8 },
+}
+
+/// Decoder-side sequence-table state in wire order (LL, OF, ML).
+pub type SeqTablesWire = [SeqTableOnWire; 3];
 
 /// Predefined LL normalized distribution (from C's `LL_defaultNorm`).
 /// 36 entries, tableLog = 6.
@@ -110,14 +125,18 @@ const fn off_base(offset: u32) -> u32 {
 /// Returns [`ZstdError::Corrupt`] on internal failures.
 pub fn encode_section(
     out: &mut Vec<u8>,
-    seq_store: &SeqStore,
+    sequences: &[RawSequence],
     initial_reps: [u32; 3],
+    last_tables: &mut Option<SeqTablesWire>,
 ) -> Result<[u32; 3], ZstdError> {
-    let nb_seq = seq_store.sequences.len();
+    let nb_seq = sequences.len();
 
     // 1. Sequence count (1-3 bytes).
     write_sequence_count(out, nb_seq);
 
+    // A zero-sequence block leaves the decoder's table state
+    // untouched (RFC 8878: "The FSE tables used in Repeat_Mode are
+    // not updated").
     if nb_seq == 0 {
         return Ok(initial_reps);
     }
@@ -138,7 +157,7 @@ pub fn encode_section(
     // periodic headers) gets its ~6-bits-per-match discount — without
     // it every match pays a full offset code.
     let mut reps = initial_reps;
-    for seq in &seq_store.sequences {
+    for seq in sequences {
         let (ll_c, ll_e) = ll_code(seq.literal_length);
         let (ml_c, ml_e) = ml_code(seq.match_length);
         let ll0 = seq.literal_length == 0;
@@ -231,33 +250,46 @@ pub fn encode_section(
         max_sym: 28,
     };
 
-    let ll_choice = if ll_fse.mode == MODE_FSE
-        && measure(&ll_fse, &ml_pre, &of_pre) < measure(&ll_pre, &ml_pre, &of_pre)
-    {
-        ll_fse
-    } else {
-        ll_pre
-    };
-    let ml_choice = if ml_fse.mode == MODE_FSE
-        && measure(&ll_choice, &ml_fse, &of_pre) < measure(&ll_choice, &ml_pre, &of_pre)
-    {
-        ml_fse
-    } else {
-        ml_pre
-    };
-    let of_choice = if of_fse.mode == MODE_FSE
-        && measure(&ll_choice, &ml_choice, &of_fse) < measure(&ll_choice, &ml_choice, &of_pre)
-    {
-        of_fse
-    } else {
-        of_pre
-    };
+    let (ll_choice, ll_wire) = pick_table(
+        ll_fse.mode == MODE_FSE && {
+            let with = measure(&ll_fse, &ml_pre, &of_pre);
+            let without = measure(&ll_pre, &ml_pre, &of_pre);
+            with < without
+        },
+        ll_fse,
+        ll_pre,
+        last_tables.as_ref().map(|t| &t[0]),
+        |t| measure(t, &ml_pre, &of_pre),
+    );
+    let (ml_choice, ml_wire) = pick_table(
+        ml_fse.mode == MODE_FSE && {
+            let with = measure(&ll_choice, &ml_fse, &of_pre);
+            let without = measure(&ll_choice, &ml_pre, &of_pre);
+            with < without
+        },
+        ml_fse,
+        ml_pre,
+        last_tables.as_ref().map(|t| &t[1]),
+        |t| measure(&ll_choice, t, &of_pre),
+    );
+    let (of_choice, of_wire) = pick_table(
+        of_fse.mode == MODE_FSE && {
+            let with = measure(&ll_choice, &ml_choice, &of_fse);
+            let without = measure(&ll_choice, &ml_choice, &of_pre);
+            with < without
+        },
+        of_fse,
+        of_pre,
+        last_tables.as_ref().map(|t| &t[2]),
+        |t| measure(&ll_choice, &ml_choice, t),
+    );
 
     // 5. Write modes byte: [LL(2)] [OF(2)] [ML(2)] [reserved(2)].
     let modes: u8 = (ll_choice.mode << 6) | (of_choice.mode << 4) | (ml_choice.mode << 2);
     out.push(modes);
 
-    // 6. For FSE_Compressed tables, write the normalized counts.
+    // 6. Table descriptors in wire order (LL, OF, ML): FSE tables
+    //    send normalized counts; Predefined/Repeat send nothing.
     if ll_choice.mode == MODE_FSE {
         write_ncount(out, &ll_choice.norm, ll_max, ll_choice.table_log)?;
     }
@@ -293,6 +325,10 @@ pub fn encode_section(
 
     // The wire rep state after this block — this, not the match
     // finder's internal rotation, is what the next block must carry.
+    // The table state advances to what this block left the decoder
+    // holding (Repeat leaves it unchanged).
+    *last_tables = Some([ll_wire, of_wire, ml_wire]);
+
     Ok(reps)
 }
 
@@ -308,7 +344,37 @@ fn count_symbols(codes: &[u8], count: &mut [u32]) -> u8 {
     max_sym
 }
 
+/// Pick one symbol-type table: the Predefined-vs-FSE winner from
+/// [`choose_table_mode`], then RLE if a uniform symbol stream measures
+/// smaller, then `Repeat_Mode` if the resulting table is byte-for-byte
+/// the one the decoder already holds (saves the ncount/symbol header).
+/// Returns the choice plus its decoder-side identity for the next
+/// block's Repeat comparison.
+fn pick_table<M: Fn(&TableChoice) -> u64>(
+    fse_wins: bool,
+    fse: TableChoice,
+    predef: TableChoice,
+    last: Option<&SeqTableOnWire>,
+    measure: M,
+) -> (TableChoice, SeqTableOnWire) {
+    let mut best = if fse_wins { fse } else { predef };
+    let wire = match best.mode {
+        MODE_PREDEFINED => SeqTableOnWire::Predefined,
+        _ => SeqTableOnWire::Fse {
+            norm: best.norm.clone(),
+            table_log: best.table_log,
+        },
+    };
+    if let Some(l) = last {
+        if *l == wire && best.mode != MODE_PREDEFINED {
+            best.mode = MODE_REPEAT;
+        }
+    }
+    (best, wire)
+}
+
 /// Result of table mode selection: either Predefined or `FSE_Compressed`.
+#[derive(Clone)]
 struct TableChoice {
     mode: u8,
     norm: Vec<i16>,
@@ -640,7 +706,7 @@ mod tests {
     fn empty_seq_store_produces_zero_byte() {
         let mut out = Vec::new();
         let ss = SeqStore::new();
-        encode_section(&mut out, &ss, [1, 4, 8]).expect("encode");
+        encode_section(&mut out, &ss.sequences, [1, 4, 8], &mut None).expect("encode");
         assert_eq!(out, vec![0x00]); // 0 sequences
     }
 
@@ -652,6 +718,6 @@ mod tests {
         compress_block_fast(input, &mut ss, &mut ms);
         let mut out = Vec::new();
         // This may fail due to FSE bitstream bugs; just check no panic.
-        let _ = encode_section(&mut out, &ss, [1, 4, 8]);
+        let _ = encode_section(&mut out, &ss.sequences, [1, 4, 8], &mut None);
     }
 }
