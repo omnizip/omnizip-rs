@@ -214,6 +214,9 @@ pub fn decode_sequences_section(
         static LITS: AtomicU64 = AtomicU64::new(0);
         static MBYTES: AtomicU64 = AtomicU64::new(0);
         static MAXML: AtomicU64 = AtomicU64::new(0);
+        static MAXOFF: AtomicU64 = AtomicU64::new(0);
+        static OFF1K: AtomicU64 = AtomicU64::new(0);
+        static OFF127K: AtomicU64 = AtomicU64::new(0);
         N.fetch_add(
             u64::try_from(sequences.len()).unwrap_or(0),
             Ordering::Relaxed,
@@ -222,13 +225,23 @@ pub fn decode_sequences_section(
             LITS.fetch_add(u64::from(s2.literal_length), Ordering::Relaxed);
             MBYTES.fetch_add(u64::from(s2.match_length), Ordering::Relaxed);
             MAXML.fetch_max(u64::from(s2.match_length), Ordering::Relaxed);
+            MAXOFF.fetch_max(u64::from(s2.offset), Ordering::Relaxed);
+            if s2.offset > 1024 {
+                OFF1K.fetch_add(1, Ordering::Relaxed);
+            }
+            if s2.offset > 127 * 1024 {
+                OFF127K.fetch_add(1, Ordering::Relaxed);
+            }
         }
         eprintln!(
-            "SEQ_STATS total: seqs={} lits={} mbytes={} max_ml={}",
+            "SEQ_STATS total: seqs={} lits={} mbytes={} max_ml={} max_off={} off>1K={} off>127K={}",
             N.load(Ordering::Relaxed),
             LITS.load(Ordering::Relaxed),
             MBYTES.load(Ordering::Relaxed),
-            MAXML.load(Ordering::Relaxed)
+            MAXML.load(Ordering::Relaxed),
+            MAXOFF.load(Ordering::Relaxed),
+            OFF1K.load(Ordering::Relaxed),
+            OFF127K.load(Ordering::Relaxed)
         );
     }
 

@@ -443,12 +443,19 @@ pub fn encode_frame_with_dict(
 
             match params.strategy {
                 Strategy::Fast => {
+                    // The C fast parser searches the full window
+                    // (windowLog 19-20 at L1/L2), not just one block
+                    // back — on inputs with long-range repetition the
+                    // reference emits tens of thousands of >127K
+                    // matches that a block-local horizon never sees.
+                    let max_dist = 1usize << params.window_log;
                     crate::encoder::match_finder::compress_block_fast4_with_prefix(
                         &virtual_stream[..offset + chunk_size],
                         offset,
                         &mut seq_store,
                         &mut match_state,
                         min_match,
+                        max_dist,
                     );
                 }
                 Strategy::Greedy => {
@@ -834,12 +841,14 @@ fn write_block_cross(
             );
         }
         _ => {
+            let max_dist = 1usize << params.window_log;
             crate::encoder::match_finder::compress_block_fast4_with_prefix(
                 src,
                 block_start,
                 &mut seq_store,
                 ms,
                 min_match,
+                max_dist,
             );
         }
     }

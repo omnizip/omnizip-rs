@@ -813,6 +813,7 @@ fn post_match_fill_and_reps(
     src: &[u8],
     seq_store: &mut SeqStore,
     ms: &mut MatchState,
+    m_start: usize,
     ip0: &mut usize,
     anchor: &mut usize,
     rep1: &mut u32,
@@ -823,6 +824,13 @@ fn post_match_fill_and_reps(
 ) -> bool {
     let _ = anchor;
     if *ip0 <= ilimit {
+        // C fills TWO entries per match: match_start+2 and
+        // match_end-2. The start+2 entry keeps a fresh position from
+        // inside the match region visible for later lookups.
+        if m_start + 2 + 4 <= src.len() {
+            let p0 = m_start + 2;
+            ms.hash_table[hash_at(p0)] = p0 as u32;
+        }
         let p1 = (*ip0).saturating_sub(2);
         ms.hash_table[hash_at(p1)] = p1 as u32;
         while *rep2 > 0 && *ip0 + 4 <= iend && *ip0 >= *rep2 as usize {
@@ -867,6 +875,7 @@ pub fn compress_block_fast4_with_prefix(
     seq_store: &mut SeqStore,
     ms: &mut MatchState,
     min_match: usize,
+    max_dist: usize,
 ) -> usize {
     let mm = min_match.max(MIN_MATCH);
     if src.len() < prefix_len + 16 {
@@ -927,6 +936,14 @@ pub fn compress_block_fast4_with_prefix(
         let mut current0;
 
         loop {
+            // C writes the current position into its bucket at the
+            // top of every pipeline iteration (`hashTable[hash0] =
+            // current0`) — match_idx already holds the previous
+            // occupant read at the advance site. Without this, half
+            // the visited positions never enter the table (the
+            // advance-site write only covers the other half).
+            ms.hash_table[hash0] = ip0 as u32;
+
             // Repcode probe at ip2 (reads 4 bytes at ip2 - rep1).
             if rep1 > 0
                 && ip2 >= rep1 as usize
@@ -958,12 +975,14 @@ pub fn compress_block_fast4_with_prefix(
                 );
                 // hash1 write: ip1 < ip2, safe pre-write.
                 ms.hash_table[hash1] = ip1 as u32;
+                let m_start = ip0;
                 ip0 += m_length;
                 // Post-match fill + immediate rep2 chain.
                 if post_match_fill_and_reps(
                     src,
                     seq_store,
                     ms,
+                    m_start,
                     &mut ip0,
                     &mut anchor,
                     &mut rep1,
@@ -981,7 +1000,7 @@ pub fn compress_block_fast4_with_prefix(
 
             // Hash match at ip0 (4-byte compare like the C).
             if match_idx > 0
-                && ip0 - match_idx < BLOCK_MAX_SIZE
+                && ip0 - match_idx < max_dist
                 && match_idx + 4 <= iend
                 && read32(ip0) == read32(match_idx)
             {
@@ -1004,11 +1023,13 @@ pub fn compress_block_fast4_with_prefix(
                     iend - ip0 - m_length,
                 );
                 store_seq(src, seq_store, &mut anchor, ip0, new_off, m_length as u32);
+                let m_start = ip0;
                 ip0 += m_length;
                 if post_match_fill_and_reps(
                     src,
                     seq_store,
                     ms,
+                    m_start,
                     &mut ip0,
                     &mut anchor,
                     &mut rep1,
@@ -1036,7 +1057,7 @@ pub fn compress_block_fast4_with_prefix(
 
             // Hash match at the (new) ip0.
             if match_idx > 0
-                && ip0 - match_idx < BLOCK_MAX_SIZE
+                && ip0 - match_idx < max_dist
                 && match_idx + 4 <= iend
                 && read32(ip0) == read32(match_idx)
             {
@@ -1061,11 +1082,13 @@ pub fn compress_block_fast4_with_prefix(
                     iend - ip0 - m_length,
                 );
                 store_seq(src, seq_store, &mut anchor, ip0, new_off, m_length as u32);
+                let m_start = ip0;
                 ip0 += m_length;
                 if post_match_fill_and_reps(
                     src,
                     seq_store,
                     ms,
+                    m_start,
                     &mut ip0,
                     &mut anchor,
                     &mut rep1,

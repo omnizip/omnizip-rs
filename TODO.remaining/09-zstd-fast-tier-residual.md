@@ -60,3 +60,35 @@ diffing against zstd_fast.c position-by-position on a small
 rustsrc slice; the two new env-gated diagnostics
 (ZSTD_SEQ_STATS on any stream, ZSTD_FAST_STATS on encode) make
 that tractable.
+
+## CLOSED 2026-08-31 (PR pending): two root causes found and ported
+
+Position-by-position diff of fast4 against zstd_fast.c found two
+missing table policies, both ported:
+
+1. **Loop-top table write.** C writes the current position into its
+   hash bucket at the top of every pipeline iteration
+   (`hashTable[hash0] = current0`); ours only wrote at the advance
+   site — half the visited positions never entered the table.
+2. **Post-match start+2 fill.** C fills TWO entries per match
+   (match_start+2 and match_end-2); ours only end-2.
+3. **Window horizon (the dominant cause).** Ours capped candidates at
+   BLOCK_MAX_SIZE (127 KiB); C searches the full window — SEQ_STATS
+   showed ref emitting 32,069 sequences with offsets > 127 KiB (max
+   1,044,868) vs our 278, and max match length 87,543 vs our 1,013.
+   Candidates now limited by `1 << window_log` instead.
+
+### Results (full 10-corpus sweep, reference-decode verified)
+
+- rustsrc L2: 1,018,408 → **745,039 = 0.9987x (beats ref)**
+- rustsrc L1: 1,019,666 → 925,769 = 0.9978x (beats ref)
+- Worst L1/L2 cell in the codebase is now csv2m L2 1.0103
+  (was 1.3651); words L1/L2 1.003; all others ≤ 1.005 or beating
+- L3/L4/L6/L19 ratio-identical (opt path untouched); determinism
+  recording and regression baseline unchanged (their fixtures run
+  outside the Fast tier)
+- Round-trip + reference decode verified on 5 corpora x L1/L2,
+  184 tests green
+
+Task 09 closes; the remaining documented zstd residual is the
+periodic-CSV L18-22 family (task 10, separate cause).
