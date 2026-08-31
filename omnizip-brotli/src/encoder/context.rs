@@ -4,7 +4,7 @@
 //! context ID derived from the previous 1-2 bytes. The context
 //! function depends on `CONTEXT_MODE`.
 
-use crate::static_codes::K_UTF8_CONTEXT_LOOKUP;
+use crate::static_codes::{K_SIGNED_3BIT_CONTEXT_LOOKUP, K_UTF8_CONTEXT_LOOKUP};
 use omnizip_codecs::ContentType;
 
 /// Check if input looks like text (printable ASCII + whitespace).
@@ -30,7 +30,14 @@ pub fn is_text_like(input: &[u8]) -> bool {
 pub fn compute_context_id(p1: u8, p2: u8, mode: u32) -> u8 {
     match mode {
         0 => p1 & 0x3F, // LSB6
+        1 => p1 >> 2,   // MSB6
         2 => K_UTF8_CONTEXT_LOOKUP[p1 as usize] | K_UTF8_CONTEXT_LOOKUP[(p2 as usize) | 256],
+        // SIGNED: sign-aware 3-bit buckets of both preceding bytes —
+        // matches the decoder's ContextMode::context_id_2 exactly.
+        3 => {
+            (K_SIGNED_3BIT_CONTEXT_LOOKUP[p1 as usize] << 3)
+                + K_SIGNED_3BIT_CONTEXT_LOOKUP[p2 as usize]
+        }
         _ => p1 & 0x3F, // fallback to LSB6
     }
 }
