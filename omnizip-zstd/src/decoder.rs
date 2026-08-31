@@ -266,6 +266,14 @@ impl ZstdDecoder {
             &mut self.previous_fse_tables,
             &mut self.executor,
         )?;
+        if std::env::var_os("ZSTD_SEC_DUMP").is_some() {
+            eprintln!(
+                "SEC block={} lit_bytes={} seq_start={:02X}",
+                block.block_size,
+                lit_section.consumed,
+                after_literals.first().copied().unwrap_or(0)
+            );
+        }
 
         // 3. Execute sequences against literals, appending to the
         //    frame-level output buffer (which may already contain the
@@ -273,6 +281,9 @@ impl ZstdDecoder {
         //    prefix resolve correctly.
         self.executor
             .execute(&literals, &seq_section.sequences, output)?;
+        if std::env::var_os("ZSTD_SEC_DUMP").is_some() {
+            eprintln!("SECOUT block={} out_end={}", block.block_size, output.len());
+        }
 
         Ok(after_block)
     }
