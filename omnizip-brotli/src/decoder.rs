@@ -1228,6 +1228,9 @@ pub fn decode(compressed: &[u8]) -> Result<Vec<u8>, &'static str> {
         }
     }
 
+    if std::env::var_os("BROTLI_DEC_STATS").is_some() {
+        crate::decoder_full::_print_dec_stats(output.len());
+    }
     Ok(output)
 }
 
