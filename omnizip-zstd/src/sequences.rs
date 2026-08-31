@@ -84,22 +84,25 @@ pub struct Sequence {
 pub struct SequencesSection {
     pub sequences: Vec<Sequence>,
     pub consumed: usize,
-    pub fse_tables: (),
 }
 
 /// Decode the sequences section. `previous_tables` carries the FSE
-/// tables from the previous compressed block in the same frame (for
-/// `MODE_REPEAT`). `executor` supplies the repeat-offset state and is
-/// updated in place as each sequence resolves its offset.
+/// table state from the previous compressed block in the same frame
+/// (for `MODE_REPEAT`) and is updated in place for the next block.
+/// `executor` supplies the repeat-offset state and is updated in
+/// place as each sequence resolves its offset.
+///
+/// Per RFC 8878 §3.1.1.3.2, a block with `Number_of_Sequences == 0`
+/// returns before touching `previous_tables`, so a later
+/// `MODE_REPEAT` still refers to the last block that had sequences.
 ///
 /// # Errors
 ///
-/// Returns [`ZstdError::Corrupt`] on any structural problem,
-/// [`ZstdError::Unsupported`] when an FSE-mode table is encountered
+/// Returns [`ZstdError::Corrupt`] on any structural problem
 ///
 pub fn decode_sequences_section(
     input: &[u8],
-    _previous_tables: &(),
+    previous_tables: &mut SeqTableState,
     executor: &mut SequenceExecutor,
 ) -> Result<SequencesSection, ZstdError> {
     if input.is_empty() {
@@ -115,7 +118,6 @@ pub fn decode_sequences_section(
         return Ok(SequencesSection {
             sequences: Vec::new(),
             consumed: input.len() - after_count.len(),
-            fse_tables: (),
         });
     }
 
@@ -139,6 +141,7 @@ pub fn decode_sequences_section(
         &mut cursor,
         &LL_BASE,
         &LL_BITS,
+        &mut previous_tables.ll,
     )?;
     let of_tbl = get_table(
         of_mode,
@@ -147,6 +150,7 @@ pub fn decode_sequences_section(
         &mut cursor,
         &OF_BASE,
         &OF_BITS,
+        &mut previous_tables.of,
     )?;
     let ml_tbl = get_table(
         ml_mode,
@@ -155,6 +159,7 @@ pub fn decode_sequences_section(
         &mut cursor,
         &ML_BASE,
         &ML_BITS,
+        &mut previous_tables.ml,
     )?;
 
     // 4. Bitstream: everything left in `cursor` is the FSE bitstream.
@@ -248,20 +253,33 @@ pub fn decode_sequences_section(
     Ok(SequencesSection {
         sequences,
         consumed: input.len(),
-        fse_tables: (),
     })
 }
 
 /// Table type for sequence decoding — either a reference to a
 /// predefined table, an RLE single-entry table, or a dynamically
 /// built FSE table.
+#[derive(Clone, Debug)]
 enum SeqTable {
     Predefined(&'static [PredefEntry], u8),
     Owned(Vec<PredefEntry>, u8),
     Rle(PredefEntry),
 }
 
-/// Build a table for the given mode.
+/// Per-frame sequence-table state for `Repeat_Mode` (RFC 8878
+/// §3.1.1.3.2): the last table each symbol type used in a compressed
+/// block with sequences. `Predefined` and `RLE` tables count too —
+/// repeating them reproduces the same outcome. Reset at frame start;
+/// no dictionary support, so a first-block `Repeat_Mode` is corrupt.
+#[derive(Debug, Clone, Default)]
+pub struct SeqTableState {
+    ll: Option<SeqTable>,
+    of: Option<SeqTable>,
+    ml: Option<SeqTable>,
+}
+
+/// Build a table for the given mode, recording it in `previous` for
+/// a later `MODE_REPEAT`.
 fn get_table(
     mode: u8,
     predef: &'static [PredefEntry],
@@ -269,9 +287,10 @@ fn get_table(
     cursor: &mut &[u8],
     base_table: &[u32],
     bits_table: &[u8],
+    previous: &mut Option<SeqTable>,
 ) -> Result<SeqTable, ZstdError> {
-    match mode {
-        MODE_PREDEFINED => Ok(SeqTable::Predefined(predef, accuracy_log)),
+    let table = match mode {
+        MODE_PREDEFINED => SeqTable::Predefined(predef, accuracy_log),
         MODE_RLE => {
             if cursor.is_empty() {
                 return Err(ZstdError::Corrupt {
@@ -280,12 +299,12 @@ fn get_table(
             }
             let symbol = cursor[0];
             *cursor = &cursor[1..];
-            Ok(SeqTable::Rle(PredefEntry {
+            SeqTable::Rle(PredefEntry {
                 next_state: 0,
                 nb_add_bits: bits_table[symbol as usize],
                 nb_bits: 0,
                 base_val: base_table[symbol as usize],
-            }))
+            })
         }
         MODE_FSE => {
             // Read the custom FSE table from the bitstream.
@@ -317,15 +336,24 @@ fn get_table(
                     base_val,
                 });
             }
-            Ok(SeqTable::Owned(entries, dtable.accuracy_log()))
+            SeqTable::Owned(entries, dtable.accuracy_log())
         }
-        MODE_REPEAT => Err(ZstdError::Unsupported {
-            reason: "MODE_REPEAT requires prior table state".into(),
-        }),
-        _ => Err(ZstdError::Corrupt {
-            reason: format!("invalid sequence table mode: {mode}"),
-        }),
-    }
+        MODE_REPEAT => {
+            return match previous.clone() {
+                Some(table) => Ok(table),
+                None => Err(ZstdError::Corrupt {
+                    reason: "repeat mode without a previous sequence table".into(),
+                }),
+            };
+        }
+        _ => {
+            return Err(ZstdError::Corrupt {
+                reason: format!("invalid sequence table mode: {mode}"),
+            });
+        }
+    };
+    *previous = Some(table.clone());
+    Ok(table)
 }
 
 /// Read `accuracy_log` bits to initialise the FSE state.
@@ -578,13 +606,14 @@ mod tests {
     #[test]
     fn empty_section_errors() {
         let mut e = SequenceExecutor::new();
-        assert!(decode_sequences_section(&[], &(), &mut e).is_err());
+        assert!(decode_sequences_section(&[], &mut SeqTableState::default(), &mut e).is_err());
     }
 
     #[test]
     fn zero_sequences_returns_empty() {
         let mut e = SequenceExecutor::new();
-        let s = decode_sequences_section(&[0x00], &(), &mut e).expect("decode");
+        let s = decode_sequences_section(&[0x00], &mut SeqTableState::default(), &mut e)
+            .expect("decode");
         assert!(s.sequences.is_empty());
     }
 
