@@ -16,7 +16,7 @@ path = "src/lib.rs"
 
 [dependencies]
 omnizip-codecs.workspace = true
-omnizip-libdeflate = { path = "../omnizip-libdeflate", version = "0.21.34" }
+omnizip-libdeflate = { path = "../omnizip-libdeflate", version = "0.21.35" }
 
 [lints]
 workspace = true
