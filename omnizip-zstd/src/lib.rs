@@ -60,7 +60,9 @@ pub use frame::{detect_frame_kind, strip_magic, BlockHeader, FrameHeader};
 pub use fse::{BitStream, ForwardBitStream, FseDecoder, FseState, Table};
 pub use huffman::{HuffmanDecoder, HuffmanTable};
 pub use literals::decode_literals_section;
-pub use sequences::{decode_sequences_section, Sequence, SequenceExecutor, SequencesSection};
+pub use sequences::{
+    decode_sequences_section, SeqTableState, Sequence, SequenceExecutor, SequencesSection,
+};
 
 pub use encoder::match_finder::MatchState;
 

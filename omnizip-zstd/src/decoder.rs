@@ -35,7 +35,7 @@ use crate::constants::{MAGIC_NUMBER, SKIPPABLE_MAGIC_BASE, SKIPPABLE_MAGIC_MASK}
 use crate::frame::{BlockHeader, FrameHeader};
 use crate::huffman::HuffmanTable;
 use crate::literals::decode_literals_section;
-use crate::sequences::{decode_sequences_section, SequenceExecutor};
+use crate::sequences::{decode_sequences_section, SeqTableState, SequenceExecutor};
 use crate::ZstdError;
 
 /// Pure-Rust ZSTD decoder. Construct once, call [`Self::decode_stream`]
@@ -43,7 +43,7 @@ use crate::ZstdError;
 #[derive(Debug, Default)]
 pub struct ZstdDecoder {
     previous_huffman_table: Option<HuffmanTable>,
-    previous_fse_tables: (),
+    previous_fse_tables: SeqTableState,
     executor: SequenceExecutor,
 }
 
@@ -59,9 +59,7 @@ impl ZstdDecoder {
     /// # Errors
     ///
     /// Returns [`ZstdError::Corrupt`] on structural problems and
-    /// [`ZstdError::Unsupported`] on not-yet-implemented features
-    /// (Huffman FSE-compressed weights, `MODE_FSE` sequence tables,
-    /// real `XXHash32` verification).
+    /// [`ZstdError::Unsupported`] on not-yet-implemented features.
     pub fn decode_stream(&mut self, input: &[u8]) -> Result<Vec<u8>, ZstdError> {
         self.decode_stream_with_prefix(input, &[])
     }
@@ -144,7 +142,7 @@ impl ZstdDecoder {
     ) -> Result<(Vec<u8>, &'a [u8]), ZstdError> {
         // Reset per-frame state.
         self.previous_huffman_table = None;
-        self.previous_fse_tables = ();
+        self.previous_fse_tables = SeqTableState::default();
         self.executor = SequenceExecutor::new();
 
         let (header, after_header) = FrameHeader::parse(input)?;
@@ -265,10 +263,9 @@ impl ZstdDecoder {
         //    can update repeat-offset slots inline during decode.
         let seq_section = decode_sequences_section(
             after_literals,
-            &self.previous_fse_tables,
+            &mut self.previous_fse_tables,
             &mut self.executor,
         )?;
-        let () = seq_section.fse_tables;
 
         // 3. Execute sequences against literals, appending to the
         //    frame-level output buffer (which may already contain the
