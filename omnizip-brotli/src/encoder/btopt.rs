@@ -175,8 +175,20 @@ fn build_dict_at(
         }
         let global_pos = mlen_offset + pos;
         let max_dist = (global_pos as u32).min(crate::from_spec_encoder::MAX_BACKWARD_DISTANCE);
-        if let Some((d, wl, tl)) = crate::encoder::dict_hash::find_match(input, pos, max_dist) {
-            if tl >= 2 && pos + tl as usize <= n {
+        if let Some((d, wl, _finder_tl)) =
+            crate::encoder::dict_hash::find_match(input, pos, max_dist)
+        {
+            // The transformed length that actually reaches the output
+            // is dictionary_lookup's (the decoder's view). The finder's
+            // own tl can disagree on transform selection — trusting it
+            // drifts every later command's position (the arial q10
+            // chunk-overrun panic: a +10-byte cumulative shift).
+            let mut tmp = Vec::new();
+            if crate::dictionary::dictionary_lookup(&mut tmp, wl, d as i32, max_dist) == Some(())
+                && tmp.len() >= 2
+                && pos + tmp.len() <= n
+            {
+                let tl = tmp.len() as u32;
                 dict_at[pos] = Some((d, wl, tl));
             }
         }
@@ -563,7 +575,8 @@ pub(crate) fn parse_btopt_with(
         matches,
     );
 
-    let model1 = CostModel::from_commands(input, &pass0).with_positional_literals(&ctx_lits);
+    let model1 =
+        CostModel::from_commands(input, &pass0, mlen_offset).with_positional_literals(&ctx_lits);
     dp_pass(
         input,
         quality,

@@ -299,7 +299,7 @@ impl CostModel {
 
     /// Pass-2 costs: histograms over the previous pass's commands
     /// (upstream `ZopfliCostModelSetFromCommands`).
-    pub(crate) fn from_commands(data: &[u8], commands: &[Command]) -> Self {
+    pub(crate) fn from_commands(data: &[u8], commands: &[Command], mlen_offset: usize) -> Self {
         let n = data.len();
         let mut hist_literal = [0u32; 256];
         let mut hist_cmd = [0u32; NUM_CMD_SYMBOLS];
@@ -328,8 +328,12 @@ impl CostModel {
         // so SetCost priced them as rare and the DP under-rode reps
         // (~3x fewer implicit-rep0 commands than the reference on CSV).
         let dist_cfg = crate::encoder::distance_config::DistanceConfig::choose(commands, 0);
+        // The walk's dict classification is global-position based;
+        // mlen_offset must be the chunk's real offset or every
+        // dictionary candidate on continuation chunks mis-advances
+        // (the arial q10 8 MiB-chunk overrun).
         if let Some(stream) =
-            crate::from_spec_encoder::build_symbol_stream(commands, data, 0, &dist_cfg)
+            crate::from_spec_encoder::build_symbol_stream(commands, data, mlen_offset, &dist_cfg)
         {
             for &cs in &stream.cmd_symbols {
                 if cs < NUM_CMD_SYMBOLS {
@@ -1029,7 +1033,7 @@ pub(crate) fn parse_hq_with(
         let model = if pass == 0 {
             CostModel::from_literal_costs(input)
         } else {
-            CostModel::from_commands(input, &prev_commands)
+            CostModel::from_commands(input, &prev_commands, 0)
         };
         init_nodes(&mut nodes);
         nodes[0].length = 0;

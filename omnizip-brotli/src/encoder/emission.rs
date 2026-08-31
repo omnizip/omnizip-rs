@@ -515,6 +515,11 @@ pub(crate) fn emit_metablock_from_commands(
     // UTF8 gives better context separation for multi-byte chars and ASCII text.
     let context_mode: u32 = if use_context && is_text_like(input) {
         2 // UTF8
+    } else if quality >= 10 {
+        // Reference ChooseContextMode: q10+ non-UTF8 input gets the
+        // SIGNED prior (sign-aware buckets of both previous bytes);
+        // LSB6 stays for the lower tiers.
+        3 // SIGNED
     } else {
         0 // LSB6
     };
