@@ -297,8 +297,10 @@ impl OptState {
                 bt: vec![0; 2 * (1usize << bt_log)],
                 bt_log,
                 next_to_update: 0,
+                // u32::MAX sentinel: index 0 is a REAL position (the C's
+                // base offset makes 0 unreachable; we must distinguish it).
                 hash3_table: if hash_log3 > 0 {
-                    vec![0; 1usize << hash_log3]
+                    vec![u32::MAX; 1usize << hash_log3]
                 } else {
                     Vec::new()
                 },
@@ -397,13 +399,15 @@ impl BtFinder {
     fn hash_ptr(&self, src: &[u8], pos: usize) -> usize {
         // mls >= 4 tree hash; mls == 3 handled by hash3 below.
         if self.min_match == 3 {
+            // C ZSTD_hash3 window: (u << 8) * prime3bytes >> (32-h).
+            // The top byte never contributes (see hash3_ptr).
             let v = u32::from_le_bytes([
                 src[pos],
                 src[pos + 1],
                 src[pos + 2],
                 if pos + 3 < src.len() { src[pos + 3] } else { 0 },
             ]) & 0x00FF_FFFF;
-            ((v.wrapping_mul(506_832_829) >> (32 - self.hash_log)) as usize)
+            (((v << 8).wrapping_mul(506_832_829) >> (32 - self.hash_log)) as usize)
                 & ((1usize << self.hash_log) - 1)
         } else {
             let v = u32::from_le_bytes([src[pos], src[pos + 1], src[pos + 2], src[pos + 3]]);
@@ -413,14 +417,19 @@ impl BtFinder {
     }
 
     fn hash3_ptr(&self, src: &[u8], pos: usize) -> usize {
+        // C ZSTD_hash3: (u << 8) * prime3bytes >> (32-h), in U32
+        // arithmetic. The <<8 keeps only the low 24 bits — the top
+        // byte of the read never contributes. Our old formula hashed
+        // a different bit window of the product, so the HC3 table
+        // collided differently than the reference's and offered
+        // different short-match candidates.
         let v = u32::from_le_bytes([
             src[pos],
             src[pos + 1],
             src[pos + 2],
             if pos + 3 < src.len() { src[pos + 3] } else { 0 },
         ]) & 0x00FF_FFFF;
-        ((v.wrapping_mul(506_832_829) >> (32 - self.hash_log3)) as usize)
-            & ((1usize << self.hash_log3) - 1)
+        ((v << 8).wrapping_mul(506_832_829) >> (32 - self.hash_log3)) as usize
     }
 }
 
@@ -584,6 +593,8 @@ fn insert_and_find_first_index_hash3(mf: &mut BtFinder, src: &[u8], pos: usize) 
         idx += 1;
     }
     mf.next_to_update3 = target as u32;
+    // u32::MAX = empty bucket; any other value is a real position
+    // (including 0, which the C's base offset makes naturally valid).
     mf.hash3_table[mf.hash3_ptr(src, pos)] as usize
 }
 
@@ -658,7 +669,10 @@ fn insert_bt_and_get_all_matches(
     // HC3 (len-3) match finder.
     if mf.min_match == 3 && best_length < min_match as usize {
         let match_index3 = insert_and_find_first_index_hash3(mf, src, ip);
-        if match_index3 >= match_low && curr - match_index3 < (1 << 18) {
+        if std::env::var_os("ZSTD_OPT_DUMP").is_some() && (315..=325).contains(&curr) {
+            eprintln!("HC3DUMP ip={curr} mi3={match_index3} match_low={match_low}");
+        }
+        if match_index3 != u32::MAX as usize && curr - match_index3 < (1 << 18) {
             let mlen = count_abs(src, ip, match_index3, src.len() - ip);
             if mlen >= min_match as usize {
                 best_length = mlen;
@@ -751,9 +765,9 @@ fn insert_bt_and_get_all_matches(
     }
 
     mf.next_to_update = (match_end_idx - 8) as u32;
-    if std::env::var_os("ZSTD_OPT_DUMP").is_some() && (curr as u32) == 33 {
+    if std::env::var_os("ZSTD_OPT_DUMP").is_some() && (310..=330).contains(&(curr as u32)) {
         eprintln!(
-            "OPTDUMP ip=33 mnum={mnum} ll0={ll0} reps={:?} cands={:?}",
+            "OPTDUMP ip={curr} mnum={mnum} ll0={ll0} reps={:?} cands={:?}",
             &rep.iter().collect::<Vec<_>>(),
             &match_buf[..mnum]
                 .iter()
@@ -809,7 +823,7 @@ pub fn compress_block_opt_with_prefix(
         st.mf.hash_table.fill(0);
         st.mf.bt.fill(0);
         st.mf.next_to_update = 0;
-        st.mf.hash3_table.fill(0);
+        st.mf.hash3_table.fill(u32::MAX);
         st.mf.next_to_update3 = 0;
     }
 
