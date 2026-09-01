@@ -309,6 +309,20 @@ fn get_table(
         MODE_FSE => {
             // Read the custom FSE table from the bitstream.
             let (dtable, consumed) = crate::fse::read_fse_table(cursor)?;
+            if std::env::var_os("ZSTD_FSE_DUMP").is_some() {
+                let mut sym_cells = vec![0u32; 256];
+                for i in 0..dtable.size() {
+                    sym_cells[usize::from(dtable.state(i).symbol)] += 1;
+                }
+                let nz: Vec<u32> = sym_cells.iter().filter(|&&c| c > 0).copied().collect();
+                eprintln!(
+                    "FSETBL log={} size={} hdr_bytes={} nonzero={:?}",
+                    dtable.accuracy_log(),
+                    dtable.size(),
+                    consumed,
+                    &nz[..nz.len().min(40)]
+                );
+            }
             *cursor = &cursor[consumed..];
 
             // Convert the generic FSE DTable entries into ZSTD
