@@ -27,6 +27,7 @@ use crate::ZstdError;
 
 /// Sequence-table mode codes (RFC 8878 §3.1.1.3.2 Table 15).
 const MODE_PREDEFINED: u8 = 0;
+const MODE_RLE: u8 = 1;
 const MODE_FSE: u8 = 2;
 const MODE_REPEAT: u8 = 3;
 
@@ -38,6 +39,7 @@ const MODE_REPEAT: u8 = 3;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SeqTableOnWire {
     Predefined,
+    Rle(u8),
     Fse { norm: Vec<i16>, table_log: u8 },
 }
 
@@ -258,6 +260,7 @@ pub fn encode_section(
         },
         ll_fse,
         ll_pre,
+        &ll_count,
         last_tables.as_ref().map(|t| &t[0]),
         |t| measure(t, &ml_pre, &of_pre),
     );
@@ -269,6 +272,7 @@ pub fn encode_section(
         },
         ml_fse,
         ml_pre,
+        &ml_count,
         last_tables.as_ref().map(|t| &t[1]),
         |t| measure(&ll_choice, t, &of_pre),
     );
@@ -280,6 +284,7 @@ pub fn encode_section(
         },
         of_fse,
         of_pre,
+        &of_count,
         last_tables.as_ref().map(|t| &t[2]),
         |t| measure(&ll_choice, &ml_choice, t),
     );
@@ -292,12 +297,18 @@ pub fn encode_section(
     //    send normalized counts; Predefined/Repeat send nothing.
     if ll_choice.mode == MODE_FSE {
         write_ncount(out, &ll_choice.norm, ll_max, ll_choice.table_log)?;
+    } else if ll_choice.mode == MODE_RLE {
+        out.push(ll_choice.max_sym);
     }
     if of_choice.mode == MODE_FSE {
         write_ncount(out, &of_choice.norm, of_max, of_choice.table_log)?;
+    } else if of_choice.mode == MODE_RLE {
+        out.push(of_choice.max_sym);
     }
     if ml_choice.mode == MODE_FSE {
         write_ncount(out, &ml_choice.norm, ml_max, ml_choice.table_log)?;
+    } else if ml_choice.mode == MODE_RLE {
+        out.push(ml_choice.max_sym);
     }
 
     // 7. Build CTables from the chosen distributions.
@@ -354,12 +365,20 @@ fn pick_table<M: Fn(&TableChoice) -> u64>(
     fse_wins: bool,
     fse: TableChoice,
     predef: TableChoice,
+    count: &[u32],
     last: Option<&SeqTableOnWire>,
     measure: M,
 ) -> (TableChoice, SeqTableOnWire) {
     let mut best = if fse_wins { fse } else { predef };
+    if let Some(sym) = uniform_symbol(count) {
+        let rle = rle_choice(sym);
+        if measure(&rle) < measure(&best) {
+            best = rle;
+        }
+    }
     let wire = match best.mode {
         MODE_PREDEFINED => SeqTableOnWire::Predefined,
+        MODE_RLE => SeqTableOnWire::Rle(best.max_sym),
         _ => SeqTableOnWire::Fse {
             norm: best.norm.clone(),
             table_log: best.table_log,
@@ -373,6 +392,33 @@ fn pick_table<M: Fn(&TableChoice) -> u64>(
     (best, wire)
 }
 
+/// The single symbol an RLE table would carry, if every symbol in
+/// the stream is identical.
+fn uniform_symbol(count: &[u32]) -> Option<u8> {
+    let mut found: Option<u8> = None;
+    for (sym, &c) in count.iter().enumerate() {
+        if c == 0 {
+            continue;
+        }
+        if found.is_some() {
+            return None;
+        }
+        found = Some(sym as u8);
+    }
+    found
+}
+
+/// A single-symbol table choice: one header byte on the wire, zero
+/// state bits in the bitstream (built via [`CTable::build_rle`]).
+fn rle_choice(sym: u8) -> TableChoice {
+    TableChoice {
+        mode: MODE_RLE,
+        norm: Vec::new(),
+        table_log: 0,
+        max_sym: sym,
+    }
+}
+
 /// Result of table mode selection: either Predefined or `FSE_Compressed`.
 #[derive(Clone)]
 struct TableChoice {
@@ -384,6 +430,13 @@ struct TableChoice {
 
 impl TableChoice {
     fn build_ctable(&self) -> Result<CTable, ZstdError> {
+        // RLE tables (and Repeat-of-RLE, which keeps the empty norm)
+        // never go through the norm-based builder: its transform math
+        // underflows at table_log 0 (the C has a dedicated
+        // FSE_buildCTable_rle for exactly this shape).
+        if self.table_log == 0 {
+            return Ok(CTable::build_rle(self.max_sym));
+        }
         build_ctable(&self.norm, self.max_sym, self.table_log)
     }
 }
@@ -479,12 +532,18 @@ fn section_size_bits(
     let mut tmp: Vec<u8> = Vec::new();
     if ll.mode == MODE_FSE {
         let _ = write_ncount(&mut tmp, &ll.norm, ll_max, ll.table_log);
+    } else if ll.mode == MODE_RLE {
+        tmp.push(ll.max_sym);
     }
     if of.mode == MODE_FSE {
         let _ = write_ncount(&mut tmp, &of.norm, of_max, of.table_log);
+    } else if of.mode == MODE_RLE {
+        tmp.push(of.max_sym);
     }
     if ml.mode == MODE_FSE {
         let _ = write_ncount(&mut tmp, &ml.norm, ml_max, ml.table_log);
+    } else if ml.mode == MODE_RLE {
+        tmp.push(ml.max_sym);
     }
     let header_bits = 8 * tmp.len() as u64 + 8; // + modes byte
 
