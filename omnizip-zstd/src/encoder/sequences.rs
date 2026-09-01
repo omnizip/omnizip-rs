@@ -486,7 +486,12 @@ fn choose_table_mode(
     // ML <= 9. Exceeding them is a spec violation that conformant
     // decoders (system zstd) reject even though ours is lenient.
     let opt_log = optimal_table_log(accuracy_cap, total as usize, max_sym);
-    let custom_norm = normalize_count(opt_log, count, total, max_sym, false).unwrap_or_default();
+    // C ZSTD_useLowProbCount: low-probability symbols get ncount -1
+    // (instead of +1) once blocks carry >= 2048 sequences — it fades
+    // in around 16K blocks depending on compressibility.
+    let use_low_prob = total >= 2048;
+    let custom_norm =
+        normalize_count(opt_log, count, total, max_sym, use_low_prob).unwrap_or_default();
 
     let fse_choice = if custom_norm.is_empty() {
         let mut single_norm = vec![0i16; max_sym as usize + 1];
