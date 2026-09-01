@@ -117,3 +117,27 @@ every other sweep cell within 1.000-1.013x or beating (arial L22
   single blocks disproves it; the full-file seq-count difference
   (233K vs 282K) is a byproduct of the reference's own finer block
   boundaries, not a denser parser.
+
+## CORRECTION (2026-09-01): the "parse parity" was a COUNT artifact — the price-model/parse question is REOPENED
+
+Sequence-level alignment of the full-file L18 streams (ZSTD_SEQ_DUMP
+on both, ours via our decoder): the parses diverge at output position
+17 — the SECOND sequence (ours: ll=11 ml=3 off=4; ref: ll=16 ml=6
+off=32) and crisscross constantly, re-syncing at shared positions.
+The earlier slice experiment compared AGGREGATE counts (19,638 vs
+19,647) and misread that as parse parity. Real shape: ours 233,746
+seqs / 208K literals vs ref 282,595 seqs / 115K literals — the
+reference converts ~94KB more literals into short matches (see the
+python alignment: first-divergence dump in this task's history).
+
+### Next attack (task-09 method, opt tier)
+
+Position-by-position diff of our opt-tier CANDIDATE LIST + prices vs
+zstd_opt.c's insertBtAndGetAllMatches at the first divergence
+(position 33: ours had (4,3), ref took (32,6)). Two candidate causes:
+(a) the tree/HC3 candidate generation never offers the short
+recent-offset match (finder side — like task 09's missing table
+policies), or (b) the price model rejects it (short-ml-at-offset-cost
+pricing). (a) is the likelier and the more tractable; instrument
+OMNIZIP-style dumps of insert_and_get_all_matches at a fixed position
+and compare against the C's list shape.
