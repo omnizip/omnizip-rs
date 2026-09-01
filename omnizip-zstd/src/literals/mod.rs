@@ -281,6 +281,13 @@ fn decode_compressed<'t>(
         crate::huffman::weights::read_huffman_table(compressed)?.1
     };
 
+    if std::env::var_os("ZSTD_LIT_DUMP").is_some() {
+        eprintln!(
+            "LIT tree_bytes={table_bytes} streams={} data_bytes={}",
+            if single_stream { 1 } else { 4 },
+            lit_c_size_us.saturating_sub(table_bytes)
+        );
+    }
     let literal_data = &compressed[table_bytes..];
     let mut literals = vec![0u8; lit_size_us];
     if single_stream {
