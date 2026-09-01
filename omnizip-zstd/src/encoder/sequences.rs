@@ -152,12 +152,18 @@ pub fn encode_section(
     let mut off_bases = Vec::with_capacity(nb_seq);
 
     // Repeat-offset tracking, mirroring the decoder's
-    // SequenceExecutor::resolve_offset. Only the unambiguous
-    // repcode configurations are emitted (the `prev[0] - 1` quirk is
-    // left explicit); everything else falls back to a full offset.
-    // This is where recurring-distance data (line-oriented text,
-    // periodic headers) gets its ~6-bits-per-match discount — without
-    // it every match pays a full offset code.
+    // SequenceExecutor::resolve_offset exactly. The full emit-able
+    // set (decoder value = 1 + ll0 + extra for off-code 1):
+    //   rep1  off==reps[0], ll0=0  -> offBase 1, no ring change
+    //   rep2  off==reps[1]         -> swap [0]<->[1];
+    //                                  offBase 1 (ll0=1) / 2 (ll0=0)
+    //   rep3  off==reps[2] (>3)    -> 3-rotate;
+    //                                  offBase 3 (ll0=0) / 2 (ll0=1)
+    //   quirk off==reps[0]-1, ll0=1, reps[0]>=2 -> 3-rotate, offBase 3
+    // This is where recurring-distance data gets its per-match
+    // discount; the conservative table (rep2 only at ll0, no quirk)
+    // left the OF histogram top-heavy enough to reshape the FSE
+    // table (1-vs-35 cells on symbol 1 vs the reference).
     let mut reps = initial_reps;
     for seq in sequences {
         let (ll_c, ll_e) = ll_code(seq.literal_length);
@@ -167,12 +173,18 @@ pub fn encode_section(
         let ob = if !ll0 && seq.offset == reps[0] {
             // offBase 1, no state change.
             1
-        } else if ll0 && seq.offset == reps[1] {
-            // offBase 1 with ll0: decoder uses prev[1] and swaps.
+        } else if seq.offset == reps[1] {
+            // rep2 both literal states: decoder value 1 (ll0=0,
+            // offBase 2) selects prev[1]; offBase 1 with ll0=1 does
+            // the same. Ring swaps [0] and [1].
             let used = reps[1];
             reps[1] = reps[0];
             reps[0] = used;
-            1
+            if ll0 {
+                1
+            } else {
+                2
+            }
         } else if seq.offset == reps[2] && seq.offset > 3 {
             // rep3. The decoder's of_bits==1 path computes
             // `value = OF_base[1] + ll0 + read(1)` and selects prev[2]
@@ -189,6 +201,14 @@ pub fn encode_section(
             } else {
                 3
             }
+        } else if ll0 && reps[0] >= 2 && seq.offset == reps[0] - 1 {
+            // The prev[0]-1 quirk: decoder value 3 (offBase 3, ll0=1)
+            // resolves to prev[0]-1 and rotates fully. Only when the
+            // result is a legal nonzero offset.
+            reps[2] = reps[1];
+            reps[1] = reps[0];
+            reps[0] = seq.offset;
+            3
         } else {
             reps[2] = reps[1];
             reps[1] = reps[0];
