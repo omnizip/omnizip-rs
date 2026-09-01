@@ -447,11 +447,13 @@ pub fn compress_with_quality(input: &[u8], quality: i32) -> Vec<u8> {
         return empty_frame();
     }
 
-    // Q1: the reference's two-pass fragment compressor — an order of
-    // magnitude faster than the from-spec parse with a BETTER ratio
-    // on structured data (fresh per-128KB-block Huffman codes built
-    // from actual histograms). BROTLI_NO_TP forces the from-spec path.
-    if q == 1 && !env_flag!("BROTLI_NO_TP") {
+    // Q1 routes to the from-spec parse: the two-pass fragment
+    // compressor is ~4x faster but loses 5-17% ratio on every
+    // measured corpus class (csv2m 1.26x ref -> 1.045x, rfc 122,356
+    // -> 104,390 BEATS ref, bin1 -62KB, words -31KB); the from-spec
+    // path is still ~2x the reference CLI's speed at this tier.
+    // BROTLI_TP restores the two-pass path.
+    if q == 1 && env_flag!("BROTLI_TP") {
         return crate::fast_encoder::compress_two_pass_q1(input);
     }
 
