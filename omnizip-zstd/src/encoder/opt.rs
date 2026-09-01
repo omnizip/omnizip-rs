@@ -751,6 +751,16 @@ fn insert_bt_and_get_all_matches(
     }
 
     mf.next_to_update = (match_end_idx - 8) as u32;
+    if std::env::var_os("ZSTD_OPT_DUMP").is_some() && (curr as u32) == 33 {
+        eprintln!(
+            "OPTDUMP ip=33 mnum={mnum} ll0={ll0} reps={:?} cands={:?}",
+            &rep.iter().collect::<Vec<_>>(),
+            &match_buf[..mnum]
+                .iter()
+                .map(|m| (m.off, m.len))
+                .collect::<Vec<_>>()
+        );
+    }
     mnum
 }
 
