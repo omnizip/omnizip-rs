@@ -268,9 +268,11 @@ impl ZstdDecoder {
         )?;
         if std::env::var_os("ZSTD_SEC_DUMP").is_some() {
             eprintln!(
-                "SEC block={} lit_bytes={} seq_start={:02X} modes={:08b}",
+                "SEC block={} lit_bytes={} lit_type={} lit_regen={} seq_start={:02X} modes={:08b}",
                 block.block_size,
                 lit_section.consumed,
+                block_input.first().map_or(0, |b| b & 3),
+                literals.len(),
                 after_literals.first().copied().unwrap_or(0),
                 after_literals.get(1).copied().unwrap_or(0)
             );

@@ -389,10 +389,20 @@ fn encode_weights(weights: &[u8]) -> Result<Vec<u8>, ZstdError> {
             reason: "encode_weights: no present symbols".into(),
         })?;
 
-    if max_symbol <= 128 {
-        encode_weights_direct(weights, max_symbol)
-    } else {
-        encode_weights_fse(weights, max_symbol)
+    // C HUF_writeCTable_wksp: try FSE weight compression and ship it
+    // when it clearly wins (hSize > 1 && hSize < nSymbols/2); the
+    // static "direct below 129 symbols" rule left csv4k's tree at 62
+    // bytes where the reference's FSE form is 24.
+    let n_symbols = max_symbol + 1;
+    let fse = encode_weights_fse(weights, max_symbol).ok();
+    let direct = encode_weights_direct(weights, max_symbol).ok();
+    match (fse, direct) {
+        (Some(f), Some(d)) if f.len() > 1 && f.len() < n_symbols / 2 => Ok(f),
+        (_, Some(d)) => Ok(d),
+        (Some(f), None) => Ok(f),
+        (None, None) => Err(ZstdError::Corrupt {
+            reason: "encode_weights: no viable weight encoding".into(),
+        }),
     }
 }
 
