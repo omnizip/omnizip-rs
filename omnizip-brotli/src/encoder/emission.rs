@@ -122,6 +122,11 @@ pub(crate) fn encode_huffman_chunk_body(
     // the inline switch emission in the literal loop are wired up, so
     // this can be flipped back on for inputs with strongly varying
     // per-block statistics.
+    // Literal BLOCK switching stays off: the wired path is a 2-tree
+    // (ctx >> 6) stub that never wins the assignment contest — the
+    // real lever is porting the reference's (block, context)
+    // ContextBlockSplitter, which is how it reaches 109 lit trees on
+    // binary where our context-only clustering ceilings at 64.
     let use_block_switch = false;
     let phase_timer = env_flag!("BROTLI_PHASE_TIMER");
     let pt0 = std::time::Instant::now();
