@@ -517,11 +517,13 @@ pub(crate) fn emit_metablock_from_commands(
         2 // UTF8
     } else if quality >= 10 {
         // Reference ChooseContextMode: q10+ non-UTF8 input gets the
-        // SIGNED prior (sign-aware buckets of both previous bytes);
-        // LSB6 stays for the lower tiers.
+        // SIGNED prior (sign-aware buckets of both previous bytes).
         3 // SIGNED
     } else {
-        0 // LSB6
+        // Reference ChooseContextMode: UTF8 for ALL input below q10
+        // (SIGNED is the q10+ branch). Measured vs our old LSB6 for
+        // binary: fits q5 -161KB, arial q5 -45KB, bin1 q5/q9 -2.8KB.
+        2 // UTF8
     };
     let mut decided_ctx: Option<(usize, Vec<u8>)> = decided_early.clone();
     let (mut ntrees_l, mut lit_ctx_map): (u32, Vec<u8>) = if use_block_switch {
