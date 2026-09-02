@@ -4887,8 +4887,14 @@ fn parse_input_with_offset_impl(
     // input stay on the greedy walk (a DP-parsed tail chunk measured
     // +50 KB on 2 MiB CSV q2), while genuinely small standalone
     // inputs keep the DP's global pricing (100KB: DP wins +12%).
+    // q9 on >=1MiB TEXT routes to the DP: the reference's q9 is its
+    // single-pass zopfli, and our DP beats it there (rustsrc 338,221
+    // vs ref 340,647) where the greedy tier lost 25KB; words -72KB,
+    // csv2m -13KB. Binary inputs keep the greedy tier at q9 (the DP
+    // measured worse on arial +92KB, fits +16KB). q2-8 keep greedy
+    // everywhere (there it beat both the reference and our zopfli).
     let greedy_tier = quality >= 2
-        && quality < 10
+        && (quality < 9 || (quality < 10 && !is_text_like(input)))
         && !env_flag!("BROTLI_NO_GREEDY_TIER")
         && (env_flag!("BROTLI_GREEDY_TIER") || mlen_offset > 0 || input.len() >= (1 << 20) - 1);
     let use_dict = if greedy_tier && env_flag!("BROTLI_GREEDY_NODICT") {
