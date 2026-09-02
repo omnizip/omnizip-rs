@@ -647,6 +647,27 @@ pub(crate) fn collect_matches(
                 }
             }
         }
+        // Static-dictionary candidate (reference FindAllMatchesH10
+        // queries the dictionary at every position; minlen =
+        // max(4, best_len+1) self-gates once real matches beat word
+        // lengths). Restricted to LENGTH-PRESERVING words (tl == wl):
+        // transform-length changes would need the btopt CODE_DICT
+        // advance/wire split, while a plain word advances and emits
+        // the same length everywhere.
+        if best_len < 24 {
+            if let Some((d, wl, tl)) = crate::encoder::dict_hash::find_match(data, i, u32::MAX) {
+                if tl == wl && wl as usize > best_len {
+                    let mut tmp = Vec::new();
+                    if crate::dictionary::dictionary_lookup(&mut tmp, wl, d as i32, u32::MAX)
+                        == Some(())
+                        && tmp.len() == wl as usize
+                    {
+                        best_len = wl as usize;
+                        matches.push((d, wl));
+                    }
+                }
+            }
+        }
         if best_len > max_zopfli_len {
             // Keep only the longest match, skip its tail positions
             // (they were stored into the tree above).
