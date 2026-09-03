@@ -371,6 +371,34 @@ fn dp_pass(
         let cend = cstart + num_matches[i] as usize;
         let mut len = min_len;
         for &(dist, mlen) in &matches[cstart..cend] {
+            // Static-dictionary candidates from collect_matches arrive
+            // in the shared match list with distances beyond the
+            // window. Pricing them as huge real distances overpays;
+            // route through the CODE_DICT relax (and only when
+            // dict_at recorded the entry — the backtrack resolves
+            // through it).
+            if u64::from(dist) > crate::from_spec_encoder::MAX_BACKWARD_DISTANCE as u64 {
+                if let Some((d, wl, _tl)) = dict_at[i] {
+                    if d == dist {
+                        if let Some(sym) = find_cmd_symbol(ilen, wl) {
+                            let e = &kCmdLut[sym];
+                            let dsym = long_dist_symbol(d);
+                            let extra = (((dsym as u32) - 16) >> 1) + 1;
+                            let total = base
+                                + cmd_table[sym]
+                                + f32::from(e.insert_len_extra_bits)
+                                + f32::from(e.copy_len_extra_bits)
+                                + dist_table[dsym]
+                                + extra as f32;
+                            let j = i + wl as usize;
+                            if j <= n {
+                                dp.relax(j, i, wl, d, CODE_DICT, total, reps);
+                            }
+                        }
+                    }
+                }
+                continue;
+            }
             let maxlen = (mlen as usize).min(n - i).min(MATCH_LEN_CAP);
             if len < maxlen && maxlen > max_z {
                 len = maxlen;

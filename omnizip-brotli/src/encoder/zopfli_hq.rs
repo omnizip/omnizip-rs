@@ -654,7 +654,12 @@ pub(crate) fn collect_matches(
         // transform-length changes would need the btopt CODE_DICT
         // advance/wire split, while a plain word advances and emits
         // the same length everywhere.
-        if best_len < 24 {
+        // q11 (zopfli_hq) only: q10's btopt offers dictionary
+        // candidates through its own gated dict_at, and these
+        // collect-level ones measured +4,622 on fits q10 even with
+        // CODE_DICT routing (the DP takes them where its own gate
+        // would not).
+        if quality == 11 && best_len < 24 {
             if let Some((d, wl, tl)) = crate::encoder::dict_hash::find_match(data, i, u32::MAX) {
                 if tl == wl && wl as usize > best_len {
                     let mut tmp = Vec::new();
