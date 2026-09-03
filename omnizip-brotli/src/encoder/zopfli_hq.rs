@@ -668,6 +668,15 @@ pub(crate) fn collect_matches(
                 }
             }
         }
+        if std::env::var_os("BROTLI_HQ_DUMP").is_some() && i < 128 {
+            let cs = if num_matches[i] > 0 {
+                &matches[matches.len() - num_matches[i] as usize..]
+            } else {
+                &[][..]
+            };
+            let d = crate::encoder::dict_hash::find_match(data, i, u32::MAX);
+            eprintln!("HQDUMP pos={i} cands={:?} dict={:?}", cs, d);
+        }
         if best_len > max_zopfli_len {
             // Keep only the longest match, skip its tail positions
             // (they were stored into the tree above).

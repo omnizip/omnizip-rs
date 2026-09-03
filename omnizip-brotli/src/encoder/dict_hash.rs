@@ -134,15 +134,18 @@ pub fn find_match(input: &[u8], pos: usize, max_distance: u32) -> Option<(u32, u
     let mut best_len: u32 = 0;
     let mut best_distance: u32 = 0;
     let mut best_word_len: u32 = 0;
-    // Common 4-byte prefixes chain dozens of transformed words; the
-    // reference's curated bucket lists hold only a handful. Cap the
-    // walk (BROTLI_DICT_CHAIN overrides).
+    // 121 transforms per word flood shared-prefix buckets: the
+    // 4-letter-uppercase class (PAGE/TEXT/...) sits ~100-250 entries
+    // deep, so the old cap of 8 silently dropped most short-word
+    // matches (measured: PAGE/TEXT/DATA/INFO/NAME all missed at 8,
+    // all found at 256 — see dictprobe). The reference's curated
+    // bucket lists have full coverage. BROTLI_DICT_CHAIN overrides.
     static DICT_CHAIN: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
     let max_chain: u32 = *DICT_CHAIN.get_or_init(|| {
         std::env::var("BROTLI_DICT_CHAIN")
             .ok()
             .and_then(|v| v.parse().ok())
-            .unwrap_or(8)
+            .unwrap_or(256)
     });
     let mut walked: u32 = 0;
 
@@ -152,9 +155,9 @@ pub fn find_match(input: &[u8], pos: usize, max_distance: u32) -> Option<(u32, u
         let pool_start = entry.pool_offset as usize;
         let transformed = &table.byte_pool[pool_start..pool_start + tlen];
 
-        if pos + tlen <= input.len()
+        if tlen as u32 > best_len
+            && pos + tlen <= input.len()
             && transformed == &input[pos..pos + tlen]
-            && tlen as u32 > best_len
         {
             best_len = tlen as u32;
             let len = entry.word_length as usize;
