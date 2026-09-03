@@ -29,19 +29,19 @@ omnizip-cpio = { path = "../omnizip-cpio" }
 omnizip-zip = { path = "../omnizip-zip" }
 omnizip-tar = { path = "../omnizip-tar" }
 omnizip-archive-core = { path = "../omnizip-archive-core" }
-omnizip-codecs = { path = "../omnizip-codecs", version = "0.21.47" }
-omnizip-lzma = { path = "../omnizip-lzma", version = "0.21.47" }
-omnizip-zstd = { path = "../omnizip-zstd", version = "0.21.47" }
-omnizip-snappy = { path = "../omnizip-snappy", version = "0.21.47" }
-omnizip-lz4 = { path = "../omnizip-lz4", version = "0.21.47" }
-omnizip-deflate = { path = "../omnizip-deflate", version = "0.21.47" }
-omnizip-deflate64 = { path = "../omnizip-deflate64", version = "0.21.47" }
-omnizip-brotli = { path = "../omnizip-brotli", version = "0.21.47" }
-omnizip-bzip2 = { path = "../omnizip-bzip2", version = "0.21.47" }
-omnizip-ppmd = { path = "../omnizip-ppmd", version = "0.21.47" }
-omnizip-zpaq = { path = "../omnizip-zpaq", version = "0.21.47" }
-omnizip-glza = { path = "../omnizip-glza", version = "0.21.47" }
-omnizip-flac = { path = "../omnizip-flac", version = "0.21.47" }
+omnizip-codecs = { path = "../omnizip-codecs", version = "0.21.48" }
+omnizip-lzma = { path = "../omnizip-lzma", version = "0.21.48" }
+omnizip-zstd = { path = "../omnizip-zstd", version = "0.21.48" }
+omnizip-snappy = { path = "../omnizip-snappy", version = "0.21.48" }
+omnizip-lz4 = { path = "../omnizip-lz4", version = "0.21.48" }
+omnizip-deflate = { path = "../omnizip-deflate", version = "0.21.48" }
+omnizip-deflate64 = { path = "../omnizip-deflate64", version = "0.21.48" }
+omnizip-brotli = { path = "../omnizip-brotli", version = "0.21.48" }
+omnizip-bzip2 = { path = "../omnizip-bzip2", version = "0.21.48" }
+omnizip-ppmd = { path = "../omnizip-ppmd", version = "0.21.48" }
+omnizip-zpaq = { path = "../omnizip-zpaq", version = "0.21.48" }
+omnizip-glza = { path = "../omnizip-glza", version = "0.21.48" }
+omnizip-flac = { path = "../omnizip-flac", version = "0.21.48" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 clap = { version = "4.5", features = ["derive"] }
