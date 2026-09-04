@@ -105,6 +105,13 @@ const SPQ_SIZE: usize = 8;
 const MAX_ZOPFLI_CANDIDATES: [usize; 2] = [1, 5];
 
 const CACHE_INDEX: [usize; 16] = [0, 1, 2, 3, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1];
+/// Back-pointer marker for static-dictionary transitions (task 18).
+/// The decoder leaves the distance ring UNCHANGED on dictionary
+/// references, so the cache rebuild must never push these distances —
+/// a dictionary distance used as an in-window copy source desyncs
+/// every downstream walk (the PR #465 root cause). Values 0..=16 are
+/// upstream short codes (+1); 17 fits the 5-bit field.
+const CODE_DICT_SHORT: u32 = 17;
 const CACHE_OFFSET: [i32; 16] = [0, 0, 0, 0, -1, 1, -2, 2, -3, 3, -1, 1, -2, 2, -3, 3];
 
 #[inline]
@@ -759,8 +766,10 @@ fn compute_distance_cache(pos: usize, starting: &[i32; 4], nodes: &[Node], gap: 
     let mut p = nodes[pos].shortcut as usize;
     while idx < 4 && p > 0 {
         let node = &nodes[p];
-        cache[idx] = node.distance as i32;
-        idx += 1;
+        if node.short_code() != CODE_DICT_SHORT {
+            cache[idx] = node.distance as i32;
+            idx += 1;
+        }
         p = nodes[p - node.copy_len() - node.insert_len()].shortcut as usize;
     }
     while idx < 4 {
@@ -781,6 +790,7 @@ fn update_nodes(
     model: &CostModel,
     num_matches: u32,
     matches: &[(u32, u32)],
+    dict_at: &[Option<(u32, u32, u32)>],
     starting_cache: &[i32; 4],
     max_candidates: usize,
     max_zopfli_len: usize,
@@ -915,6 +925,42 @@ fn update_nodes(
                     result = result.max(full_len);
                 }
             }
+
+            // Static-dictionary candidate (task 18): length-preserving
+            // words only (tl == wl), so the node's len_code equals its
+            // copy length and the backtrack's existing Command shape is
+            // exact. The node is marked CODE_DICT_SHORT so the
+            // distance-cache rebuild never pushes the dictionary
+            // distance — rep relaxation must not treat it as an
+            // in-window copy source (the PR #465 root cause).
+            // Reference rule (ChooseHasher era): the static dictionary
+            // is searched ONLY where the match finder found nothing
+            // useful — dict words displacing real matches measurably
+            // WORSENED total emission (words q11 +91B) through
+            // dist/cmd tree-shape shifts the per-transition cost
+            // cannot see. "Nothing useful" = no candidate ≥ 4 bytes
+            // (the short-match scan still lists 2-3 byte matches).
+            let best_mlen = matches.last().map_or(0, |m| m.1);
+            if best_mlen < 4 {
+                if let Some((d, wl, tl)) = dict_at.get(pos).copied().flatten() {
+                    let wl_us = wl as usize;
+                    if tl == wl && wl_us >= 4 && wl_us <= max_len {
+                        crate::encoder::work_meter::add(2, 1);
+                        let sym = long_dist_symbol(d);
+                        let dist_extra = ((sym as u32 - 16) >> 1) + 1;
+                        let dict_cost = base_cost + dist_extra as f32 + model.dist_cost(sym);
+                        let copycode = get_copy_length_code(wl_us);
+                        let cmdcode = combine_length_codes(inscode, copycode, false);
+                        let cost = dict_cost
+                            + copy_extra(usize::from(copycode)) as f32
+                            + model.cmd_cost(cmdcode);
+                        if cost < nodes[pos + wl_us].cost {
+                            update_node(nodes, pos, start, wl_us, wl_us, d, CODE_DICT_SHORT, cost);
+                            result = result.max(wl_us);
+                        }
+                    }
+                }
+            }
         }
     }
     result
@@ -1013,7 +1059,7 @@ pub fn parse_hq(input: &[u8], quality: i32) -> Vec<Command> {
     }
     let mut tree = omnizip_codecs::BinaryTreeMatchFinder::new(input);
     let (num_matches, matches) = collect_matches(input, &mut tree, quality);
-    parse_hq_with(input, quality, &num_matches, &matches)
+    parse_hq_with(input, quality, 0, &num_matches, &matches)
 }
 
 /// Collection-sharing variant used by the q10/11 routing (the btopt
@@ -1022,6 +1068,7 @@ pub fn parse_hq(input: &[u8], quality: i32) -> Vec<Command> {
 pub(crate) fn parse_hq_with(
     input: &[u8],
     quality: i32,
+    mlen_offset: usize,
     num_matches: &[u32],
     matches: &[(u32, u32)],
 ) -> Vec<Command> {
@@ -1048,6 +1095,24 @@ pub(crate) fn parse_hq_with(
     for i in 0..n {
         offsets[i + 1] = offsets[i] + num_matches[i];
     }
+    // Static-dictionary candidates (task 18), gated to q11 like the
+    // q10 btopt dict_at path (q10's btopt offers its own candidates
+    // through CODE_DICT; feeding these to q10's hq too measured
+    // +4,622 on fits). Distances computed against the decoder's
+    // clamped output position via the shared, lookup-validated
+    // builder.
+    // Default OFF (BROTLI_Q11_DICT=1 to measure): the dict candidates
+    // improved 7/8 corpus cells (-41..-422 B) but REGRESSED the
+    // plist-JSON cell +373 B — per-transition pricing cannot predict
+    // total-emission tree-shape shifts, and without an old-vs-new
+    // exact-acceptance pass (a third contest candidate at ~+40% q11
+    // cost) the feature nets ~0.01%. Numbers in TODO.remaining/18.
+    let dict_at: Vec<Option<(u32, u32, u32)>> =
+        if quality == 11 && crate::from_spec_encoder::env_flag!("BROTLI_Q11_DICT") {
+            crate::encoder::btopt::build_dict_at(input, mlen_offset, &offsets, num_matches, matches)
+        } else {
+            Vec::new()
+        };
 
     let starting_cache: [i32; 4] = [16, 15, 11, 4];
     let mut nodes = vec![
@@ -1087,6 +1152,7 @@ pub(crate) fn parse_hq_with(
                 &model,
                 num_matches[i],
                 &matches[mstart..mend],
+                &dict_at,
                 &starting_cache,
                 max_candidates,
                 max_zopfli_len,

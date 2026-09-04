@@ -5014,7 +5014,13 @@ fn parse_input_with_offset_impl(
         let mut tree = omnizip_codecs::BinaryTreeMatchFinder::new(input);
         let (num_matches, matches) =
             crate::encoder::zopfli_hq::collect_matches(input, &mut tree, quality);
-        let hq = crate::encoder::zopfli_hq::parse_hq_with(input, quality, &num_matches, &matches);
+        let hq = crate::encoder::zopfli_hq::parse_hq_with(
+            input,
+            quality,
+            mlen_offset,
+            &num_matches,
+            &matches,
+        );
         if env_flag!("BROTLI_NO_BTOPT") || env_flag!("BROTLI_NO_CM") || n < 8 || input.len() < 4096
         {
             return (hq, None);

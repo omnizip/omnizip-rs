@@ -23,7 +23,7 @@ MECE decomposition of all remaining work. Each task is self-contained.
 | 15 | Real-world content-class conformance pass | done 2026-09-04 | MEDIUM |
 | 16 | LZMA residual cells — re-measure + close | done 2026-09-04 | MEDIUM |
 | 17 | Fuzzing depth (TODO.omnizip-rs 31) | done 2026-09-04 | MEDIUM |
-| 18 | q11 collect-level dictionary candidates (activation needs dict-aware DP) | pending 2026-09-04 | LOW |
+| 18 | q11 dict candidates via dict-aware DP | done 2026-09-05 — env-gated OFF (measured net ~0.01%) | LOW |
 | 19 | zstd multi-threaded compress (`compress_mt`) | done 2026-09-04 | HIGH |
 | 20 | brotli q4-9 bank-tier multi-threading | closed — infeasible byte-identical | MEDIUM |
 | 21 | brotli q9-text single-thread gap (28-56x) | mitigated 2026-09-04 | MEDIUM |
