@@ -569,6 +569,28 @@ impl<'a> HashChainMatchFinder<'a> {
         self.head[h] = pos as u32;
     }
 
+    /// Insert positions `[cur, pos)` into the hash table + chain
+    /// WITHOUT searching — replays the store side of [`advance`](Self::advance)
+    /// so a per-chunk finder can reproduce the state a sequentially
+    /// shared finder would hold at `pos`.
+    ///
+    /// Positions older than the caller's intended window are safe to
+    /// skip: chain walks link most-recent-first and break at the first
+    /// candidate beyond `max_distance`, so a chain that ends at a
+    /// SENTINEL where the sequential chain would reach a too-far node
+    /// produces identical search results.
+    ///
+    /// Re-priming an already-primed finder to a later position is also
+    /// safe (inserting more positions never disturbs existing links;
+    /// `head` always holds the most recent position per bucket).
+    pub fn prime_until(&mut self, pos: usize) {
+        let end = pos.min(self.data.len());
+        while self.cur < end {
+            self.insert_at(self.cur);
+            self.cur += 1;
+        }
+    }
+
     /// Word-at-a-time match length between `data[a..]` and `data[b..]`,
     /// capped at `max_len`.
     ///
@@ -621,6 +643,55 @@ impl<'a> HashChainMatchFinder<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn primed_finder_searches_like_sequential() {
+        // Repetitive content with deep same-hash chains, long enough
+        // to exercise the prev ring: a finder primed store-only to the
+        // chunk offset must return identical candidates to one that
+        // advanced sequentially through the whole prefix. This
+        // equivalence is what multi-threaded chunk encoding relies on
+        // for byte-identical output.
+        let mut data = Vec::new();
+        for block in 0..40 {
+            data.extend_from_slice(
+                format!("header-{block:03} common prefix tail {block:03}\n").as_bytes(),
+            );
+            data.extend(
+                std::iter::repeat([b'x', b'y', (block % 7) as u8 + b'0'])
+                    .take(13)
+                    .flatten(),
+            );
+        }
+        let cfg = HashChainConfig {
+            min_match: 4,
+            max_chain_length: 64,
+            nice_match: 64,
+            dict_size: 1024,
+            hash_log: 10,
+            hash_bytes: 4,
+            max_match_length: 1951,
+        };
+        for split in [data.len() / 3, data.len() * 2 / 3] {
+            let mut seq = HashChainMatchFinder::new(&data, cfg);
+            while seq.position() < split {
+                seq.advance();
+            }
+            let mut primed = HashChainMatchFinder::new(&data, cfg);
+            primed.prime_until(split);
+            assert_eq!(primed.position(), seq.position());
+            let end = data.len() - 64;
+            for pos in split..end {
+                let mut a = Vec::new();
+                let mut b = Vec::new();
+                seq.walk_chain_ladder(pos, 64, 0, &mut a);
+                primed.walk_chain_ladder(pos, 64, 0, &mut b);
+                assert_eq!(a, b, "candidate ladder diverges at pos {pos}");
+                seq.advance();
+                primed.advance();
+            }
+        }
+    }
 
     #[test]
     fn finds_short_match() {

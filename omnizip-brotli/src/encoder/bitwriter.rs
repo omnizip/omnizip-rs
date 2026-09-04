@@ -53,6 +53,19 @@ impl BitWriter {
         }
     }
 
+    /// Append the full bit content of `other` at the current (possibly
+    /// unaligned) position. Brotli metablocks concatenate at BIT
+    /// granularity, so per-chunk writers must splice mid-byte.
+    pub fn append_writer(&mut self, other: &Self) {
+        for &b in &other.out {
+            self.write_bits(u32::from(b), 8);
+        }
+        if other.nbits > 0 {
+            let v = (other.acc & ((1u64 << other.nbits) - 1)) as u32;
+            self.write_bits(v, other.nbits);
+        }
+    }
+
     /// Flush remaining bits and return the output bytes.
     #[must_use]
     pub fn flush(mut self) -> Vec<u8> {

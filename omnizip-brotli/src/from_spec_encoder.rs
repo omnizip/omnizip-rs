@@ -533,6 +533,67 @@ pub fn compress_with_quality(input: &[u8], quality: i32) -> Vec<u8> {
             hash_bytes: 4,
             max_match_length: zopfli_max_len(q),
         };
+        // Multi-threaded chunk encoding for the zopfli tiers (q10-11;
+        // the bank hasher below is q2-9 only, so this tier's chunks
+        // are independent in the emission layer — each metablock
+        // resets the rep ring, forcing four explicit long-form copies
+        // first). The only cross-chunk parse state is the shared MF,
+        // which a per-worker finder reproduces by store-only priming
+        // through the preceding window: chain walks link
+        // most-recent-first and break at the first beyond-window
+        // candidate, so primed state searches identically. Output is
+        // byte-identical to the sequential loop and independent of the
+        // worker count (fixed chunk boundaries, results assembled in
+        // chunk order). BROTLI_NO_MT restores the sequential path.
+        #[cfg(not(target_arch = "wasm32"))]
+        if q >= 10 && !env_flag!("BROTLI_NO_MT") && input.len() > chunk_size {
+            let chunk_count = input.len().div_ceil(chunk_size);
+            let workers = std::thread::available_parallelism()
+                .map_or(1, std::num::NonZeroUsize::get)
+                .min(chunk_count)
+                .min(4);
+            if workers > 1 {
+                let mut outputs: Vec<Option<BitWriter>> = (0..chunk_count).map(|_| None).collect();
+                let per = chunk_count.div_ceil(workers);
+                std::thread::scope(|scope| {
+                    let handles: Vec<_> = outputs
+                        .chunks_mut(per)
+                        .enumerate()
+                        .map(|(w, slice)| {
+                            scope.spawn(move || {
+                                let mut mf =
+                                    omnizip_codecs::HashChainMatchFinder::new(input, mf_config);
+                                for (i, slot) in slice.iter_mut().enumerate() {
+                                    let offset = (w * per + i) * chunk_size;
+                                    let end = (offset + chunk_size).min(input.len());
+                                    let is_last = end == input.len();
+                                    mf.prime_until(offset);
+                                    let mut chunk_bw = BitWriter::new();
+                                    encode_huffman_chunk_with_shared_mf(
+                                        &mut chunk_bw,
+                                        input,
+                                        offset,
+                                        end,
+                                        is_last,
+                                        q,
+                                        &mut mf,
+                                        None,
+                                    );
+                                    *slot = Some(chunk_bw);
+                                }
+                            })
+                        })
+                        .collect();
+                    for h in handles {
+                        h.join().expect("chunk encoder panicked");
+                    }
+                });
+                for writer in outputs {
+                    bw.append_writer(&writer.expect("every chunk encoded"));
+                }
+                return bw.flush();
+            }
+        }
         let mut shared_mf = omnizip_codecs::HashChainMatchFinder::new(input, mf_config);
         // H5 bank hasher for the greedy tier (q4-9): one-cache-line
         // bucket scans instead of prev[] chain walks, with the 16
