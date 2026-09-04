@@ -24,6 +24,9 @@ MECE decomposition of all remaining work. Each task is self-contained.
 | 16 | LZMA residual cells — re-measure + close | pending 2026-09-04 | MEDIUM |
 | 17 | Fuzzing depth (TODO.omnizip-rs 31) | pending 2026-09-04 | MEDIUM |
 | 18 | q11 collect-level dictionary candidates (activation needs dict-aware DP) | pending 2026-09-04 | LOW |
+| 19 | zstd multi-threaded compress (`compress_mt`) | done 2026-09-04 | HIGH |
+| 20 | brotli q4-9 bank-tier multi-threading | pending 2026-09-04 | MEDIUM |
+| 21 | brotli q9-text single-thread gap (28-56x) | pending 2026-09-04 | MEDIUM |
 
 ## Principles
 
