@@ -225,6 +225,30 @@ pub fn compress(plaintext: &[u8], level: ZstdLevel) -> Result<Vec<u8>, ZstdError
     encoder::encode_frame(plaintext, level)
 }
 
+/// Compress `plaintext` at the given level across multiple threads.
+///
+/// Opt-in multi-threaded variant of [`compress`]: the input is split
+/// into fixed-size jobs (a pure function of input length — never of
+/// `threads`), each encoded as an independent frame on a scoped
+/// worker thread, concatenated in job order. Output is deterministic
+/// across thread counts; `threads <= 1` falls back to [`compress`].
+///
+/// Cross-job matches are lost at job boundaries, so multi-job output
+/// can be slightly larger than [`compress`] on highly redundant
+/// inputs — measure the delta for your workload
+/// (`TODO.remaining/19` records the corpus numbers).
+///
+/// # Errors
+///
+/// See [`compress`].
+pub fn compress_mt(
+    plaintext: &[u8],
+    level: ZstdLevel,
+    threads: usize,
+) -> Result<Vec<u8>, ZstdError> {
+    encoder::encode_frames_mt(plaintext, level, threads)
+}
+
 /// Decompress a ZSTD frame.
 ///
 /// Currently decodes Raw, RLE, and Compressed blocks (Compressed
@@ -285,6 +309,41 @@ pub fn decompress_with_dict(
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    #[test]
+    fn compress_mt_round_trips_and_is_thread_invariant() {
+        // 5 jobs at the forced 64 KiB job size: exercises the
+        // multi-frame path and proves output does not depend on the
+        // thread count.
+        std::env::set_var("ZSTD_MT_JOB", "65536");
+        let mut data = Vec::with_capacity(300 * 1024);
+        for i in 0..300 * 1024 {
+            data.push(((i / 97) % 251) as u8 ^ (i % 13) as u8);
+            if i % 4096 == 0 {
+                data.extend_from_slice(b"repeated anchor payload line\n");
+            }
+        }
+        data.truncate(300 * 1024);
+        for level in [ZstdLevel::Fastest, ZstdLevel::Default, ZstdLevel::Best] {
+            let two = compress_mt(&data, level, 2).expect("2 threads");
+            let four = compress_mt(&data, level, 4).expect("4 threads");
+            let eight = compress_mt(&data, level, 8).expect("8 threads");
+            assert_eq!(two, four, "thread count changed the output");
+            assert_eq!(two, eight, "thread count changed the output");
+            let plain = decompress(&two, data.len() as u32).expect("decode");
+            assert_eq!(plain, data);
+        }
+        std::env::remove_var("ZSTD_MT_JOB");
+    }
+
+    #[test]
+    fn compress_mt_small_input_matches_compress() {
+        let data = b"single-job inputs must fall through to compress()".to_vec();
+        let a = compress_mt(&data, ZstdLevel::Default, 8).expect("mt");
+        let b = compress(&data, ZstdLevel::Default).expect("st");
+        assert_eq!(a, b);
+    }
 
     /// Regression (user report, 100 MB benchmark): the long-distance
     /// matcher emitted offsets our decoder resolved to different
