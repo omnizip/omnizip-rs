@@ -659,27 +659,25 @@ pub(crate) fn collect_matches(
         // collect-level ones measured +4,622 on fits q10 even with
         // CODE_DICT routing (the DP takes them where its own gate
         // would not).
-        if quality == 11 && best_len < 24 {
-            if let Some((d, wl, tl)) = crate::encoder::dict_hash::find_match(data, i, u32::MAX) {
-                if tl == wl && wl as usize > best_len {
-                    let mut tmp = Vec::new();
-                    if crate::dictionary::dictionary_lookup(&mut tmp, wl, d as i32, u32::MAX)
-                        == Some(())
-                        && tmp.len() == wl as usize
-                    {
-                        best_len = wl as usize;
-                        matches.push((d, wl));
-                    }
-                }
-            }
-        }
+        // Static-dictionary candidates are NOT probed here. A previous
+        // block attempted them at collect level, but its distance base
+        // was u32::MAX, which overflowed in debug builds (CI panic)
+        // and wrapped in release — where the follow-up lookup computed
+        // a negative address and rejected every candidate, so the
+        // feature never actually fired. Activating it correctly is
+        // tracked in TODO.remaining/18-q11-dict-candidates.md: the DP
+        // rep relaxation treats dictionary distances as in-window
+        // copy sources (distance-cache pollution), which desyncs the
+        // command walk; it needs dict-aware cache handling first.
+        // q10/11 dictionary candidates come from btopt's dict_at path,
+        // which is distance-cache-safe.
         if std::env::var_os("BROTLI_HQ_DUMP").is_some() && i < 128 {
             let cs = if num_matches[i] > 0 {
                 &matches[matches.len() - num_matches[i] as usize..]
             } else {
                 &[][..]
             };
-            let d = crate::encoder::dict_hash::find_match(data, i, u32::MAX);
+            let d = crate::encoder::dict_hash::find_match(data, i, i as u32);
             eprintln!("HQDUMP pos={i} cands={:?} dict={:?}", cs, d);
         }
         if best_len > max_zopfli_len {
