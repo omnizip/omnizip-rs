@@ -31,6 +31,22 @@ user-time ratios — re-measure quietly before citing)
   candidates).
 - **brotli q4-9 (bank tier) deferred**: `BankMatchFinder` state
   threading needs its own priming analysis.
+## Results (2026-09-04, PR #467 — brotli q10-11 SHIPPED)
+
+- words q11 (2 chunks): 21.2s → 12.3s (**1.72x**); fits4m q11: no gain
+  (2 chunks, one chunk holds ~all the DP weight — later chunks see
+  richer cross-window match history).
+- Byte-identity: words/fits q10+q11 and csv5m (3 chunks, periodic
+  content, q11) all IDENTICAL to `BROTLI_NO_MT=1`, all REF-OK; the
+  priming equivalence is unit-tested
+  (`primed_finder_searches_like_sequential`).
+- csv21m q10/q11 full-size identity still running at merge time
+  (30+ CPU-minute cells on the loaded box); the 3-chunk csv5m cell
+  covers the same code path.
+- Remaining in this task: zstd `compress_mt`, q4-9 bank-tier MT
+  (needs `BankMatchFinder` priming analysis), q9-text 28-56x
+  single-thread gap.
+
 - **zstd**: `compress_mt(input, level, threads)` — fixed job size
   (a pure function of input length, never of thread count), each job
   an independent frame via a per-thread `MatchState`, concatenated in
