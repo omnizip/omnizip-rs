@@ -200,7 +200,7 @@ jobs:
             crates: >-
               ozip omnizip-bench omnizip-differential omnizip-determinism
               omnizip-property omnizip-conformance omnizip-security-tests
-              omnizip-benchmarks
+              omnizip-benchmarks fuzz-smoke
     steps:
       - uses: actions/checkout@v7
 
