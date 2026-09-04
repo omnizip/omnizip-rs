@@ -1,0 +1,21 @@
+[package]
+name = "fuzz-smoke"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+omnizip-codecs = { path = "../../omnizip-codecs" }
+omnizip-brotli = { path = "../../omnizip-brotli" }
+omnizip-zstd = { path = "../../omnizip-zstd" }
+omnizip-lzma = { path = "../../omnizip-lzma" }
+omnizip-deflate = { path = "../../omnizip-deflate" }
+omnizip-bzip2 = { path = "../../omnizip-bzip2" }
+omnizip-lz4 = { path = "../../omnizip-lz4" }
+omnizip-snappy = { path = "../../omnizip-snappy" }
+
+[lints]
+workspace = true

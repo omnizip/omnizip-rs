@@ -15,6 +15,7 @@ members = [
     "tests/benchmarks",
     "tests/conformance",
     "tests/security",
+    "tests/fuzz_smoke",
 ]
 exclude = [
     # Fuzz targets use cargo-fuzz's own build pipeline (no_main, libfuzzer-sys).

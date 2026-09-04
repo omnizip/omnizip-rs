@@ -105,6 +105,9 @@ pub fn decode(input: &[u8]) -> Result<Vec<u8>, &'static str> {
             1 => {
                 // COPY_1: 1-byte offset. Wire stores RAW distance
                 // (high 3 bits in tag, low 8 bits in next byte).
+                if i >= input.len() {
+                    return Err("truncated copy-1 offset");
+                }
                 let len = (usize::from(tag >> 2) & 0b111) + 4;
                 let dist = (usize::from(tag >> 5) << 8) | usize::from(input[i]);
                 i += 1;
@@ -115,6 +118,9 @@ pub fn decode(input: &[u8]) -> Result<Vec<u8>, &'static str> {
             }
             2 => {
                 // COPY_2: 2-byte offset. Wire stores RAW distance LE.
+                if i + 2 > input.len() {
+                    return Err("truncated copy-2 offset");
+                }
                 let len = (usize::from(tag >> 2)) + 1;
                 let dist = usize::from(input[i]) | (usize::from(input[i + 1]) << 8);
                 i += 2;
@@ -125,6 +131,9 @@ pub fn decode(input: &[u8]) -> Result<Vec<u8>, &'static str> {
             }
             3 => {
                 // COPY_4: 4-byte offset. Wire stores RAW distance LE.
+                if i + 4 > input.len() {
+                    return Err("truncated copy-4 offset");
+                }
                 let len = (usize::from(tag >> 2)) + 1;
                 let dist = usize::from(input[i])
                     | (usize::from(input[i + 1]) << 8)

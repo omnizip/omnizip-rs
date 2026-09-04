@@ -1,15 +1,8 @@
-name: Fuzz
-
-# Nightly fuzz run for wire-format safety. Catches panics on malformed
-# input and round-trip bugs that hand-written tests miss.
-#
-# Crash artifacts are uploaded as workflow artifacts; failures open an
-# issue automatically.
+name: fuzz
 
 on:
   schedule:
-    # 04:00 UTC daily
-    - cron: '0 4 * * *'
+    - cron: "17 3 * * *"
   workflow_dispatch:
 
 permissions:
@@ -17,42 +10,30 @@ permissions:
   issues: write
 
 jobs:
-  fuzz:
+  libfuzzer:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [brotli_round_trip, zstd_round_trip, lzma_round_trip, lz4_round_trip, deflate_round_trip, brotli_decode_no_panic, zstd_decode, bzip2_decode, deflate_decode, lz4_decode]
     steps:
       - uses: actions/checkout@v4
-
       - uses: dtolnay/rust-toolchain@nightly
-
-      - name: Install cargo-fuzz
-        run: cargo install cargo-fuzz --locked
-
-      - name: Run fuzz targets (5 min each)
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo install cargo-fuzz --locked
+      - name: Run ${{ matrix.target }}
         working-directory: tests/fuzz
-        env:
-          MAX_TOTAL_TIME: '300'
-        run: |
-          set -e
-          for target in brotli_round_trip zstd_round_trip lzma_round_trip lz4_round_trip deflate_round_trip brotli_decode_no_panic; do
-            echo "::group::Fuzz $target"
-            cargo +nightly fuzz run "$target" -- -max_total_time="${MAX_TOTAL_TIME}" || true
-            echo "::endgroup::"
-          done
-
-      - name: Upload crash artifacts
-        if: always()
-        uses: actions/upload-artifact@v4
+        run: cargo fuzz run ${{ matrix.target }} -- -max_total_time=300 -timeout=10
+      - uses: actions/upload-artifact@v4
+        if: failure()
         with:
-          name: fuzz-artifacts
+          name: crash-${{ matrix.target }}
           path: tests/fuzz/artifacts/
           if-no-files-found: ignore
-          retention-days: 30
-
       - name: Open issue on crash
         if: failure()
         uses: peter-evans/create-issue-from-file@v5
         with:
-          title: 'Nightly fuzz crash: ${{ github.run_id }}'
+          title: 'Nightly fuzz crash: ${{ matrix.target }} (${{ github.run_id }})'
           content-filepath: /tmp/fuzz-report.md
           labels: bug,fuzz
