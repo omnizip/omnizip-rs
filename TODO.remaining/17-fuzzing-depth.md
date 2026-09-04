@@ -30,6 +30,35 @@ mutation gate so every PR exercises malformed-input paths.
    decoders must return errors not panics. Deterministic seeds so
    failures reproduce.
 
+## Results (2026-09-04) — stable gate SHIPPED, 2 decoder bugs found+fixed
+
+The first run of the smoke gate found **16 real panics across THREE decoders** — the exact
+class it exists for:
+
+- `omnizip-zstd` RLE sequence-table mode indexed
+  `bits_table[symbol]` / `base_table[symbol]` without validating the
+  symbol against the table's alphabet (mutated streams can carry any
+  byte); the FSE branch below it guarded correctly. → structured
+  `Corrupt` error.
+- `omnizip-bzip2` RUNA/RUNB run accumulation overflowed u64 on
+  corrupted-table symbol chains (debug panic; garbage decode in
+  release) — now bounded at the legal block budget with a structured
+  error. The unbounded loop was ALSO the gate's runtime sink: the
+  debug run went 128s → 12.8s once bounded.
+- `omnizip-snappy` COPY_1/COPY_2/COPY_4 read 1/2/4 offset bytes with
+  no bounds checks — truncated streams panicked (11 of the 13 cases).
+  → `truncated copy-N offset` errors.
+
+Both fixed; snappy (15) + zstd (187) suites green; the full gate green
+(7 codecs × 4 fixture classes × fast levels × 24 mutations each +
+random inputs). Encode levels kept fast (brotli q1/q5, zstd L1/L6,
+xz -1, deflate 1/6, bzip2 9, lz4 1, snappy) so the gate stays
+CI-cheap — the panic class lives in the decoders, not the tiers.
+
+Also added: decode-no-panic cargo-fuzz targets for zstd/bzip2/
+deflate/lz4 (joining brotli's), and the nightly `fuzz.yml` workflow
+(10 targets × 5 min each, crash artifacts uploaded).
+
 ## Rules
 
 - Crash artifacts root-caused become committed regression tests

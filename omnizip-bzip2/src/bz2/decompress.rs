@@ -268,6 +268,11 @@ pub fn decompress_framed(input: &[u8]) -> Result<Vec<u8>, OmnizipError> {
     }
 }
 
+/// Malformed RUNA/RUNB chain (run length overflowed any legal block).
+fn corrupt_run() -> OmnizipError {
+    err("run-length symbol chain exceeds block budget")
+}
+
 /// RUNA/RUNB + symbol stream → MTF values (RLE2 inverse).
 fn symbols_to_mtf(symbols: &[u16], n_in_use: usize) -> Result<Vec<u8>, OmnizipError> {
     let eob = n_in_use as u16 + 1;
@@ -280,9 +285,14 @@ fn symbols_to_mtf(symbols: &[u16], n_in_use: usize) -> Result<Vec<u8>, OmnizipEr
             let mut bit: u64 = 1;
             while i < symbols.len() && (symbols[i] == RUNA || symbols[i] == RUNB) {
                 if symbols[i] == RUNB {
-                    run += bit << 1;
+                    run = run.checked_add(bit << 1).ok_or(corrupt_run())?;
                 } else {
-                    run += bit;
+                    run = run.checked_add(bit).ok_or(corrupt_run())?;
+                }
+                // A legal run never exceeds the 9 * 100k block budget;
+                // longer RUNA/RUNB chains come from corrupted tables.
+                if bit >= 1 << 40 {
+                    return Err(corrupt_run());
                 }
                 bit <<= 1;
                 i += 1;

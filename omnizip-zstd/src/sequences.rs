@@ -299,6 +299,14 @@ fn get_table(
             }
             let symbol = cursor[0];
             *cursor = &cursor[1..];
+            // The symbol selects a code from the caller's table
+            // (literals/offsets/match-lengths have different
+            // alphabets); a mutated stream can carry any byte.
+            if symbol as usize >= base_table.len() || symbol as usize >= bits_table.len() {
+                return Err(ZstdError::Corrupt {
+                    reason: format!("RLE mode: symbol {symbol} out of range"),
+                });
+            }
             SeqTable::Rle(PredefEntry {
                 next_state: 0,
                 nb_add_bits: bits_table[symbol as usize],

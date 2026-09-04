@@ -32,12 +32,29 @@ path = "targets/deflate_round_trip.rs"
 name = "brotli_decode_no_panic"
 path = "targets/brotli_decode_no_panic.rs"
 
+[[bin]]
+name = "zstd_decode"
+path = "targets/zstd_decode.rs"
+
+[[bin]]
+name = "bzip2_decode"
+path = "targets/bzip2_decode.rs"
+
+[[bin]]
+name = "deflate_decode"
+path = "targets/deflate_decode.rs"
+
+[[bin]]
+name = "lz4_decode"
+path = "targets/lz4_decode.rs"
+
 [dependencies]
 omnizip-codecs = { path = "../../omnizip-codecs" }
 omnizip-brotli = { path = "../../omnizip-brotli" }
 omnizip-zstd = { path = "../../omnizip-zstd" }
 omnizip-lzma = { path = "../../omnizip-lzma" }
 omnizip-lz4 = { path = "../../omnizip-lz4" }
+omnizip-bzip2 = { path = "../../omnizip-bzip2" }
 omnizip-deflate = { path = "../../omnizip-deflate" }
 
 # cargo-fuzz / libfuzzer integration. The fuzz! macro requires this.
