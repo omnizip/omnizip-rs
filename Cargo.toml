@@ -25,7 +25,7 @@ exclude = [
 resolver = "2"
 
 [workspace.package]
-version = "0.21.55"
+version = "0.21.56"
 edition = "2021"
 rust-version = "1.75"
 license = "MIT OR Apache-2.0"
@@ -43,11 +43,11 @@ unsafe_code = "forbid"
 [workspace.lints.clippy]
 
 [workspace.dependencies]
-omnizip-codecs = { path = "omnizip-codecs", version = "0.21.55" }
-omnizip-lzma = { path = "omnizip-lzma", version = "0.21.55" }
-omnizip-zstd = { path = "omnizip-zstd", version = "0.21.55" }
-omnizip-lz4 = { path = "omnizip-lz4", version = "0.21.55" }
-omnizip-crypto = { path = "omnizip-crypto", version = "0.21.55" }
+omnizip-codecs = { path = "omnizip-codecs", version = "0.21.56" }
+omnizip-lzma = { path = "omnizip-lzma", version = "0.21.56" }
+omnizip-zstd = { path = "omnizip-zstd", version = "0.21.56" }
+omnizip-lz4 = { path = "omnizip-lz4", version = "0.21.56" }
+omnizip-crypto = { path = "omnizip-crypto", version = "0.21.56" }
 # Dev-only: used for cross-compat tests, not in the hot path.
 lz4_flex = { version = "0.11", default-features = false, features = ["std", "frame"] }
 snap = "1.1"
