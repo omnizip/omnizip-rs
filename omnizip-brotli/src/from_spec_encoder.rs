@@ -546,21 +546,25 @@ pub fn compress_with_quality(input: &[u8], quality: i32) -> Vec<u8> {
         // worker count (fixed chunk boundaries, results assembled in
         // chunk order). BROTLI_NO_MT restores the sequential path.
         #[cfg(not(target_arch = "wasm32"))]
-        let chunk_count = input.len().div_ceil(chunk_size);
-        // q9 extends the gate when EVERY chunk classifies as text:
-        // text chunks route to the zopfli DP at q9 (never the
-        // bank-driven greedy tier), so only the chain MF crosses
-        // chunk boundaries. The all-chunks guard covers
-        // mixed-classification inputs — one non-text chunk would take
-        // the greedy path and consume the bank the sequential encoder
-        // provides but the MT workers do not.
-        let mt_eligible = q >= 10
-            || (q == 9
-                && (0..chunk_count).all(|i| {
-                    let start = i * chunk_size;
-                    let end = (start + chunk_size).min(input.len());
-                    crate::encoder::context::is_text_like(&input[start..end])
-                }));
+        let (chunk_count, mt_eligible) = {
+            // q9 extends the gate when EVERY chunk classifies as text:
+            // text chunks route to the zopfli DP at q9 (never the
+            // bank-driven greedy tier), so only the chain MF crosses
+            // chunk boundaries. The all-chunks guard covers
+            // mixed-classification inputs — one non-text chunk would
+            // take the greedy path and consume the bank the
+            // sequential encoder provides but the MT workers do not.
+            let chunk_count = input.len().div_ceil(chunk_size);
+            let mt_eligible = q >= 10
+                || (q == 9
+                    && (0..chunk_count).all(|i| {
+                        let start = i * chunk_size;
+                        let end = (start + chunk_size).min(input.len());
+                        crate::encoder::context::is_text_like(&input[start..end])
+                    }));
+            (chunk_count, mt_eligible)
+        };
+        #[cfg(not(target_arch = "wasm32"))]
         if mt_eligible && !env_flag!("BROTLI_NO_MT") && input.len() > chunk_size {
             let workers = std::thread::available_parallelism()
                 .map_or(1, std::num::NonZeroUsize::get)
