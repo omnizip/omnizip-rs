@@ -40,9 +40,9 @@ user-time ratios — re-measure quietly before citing)
   content, q11) all IDENTICAL to `BROTLI_NO_MT=1`, all REF-OK; the
   priming equivalence is unit-tested
   (`primed_finder_searches_like_sequential`).
-- csv21m q10/q11 full-size identity still running at merge time
-  (30+ CPU-minute cells on the loaded box); the 3-chunk csv5m cell
-  covers the same code path.
+- csv21m q10 (1,399,630B) and q11 (1,571,693B) full-size identity
+  CONFIRMED later the same day: IDENTICAL + REF-OK. Every scale
+  tested is byte-identical; no caveats remain.
 - Remaining in this task: zstd `compress_mt`, q4-9 bank-tier MT
   (needs `BankMatchFinder` priming analysis), q9-text 28-56x
   single-thread gap.
