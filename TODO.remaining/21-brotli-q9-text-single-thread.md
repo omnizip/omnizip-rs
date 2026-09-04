@@ -3,7 +3,7 @@
 - **Priority:** MEDIUM (the largest remaining single-thread cell)
 - **Depends on:** [13](13-encode-speed-parallelism.md)
 - **Estimated effort:** open-ended — diagnosis first
-- **Status:** pending 2026-09-04
+- **Status:** mitigated 2026-09-04 — MT extended to q9-text; single-chunk levers deferred
 
 ## Standing (2026-09-04 fresh table, task 13)
 
@@ -39,3 +39,22 @@ ours pays the full 2-pass HQ DP.
 
 - q9-text ≤1.3x reference on the corpus (or a documented trade
   ratified by the ratio gate), with the decision recorded here.
+
+
+## Resolution (2026-09-04)
+
+The q9-text DP routing is a deliberate ratio-over-time trade (our q9
+beats reference sizes on every text cell — rustsrc 338K vs ref 341K
+at the time of routing; greedy there lost 13-72KB). The standing
+28-56x cells are all SINGLE-chunk inputs (rustsrc 2.06MB, csv2m
+1.5MB) where multi-threading cannot help.
+
+Mitigation shipped: the byte-identical MT gate now covers q9 when
+every chunk classifies as text (text chunks never route to the
+bank-driven greedy tier; an all-chunks guard handles
+mixed-classification inputs) — validated IDENTICAL on words q9.
+Multi-chunk q9 text (>= 2MiB) now parallelizes like q10-11.
+
+Deferred: single-chunk levers (fewer refinement iterations, candidate
+shape, the reference's lazy+HQ-hasher port) remain unmeasured; any
+change must clear the ratio gate on all fixture classes.

@@ -3,7 +3,7 @@
 - **Priority:** HIGH (the largest remaining practical gap for LimniFS)
 - **Depends on:** nothing open; extends [TODO.omnizip-rs 33](../TODO.omnizip-rs/33-multi-threaded-encoding.md)
 - **Estimated effort:** 1 week
-- **Status:** in_progress 2026-09-04
+- **Status:** closed 2026-09-04 (see 19/20/21; q9-text MT extension shipped)
 
 ## Fresh time table (2026-09-04, shared box, load 8-14, best-of-3
 user-time ratios — re-measure quietly before citing)
