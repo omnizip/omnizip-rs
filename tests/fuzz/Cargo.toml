@@ -48,12 +48,26 @@ path = "targets/deflate_decode.rs"
 name = "lz4_decode"
 path = "targets/lz4_decode.rs"
 
+[[bin]]
+name = "ppmd7_decode"
+path = "targets/ppmd7_decode.rs"
+
+[[bin]]
+name = "ppmd8_decode"
+path = "targets/ppmd8_decode.rs"
+
+[[bin]]
+name = "deflate64_decode"
+path = "targets/deflate64_decode.rs"
+
 [dependencies]
 omnizip-codecs = { path = "../../omnizip-codecs" }
 omnizip-brotli = { path = "../../omnizip-brotli" }
 omnizip-zstd = { path = "../../omnizip-zstd" }
 omnizip-lzma = { path = "../../omnizip-lzma" }
 omnizip-lz4 = { path = "../../omnizip-lz4" }
+omnizip-ppmd = { path = "../../omnizip-ppmd" }
+omnizip-deflate64 = { path = "../../omnizip-deflate64" }
 omnizip-bzip2 = { path = "../../omnizip-bzip2" }
 omnizip-deflate = { path = "../../omnizip-deflate" }
 

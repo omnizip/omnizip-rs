@@ -15,7 +15,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [brotli_round_trip, zstd_round_trip, lzma_round_trip, lz4_round_trip, deflate_round_trip, brotli_decode_no_panic, zstd_decode, bzip2_decode, deflate_decode, lz4_decode]
+        target: [brotli_round_trip, zstd_round_trip, lzma_round_trip, lz4_round_trip, deflate_round_trip, brotli_decode_no_panic, zstd_decode, bzip2_decode, deflate_decode, lz4_decode, ppmd7_decode, ppmd8_decode, deflate64_decode]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@nightly

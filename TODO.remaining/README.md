@@ -15,7 +15,7 @@ MECE decomposition of all remaining work. Each task is self-contained.
 | 07 | CONTEXT.md domain glossary creation | done 2026-08-29 | LOW |
 | 08 | Architecture: emission module extraction (from_spec_encoder.rs 8855 lines) | done 2026-08-30 | LOW |
 | 09 | Zstd L1/L2 fast-tier residual cells (documented, not blocking) | deferred | LOW |
-| 10 | Zstd L18-22 periodic-CSV cells (1.15-1.19x) | deferred — re-diagnosed 2026-08-30 | LOW |
+| 10 | Zstd L18-22 periodic-CSV cells (1.15-1.19x) | closed 2026-09-04 — stale-generator artifact | LOW |
 | 11 | Deflate level tiers (zlib configuration_table parity) | done 2026-08-29 | HIGH |
 | 12 | LZ4 fast-tier ratio on low-redundancy data | done 2026-08-29 | HIGH |
 | 13 | Encode speed — fresh measurement + deterministic MT | closed 2026-09-04 | HIGH |
@@ -27,7 +27,7 @@ MECE decomposition of all remaining work. Each task is self-contained.
 | 19 | zstd multi-threaded compress (`compress_mt`) | done 2026-09-04 | HIGH |
 | 20 | brotli q4-9 bank-tier multi-threading | closed — infeasible byte-identical | MEDIUM |
 | 21 | brotli q9-text single-thread gap (28-56x) | mitigated 2026-09-04 | MEDIUM |
-| 22 | Extend fuzz coverage to the remaining decoders | pending 2026-09-04 | MEDIUM |
+| 22 | Extend fuzz coverage to the remaining decoders | done 2026-09-04 | MEDIUM |
 
 ## Principles
 

@@ -15,8 +15,12 @@ pub const MAX_MATCH_LENGTH: usize = 258;
 /// Minimum match length — shorter matches are emitted as literals.
 pub const MIN_MATCH_LENGTH: usize = 3;
 
-/// Maximum match distance (= window size - 1).
-pub const MAX_DISTANCE: usize = DICTIONARY_SIZE - 1;
+/// Maximum match distance. The distance table encodes up to 32 768
+/// (code 29 = 24 577 + 13 extra bits); the Deflate64 64K extension is
+/// not representable in the current table, so the tokenizer is capped
+/// to the encodable range rather than emitting tokens that silently
+/// decode to the wrong distance.
+pub const MAX_DISTANCE: usize = 32_768;
 
 /// Number of literal/length codes (0..285).
 pub const LITERAL_CODES: usize = 286;
