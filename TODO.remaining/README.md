@@ -21,7 +21,7 @@ MECE decomposition of all remaining work. Each task is self-contained.
 | 13 | Encode speed — fresh measurement + deterministic MT | in_progress 2026-09-04 | HIGH |
 | 14 | RAR4 archive format — verification + closure (already shipped; stale-index fix) | done 2026-09-04 | MEDIUM |
 | 15 | Real-world content-class conformance pass | pending 2026-09-04 | MEDIUM |
-| 16 | LZMA residual cells — re-measure + close | pending 2026-09-04 | MEDIUM |
+| 16 | LZMA residual cells — re-measure + close | done 2026-09-04 | MEDIUM |
 | 17 | Fuzzing depth (TODO.omnizip-rs 31) | pending 2026-09-04 | MEDIUM |
 | 18 | q11 collect-level dictionary candidates (activation needs dict-aware DP) | pending 2026-09-04 | LOW |
 | 19 | zstd multi-threaded compress (`compress_mt`) | done 2026-09-04 | HIGH |
