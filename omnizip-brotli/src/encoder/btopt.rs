@@ -155,7 +155,7 @@ fn ctx_literal_costs(input: &[u8]) -> Vec<f32> {
 /// below 16 (the `zopfli_collect` gate): the LUT probe is ~30% of
 /// parse time when run at every position, and a position already
 /// covered by a long match rarely prefers a dict word.
-fn build_dict_at(
+pub(crate) fn build_dict_at(
     input: &[u8],
     mlen_offset: usize,
     offsets: &[u32],

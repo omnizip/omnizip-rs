@@ -2,7 +2,7 @@
 
 - **Priority:** LOW (measured gain so far: 0.005–0.07%)
 - **Depends on:** nothing open
-- **Status:** pending 2026-09-04 (opened from the 0.21.49 debug-panic fix)
+- **Status:** done 2026-09-05 — implemented, measured, shipped env-gated default-OFF
 
 ## Background
 
@@ -58,3 +58,33 @@ With the base corrected to `min(mlen_offset + i, MAX_BACKWARD)`
   `BROTLI_DICT_CHAIN` depth.
 - Net ratio win across the corpus (not just single files).
 - Debug + release tests green.
+
+
+## Resolution (2026-09-05) — implemented via dict-aware DP; env-gated OFF
+
+The design sketch above is now real code, validated end-to-end:
+
+- `build_dict_at` (btopt's lookup-validated builder) is shared into
+  `parse_hq_with` (mlen_offset threaded through); the DP relaxes each
+  position's candidate as a `CODE_DICT_SHORT` (17) node — length-
+  preserving only, priced at the exact top-bucket wire shape
+  (`long_dist_symbol(d)` + 24 extra bits).
+- `compute_distance_cache` never pushes dictionary distances (the
+  PR #465 root cause), so rep relaxation cannot treat them as
+  in-window sources. The backtrack's existing `len_code`-vs-`copy_len`
+  Command shape is exact for tl == wl.
+- Gate: reference rule — candidates only where the position's best
+  match is below 4 bytes.
+
+**Measured (with the gate, ungated by `BROTLI_Q11_DICT=1`):**
+words −41, rustsrc −63, arial −422, five cells flat, all REF-OK,
+deterministic, MT-identical — but the real-corpus `plists.json` cell
+**+373** (per-transition pricing cannot predict total-emission
+tree-shape shifts; the contest guards hq-vs-btopt, not new-vs-old).
+Net ≈ 0.01% across the corpus.
+
+**Shipped default OFF** (`BROTLI_Q11_DICT=1` restores; the
+`BROTLI_MID_DICT` precedent): default output stays byte-identical to
+main on every cell. The always-on variant needs a third
+exact-emission contest candidate (hq-with-dict vs hq-without) at
+~+40% q11 cost — documented here if the ratio ever matters.
