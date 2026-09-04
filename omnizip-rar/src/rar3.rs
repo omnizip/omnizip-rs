@@ -403,7 +403,15 @@ fn find_signature(data: &[u8], from: usize) -> Option<usize> {
     (from..=limit).find(|&i| data.get(i..i + MAGIC_RAR4.len()) == Some(&MAGIC_RAR4[..]))
 }
 
-fn scan_volume_set(first: &Path) -> Vec<std::path::PathBuf> {
+/// Find all parts of a RAR volume set starting at `first`.
+///
+/// Recognizes `.partNN.rar` numbering (any zero padding), the
+/// `name.rar` + `name.rNN` sibling scheme, and the old two-letter
+/// `base-aa`/`base-ab` suffix naming. Returns at least `[first]`.
+///
+/// Public so the `ozip` CLI can concatenate parts itself (it needs the
+/// bytes, not a reader, to keep the password wiring in one place).
+pub fn scan_volume_set(first: &Path) -> Vec<std::path::PathBuf> {
     let mut parts = vec![first.to_path_buf()];
     let name = first
         .file_name()

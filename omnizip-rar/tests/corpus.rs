@@ -112,6 +112,27 @@ fn multivolume_sets_decode_fully() {
             );
         }
     }
+    for first in [
+        "test_rar_multivolume_multiple_files.part1.rar",
+        "test_rar_multivolume_single_file.part1.rar",
+        "test_rar_multivolume_uncompressed_files.part01.rar",
+        "test_read_format_rar_multivolume.part0001.rar",
+    ] {
+        let mut r = Rar4Reader::open_volume_set(&root.join("rar4").join(first)).unwrap();
+        let entries = r.entries().unwrap();
+        assert!(!entries.is_empty());
+        for (i, entry) in entries.iter().enumerate() {
+            let name = entry.name.clone();
+            let data = r
+                .read_entry(i)
+                .unwrap_or_else(|e| panic!("{first}: {name}: {e}"));
+            assert_eq!(
+                data.len() as u64,
+                entry.size.unwrap_or(0),
+                "{first}: {name}"
+            );
+        }
+    }
 }
 
 #[test]

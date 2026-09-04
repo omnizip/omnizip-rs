@@ -481,6 +481,25 @@ fn open_archive(archive: &Path, password: Option<&str>) -> Result<Opened, String
         }
         return open_bytes(&data, password);
     }
+    // RAR volume sets (.partNN.rar numbering, or name.rar + name.rNN
+    // siblings): concatenate the parts and open the concatenation —
+    // RAR4 and RAR5 volume data are both plain byte splits.
+    let rar_set = (name.contains(".part") && name.ends_with(".rar"))
+        || (name.ends_with(".rar") && {
+            let stem = &name[..name.len() - 4];
+            archive.with_file_name(format!("{stem}.r00")).exists()
+        });
+    if rar_set {
+        let parts = omnizip_rar::scan_volume_set(archive);
+        let mut data =
+            std::fs::read(&parts[0]).map_err(|e| format!("{}: {e}", parts[0].display()))?;
+        for part in &parts[1..] {
+            data.extend_from_slice(
+                &std::fs::read(part).map_err(|e| format!("{}: {e}", part.display()))?,
+            );
+        }
+        return open_bytes(&data, password);
+    }
     let data = std::fs::read(archive).map_err(|e| format!("{}: {e}", archive.display()))?;
     open_bytes(&data, password)
 }

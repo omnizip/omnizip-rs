@@ -21,6 +21,8 @@ pub const MAGIC_RAR4: [u8; 7] = [0x52, 0x61, 0x72, 0x21, 0x1A, 0x07, 0x00];
 /// RAR5 signature: `Rar!\x1A\x07\x01\x00`.
 pub const MAGIC_RAR5: [u8; 8] = [0x52, 0x61, 0x72, 0x21, 0x1A, 0x07, 0x01, 0x00];
 
+pub use rar3::scan_volume_set;
+
 /// RAR5 block types.
 pub mod rar5_block {
     pub const MAIN: u64 = 1;

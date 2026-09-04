@@ -16,6 +16,13 @@ MECE decomposition of all remaining work. Each task is self-contained.
 | 08 | Architecture: emission module extraction (from_spec_encoder.rs 8855 lines) | done 2026-08-30 | LOW |
 | 09 | Zstd L1/L2 fast-tier residual cells (documented, not blocking) | deferred | LOW |
 | 10 | Zstd L18-22 periodic-CSV cells (1.15-1.19x) | deferred — re-diagnosed 2026-08-30 | LOW |
+| 11 | Deflate level tiers (zlib configuration_table parity) | done 2026-08-29 | HIGH |
+| 12 | LZ4 fast-tier ratio on low-redundancy data | done 2026-08-29 | HIGH |
+| 13 | Encode speed — fresh measurement + deterministic MT | in_progress 2026-09-04 | HIGH |
+| 14 | RAR4 archive format — verification + closure (already shipped; stale-index fix) | done 2026-09-04 | MEDIUM |
+| 15 | Real-world content-class conformance pass | pending 2026-09-04 | MEDIUM |
+| 16 | LZMA residual cells — re-measure + close | pending 2026-09-04 | MEDIUM |
+| 17 | Fuzzing depth (TODO.omnizip-rs 31) | pending 2026-09-04 | MEDIUM |
 | 18 | q11 collect-level dictionary candidates (activation needs dict-aware DP) | pending 2026-09-04 | LOW |
 
 ## Principles
