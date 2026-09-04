@@ -187,6 +187,23 @@ fn no_decoder_panics_on_malformed_input() {
     all.extend(gate("bzip2", &omnizip_bzip2::Bzip2Codec, &[1, 9], 16));
     all.extend(gate("lz4", &omnizip_lz4::Lz4FastCodec, &[1, 9], 16));
     all.extend(gate("snappy", &omnizip_snappy::SnappyCodec, &[1], 24));
+    // Container-reachable and remaining decoders (task 22). The
+    // statistical/slow codecs (zpaq, glza, ppmd) get fewer cases —
+    // their encoders dominate the gate's runtime.
+    all.extend(gate("ppmd7", &omnizip_ppmd::Ppmd7Codec, &[1], 8));
+    all.extend(gate("ppmd8", &omnizip_ppmd::Ppmd8Codec, &[1], 8));
+    all.extend(gate(
+        "deflate64",
+        &omnizip_deflate64::Deflate64Codec,
+        &[1, 6],
+        16,
+    ));
+    all.extend(gate("flac", &omnizip_flac::FlacCodec, &[1], 8));
+    all.extend(gate("fsst", &omnizip_fsst::FsstCodec, &[1], 16));
+    all.extend(gate("glza", &omnizip_glza::GlzaCodec, &[1], 8));
+    all.extend(gate("zpaq", &omnizip_zpaq::ZpaqCodec, &[1], 4));
+    all.extend(gate("ricepp", &omnizip_ricepp::RiceppCodec::new(), &[1], 8));
+    all.extend(gate("blosc", &omnizip_blosc::BloscCodec, &[1], 16));
     assert!(
         all.is_empty(),
         "decoders panicked on {} malformed inputs:\n{}",

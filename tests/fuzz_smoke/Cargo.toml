@@ -16,6 +16,14 @@ omnizip-deflate = { path = "../../omnizip-deflate" }
 omnizip-bzip2 = { path = "../../omnizip-bzip2" }
 omnizip-lz4 = { path = "../../omnizip-lz4" }
 omnizip-snappy = { path = "../../omnizip-snappy" }
+omnizip-ppmd = { path = "../../omnizip-ppmd" }
+omnizip-deflate64 = { path = "../../omnizip-deflate64" }
+omnizip-flac = { path = "../../omnizip-flac" }
+omnizip-fsst = { path = "../../omnizip-fsst" }
+omnizip-glza = { path = "../../omnizip-glza" }
+omnizip-zpaq = { path = "../../omnizip-zpaq" }
+omnizip-ricepp = { path = "../../omnizip-ricepp" }
+omnizip-blosc = { path = "../../omnizip-blosc" }
 
 [lints]
 workspace = true

@@ -141,3 +141,12 @@ policies), or (b) the price model rejects it (short-ml-at-offset-cost
 pricing). (a) is the likelier and the more tractable; instrument
 OMNIZIP-style dumps of insert_and_get_all_matches at a fixed position
 and compare against the C's list shape.
+
+
+## Closed 2026-09-04 — generator artifact
+
+The 1.15-1.19x cells were measured on the hand-rolled synthetic csv2m
+fixture. The exact in-tree-generator csv2m sweep (baseline.txt,
+2026-09-03) shows zstd q19 at **0.925x** (152,845 vs ref 165,209 —
+BEATS). Closed per the "always regenerate corpus fixtures from
+in-tree generators" lesson.

@@ -84,9 +84,16 @@ const DISTANCE_TABLE: [(u32, u8); 30] = [
     (8193, 12),
     (12_289, 12),
     (16_385, 13),
-    // Deflate64 extension: code 29 carries 13 extra bits, extending the
-    // range to 16 385 + (1 << 13) - 1 = 65 536 — the full 64 KB window.
-    (32_769, 13),
+    // Code 29 = base 24 577 + 13 extra bits (24 577..32 768), matching
+    // the Ruby reference's decoder table. The previous entry
+    // (32_769, 13) left distances 24 577..32 768 with no bucket — the
+    // encoder underflowed on them (debug panic; silent wrong-distance
+    // emission in release). The Ruby ENCODE side also maps
+    // 32 769..65 536 to code 29, which needs more than 13 extra bits
+    // and cannot be represented; until the Deflate64 64K extension is
+    // verified against a reference extractor, the tokenizer is capped
+    // at 32 768 (see MAX_DISTANCE) so no unencodable token is built.
+    (24_577, 13),
 ];
 
 /// Decompose a match length into `(code, extra_value, extra_bits)`.
