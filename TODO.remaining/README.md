@@ -16,6 +16,7 @@ MECE decomposition of all remaining work. Each task is self-contained.
 | 08 | Architecture: emission module extraction (from_spec_encoder.rs 8855 lines) | done 2026-08-30 | LOW |
 | 09 | Zstd L1/L2 fast-tier residual cells (documented, not blocking) | deferred | LOW |
 | 10 | Zstd L18-22 periodic-CSV cells (1.15-1.19x) | deferred — re-diagnosed 2026-08-30 | LOW |
+| 18 | q11 collect-level dictionary candidates (activation needs dict-aware DP) | pending 2026-09-04 | LOW |
 
 ## Principles
 
