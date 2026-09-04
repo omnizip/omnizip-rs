@@ -41,6 +41,33 @@ hand-roll generators — reuse in-tree generators where they exist.
 3. Distinguish content-class gaps from generator artifacts FIRST
    (the lesson of 2026-09-03).
 
+## Results (2026-09-04) — task CLOSED
+
+Nine real content classes at `~/sweep-corpus/real/` with
+`MANIFEST.txt` (provenance + sha256): SVG vectors, macOS install log,
+Mach-O executables, OTF/CFF fonts, JPEG photo, plist-export JSON,
+compiler .rlib archives, SQLite engine output, asset PDFs. 63 cells
+(brotli q1/5/9/11 + zstd L1/6/19 per file); raw table appended to
+`~/sweep-corpus/baseline.txt`.
+
+- q1/L1 beats the reference on EVERY class (0.76–0.99) — the
+  from-spec q1 + fast-tier routing holds on real content.
+- zstd L6 beats on EVERY class (0.91–0.999).
+- brotli q5/q9 beat or tie on 8/9 classes (rlibs 1.035–1.038 the
+  exception, the known mixed-binary q5 family).
+- Cells >1.05x, all inside documented residual families (no new
+  bug class found):
+  - `plists.json` brotli q11 1.0995 — q11 contest tier on repetitive
+    structured JSON (same family as bin1 q11 1.048, task-18-class
+    parse-shape gap);
+  - `noto-otf.bin` zstd L1 1.0590 — fast tier on OTF (the deferred
+    task-09 L1/L2 residual family);
+  - `photo.jpg` brotli q11 1.0587 — 17 KB near-incompressible file,
+    model-overhead scale class.
+
+Verdict: no actionable new gap; the corpus becomes a standing
+regression class for future sweeps.
+
 ## Acceptance
 
 - ≥8 real-world content classes swept, manifest recorded.
