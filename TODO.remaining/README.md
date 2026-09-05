@@ -26,7 +26,7 @@ MECE decomposition of all remaining work. Each task is self-contained.
 | 18 | q11 dict candidates via dict-aware DP | done 2026-09-05 — env-gated OFF (measured net ~0.01%) | LOW |
 | 23 | Deflate64 interop probe | done 2026-09-05 — NOT interoperable (7zz oracle) | HIGH |
 | 24 | Deflate64 wire-true port | done 2026-09-05 — bidirectional 7zz interop | MEDIUM |
-| 25 | zstd fast-tier real-corpus cells (task 09 re-open) | closed 2026-09-05 — root-caused, lever at block.rs:448 | LOW |
+| 25 | zstd fast-tier real-corpus cells (task 09 re-open) | FIXED 2026-09-05 — cparams size tiering ported | LOW |
 | 19 | zstd multi-threaded compress (`compress_mt`) | done 2026-09-04 | HIGH |
 | 20 | brotli q4-9 bank-tier multi-threading | closed — infeasible byte-identical | MEDIUM |
 | 21 | brotli q9-text single-thread gap (28-56x) | mitigated 2026-09-04 | MEDIUM |

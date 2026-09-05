@@ -126,7 +126,7 @@ impl ZstdCompressor {
     /// Returns [`ZstdError::Corrupt`] on internal encoder failures.
     pub fn compress(&mut self, input: &[u8], level: ZstdLevel) -> Result<Vec<u8>, ZstdError> {
         let level_u8 = level.as_reference_level();
-        let mut params = crate::encoder::cparams::get_params(level_u8);
+        let mut params = crate::encoder::cparams::get_params_for(level_u8, input.len());
         params.hash_log =
             crate::encoder::block::cap_hash_log_for_input(params.hash_log, input.len());
 

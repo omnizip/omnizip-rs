@@ -56,3 +56,34 @@ literals it replaces are cheap, like zstd's fast-strategy quality
 check) should move toward the reference's parse shape; EVERY L1/L2
 cell must be swept before changing the default (current corpus: L1
 0.99-1.00 everywhere except fonts 1.059 and fits 1.015).
+
+
+## FIX SHIPPED (2026-09-05, same day) — the real root cause was the
+## cparams SIZE TIERING, not an accept bar
+
+The lever documented above (an accept bar) was a WRONG diagnosis —
+an artifact of summing the wrong SEQ_DUMP column in the first
+decomposition. Corrected profiling showed ours finding FEWER matches
+and 9.5K MORE literals than the reference, with 577 short matches at
+NEW offsets vs our 1 — structurally impossible for a 7-byte hash.
+
+Actual root cause: our cparams ported only the `>256 KB` row of
+`clevels.h`, while the reference selects among FOUR tables by input
+size (`tableID = (r<=256K) + (r<=128K) + (r<=16K)`). At ≤256 KB the
+reference runs L1 with minMatch 6 and L2 as DOUBLE-fast with
+minMatch 5.
+
+Fix: all four tables ported verbatim + tier selection in
+`get_params_for(level, src_size)`, threaded through every encode
+entry point. Results (ours/ref):
+
+- noto-otf L1 1.0590 → **1.0002**; L2 1.0589 → **0.9675 (beats)**
+- rfc.txt L1 1.021 → **0.9999**; plists L1 0.977 (held)
+- Full 10-file corpus: every cell ≤1.015, none regressed (the
+  >256 KB tier is byte-identical by construction).
+- Reference-decode OK on all changed streams; regression gate green
+  without baseline churn; tier unit tests committed.
+
+Task 25 CLOSED — with the standing lesson: verify a diagnostic
+decomposition's column semantics before designing a fix from it
+(the first accept-bar theory came from summed positions).
