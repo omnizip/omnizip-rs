@@ -111,7 +111,7 @@ pub fn cap_hash_log_for_input(hash_log: u32, input_len: usize) -> u32 {
 ///
 /// Returns [`ZstdError::Corrupt`] on internal failures.
 pub fn encode_frame_compressed(plaintext: &[u8], level: u8) -> Result<Vec<u8>, ZstdError> {
-    let mut params = crate::encoder::cparams::get_params(level);
+    let mut params = crate::encoder::cparams::get_params_for(level, plaintext.len());
     params.hash_log = cap_hash_log_for_input(params.hash_log, plaintext.len());
     let mut out = Vec::with_capacity(plaintext.len() / 2 + 64);
     let mut match_state = MatchState::new(params.hash_log);
@@ -383,7 +383,8 @@ pub fn encode_frame_with_dict(
     };
 
     let dict_content = dict.content();
-    let mut params = crate::encoder::cparams::get_params(level);
+    let mut params =
+        crate::encoder::cparams::get_params_for(level, dict_content.len() + plaintext.len());
     params.hash_log = cap_hash_log_for_input(params.hash_log, dict_content.len() + plaintext.len());
 
     // Virtual stream: dict_content ++ plaintext. Match positions are
