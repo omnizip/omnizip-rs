@@ -4,7 +4,7 @@
   stores content-addressed data, not foreign zipx, but the crate
   ADVERTISES the format)
 - **Depends on:** [23](23-deflate64-64k-probe.md) (oracle method)
-- **Status:** decoder SHIPPED 2026-09-05; encoder remains
+- **Status:** done 2026-09-05 — full bidirectional wire interop
 
 ## Goal
 
@@ -85,3 +85,24 @@ Emit wire blocks (stored/fixed/dynamic + the d64 code ranges) in
 place of the legacy container, acceptance = `7zz x` on our archives.
 Until then our method-9 output stays legacy-readable-only (wire
 streams from real tools decode fine).
+
+
+## Encoder half — SHIPPED (same PR follow-up)
+
+`compress` now emits a real final dynamic Deflate64 block: package-
+merge length-limited canonical trees, standard RLE code-length coding,
+and d64-correct length mapping (code 285 = base 227 + 16 extra bits —
+the legacy "285 = fixed 258" is STANDARD deflate and decodes as 227
+in a d64 reader). `decompress` routes WIRE-FIRST: legacy-first proved
+unsafe — a wire stream's leading bytes can satisfy the legacy
+container's weak length checks and decode to plausible-length
+garbage.
+
+Acceptance (the full battery, both directions):
+
+- 7zz-written archives decode byte-identically (seven shapes).
+- OUR method-9 archives extract byte-identically through `7zz x`
+  (seven shapes incl. 70 KB-distance content and the empty
+  EOB-only-tree case).
+
+Task 24 CLOSED. Wire-format Deflate64 both ways.

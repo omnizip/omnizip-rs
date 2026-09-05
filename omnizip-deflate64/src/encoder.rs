@@ -49,6 +49,11 @@ impl Encoder {
     }
 
     /// LZ77 match finding — port of `LZ77Encoder#find_matches`.
+    /// Tokenize for the wire encoder (public within the crate).
+    pub(crate) fn tokenize(&self, data: &[u8]) -> Vec<Token> {
+        self.find_matches(data)
+    }
+
     fn find_matches(&self, data: &[u8]) -> Vec<Token> {
         let mut tokens = Vec::new();
         // Hash chain: `head[hash]` = most recent position with that hash;

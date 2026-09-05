@@ -68,8 +68,11 @@ impl Codec for Deflate64Codec {
             });
         }
         let enc = encoder::Encoder::new();
-        let encoded = enc.encode(plaintext);
-        Ok(container::pack(&encoded))
+        // Wire emission (task 24): real Deflate64 dynamic block that
+        // any reference tool extracts. The legacy container's own
+        // streams remain readable via the decompress fallback.
+        let tokens = enc.tokenize(plaintext);
+        Ok(wire::deflate64_compress(plaintext, &tokens))
     }
     fn decompress(&self, compressed: &[u8], expected_len: u32) -> Result<Vec<u8>, OmnizipError> {
         let expected_us = usize::try_from(expected_len).map_err(|_| OmnizipError::Corrupt {
@@ -82,16 +85,28 @@ impl Codec for Deflate64Codec {
         // wire layer existed. A real wire stream cannot parse as the
         // container (its BE32 length fields never match), and a
         // legacy stream fails wire decoding structurally.
-        let legacy = container::unpack(compressed).and_then(|(l, d, b)| {
-            decoder::Decoder::decode(&l, &d, b, expected_us)
-                .map_err(|_| "legacy decode failed".to_string())
-        });
-        match legacy {
+        // Wire-first: a real Deflate64 stream parses structurally,
+        // and the legacy container's BE32 length prefix fails wire
+        // decoding fast (stored-block LEN/NLEN mismatch). Legacy-first
+        // routing proved UNSAFE: a wire stream's leading bytes can
+        // satisfy the container's weak length checks and decode to
+        // plausible-length garbage.
+        match wire::inflate64(compressed) {
             Ok(out) => Ok(out),
-            Err(_) => wire::inflate64(compressed).map_err(|reason| OmnizipError::Corrupt {
-                codec: CodecId::DEFLATE64,
-                reason,
-            }),
+            Err(reason) => {
+                let _ = &reason;
+                let (lit_table, dist_table, bitstream) =
+                    container::unpack(compressed).map_err(|_| OmnizipError::Corrupt {
+                        codec: CodecId::DEFLATE64,
+                        reason,
+                    })?;
+                decoder::Decoder::decode(&lit_table, &dist_table, bitstream, expected_us).map_err(
+                    |e| OmnizipError::DecodeFailed {
+                        codec: CodecId::DEFLATE64,
+                        reason: format!("{e:?}"),
+                    },
+                )
+            }
         }
     }
 }
