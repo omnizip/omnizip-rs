@@ -282,3 +282,279 @@ fn copy_overlap(out: &mut Vec<u8>, distance: usize, length: usize) {
         out.push(b);
     }
 }
+
+// ===================== Encoder =====================
+
+/// Canonical code assignment from code lengths (RFC 1951 §3.2.2):
+/// shorter codes first, ties by symbol value.
+fn canonical_codes(lengths: &[u8]) -> Vec<(u16, u8, u16)> {
+    let mut len_counts = [0u16; 16];
+    for &l in lengths {
+        if l > 0 {
+            len_counts[usize::from(l)] += 1;
+        }
+    }
+    let mut next_code = [0u16; 16];
+    let mut code = 0u16;
+    for l in 1..16 {
+        code = (code + len_counts[l - 1]) << 1;
+        next_code[l] = code;
+    }
+    lengths
+        .iter()
+        .enumerate()
+        .filter(|(_, &l)| l > 0)
+        .map(|(sym, &l)| {
+            (sym as u16, l, {
+                let c = next_code[usize::from(l)];
+                next_code[usize::from(l)] += 1;
+                c
+            })
+        })
+        .collect()
+}
+
+struct BitWriter {
+    out: Vec<u8>,
+    acc: u32,
+    nbits: u32,
+}
+
+impl BitWriter {
+    fn new() -> Self {
+        Self {
+            out: Vec::new(),
+            acc: 0,
+            nbits: 0,
+        }
+    }
+    /// LSB-first field (headers, extra bits).
+    fn put(&mut self, value: u32, n: u8) {
+        for i in 0..u32::from(n) {
+            let bit = (value >> i) & 1;
+            self.acc |= bit << self.nbits;
+            self.nbits += 1;
+            if self.nbits == 8 {
+                self.out.push(self.acc as u8);
+                self.acc = 0;
+                self.nbits = 0;
+            }
+        }
+    }
+    /// Huffman code, MSB-first (RFC 1951).
+    fn put_code(&mut self, code: u16, len: u8) {
+        for i in (0..u32::from(len)).rev() {
+            let bit = u32::from((code >> i) & 1);
+            self.acc |= bit << self.nbits;
+            self.nbits += 1;
+            if self.nbits == 8 {
+                self.out.push(self.acc as u8);
+                self.acc = 0;
+                self.nbits = 0;
+            }
+        }
+    }
+    fn finish(mut self) -> Vec<u8> {
+        if self.nbits > 0 {
+            self.out.push(self.acc as u8);
+        }
+        self.out
+    }
+}
+
+/// Wire length encoding under Deflate64 semantics: code 285 carries
+/// 16 extra bits (base 227) — the legacy table's "285 = fixed 258"
+/// is STANDARD deflate and would decode as 227 in a d64 reader.
+fn wire_length_encode(length: usize) -> (usize, u32, u8) {
+    let mut idx = 0usize;
+    while idx < 28 {
+        // length = LEN_START + 3 + extra
+        let base = usize::try_from(LEN_START[idx]).unwrap_or(0) + 3;
+        let bits = LEN_BITS[idx];
+        let max = base + ((1u64 << u32::from(bits)) - 1) as usize;
+        if length >= base && length <= max {
+            return (257 + idx, (length - base) as u32, bits);
+        }
+        idx += 1;
+    }
+    // Code 285: length 227..65538 (16 extra bits).
+    (285, (length - 227) as u32, 16)
+}
+
+fn wire_distance_encode(distance: usize) -> (usize, u32, u8) {
+    // DIST_START is 0-based: wire distance = base + extra + 1.
+    for (idx, &base0) in DIST_START.iter().enumerate() {
+        let bits = DIST_BITS[idx];
+        let max = usize::try_from(base0).unwrap_or(0) + ((1u64 << u32::from(bits)) - 1) as usize;
+        if distance - 1 <= max {
+            return (
+                idx,
+                (distance - 1 - usize::try_from(base0).unwrap_or(0)) as u32,
+                bits,
+            );
+        }
+    }
+    (31, 0, 0)
+}
+
+/// Compress `data` (tokenized) into one final dynamic Deflate64
+/// block. Deterministic: fixed tie-breaking throughout.
+#[must_use]
+pub fn deflate64_compress(data: &[u8], tokens: &[crate::token::Token]) -> Vec<u8> {
+    let mut lit_freq = vec![0u32; 286];
+    let mut dist_freq = vec![0u32; 32];
+    lit_freq[256] = 1; // end-of-block
+    for t in tokens {
+        match *t {
+            crate::token::Token::Literal { value } => lit_freq[usize::from(value)] += 1,
+            crate::token::Token::Match { length, distance } => {
+                let (lc, _, _) = wire_length_encode(length);
+                lit_freq[lc] += 1;
+                let (dc, _, _) = wire_distance_encode(distance);
+                dist_freq[dc] += 1;
+            }
+        }
+    }
+    let _ = data;
+    // Length-limited canonical lengths (15-bit cap).
+    let mut lit_lengths = omnizip_codecs::huffman::HuffmanLengths::build(&lit_freq, 15).lengths;
+    lit_lengths.resize(286, 0);
+    let mut dist_lengths = omnizip_codecs::huffman::HuffmanLengths::build(&dist_freq, 15).lengths;
+    dist_lengths.resize(32, 0);
+    // Deflate requires at least one distance code; an all-zero table
+    // (no matches) gets a dummy 1-bit code 0, mirroring zlib.
+    if dist_lengths.iter().all(|&l| l == 0) {
+        dist_lengths[0] = 1;
+    }
+    let lit_codes = canonical_codes(&lit_lengths);
+    let dist_codes = canonical_codes(&dist_lengths);
+    let lit_code_of = |sym: u16| lit_codes.iter().find(|(s, _, _)| *s == sym).copied();
+    let dist_code_of = |sym: usize| {
+        dist_codes
+            .iter()
+            .find(|(s, _, _)| usize::from(*s) == sym)
+            .copied()
+    };
+
+    // Code-length (RLE) coding of lit||dist lengths.
+    // Header trims must match the coded lengths EXACTLY: RLE-code
+    // only the trimmed prefix (the previous full-table coding made the
+    // decoder's HLIT+HDIST count overflow and fall through to the
+    // legacy path, decoding garbage).
+    let mut hlit = lit_lengths.len().min(286);
+    while hlit > 257 && lit_lengths[hlit - 1] == 0 {
+        hlit -= 1;
+    }
+    let hdist = 32usize; // full d64 alphabet — trailing zeros code cheaply via RLE 17/18
+
+    // (symbol, payload) pairs — 16/17/18 carry a run-count payload
+    // read as 2/3/7 extra bits; literals carry none.
+    let mut cl_stream: Vec<(u8, u16)> = Vec::new();
+    let mut all_lengths: Vec<u8> = lit_lengths[..hlit].to_vec();
+    all_lengths.extend_from_slice(&dist_lengths[..hdist]);
+    let mut i = 0usize;
+    while i < all_lengths.len() {
+        let v = all_lengths[i];
+        let mut run = 1usize;
+        while i + run < all_lengths.len() && all_lengths[i + run] == v {
+            run += 1;
+        }
+        if v == 0 {
+            while run >= 11 {
+                let n = run.min(138);
+                cl_stream.push((18, (n - 11) as u16));
+                run -= n;
+                i += n;
+            }
+            while run >= 3 {
+                let n = run.min(10);
+                cl_stream.push((17, (n - 3) as u16));
+                run -= n;
+                i += n;
+            }
+            for _ in 0..run {
+                cl_stream.push((0, 0));
+                i += 1;
+            }
+        } else {
+            cl_stream.push((v, 0));
+            i += 1;
+            run -= 1;
+            while run >= 3 {
+                let n = run.min(6);
+                cl_stream.push((16, (n - 3) as u16));
+                run -= n;
+                i += n;
+            }
+            for _ in 0..run {
+                cl_stream.push((v, 0));
+                i += 1;
+            }
+        }
+    }
+
+    let mut cl_freq = [0u32; 19];
+    for &(s, _) in &cl_stream {
+        cl_freq[usize::from(s)] += 1;
+    }
+    let mut cl_lengths = omnizip_codecs::huffman::HuffmanLengths::build(&cl_freq, 7).lengths;
+    cl_lengths.resize(19, 0);
+    if cl_lengths.iter().all(|&l| l == 0) {
+        cl_lengths[0] = 1;
+    }
+    let cl_codes = canonical_codes(&cl_lengths);
+
+    let mut hclen = 19usize;
+    while hclen > 4 && cl_lengths[CODE_LENGTH_ORDER[hclen - 1]] == 0 {
+        hclen -= 1;
+    }
+
+    let mut bw = BitWriter::new();
+    bw.put(1, 1); // BFINAL
+    bw.put(2, 2); // BTYPE = dynamic
+    bw.put((hlit - 257) as u32, 5);
+    bw.put((hdist - 1) as u32, 5);
+    bw.put((hclen - 4) as u32, 4);
+    for &ord in CODE_LENGTH_ORDER.iter().take(hclen) {
+        bw.put(u32::from(cl_lengths[ord]), 3);
+    }
+    for &(sym, payload) in &cl_stream {
+        let (_, len, code) = cl_codes
+            .iter()
+            .find(|(cs, _, _)| *cs == u16::from(sym))
+            .copied()
+            .unwrap_or((0, 0, 0));
+        bw.put_code(code, len);
+        match sym {
+            16 => bw.put(u32::from(payload), 2),
+            17 => bw.put(u32::from(payload), 3),
+            18 => bw.put(u32::from(payload), 7),
+            _ => {}
+        }
+    }
+    for t in tokens {
+        match *t {
+            crate::token::Token::Literal { value } => {
+                if let Some((_, len, code)) = lit_code_of(u16::from(value)) {
+                    bw.put_code(code, len);
+                }
+            }
+            crate::token::Token::Match { length, distance } => {
+                let (lc, lextra, lbits) = wire_length_encode(length);
+                if let Some((_, len, code)) = lit_code_of(lc as u16) {
+                    bw.put_code(code, len);
+                }
+                bw.put(lextra, lbits);
+                let (dc, dextra, dbits) = wire_distance_encode(distance);
+                if let Some((_, len, code)) = dist_code_of(dc) {
+                    bw.put_code(code, len);
+                }
+                bw.put(dextra, dbits);
+            }
+        }
+    }
+    if let Some((_, len, code)) = lit_code_of(256) {
+        bw.put_code(code, len);
+    }
+    bw.finish()
+}
