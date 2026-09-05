@@ -4,7 +4,7 @@
   stores content-addressed data, not foreign zipx, but the crate
   ADVERTISES the format)
 - **Depends on:** [23](23-deflate64-64k-probe.md) (oracle method)
-- **Status:** pending 2026-09-05
+- **Status:** decoder SHIPPED 2026-09-05; encoder remains
 
 ## Goal
 
@@ -55,3 +55,33 @@ dynamic header; the divergence is purely "we never parse this".
 - 7zz is the local oracle for BOTH directions (it writes and reads
   method 9).
 - Estimated: a focused session — decoder first, encoder second.
+
+
+## Decoder half — SHIPPED (PR pending)
+
+`wire.rs` implements real RFC-1951 blocks with the d64 extensions,
+tables verbatim from 7-Zip's `DeflateConst.h` (codes 30/31 = bases
+32769/49153 + 14 extra bits; length code 285 = base 227 + 16 extra
+bits). `decompress` routes legacy-container-first (strict length
+validation) with wire fallback — foreign streams now decode.
+
+Validated against 7zz on seven shapes: 70 KB distances (A+B+A),
+mid-stream stored blocks (text+random+text — this found a
+`byte_align` bit/byte-units bug), a 2.85 MB multi-block stream,
+tiny, repetitive, and empty members — all byte-identical to `7zz x`.
+A 7-Zip-produced wire vector is committed as a standing unit test.
+
+Two quirks pinned during validation (both documented in-code):
+- 7zz's writer pads unused code-length symbols with dummy lengths
+  (Kraft-over-subscribed by strict accounting); its decoder builds
+  with full=false. We mirror the tolerance — the canonical walk never
+  reaches unreachable codes, and broken codes fail the 15-bit runaway.
+- zlib rejects these streams at HDIST=32 (`too many length or
+  distance symbols`) — that is the d64 extension, not corruption.
+
+## Remaining: encoder half
+
+Emit wire blocks (stored/fixed/dynamic + the d64 code ranges) in
+place of the legacy container, acceptance = `7zz x` on our archives.
+Until then our method-9 output stays legacy-readable-only (wire
+streams from real tools decode fine).
