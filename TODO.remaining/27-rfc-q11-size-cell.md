@@ -114,12 +114,18 @@ ADDITIONAL candidate: the contest min() over {hq, hq+dict, bt, iter}
 (q11, n <= 256 KiB) can never regress. Corpus verified: rfc the only
 change, every other cell byte-identical, regression gate green.
 
+**N-BOUND LIFTED via a density screen (fifth session):** the fourth
+candidate now runs at ANY size when a 512-position dictionary-density
+sample clears 0.08 — measured classes separate cleanly (text
+0.10-0.20: rfc/rustsrc/words/dbdump/plists/install.log; periodic and
+binary 0.00-0.03: csv2m/fits/arial/rand). Small inputs (<= 256 KiB)
+stay unconditional. **rustsrc q11 379,830 -> 377,904 (-1,926 B)**;
+every other cell byte-identical; the time-sensitive binary cells
+(fits q11 at 0.93x reference time) skip the extra DP pass entirely.
+
 **Still open (7,007 vs ref 6,548, ~575 B):** the reference's emission
-beats all four candidates — its literal-steering (positional cost
-model x dict density) remains the named lever; extending the dict
-candidate's n bound upward is a second lever (rustsrc showed -1,926B
-with dict forced at full size) once the extra DP pass cost is
-bounded.
+beats all four candidates on rfc — its literal-steering (positional
+cost model x dict density) remains the named lever.
 
 ## Acceptance
 
