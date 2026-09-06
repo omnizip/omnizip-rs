@@ -269,6 +269,16 @@ fn walk_bucket(
         let n = 1usize << SIZE_BITS_BY_LENGTH[l];
         let id = usize::from(idx);
 
+        // The caps walk (upstream's is_space else-branch) handles ONLY
+        // transformed entries: raw words belong to the 6/32 sub-block
+        // walk. Leaking them here routed them through the 18/7/13 arm,
+        // which multiplies by `sub_t` (= 85) — fabricating bogus
+        // " " + ALL-CAPS(w) + " " candidates for inputs that merely
+        // matched the raw word (found via a two-byte-away ' ').
+        if caps && transform == 0 {
+            continue;
+        }
+
         if sub_t != 0 && transform != 0 {
             // Sub-block uppercase variants (upstream's is_space
             // else-branch; only the caps walk reaches this).

@@ -1799,22 +1799,7 @@ pub(crate) fn emit_metablock_from_commands(
                     );
                 }
                 if env_flag!("BROTLI_DBG_DC") {
-                    eprintln!(
-                        "DCWRITE sym={d_sym} code={dc:0b} len={dl} tree_idx={}",
-                        if ntrees_d > 1 {
-                            let ctx = if cmd.copy_len > 4 {
-                                3u8
-                            } else {
-                                (cmd.copy_len - 2) as u8
-                            };
-                            match ntrees_d {
-                                2 => usize::from(ctx >= 2),
-                                _ => ctx as usize,
-                            }
-                        } else {
-                            0
-                        }
-                    );
+                    eprintln!("DCWRITE sym={d_sym} code={dc:0b} len={dl}");
                 }
                 bw.write_bits(dc, u32::from(dl));
                 let nbits = distance_extra_bits(d_sym, &dist_cfg);
