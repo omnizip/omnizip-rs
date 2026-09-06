@@ -31,6 +31,7 @@ MECE decomposition of all remaining work. Each task is self-contained.
 | 20 | brotli q4-9 bank-tier multi-threading | closed — infeasible byte-identical | MEDIUM |
 | 21 | brotli q9-text single-thread gap (28-56x) | mitigated 2026-09-04 | MEDIUM |
 | 22 | Extend fuzz coverage to the remaining decoders | done 2026-09-04 | MEDIUM |
+| 26 | brotli PREFIX_SUFFIX table one-byte desync | done 2026-09-06 — ref q11 streams decode | HIGH |
 
 ## Principles
 
