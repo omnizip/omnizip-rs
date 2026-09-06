@@ -75,3 +75,20 @@ regression class for future sweeps.
   documented in this file with the measured root cause and the
   cost/benefit of closing it.
 - No regressions on the existing 10-file corpus (regression gate).
+
+
+## FITS follow-up — CLOSED 2026-09-06: the fits cells were fixture artifacts
+
+The sweep's worst cells (fits4m.bin brotli 1.30-1.68x) were measured
+on a HAND-ROLLED regeneration whose pixel pattern diverges from the
+canonical generator. Regenerated EXACTLY from the in-tree generator
+(omnizip-brotli/examples/fits_repro.rs, mirroring limnifs-bench:
+2880B header + BE u16, base=(idx/8)&0xFFFF ^ xorshift-noise nibble),
+the corpus file replaced, and every cell now BEATS or ties: brotli
+q1 0.7603 (beats 24%), q5 0.9392, q9 0.9547, q11 1.0018; zstd L1
+0.8756, L6 0.9262 (numbers in baseline.txt).
+
+Standing corpus after this: the ONLY >1.05 cell in the 70-cell sweep
+is rfc.txt brotli q11 (~1.10) — the documented q11 contest-tier
+residual. LESSON (second confirmation, after csv2m): always
+regenerate corpus fixtures from in-tree generators, never hand-roll.
