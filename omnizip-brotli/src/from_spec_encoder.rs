@@ -5088,18 +5088,44 @@ fn parse_input_with_offset_impl(
                 (a.0, a.1, false)
             }
         };
+        // Third contest candidate (q11, small inputs): the in-house
+        // iterative zopfli — the parse our own sub-1MiB q5 tier
+        // produces. On dictionary-dense text it beats BOTH DP parses
+        // (rfc.txt: q5 7,107 vs our q11 7,205) — the contest until now
+        // only ever compared DP-vs-DP. Ships only when it measures
+        // smaller under the SAME exact q11 emission, so output can
+        // only improve. The n bound keeps the two extra emissions off
+        // q11-scale inputs; the inversion class lives in small files.
+        if quality >= 11 && n <= 262_144 && !env_flag!("BROTLI_NO_ITERCAND") {
+            // Third contest candidate: the in-house iterative zopfli
+            // (the parse our sub-1MiB q5 tier ships), emitted with ITS
+            // OWN q5-tier emission. On dictionary-dense text this beats
+            // both DP parses (rfc.txt: q5 7,107 vs our q11 7,205) —
+            // re-measuring its commands under the q11 emission instead
+            // measured WORSE (59,042 vs 56,856 bits: the q11 literal
+            // assignment overshoots on small inputs). Ships only when
+            // strictly smaller than both DP candidates, so output can
+            // only improve. The n bound keeps the extra parse + one
+            // emission off q11-scale inputs; the inversion class lives
+            // in small files.
+            let (iter, _) =
+                zopfli_iterative_parse(input, history, mf, mlen_offset, use_dict, 5, is_last, ctx_in);
+            if !iter.is_empty() {
+                let (it_bits, it_bw) =
+                    measure_emission_bits(&iter, input, mlen_offset, 5, is_last, ctx_in);
+                if env_flag!("BROTLI_BTOPT_DUMP") {
+                    eprintln!("BTOPT chunk@{mlen_offset} n={n} iter={it_bits} vs hq={hq_bits} bt={bt_bits}");
+                }
+                if it_bits < bt_bits && it_bits < hq_bits {
+                    return (iter, Some(it_bw));
+                }
+            }
+        }
         if env_flag!("BROTLI_BTOPT_DUMP") {
             eprintln!(
                 "BTOPT chunk@{mlen_offset} n={n} hq={hq_bits}(split={hq_split}) bt={bt_bits}(split={bt_split}) winner={}",
                 if bt_bits < hq_bits { "BT" } else { "HQ" }
             );
-        }
-        if std::env::var_os("BROTLI_NO_REUSE").is_some() {
-            return if bt_bits < hq_bits {
-                (bt, None)
-            } else {
-                (hq, None)
-            };
         }
         if bt_bits < hq_bits {
             return (bt, Some(bt_bw));
