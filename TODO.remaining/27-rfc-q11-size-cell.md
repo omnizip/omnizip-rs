@@ -136,13 +136,18 @@ The R (block-split) emission variant wins the contest because our
 than the reference's context clustering — R pays 44 tree headers to
 save 1,437 content bits and still nets worse than ref's clustering.
 
-**Next lever (implementation-ready):** add a capped-split contest
-variant (R with a small tree budget, e.g. 8-16) — expected to capture
-most of the 1,437-bit content win at ~10 tree headers' cost, netting
-~1-2KB below the current winner; requires threading a numeric
-lit-split cap through `with_lit_split_override` (currently boolean)
-as an additional measured candidate. The deeper alternative is the
-reference's ContextBlockSplitter clustering quality (task 372 family).
+**Next lever (refined after measurement):** a capped-split contest
+variant — but the cap must sit at the CLUSTERING level, not the block
+budget: `BROTLI_LIT_SPLIT_MAX` (emission.rs:417, blocks) was A/B'd at
+6/10/16/24 and ships byte-identical 7,007 at every value, because the
+50 trees come from the (block x context) PQ clustering (task-281
+`split_literals` + `cluster_contexts`), not from the block count.
+Implementation: thread a tree-count cap into the clustering (or an
+early-stop on cluster count) behind `with_lit_split_override`
+(currently bool — needs Option<usize>), measured as one more contest
+variant. Expected: most of the 1,437-bit lit_sym win at ~10 trees'
+header cost. The deeper alternative remains the reference's
+ContextBlockSplitter clustering quality (task 372 family).
 
 ## Acceptance
 
