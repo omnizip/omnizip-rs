@@ -123,9 +123,26 @@ stay unconditional. **rustsrc q11 379,830 -> 377,904 (-1,926 B)**;
 every other cell byte-identical; the time-sensitive binary cells
 (fits q11 at 0.93x reference time) skip the extra DP pass entirely.
 
-**Still open (7,007 vs ref 6,548, ~575 B):** the reference's emission
-beats all four candidates on rfc — its literal-steering (positional
-cost model x dict density) remains the named lever.
+**DECOMPOSITION COMPLETE (sixth session): the PARSE is at parity —
+the entire remaining gap is literal-tree header economics.** Fresh
+DEC_STATS on the shipped 7,007 stream vs the reference: cmds 2,095 vs
+2,115, literals 2,154 vs 2,050, dict density matched, and CONTENT BITS
+NOW WIN — lit_sym 8,504 vs ref 9,941 (-1,437), dist_sym -104,
+dist_extra -136, cmd_sym +55: content total 48,397 vs ref 50,013
+(-1,616). The file is 4,600 bits larger purely from **50 literal
+trees vs the reference's 6** (~104 bits of header per extra tree).
+The R (block-split) emission variant wins the contest because our
+6-tree-class variants (decided static map) have much worse lit_sym
+than the reference's context clustering — R pays 44 tree headers to
+save 1,437 content bits and still nets worse than ref's clustering.
+
+**Next lever (implementation-ready):** add a capped-split contest
+variant (R with a small tree budget, e.g. 8-16) — expected to capture
+most of the 1,437-bit content win at ~10 tree headers' cost, netting
+~1-2KB below the current winner; requires threading a numeric
+lit-split cap through `with_lit_split_override` (currently boolean)
+as an additional measured candidate. The deeper alternative is the
+reference's ContextBlockSplitter clustering quality (task 372 family).
 
 ## Acceptance
 
