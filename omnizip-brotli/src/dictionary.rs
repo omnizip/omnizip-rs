@@ -69,7 +69,7 @@ pub const TRANSFORM_SHIFT_ALL: u8 = 22;
 /// Format: byte 0 = length, then `length` bytes of content. Total
 /// length is 217 bytes (216 explicit + trailing 0 for the implicit
 /// empty slot referenced by map index 49).
-pub const PREFIX_SUFFIX: &[u8; 217] = b"\x01 \x02, \x10 of the \x04 of \x02s \x01.\x05 and \x04 in \x01\"\x04 to \x02\">\x01\n\x02. \x01]\x05 for \x03 a \x06 that \x01'\x06 with \x06 from \x04 by \x01(\x06. The \x04 on \x04 as \x04 is \x04ing \x02\n\t\x01:\x03ed \x02=\"\x04 at \x03ly \x01,\x02='\x05.com/\x07. This \x05 not \x03er \x03al \x04ful \x04ive \x05less \x04est \x04ize \x02\xc2\xa0\x04ous \x05 the \x02e \x00";
+pub const PREFIX_SUFFIX: &[u8; 217] = b"\x01 \x02, \x08 of the \x04 of \x02s \x01.\x05 and \x04 in \x01\"\x04 to \x02\">\x01\n\x02. \x01]\x05 for \x03 a \x06 that \x01'\x06 with \x06 from \x04 by \x01(\x06. The \x04 on \x04 as \x04 is \x04ing \x02\n\t\x01:\x03ed \x02=\"\x04 at \x03ly \x01,\x02='\x05.com/\x07. This \x05 not \x03er \x03al \x04ful \x04ive \x05less \x04est \x04ize \x02\xc2\xa0\x04ous \x05 the \x02e \x00";
 
 /// Indices in `PREFIX_SUFFIX` for each of the 50 prefix/suffix slots
 /// used by the transform table.
