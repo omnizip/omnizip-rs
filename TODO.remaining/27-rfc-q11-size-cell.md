@@ -102,12 +102,24 @@ DP candidates.
 - every other corpus cell byte-identical (synthetic + real)
 - regression gate green (no baseline refresh needed)
 
-**Still open for the rest of the cell (7,107 vs ref 6,548):** the
-reference's own emission beats all three of our candidates on this
-class — the remaining ~560 B are in the reference's literal-steering
-inside its hq zopfli (positional cost model interacting with dict
-density), tracked here. The (a)/(b) levers above remain valid for
-making hq itself competitive.
+**FOURTH candidate shipped (fourth session): hq+dict as a SHIELDED
+contest candidate — rfc q11 7,107 -> 7,007 (cell 1.0701x).** Two
+discoveries: (1) the dict relaxation was inside the MATCHES loop, so
+at positions with NO LZ candidates (exactly the dictionary-word
+positions) it never ran at all — relocated to the k-loop body,
+hq+dict went 59,863 -> 56,050 bits on rfc; (2) dict density is NOT
+defaultable globally (csv2m +2,008B, dbdump +76B, words +314B when
+replacing the plain hq candidate) but IS a pure improvement as an
+ADDITIONAL candidate: the contest min() over {hq, hq+dict, bt, iter}
+(q11, n <= 256 KiB) can never regress. Corpus verified: rfc the only
+change, every other cell byte-identical, regression gate green.
+
+**Still open (7,007 vs ref 6,548, ~575 B):** the reference's emission
+beats all four candidates — its literal-steering (positional cost
+model x dict density) remains the named lever; extending the dict
+candidate's n bound upward is a second lever (rustsrc showed -1,926B
+with dict forced at full size) once the extra DP pass cost is
+bounded.
 
 ## Acceptance
 
