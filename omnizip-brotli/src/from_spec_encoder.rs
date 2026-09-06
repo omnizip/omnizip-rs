@@ -5098,7 +5098,35 @@ fn parse_input_with_offset_impl(
         // regress against any of them. The n bound keeps the extra DP
         // pass + two emissions off q11-scale inputs.
         let mut dict_winner: Option<(Vec<Command>, Option<BitWriter>, u64)> = None;
-        if quality >= 11 && n <= 262_144 && !env_flag!("BROTLI_NO_DICTCAND") {
+        // Density screen for inputs beyond the unconditional small-file
+        // bound: dictionary candidates only pay on dictionary-dense
+        // text. Measured over 512 sampled positions: text classes
+        // 0.10-0.20 (rfc/rustsrc/words/dbdump/plists/install.log),
+        // periodic/binary 0.00-0.03 (csv2m/fits/arial/rand) — 0.08
+        // sits in the empty middle. Keeps the extra DP pass + two
+        // emissions off the time-sensitive binary cells (fits q11
+        // runs at 0.93x reference time).
+        let dict_dense = n <= 262_144 || {
+            let stride = (n / 512).max(1);
+            let mut hits = 0usize;
+            let mut samples = 0usize;
+            let mut buf = [u32::MAX; 38];
+            let mut p = 0usize;
+            while p + 8 < n {
+                if crate::encoder::static_dict::find_all_static_dictionary_matches(
+                    &input[p..],
+                    4,
+                    37.min(n - p),
+                    &mut buf,
+                ) {
+                    hits += 1;
+                }
+                samples += 1;
+                p += stride;
+            }
+            samples > 0 && (hits as f32 / samples as f32) >= 0.08
+        };
+        if quality >= 11 && dict_dense && !env_flag!("BROTLI_NO_DICTCAND") {
             let hq_d = crate::encoder::zopfli_hq::parse_hq_with(
                 input,
                 quality,
