@@ -1112,15 +1112,28 @@ fn finish_metablock_decode(
                 if v.distance_code >= 0 {
                     st.implicit += 1;
                 }
-                let bucket = match distance {
-                    0..=4 => "d1-4",
-                    5..=16 => "d5-16",
-                    17..=64 => "d17-64",
-                    65..=256 => "d65-256",
-                    257..=1024 => "d257-1k",
-                    1025..=8192 => "d1k-8k",
-                    8193..=65536 => "d8k-64k",
-                    _ => "dict",
+                // Dict iff distance exceeds the decoder's own
+                // max_distance at this command — a fixed 65,536 cutoff
+                // miscounted every static-dictionary reference on
+                // small-window streams (rfc q11: 637 dict refs read as
+                // 48; dict distances start above min(pos, window)).
+                let cmd_pos = pos;
+                let is_dict_dist = usize::try_from(distance).unwrap_or(usize::MAX)
+                    > (pos.min(max_backward_distance)) as usize;
+
+                let bucket = if is_dict_dist {
+                    "dict"
+                } else {
+                    match distance {
+                        0..=4 => "d1-4",
+                        5..=16 => "d5-16",
+                        17..=64 => "d17-64",
+                        65..=256 => "d65-256",
+                        257..=1024 => "d257-1k",
+                        1025..=8192 => "d1k-8k",
+                        8193..=65536 => "d8k-64k",
+                        _ => "lz>64k",
+                    }
                 };
                 *st.dist_hist.entry(bucket).or_insert(0u64) += 1;
                 st.last_dists.push_back(distance);

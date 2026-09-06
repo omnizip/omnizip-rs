@@ -790,7 +790,8 @@ fn update_nodes(
     model: &CostModel,
     num_matches: u32,
     matches: &[(u32, u32)],
-    dict_at: &[Option<(u32, u32, u32)>],
+    dict_flat: &[(u32, u32, u32)],
+    dict_off: &[u32],
     starting_cache: &[i32; 4],
     max_candidates: usize,
     max_zopfli_len: usize,
@@ -926,39 +927,35 @@ fn update_nodes(
                 }
             }
 
-            // Static-dictionary candidate (task 18): length-preserving
-            // words only (tl == wl), so the node's len_code equals its
-            // copy length and the backtrack's existing Command shape is
-            // exact. The node is marked CODE_DICT_SHORT so the
-            // distance-cache rebuild never pushes the dictionary
-            // distance — rep relaxation must not treat it as an
-            // in-window copy source (the PR #465 root cause).
-            // Reference rule (ChooseHasher era): the static dictionary
-            // is searched ONLY where the match finder found nothing
-            // useful — dict words displacing real matches measurably
-            // WORSENED total emission (words q11 +91B) through
-            // dist/cmd tree-shape shifts the per-transition cost
-            // cannot see. "Nothing useful" = no candidate ≥ 4 bytes
-            // (the short-match scan still lists 2-3 byte matches).
-            let best_mlen = matches.last().map_or(0, |m| m.1);
-            if best_mlen < 4 {
-                if let Some((d, wl, tl)) = dict_at.get(pos).copied().flatten() {
-                    let wl_us = wl as usize;
-                    if tl == wl && wl_us >= 4 && wl_us <= max_len {
-                        crate::encoder::work_meter::add(2, 1);
-                        let sym = long_dist_symbol(d);
-                        let dist_extra = ((sym as u32 - 16) >> 1) + 1;
-                        let dict_cost = base_cost + dist_extra as f32 + model.dist_cost(sym);
-                        let copycode = get_copy_length_code(wl_us);
-                        let cmdcode = combine_length_codes(inscode, copycode, false);
-                        let cost = dict_cost
-                            + copy_extra(usize::from(copycode)) as f32
-                            + model.cmd_cost(cmdcode);
-                        if cost < nodes[pos + wl_us].cost {
-                            update_node(nodes, pos, start, wl_us, wl_us, d, CODE_DICT_SHORT, cost);
-                            result = result.max(wl_us);
-                        }
-                    }
+            // Static-dictionary candidates: the whole transform family
+            // per position (upstream feeds dict matches through the
+            // same relaxation as LZ matches). Wire copy code carries
+            // the WORD length (wl); the node advances by the PRODUCED
+            // length (tl) — the upstream len/len_code split, with
+            // `is_dict = len_code != copy_len` in the walk. The node
+            // is marked CODE_DICT_SHORT so the distance-cache rebuild
+            // never pushes the dictionary distance (rep relaxation
+            // must not treat it as an in-window copy source — the
+            // PR #465 root cause).
+            let dstart = dict_off[pos] as usize;
+            let dend = dict_off[pos + 1] as usize;
+            for &(d, tl, wl) in &dict_flat[dstart..dend] {
+                let tl_us = tl as usize;
+                let wl_us = wl as usize;
+                if tl_us > max_len {
+                    continue;
+                }
+                crate::encoder::work_meter::add(2, 1);
+                let sym = long_dist_symbol(d);
+                let dist_extra = ((sym as u32 - 16) >> 1) + 1;
+                let dict_cost = base_cost + dist_extra as f32 + model.dist_cost(sym);
+                let copycode = get_copy_length_code(wl_us);
+                let cmdcode = combine_length_codes(inscode, copycode, false);
+                let cost =
+                    dict_cost + copy_extra(usize::from(copycode)) as f32 + model.cmd_cost(cmdcode);
+                if cost < nodes[pos + tl_us].cost {
+                    update_node(nodes, pos, start, tl_us, wl_us, d, CODE_DICT_SHORT, cost);
+                    result = result.max(tl_us);
                 }
             }
         }
@@ -1007,7 +1004,10 @@ fn shortest_path_commands(data: &[u8], nodes: &mut [Node]) -> Vec<Command> {
         let len_code = next.len_code();
         pos += insert_len;
         let distance = next.distance;
-        let is_dict = len_code > copy_len;
+        // Dict when the wire copy code (word length) differs from the
+        // advance (transformed length) — omit transforms shorten
+        // (wl > tl), affix transforms lengthen (wl < tl).
+        let is_dict = len_code != copy_len;
         commands.push(Command {
             insert_len: insert_len as u32,
             // Our Command shape stores the WORD length for dict refs
@@ -1024,15 +1024,10 @@ fn shortest_path_commands(data: &[u8], nodes: &mut [Node]) -> Vec<Command> {
     }
     if std::env::var("BROTLI_HQ_CMDDUMP").is_ok() {
         let mut pp = 0usize;
-        eprintln!("HQ first 60 commands:");
+        eprintln!("HQ commands:");
         for c in &commands {
             eprintln!("HQ {pp} {} {} {}", c.insert_len, c.copy_len, c.distance);
-            pp += c.insert_len as usize
-                + if c.copy_len == 0 {
-                    0
-                } else {
-                    c.copy_len as usize
-                };
+            pp += c.insert_len as usize + c.copy_len as usize;
         }
     }
     // The reference folds an uncovered literal tail into
@@ -1065,6 +1060,58 @@ pub fn parse_hq(input: &[u8], quality: i32) -> Vec<Command> {
 /// Collection-sharing variant used by the q10/11 routing (the btopt
 /// candidate consumes the same H10 list instead of re-walking the
 /// tree). `num_matches`/`matches` come from [`collect_matches`].
+/// Per-position static-dictionary candidates, mirroring upstream
+/// `FindAllMatchesH10`'s dictionary stage: one candidate per PRODUCED
+/// length (minlen = max(4, best_len+1) self-gates once real matches
+/// beat word lengths), smallest word-id wins per length. The distance
+/// base is the decoder's clamped output position at emission time.
+fn collect_dict_candidates(
+    input: &[u8],
+    mlen_offset: usize,
+    offsets: &[u32],
+    num_matches: &[u32],
+    matches: &[(u32, u32)],
+) -> (Vec<(u32, u32, u32)>, Vec<u32>) {
+    let n = input.len();
+    let mut flat: Vec<(u32, u32, u32)> = Vec::new();
+    let mut off = vec![0u32; n + 1];
+    let mut buf = [u32::MAX; 38];
+    for pos in 0..n {
+        off[pos] = flat.len() as u32;
+        let remaining = n - pos;
+        if remaining < 4 {
+            continue;
+        }
+        let best_len = if num_matches[pos] > 0 {
+            matches[(offsets[pos] + num_matches[pos] - 1) as usize].1 as usize
+        } else {
+            0
+        };
+        let minlen = 4.max(best_len + 1);
+        let maxlen = 37.min(remaining);
+        if crate::encoder::static_dict::find_all_static_dictionary_matches(
+            &input[pos..],
+            minlen,
+            maxlen,
+            &mut buf,
+        ) {
+            let base =
+                ((mlen_offset + pos) as u32).min(crate::from_spec_encoder::MAX_BACKWARD_DISTANCE);
+            for l in minlen..=maxlen {
+                let m = buf[l];
+                if m != u32::MAX {
+                    let wl = (m & 31) as u32;
+                    // TEMP bisect knob (remove before shipping)
+                    // (distance, produced length tl, word length wl)
+                    flat.push((base + 1 + (m >> 5), l as u32, wl));
+                }
+            }
+        }
+    }
+    off[n] = flat.len() as u32;
+    (flat, off)
+}
+
 pub(crate) fn parse_hq_with(
     input: &[u8],
     quality: i32,
@@ -1095,23 +1142,28 @@ pub(crate) fn parse_hq_with(
     for i in 0..n {
         offsets[i + 1] = offsets[i] + num_matches[i];
     }
-    // Static-dictionary candidates (task 18), gated to q11 like the
-    // q10 btopt dict_at path (q10's btopt offers its own candidates
-    // through CODE_DICT; feeding these to q10's hq too measured
-    // +4,622 on fits). Distances computed against the decoder's
-    // clamped output position via the shared, lookup-validated
-    // builder.
-    // Default OFF (BROTLI_Q11_DICT=1 to measure): the dict candidates
-    // improved 7/8 corpus cells (-41..-422 B) but REGRESSED the
-    // plist-JSON cell +373 B — per-transition pricing cannot predict
-    // total-emission tree-shape shifts, and without an old-vs-new
-    // exact-acceptance pass (a third contest candidate at ~+40% q11
-    // cost) the feature nets ~0.01%. Numbers in TODO.remaining/18.
-    let dict_at: Vec<Option<(u32, u32, u32)>> =
-        if quality == 11 && crate::from_spec_encoder::env_flag!("BROTLI_Q11_DICT") {
-            crate::encoder::btopt::build_dict_at(input, mlen_offset, &offsets, num_matches, matches)
+    // Static-dictionary candidates for the DP: upstream
+    // FindAllMatchesH10 probes the dictionary at every position
+    // (minlen = max(4, best_len+1)) and feeds the whole transform
+    // family through the same relaxation as LZ matches. Faithful port
+    // via find_all_static_dictionary_matches (the old task-18 variant
+    // was scope-limited to tl==wl single words and env-gated OFF —
+    // numbers in TODO.remaining/18). q11 only: q10's btopt contest
+    // candidate keeps its own dict_at path.
+    // BROTLI_HQ_DICT=1 enables the full dictionary candidate set.
+    // Default OFF: the parse is sound (identity + omit-transform
+    // candidates round-trip byte-exact) but AFFIX (lengthening)
+    // candidates expose a latent emission bug — the first Huffman
+    // table's wire bits desync writer-vs-reader (tree LENGTHS match;
+    // bit positions after the table differ; the "space break"
+    // mirroring in write_huffman_table is the suspect). Trail in
+    // TODO.remaining/27. Measured when enabled: hq 64,197 -> 55,835
+    // bits on rfc.txt (7,205 -> ~6,980 B shipped).
+    let (dict_flat, dict_off) =
+        if quality >= 11 && crate::from_spec_encoder::env_flag!("BROTLI_HQ_DICT") {
+            collect_dict_candidates(input, mlen_offset, &offsets, num_matches, matches)
         } else {
-            Vec::new()
+            (Vec::new(), vec![0u32; n + 1])
         };
 
     let starting_cache: [i32; 4] = [16, 15, 11, 4];
@@ -1152,7 +1204,8 @@ pub(crate) fn parse_hq_with(
                 &model,
                 num_matches[i],
                 &matches[mstart..mend],
-                &dict_at,
+                &dict_flat,
+                &dict_off,
                 &starting_cache,
                 max_candidates,
                 max_zopfli_len,

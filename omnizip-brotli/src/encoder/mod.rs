@@ -16,5 +16,7 @@ pub mod dict_hash;
 pub mod dict_hash_lut;
 pub mod distance_config;
 pub(crate) mod emission;
+pub mod static_dict;
+mod static_dict_lut;
 pub mod work_meter;
 pub mod zopfli_hq;
