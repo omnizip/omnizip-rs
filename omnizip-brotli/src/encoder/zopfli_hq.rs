@@ -926,37 +926,37 @@ fn update_nodes(
                     result = result.max(full_len);
                 }
             }
+        }
 
-            // Static-dictionary candidates: the whole transform family
-            // per position (upstream feeds dict matches through the
-            // same relaxation as LZ matches). Wire copy code carries
-            // the WORD length (wl); the node advances by the PRODUCED
-            // length (tl) — the upstream len/len_code split, with
-            // `is_dict = len_code != copy_len` in the walk. The node
-            // is marked CODE_DICT_SHORT so the distance-cache rebuild
-            // never pushes the dictionary distance (rep relaxation
-            // must not treat it as an in-window copy source — the
-            // PR #465 root cause).
-            let dstart = dict_off[pos] as usize;
-            let dend = dict_off[pos + 1] as usize;
-            for &(d, tl, wl) in &dict_flat[dstart..dend] {
-                let tl_us = tl as usize;
-                let wl_us = wl as usize;
-                if tl_us > max_len {
-                    continue;
-                }
-                crate::encoder::work_meter::add(2, 1);
-                let sym = long_dist_symbol(d);
-                let dist_extra = ((sym as u32 - 16) >> 1) + 1;
-                let dict_cost = base_cost + dist_extra as f32 + model.dist_cost(sym);
-                let copycode = get_copy_length_code(wl_us);
-                let cmdcode = combine_length_codes(inscode, copycode, false);
-                let cost =
-                    dict_cost + copy_extra(usize::from(copycode)) as f32 + model.cmd_cost(cmdcode);
-                if cost < nodes[pos + tl_us].cost {
-                    update_node(nodes, pos, start, tl_us, wl_us, d, CODE_DICT_SHORT, cost);
-                    result = result.max(tl_us);
-                }
+        // Static-dictionary candidates: the whole transform family
+        // per position (upstream feeds dict matches through the
+        // same relaxation as LZ matches). Wire copy code carries
+        // the WORD length (wl); the node advances by the PRODUCED
+        // length (tl) — the upstream len/len_code split, with
+        // `is_dict = len_code != copy_len` in the walk. The node
+        // is marked CODE_DICT_SHORT so the distance-cache rebuild
+        // never pushes the dictionary distance (rep relaxation
+        // must not treat it as an in-window copy source — the
+        // PR #465 root cause).
+        let dstart = dict_off[pos] as usize;
+        let dend = dict_off[pos + 1] as usize;
+        for &(d, tl, wl) in &dict_flat[dstart..dend] {
+            let tl_us = tl as usize;
+            let wl_us = wl as usize;
+            if tl_us > max_len {
+                continue;
+            }
+            crate::encoder::work_meter::add(2, 1);
+            let sym = long_dist_symbol(d);
+            let dist_extra = ((sym as u32 - 16) >> 1) + 1;
+            let dict_cost = base_cost + dist_extra as f32 + model.dist_cost(sym);
+            let copycode = get_copy_length_code(wl_us);
+            let cmdcode = combine_length_codes(inscode, copycode, false);
+            let cost =
+                dict_cost + copy_extra(usize::from(copycode)) as f32 + model.cmd_cost(cmdcode);
+            if cost < nodes[pos + tl_us].cost {
+                update_node(nodes, pos, start, tl_us, wl_us, d, CODE_DICT_SHORT, cost);
+                result = result.max(tl_us);
             }
         }
     }
@@ -1054,7 +1054,7 @@ pub fn parse_hq(input: &[u8], quality: i32) -> Vec<Command> {
     }
     let mut tree = omnizip_codecs::BinaryTreeMatchFinder::new(input);
     let (num_matches, matches) = collect_matches(input, &mut tree, quality);
-    parse_hq_with(input, quality, 0, &num_matches, &matches)
+    parse_hq_with(input, quality, 0, &num_matches, &matches, false)
 }
 
 /// Collection-sharing variant used by the q10/11 routing (the btopt
@@ -1118,6 +1118,7 @@ pub(crate) fn parse_hq_with(
     mlen_offset: usize,
     num_matches: &[u32],
     matches: &[(u32, u32)],
+    dict_enabled: bool,
 ) -> Vec<Command> {
     let n = input.len();
     if n < 8 {
@@ -1159,12 +1160,13 @@ pub(crate) fn parse_hq_with(
     // mirroring in write_huffman_table is the suspect). Trail in
     // TODO.remaining/27. Measured when enabled: hq 64,197 -> 55,835
     // bits on rfc.txt (7,205 -> ~6,980 B shipped).
-    let (dict_flat, dict_off) =
-        if quality >= 11 && crate::from_spec_encoder::env_flag!("BROTLI_HQ_DICT") {
-            collect_dict_candidates(input, mlen_offset, &offsets, num_matches, matches)
-        } else {
-            (Vec::new(), vec![0u32; n + 1])
-        };
+    let (dict_flat, dict_off) = if quality >= 11
+        && (dict_enabled || crate::from_spec_encoder::env_flag!("BROTLI_HQ_DICT"))
+    {
+        collect_dict_candidates(input, mlen_offset, &offsets, num_matches, matches)
+    } else {
+        (Vec::new(), vec![0u32; n + 1])
+    };
 
     let starting_cache: [i32; 4] = [16, 15, 11, 4];
     let mut nodes = vec![

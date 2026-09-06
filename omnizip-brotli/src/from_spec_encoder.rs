@@ -5050,6 +5050,7 @@ fn parse_input_with_offset_impl(
             mlen_offset,
             &num_matches,
             &matches,
+            false,
         );
         if env_flag!("BROTLI_NO_BTOPT") || env_flag!("BROTLI_NO_CM") || n < 8 || input.len() < 4096
         {
@@ -5088,6 +5089,45 @@ fn parse_input_with_offset_impl(
                 (a.0, a.1, false)
             }
         };
+        // Fourth contest candidate (q11, small inputs): the hq parse
+        // WITH static-dictionary candidates. Dictionary density helps
+        // text (rfc -100B, rustsrc -1,926B) but HURTS csv-like data
+        // (csv2m +2,008B measured) — it cannot replace the plain hq
+        // candidate. As an ADDITIONAL candidate it is pure shield:
+        // the contest min() over {hq, hq+dict, bt, iter} can never
+        // regress against any of them. The n bound keeps the extra DP
+        // pass + two emissions off q11-scale inputs.
+        let mut dict_winner: Option<(Vec<Command>, Option<BitWriter>, u64)> = None;
+        if quality >= 11 && n <= 262_144 && !env_flag!("BROTLI_NO_DICTCAND") {
+            let hq_d = crate::encoder::zopfli_hq::parse_hq_with(
+                input,
+                quality,
+                mlen_offset,
+                &num_matches,
+                &matches,
+                true,
+            );
+            if !hq_d.is_empty() {
+                let (d_bits, d_bw, d_split) = {
+                    let a =
+                        measure_emission_bits(&hq_d, input, mlen_offset, quality, is_last, ctx_in);
+                    let b = with_lit_split_override(true, || {
+                        measure_emission_bits(&hq_d, input, mlen_offset, quality, is_last, ctx_in)
+                    });
+                    if b.0 < a.0 {
+                        (b.0, b.1, true)
+                    } else {
+                        (a.0, a.1, false)
+                    }
+                };
+                if env_flag!("BROTLI_BTOPT_DUMP") {
+                    eprintln!("BTOPT chunk@{mlen_offset} n={n} hqdict={d_bits}(split={d_split})",);
+                }
+                if d_bits < bt_bits && d_bits < hq_bits {
+                    dict_winner = Some((hq_d, Some(d_bw), d_bits));
+                }
+            }
+        }
         // Third contest candidate (q11, small inputs): the in-house
         // iterative zopfli — the parse our own sub-1MiB q5 tier
         // produces. On dictionary-dense text it beats BOTH DP parses
@@ -5124,7 +5164,10 @@ fn parse_input_with_offset_impl(
                 if env_flag!("BROTLI_BTOPT_DUMP") {
                     eprintln!("BTOPT chunk@{mlen_offset} n={n} iter={it_bits} vs hq={hq_bits} bt={bt_bits}");
                 }
-                if it_bits < bt_bits && it_bits < hq_bits {
+                if it_bits < bt_bits
+                    && it_bits < hq_bits
+                    && it_bits < dict_winner.as_ref().map_or(u64::MAX, |w| w.2)
+                {
                     return (iter, Some(it_bw));
                 }
             }
@@ -5134,6 +5177,11 @@ fn parse_input_with_offset_impl(
                 "BTOPT chunk@{mlen_offset} n={n} hq={hq_bits}(split={hq_split}) bt={bt_bits}(split={bt_split}) winner={}",
                 if bt_bits < hq_bits { "BT" } else { "HQ" }
             );
+        }
+        if let Some((cmds, bw, bits)) = dict_winner {
+            if bits < bt_bits && bits < hq_bits {
+                return (cmds, bw);
+            }
         }
         if bt_bits < hq_bits {
             return (bt, Some(bt_bw));
