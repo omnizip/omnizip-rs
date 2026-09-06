@@ -385,6 +385,33 @@ impl RepBuffer {
     }
 }
 
+#[test]
+fn cmd_symbol_356_covers_38_26() {
+    let s = find_cmd_symbol(38, 26).expect("sym for (38,26)");
+    eprintln!("SYM_FOR_38_26={s}");
+    let e = &kCmdLut[s];
+    let ins_base = usize::from(e.insert_len_offset);
+    let cpy_base = usize::from(e.copy_len_offset);
+    let ins_range: usize = if e.insert_len_extra_bits > 0 {
+        (1usize << e.insert_len_extra_bits) - 1
+    } else {
+        0
+    };
+    let cpy_range: usize = if e.copy_len_extra_bits > 0 {
+        (1usize << e.copy_len_extra_bits) - 1
+    } else {
+        0
+    };
+    assert!(
+        38 >= ins_base && 38 <= ins_base + ins_range,
+        "insert {ins_base}+{ins_range} vs 38 (sym {s})"
+    );
+    assert!(
+        26 >= cpy_base && 26 <= cpy_base + cpy_range,
+        "copy {cpy_base}+{cpy_range} vs 26 (sym {s})"
+    );
+}
+
 #[cfg(test)]
 #[allow(dead_code)]
 impl RepBuffer {
@@ -5063,6 +5090,13 @@ fn parse_input_with_offset_impl(
                 "BTOPT chunk@{mlen_offset} n={n} hq={hq_bits}(split={hq_split}) bt={bt_bits}(split={bt_split}) winner={}",
                 if bt_bits < hq_bits { "BT" } else { "HQ" }
             );
+        }
+        if std::env::var_os("BROTLI_NO_REUSE").is_some() {
+            return if bt_bits < hq_bits {
+                (bt, None)
+            } else {
+                (hq, None)
+            };
         }
         if bt_bits < hq_bits {
             return (bt, Some(bt_bw));
