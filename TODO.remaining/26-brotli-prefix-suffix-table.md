@@ -47,7 +47,14 @@ exactly as RFC Appendix B specifies.
 
 ## Evidence
 
-- Sweep cell `rfc.txt` brotli q11: reference stream now decodes; the
-  1.10x cell was "reference produces transforms we cannot read",
-  closing the last >1.05x brotli cell explanation.
-- Post-tiering 70-cell sweep: no remaining brotli cell >1.05x.
+- Sweep cell `rfc.txt` brotli q11: the reference stream now DECODES
+  (ours 7,205 vs ref 6,548 = 1.1003x). The SIZE gap still stands —
+  the decoder fix does not change encoder output — but it invalidates
+  every parse-shape diagnosis made while our decoder couldn't read
+  reference q11 output, and it makes reference transform usage
+  diffable (dec_ref stats) for the next diagnosis pass.
+- Telling detail for follow-up: our q11 (7,205) is worse than our own
+  q5 (7,107) and q9 (7,111) on rfc.txt — the q11 tier loses ~100B to
+  our own lower tiers on this file; contest acceptance / dict-transform
+  usage at q11 is the suspect. This remains the only >1.05x brotli
+  cell on the standing board.
