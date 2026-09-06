@@ -86,16 +86,28 @@ btopt still wins the contest (57,634), so shipped output stays 7,205
 and the feature stays gated (`BROTLI_HQ_DICT`). The corrupt era's
 55,835 was the phantom candidates measuring small.
 
-**Remaining to close the cell:** hq needs another ~2.2Kb to beat btopt
-— levers: (a) upstream feeds dict candidates through the SAME DP
-relaxation as LZ matches including from queue starts k>0 with rep
-interaction; (b) our per-candidate gate/pricing may under-use affix
-variants; (c) the q5-tier-beats-q11 anomaly (7,107 vs 7,205) suggests
-adding the greedy parse as a THIRD contest candidate. Also verified
-this session: the reference dict ring semantics are a FULL NO-OP
-(`distance_context` is reset to 0 in ReadDistanceInternal before the
-dict branch's += compensation) — our encoder/decoder pair was already
-correct; a speculative ctx-advance "fix" was tried and reverted.
+**LEVER (c) SHIPPED (third session): the iterative-zopfli third contest
+candidate.** The q11 contest now also measures the in-house iterative
+zopfli (the parse our sub-1MiB q5 tier ships) emitted with its OWN
+q5-tier emission, for inputs <= 256 KiB. Key measurement: re-emitting
+the iterative commands under the q11 emission measures WORSE (59,042
+bits on rfc) than its own q5 emission (56,852) — the q11 literal
+assignment overshoots on small inputs; the candidate must ship its own
+writer. Contest-shielded: ships only when strictly smaller than both
+DP candidates.
+
+**RESULTS (all byte-identical + C-decodable):**
+- rfc.txt q11: 7,205 -> **7,107** (cell 1.1003x -> **1.0854x**)
+- photo.jpg q11: 13,591 -> 13,450 (1.0587x -> 1.0478x)
+- every other corpus cell byte-identical (synthetic + real)
+- regression gate green (no baseline refresh needed)
+
+**Still open for the rest of the cell (7,107 vs ref 6,548):** the
+reference's own emission beats all three of our candidates on this
+class — the remaining ~560 B are in the reference's literal-steering
+inside its hq zopfli (positional cost model interacting with dict
+density), tracked here. The (a)/(b) levers above remain valid for
+making hq itself competitive.
 
 ## Acceptance
 
