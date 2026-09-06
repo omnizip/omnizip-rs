@@ -5096,7 +5096,7 @@ fn parse_input_with_offset_impl(
         // smaller under the SAME exact q11 emission, so output can
         // only improve. The n bound keeps the two extra emissions off
         // q11-scale inputs; the inversion class lives in small files.
-        if quality >= 11 && n <= 262_144 && !env_flag!("BROTLI_NO_ITERCAND") {
+        if quality >= 10 && n <= 262_144 && !env_flag!("BROTLI_NO_ITERCAND") {
             // Third contest candidate: the in-house iterative zopfli
             // (the parse our sub-1MiB q5 tier ships), emitted with ITS
             // OWN q5-tier emission. On dictionary-dense text this beats
