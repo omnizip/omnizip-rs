@@ -5108,8 +5108,16 @@ fn parse_input_with_offset_impl(
             // only improve. The n bound keeps the extra parse + one
             // emission off q11-scale inputs; the inversion class lives
             // in small files.
-            let (iter, _) =
-                zopfli_iterative_parse(input, history, mf, mlen_offset, use_dict, 5, is_last, ctx_in);
+            let (iter, _) = zopfli_iterative_parse(
+                input,
+                history,
+                mf,
+                mlen_offset,
+                use_dict,
+                5,
+                is_last,
+                ctx_in,
+            );
             if !iter.is_empty() {
                 let (it_bits, it_bw) =
                     measure_emission_bits(&iter, input, mlen_offset, 5, is_last, ctx_in);
