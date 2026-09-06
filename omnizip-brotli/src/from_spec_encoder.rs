@@ -375,9 +375,13 @@ impl RepBuffer {
         self.idx = self.idx.wrapping_add(1);
     }
 
-    /// Update state after a dictionary reference. Only implicit commands
-    /// (was_implicit = true) get idx compensation; explicit code 0-3 used
-    /// for dict references would corrupt the buffer (encoder avoids this).
+    /// Update state after a dictionary reference. The dict path is a
+    /// full no-op on the ring: upstream never writes a slot for it,
+    /// and its `dist_rb_idx += distance_context` compensation pairs
+    /// with the `distance_context = 0` reset in ReadDistanceInternal
+    /// (explicit paths) / the implicit 1-override (net 0). Only the
+    /// implicit form needs our idx compensation (pre-decremented by
+    /// the implicit read).
     pub(crate) fn on_dict_reference(&mut self, was_implicit: bool) {
         if was_implicit {
             self.idx = self.idx.wrapping_add(1);
@@ -388,7 +392,6 @@ impl RepBuffer {
 #[test]
 fn cmd_symbol_356_covers_38_26() {
     let s = find_cmd_symbol(38, 26).expect("sym for (38,26)");
-    eprintln!("SYM_FOR_38_26={s}");
     let e = &kCmdLut[s];
     let ins_base = usize::from(e.insert_len_offset);
     let cpy_base = usize::from(e.copy_len_offset);

@@ -66,12 +66,36 @@ decode (37,27) where (38,26) was written — self-correcting bit totals
 kept later commands aligned, which is why command-level diffs pointed
 everywhere at once.
 
-**Next session entry point:** instrument `write_huffman_table`'s
-code-length header loop vs `read_complex_form`'s reading loop bit-by-bit
-on the failing stream (`BROTLI_HQ_DICT=1 OUT=... rfc.txt brotli 11`),
-find the break-condition asymmetry, fix, then re-run the corpus sweep +
-un-gate. Expected: rfc q11 ~6,980–7,050 (cell closes to ~1.066-1.075x;
-full ref parity 6,548 needs the DP-level literal steering beyond dict).
+**SOLVED (2026-09-06, second session): the Huffman-table theory was WRONG — the real bug was in the port itself.** The caps sub-walk
+(`walk_bucket(..., sub_t=85, caps=true)`) leaked TRANSFORM-0 bucket
+words into the 18/7/13 sub-block arm, which multiplies by `sub_t` —
+fabricating bogus " " + ALL-CAPS(w) + " " candidates for inputs that
+merely matched the raw word plus a ' ' two bytes later (repro: input
+" clearly\n   " at pos 989 produced a " CLEARLY " candidate). The DP
+took these phantom candidates (they price well — caps transforms are
+short ids), the walk emitted them, and the produced bytes diverged from
+the input — desyncing every downstream command (the "Huffman table
+divergence", the ring misreads, the self-correcting bit patterns: all
+downstream symptoms). Fix: `if caps && transform == 0 { continue; }` —
+the caps walk handles only transformed entries (upstream's is_space
+else-branch); raw words belong to the 6/32 walk.
+
+**Honest numbers after the fix** (all streams byte-exact, ref streams
+unaffected): hq-with-dict 64,197 -> **59,863 bits** on rfc q11 — but
+btopt still wins the contest (57,634), so shipped output stays 7,205
+and the feature stays gated (`BROTLI_HQ_DICT`). The corrupt era's
+55,835 was the phantom candidates measuring small.
+
+**Remaining to close the cell:** hq needs another ~2.2Kb to beat btopt
+— levers: (a) upstream feeds dict candidates through the SAME DP
+relaxation as LZ matches including from queue starts k>0 with rep
+interaction; (b) our per-candidate gate/pricing may under-use affix
+variants; (c) the q5-tier-beats-q11 anomaly (7,107 vs 7,205) suggests
+adding the greedy parse as a THIRD contest candidate. Also verified
+this session: the reference dict ring semantics are a FULL NO-OP
+(`distance_context` is reset to 0 in ReadDistanceInternal before the
+dict branch's += compensation) — our encoder/decoder pair was already
+correct; a speculative ctx-advance "fix" was tried and reverted.
 
 ## Acceptance
 
