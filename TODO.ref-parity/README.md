@@ -10,7 +10,11 @@ runs, 10x-loop re-measure for sub-0.05s cells).
 - **S > 1 with T > 1** — paying time AND shipping larger bytes: the
   worst class; no trade exists at all.
 
-Full table: `sweep-inequality-2026-09-07.txt` (with the raw numbers).
+Full table: `sweep-inequality-v3-2026-09-07.txt` (v3 methodology —
+amortized timing BOTH sides: ours RUNS=10 in-process, reference 20x
+CLI loop; the v1 single-run table overstated small-file T ~4x via our
+lazy-init tax and is kept as sweep-inequality-2026-09-07.txt for the
+record).
 
 ## Tasks
 
@@ -18,9 +22,9 @@ Full table: `sweep-inequality-2026-09-07.txt` (with the raw numbers).
 |---|---|---|---|
 | 01 | brotli q4-9 routing: greedy for all (was I=25-85 on sub-1MiB/text) | rfc/dbdump/plists/words/rustsrc q5+q9 | done 2026-09-07 (I -> ~1-2; sizes +6-26%) |
 | 02 | brotli q1 on >=1MiB text (22x) | words q1 | pending |
-| 03 | zstd fast/intermediate tiers (22x) | words L6 | pending |
+| 03 | zstd fast/intermediate tiers (biggest cluster: 10 cells I=17-29) | all files L6 | pending |
 | 04 | brotli q11 small-file contest overhead (12.5x, S>1) | rfc q11 | pending |
-| 05 | fits/binary q11 DP cell | fits4m q11 | pending (final table) |
+| 05 | csv2m-class periodic data time pathology (csv2m zstd L6 I=137!) | csv2m x{zstd L1/L6/L19, brotli q1} | pending |
 
 ## Principles
 
