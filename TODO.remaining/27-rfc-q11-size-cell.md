@@ -142,10 +142,14 @@ budget: `BROTLI_LIT_SPLIT_MAX` (emission.rs:417, blocks) was A/B'd at
 6/10/16/24 and ships byte-identical 7,007 at every value, because the
 50 trees come from the (block x context) PQ clustering (task-281
 `split_literals` + `cluster_contexts`), not from the block count.
-Implementation: thread a tree-count cap into the clustering (or an
-early-stop on cluster count) behind `with_lit_split_override`
-(currently bool — needs Option<usize>), measured as one more contest
-variant. Expected: most of the 1,437-bit lit_sym win at ~10 trees'
+Implementation anchors (verified 2026-09-07): the tree count
+emerges from `cluster_contexts` (encoder/context.rs:52; greedy
+variant :111 — stop merging at the cap, or post-merge the smallest
+clusters down to K) fed by the (block,ctx) histograms after
+`split_literals` (emission.rs:500 ← the R-path call with
+max_lit_blocks); thread the cap behind `with_lit_split_override`
+(from_spec_encoder.rs:3131, currently `bool` — needs `Option<usize>`),
+measured as one more contest variant alongside a/b. Expected: most of the 1,437-bit lit_sym win at ~10 trees'
 header cost. The deeper alternative remains the reference's
 ContextBlockSplitter clustering quality (task 372 family).
 
