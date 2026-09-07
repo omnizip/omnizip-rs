@@ -313,6 +313,7 @@ fn encode_frame_into(
                     &mut last_huf_weights,
                     &mut last_seq_tables,
                     &mut opt_state,
+                    uses_opt,
                 )?;
                 sub = sub_end;
             }
@@ -856,6 +857,7 @@ fn write_block_cross(
     last_huf_weights: &mut Option<Vec<u8>>,
     last_seq_tables: &mut Option<SeqTablesWire>,
     opt_state: &mut Option<crate::encoder::opt::OptState>,
+    uses_opt: bool,
 ) -> Result<(), ZstdError> {
     let initial_reps = *rep_offsets;
     let chunk = &plaintext[block_start..block_end];
@@ -879,7 +881,9 @@ fn write_block_cross(
         | Strategy::Btlazy2
         | Strategy::Btopt
         | Strategy::Btultra
-        | Strategy::Btultra2 => {
+        | Strategy::Btultra2
+            if uses_opt =>
+        {
             let st = opt_state
                 .as_mut()
                 .expect("opt state exists for opt strategies");

@@ -601,6 +601,14 @@ fn insert_and_find_first_index_hash3(mf: &mut BtFinder, src: &[u8], pos: usize) 
 /// `ZSTD_insertBtAndGetAllMatches`. Fills `st.match_table`, returns
 /// the match count. `ip`/`rep`/`ll0`/`length_to_beat` as in the C.
 #[allow(clippy::too_many_lines)]
+/// Hoisted env check: a bare `var_os` here cost ~53% of csv2m L6
+/// encode time (getenv takes the global environ lock per call —
+/// the same trap brotli's decode loop hit on 2026-08-19).
+fn opt_dump_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("ZSTD_OPT_DUMP").is_some())
+}
+
 fn insert_bt_and_get_all_matches(
     mf: &mut BtFinder,
     match_buf: &mut [OptMatch],
@@ -669,7 +677,7 @@ fn insert_bt_and_get_all_matches(
     // HC3 (len-3) match finder.
     if mf.min_match == 3 && best_length < min_match as usize {
         let match_index3 = insert_and_find_first_index_hash3(mf, src, ip);
-        if std::env::var_os("ZSTD_OPT_DUMP").is_some() && (315..=325).contains(&curr) {
+        if opt_dump_enabled() && (315..=325).contains(&curr) {
             eprintln!("HC3DUMP ip={curr} mi3={match_index3} match_low={match_low}");
         }
         if match_index3 != u32::MAX as usize && curr - match_index3 < (1 << 18) {
@@ -765,7 +773,7 @@ fn insert_bt_and_get_all_matches(
     }
 
     mf.next_to_update = (match_end_idx - 8) as u32;
-    if std::env::var_os("ZSTD_OPT_DUMP").is_some() && (310..=330).contains(&(curr as u32)) {
+    if opt_dump_enabled() && (310..=330).contains(&(curr as u32)) {
         eprintln!(
             "OPTDUMP ip={curr} mnum={mnum} ll0={ll0} reps={:?} cands={:?}",
             &rep.iter().collect::<Vec<_>>(),
