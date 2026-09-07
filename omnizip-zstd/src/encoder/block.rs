@@ -205,20 +205,28 @@ fn encode_frame_into(
     // The optimal parser (btopt/btultra/btultra2) uses its own
     // binary-tree state and does not consume LDM sequences; the tree
     // window already covers everything the windowLog allows.
-    // Lazy and up (L5+) share the optimal parser with Btopt+ (the
-    // reference runs lazy tiers there; our hash-chain lazy/lazy2
-    // plateaued at 1.07-2.45x across a broad corpus sweep, while the
-    // price-parse DP meets or beats the reference everywhere).
+    // Greedy/lazy/lazy2 (L5-12) run the reference-shaped hash-chain
+    // parser (encoder::lazy) — the parse shape the reference runs at
+    // those levels. DoubleFast (L3-4) and Btlazy2 (L13-15) still
+    // share the opt DP: the reference dfast/btlazy2 parse shapes are
+    // not ported yet, and the opt DP beats them on size (ref-parity
+    // task 03 follow-up).
     let uses_opt = matches!(
         params.strategy,
         crate::encoder::cparams::Strategy::DoubleFast
-            | crate::encoder::cparams::Strategy::Lazy
-            | crate::encoder::cparams::Strategy::Lazy2
             | crate::encoder::cparams::Strategy::Btlazy2
             | crate::encoder::cparams::Strategy::Btopt
             | crate::encoder::cparams::Strategy::Btultra
             | crate::encoder::cparams::Strategy::Btultra2
     );
+    if matches!(
+        params.strategy,
+        crate::encoder::cparams::Strategy::Greedy
+            | crate::encoder::cparams::Strategy::Lazy
+            | crate::encoder::cparams::Strategy::Lazy2
+    ) {
+        match_state.enable_hc(params.chain_log);
+    }
     let ldm_enabled = ldm_enabled && !uses_opt;
     let mut opt_state = uses_opt.then(|| {
         // All opt strategies use the ultra price model (optLevel 2).
@@ -876,8 +884,6 @@ fn write_block_cross(
     use crate::encoder::cparams::Strategy;
     match params.strategy {
         Strategy::DoubleFast
-        | Strategy::Lazy
-        | Strategy::Lazy2
         | Strategy::Btlazy2
         | Strategy::Btopt
         | Strategy::Btultra
@@ -892,6 +898,21 @@ fn write_block_cross(
                 block_start,
                 &mut seq_store,
                 st,
+            );
+        }
+        Strategy::Greedy | Strategy::Lazy | Strategy::Lazy2 => {
+            let depth = match params.strategy {
+                Strategy::Greedy => 0,
+                Strategy::Lazy => 1,
+                _ => 2,
+            };
+            crate::encoder::lazy::compress_block_lazy_generic(
+                src,
+                block_start,
+                &mut seq_store,
+                ms,
+                params,
+                depth,
             );
         }
         _ => {

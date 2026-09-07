@@ -154,6 +154,15 @@ pub struct MatchState {
     pub(crate) max_chain: u32,
     /// Next position to insert into the hash table.
     pub(crate) next_to_update: u32,
+    /// Reference-shaped hash chain (`zstd_lazy.c`): window-masked
+    /// chain table used by the lazy/greedy parser, absolute
+    /// positions. Lazily allocated by [`enable_hc`](Self::enable_hc).
+    pub(crate) chain_table: Vec<u32>,
+    /// Mask for `chain_table` indexing (chain table size - 1).
+    pub(crate) chain_mask: usize,
+    /// `ms->lazySkipping`: once the step acceleration exceeds 8,
+    /// catch-up inserts stop covering every position.
+    pub(crate) lazy_skipping: bool,
 }
 
 impl MatchState {
@@ -167,7 +176,19 @@ impl MatchState {
             chain: Vec::new(),
             max_chain: 0,
             next_to_update: 0,
+            chain_table: Vec::new(),
+            chain_mask: 0,
+            lazy_skipping: false,
         }
+    }
+
+    /// Allocate the reference-shaped hash chain for the lazy parser
+    /// (`1 << chain_log` entries, masked indexing).
+    pub fn enable_hc(&mut self, chain_log: u32) {
+        if self.chain_table.is_empty() {
+            self.chain_table = vec![0; 1usize << chain_log];
+        }
+        self.chain_mask = (1usize << chain_log) - 1;
     }
 
     /// Enable hash chain walking. Allocates the chain table.
@@ -221,7 +242,11 @@ impl MatchState {
         if !self.chain.is_empty() {
             self.chain.fill(0);
         }
+        if !self.chain_table.is_empty() {
+            self.chain_table.fill(0);
+        }
         self.next_to_update = 0;
+        self.lazy_skipping = false;
     }
 
     /// Seed the hash table with a dictionary prefix. Scans
