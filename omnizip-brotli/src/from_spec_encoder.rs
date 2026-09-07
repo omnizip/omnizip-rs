@@ -5021,9 +5021,9 @@ fn parse_input_with_offset_impl(
     // measured worse on arial +92KB, fits +16KB). q2-8 keep greedy
     // everywhere (there it beat both the reference and our zopfli).
     let greedy_tier = quality >= 2
-        && (quality < 9 || (quality < 10 && !is_text_like(input)))
+        && quality < 10
         && !env_flag!("BROTLI_NO_GREEDY_TIER")
-        && (env_flag!("BROTLI_GREEDY_TIER") || mlen_offset > 0 || input.len() >= (1 << 20) - 1);
+        && (env_flag!("BROTLI_GREEDY_TIER") || mlen_offset > 0 || input.len() >= 4096);
     let use_dict = if greedy_tier && env_flag!("BROTLI_GREEDY_NODICT") {
         false
     } else {
