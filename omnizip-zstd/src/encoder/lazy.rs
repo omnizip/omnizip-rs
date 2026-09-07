@@ -146,12 +146,11 @@ fn hc_find_best_match(
     while match_index >= low_limit && nb_attempts > 0 {
         let m = match_index as usize;
         let mut current_ml = 0usize;
-        // Quick reject: compare the 4 bytes at match+ml-3. The
-        // `ip+ml == iend` break below keeps this read in bounds the
-        // same way the C's control flow does; the explicit bound
-        // check covers the ml==3 initial value.
+        // Quick reject: compare the 4 bytes at match+ml-3; on pass,
+        // count the FULL match from byte 0 (the quick check skips
+        // the first ml-3 bytes, so it is only a heuristic gate).
         if ip + ml < iend && read32(src, m + ml - 3) == read32(src, ip + ml - 3) {
-            current_ml = 4 + count(src, ip + 4, m + 4, iend);
+            current_ml = count(src, ip, m, iend);
         }
 
         if current_ml > ml {
