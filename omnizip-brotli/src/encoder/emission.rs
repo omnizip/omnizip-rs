@@ -734,9 +734,12 @@ pub(crate) fn emit_metablock_from_commands(
         // Literal-tree clustering cap: the reference's ContextBlockSplitter
         // reaches >100 trees at q11 (FITS: 143); a cap of 4 forfeits ~360KB
         // of literal entropy there. BROTLI_LIT_TREES overrides.
-        let lit_trees_cap: usize = std::env::var("BROTLI_LIT_TREES")
-            .ok()
-            .and_then(|v| v.parse().ok())
+        let lit_trees_cap: usize = crate::from_spec_encoder::lit_tree_cap_now()
+            .or_else(|| {
+                std::env::var("BROTLI_LIT_TREES")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+            })
             .unwrap_or(if quality >= 10 { 64 } else { 4 });
         let cmap_a = if skip_ab {
             Vec::new()
