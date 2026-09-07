@@ -151,8 +151,12 @@ extra `measure_emission_bits` via a scoped thread-local override) and
 ships it only when strictly smaller. Results (all byte-identical +
 C-decodable): rfc 7,007 -> **6,678** (cell 1.0701x -> **1.0198x**);
 plists.json -7,385; noto-otf -1,995; sqlite -795; install.log -503;
-icons.svg -248; every other cell byte-identical (binary cells are
-cap-insensitive). Regression gate green without a baseline refresh.
+icons.svg -248; every other cell byte-identical. Binary cells are
+MOSTLY cap-insensitive (csv2m/fits/arial byte-identical) — but not
+always: the post-release sweep found bin2 q11 -11,423 B (-6.0%) and
+rand -263 B under the shielded cap (both byte-verified round-trips);
+the strict-smaller gate makes such wins free. Regression gate green
+without a baseline refresh.
 NOTE: the iterative-candidate winner path returns before the
 refinement (early return) — q10 keeps its exact prior output.
 
