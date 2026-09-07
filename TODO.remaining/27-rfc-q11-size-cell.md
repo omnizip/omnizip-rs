@@ -156,6 +156,18 @@ cap-insensitive). Regression gate green without a baseline refresh.
 NOTE: the iterative-candidate winner path returns before the
 refinement (early return) — q10 keeps its exact prior output.
 
+**FINAL DECOMPOSITION (post-tree-cap, closing the task):** the
+6,678-byte stream vs the reference's 6,548: lit_trees 6 = 6, cmds
+2,095 vs 2,115, and CONTENT BITS AT PARITY (ours 49,991 vs ref
+50,013 — 22 bits in our favor: lit_sym +157, cmd_sym +55, dist_sym
+-104, dist_extra -136, extras +6). The entire remaining 130 B is
+header-wire encoding — context-map coding, tree wire forms, block
+headers — diffuse across many small elements with no dominant
+component. The next meaningful step is a header-encoding AUDIT (cmap
+RLE choices, simple-form vs complex-form tree selection), a different
+work class than this task's parse/emission levers. Cell CLOSED at
+1.0198x.
+
 Implementation anchors (verified 2026-09-07): the tree count
 emerges from `cluster_contexts` (encoder/context.rs:52; greedy
 variant :111 — stop merging at the cap, or post-merge the smallest
