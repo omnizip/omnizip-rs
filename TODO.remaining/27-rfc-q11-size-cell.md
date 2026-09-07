@@ -142,6 +142,20 @@ budget: `BROTLI_LIT_SPLIT_MAX` (emission.rs:417, blocks) was A/B'd at
 6/10/16/24 and ships byte-identical 7,007 at every value, because the
 50 trees come from the (block x context) PQ clustering (task-281
 `split_literals` + `cluster_contexts`), not from the block count.
+**TREE-CAP REFINEMENT SHIPPED (seventh session): the last >1.05x cell
+is CLOSED at 1.0198x.** The cap knob already existed —
+`BROTLI_LIT_TREES` (emission.rs) IS the clustering target; A/B at
+6/8/12/16 gave 6,678/6,713 on rfc. Shipped as a SHIELDED refinement:
+the emission contest re-measures its winner under tree-cap 6 (one
+extra `measure_emission_bits` via a scoped thread-local override) and
+ships it only when strictly smaller. Results (all byte-identical +
+C-decodable): rfc 7,007 -> **6,678** (cell 1.0701x -> **1.0198x**);
+plists.json -7,385; noto-otf -1,995; sqlite -795; install.log -503;
+icons.svg -248; every other cell byte-identical (binary cells are
+cap-insensitive). Regression gate green without a baseline refresh.
+NOTE: the iterative-candidate winner path returns before the
+refinement (early return) — q10 keeps its exact prior output.
+
 Implementation anchors (verified 2026-09-07): the tree count
 emerges from `cluster_contexts` (encoder/context.rs:52; greedy
 variant :111 — stop merging at the cap, or post-merge the smallest

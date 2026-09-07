@@ -32,7 +32,7 @@ MECE decomposition of all remaining work. Each task is self-contained.
 | 21 | brotli q9-text single-thread gap (28-56x) | mitigated 2026-09-04 | MEDIUM |
 | 22 | Extend fuzz coverage to the remaining decoders | done 2026-09-04 | MEDIUM |
 | 26 | brotli PREFIX_SUFFIX table one-byte desync | done 2026-09-06 — ref q11 streams decode | HIGH |
-| 27 | rfc.txt brotli q11 size cell | in_progress — 3rd contest candidate shipped (1.1003x → 1.0854x); rest needs ref literal-steering | MEDIUM |
+| 27 | rfc.txt brotli q11 size cell | CLOSED 2026-09-07 — 1.0198x via tree-cap refinement; board has NO cell >1.05x | MEDIUM |
 
 ## Principles
 

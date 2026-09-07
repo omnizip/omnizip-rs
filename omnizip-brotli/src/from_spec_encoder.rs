@@ -3120,6 +3120,8 @@ thread_local! {
     /// Some(true) forces the splitter (decided map off), None follows
     /// the env/default. Only set around emission measurements.
     static LIT_SPLIT_OVERRIDE: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+    static LIT_TREE_CAP_OVERRIDE: std::cell::Cell<Option<usize>> =
+        const { std::cell::Cell::new(None) };
 }
 
 pub(crate) fn lit_split_forced_now() -> bool {
@@ -3133,6 +3135,22 @@ fn with_lit_split_override<T>(forced: bool, f: impl FnOnce() -> T) -> T {
     let out = f();
     LIT_SPLIT_OVERRIDE.with(|c| c.set(None));
     out
+}
+
+/// Scoped literal-tree clustering cap (None = unset). Used by the
+/// emission contest to re-measure the winner under a small tree
+/// budget: on dictionary-dense text the natural clustering produces
+/// dozens of literal trees whose headers cost more than their
+/// concentration saves (rfc q11: 50 trees vs the reference's 6).
+fn with_lit_tree_cap<T>(cap: usize, f: impl FnOnce() -> T) -> T {
+    LIT_TREE_CAP_OVERRIDE.with(|c| c.set(Some(cap)));
+    let out = f();
+    LIT_TREE_CAP_OVERRIDE.with(|c| c.set(None));
+    out
+}
+
+pub(crate) fn lit_tree_cap_now() -> Option<usize> {
+    LIT_TREE_CAP_OVERRIDE.with(|c| c.get())
 }
 
 fn measure_emission_bits(
@@ -5206,15 +5224,37 @@ fn parse_input_with_offset_impl(
                 if bt_bits < hq_bits { "BT" } else { "HQ" }
             );
         }
-        if let Some((cmds, bw, bits)) = dict_winner {
-            if bits < bt_bits && bits < hq_bits {
-                return (cmds, bw);
+        let (mut win_cmds, mut win_bw, mut win_bits): (Vec<Command>, Option<BitWriter>, u64) =
+            if let Some((cmds, bw, bits)) = dict_winner {
+                (cmds, bw, bits)
+            } else if bt_bits < hq_bits {
+                (bt, Some(bt_bw), bt_bits)
+            } else {
+                (hq, Some(hq_bw), hq_bits)
+            };
+        // Tree-cap refinement: re-measure the winner under a small
+        // literal-tree clustering cap. On text the natural clustering
+        // produces dozens of literal trees whose headers cost more
+        // than their concentration saves (rfc: 50 trees vs the
+        // reference's 6; plists.json -7.4KB, noto -2.0KB at cap 6);
+        // binary cells are cap-insensitive (measured: csv2m/fits/arial
+        // byte-identical). Shielded: ships only when strictly
+        // smaller, so cap-insensitive inputs keep their exact output
+        // at the cost of one extra emission measurement.
+        if quality >= 10 && win_bits > 0 && !env_flag!("BROTLI_NO_TREECAP") {
+            let (c_bits, c_bw) = with_lit_tree_cap(6, || {
+                measure_emission_bits(&win_cmds, input, mlen_offset, quality, is_last, ctx_in)
+            });
+            if c_bits < win_bits {
+                if env_flag!("BROTLI_BTOPT_DUMP") {
+                    eprintln!("BTOPT chunk@{mlen_offset} n={n} treecap: {win_bits} -> {c_bits}",);
+                }
+                win_bits = c_bits;
+                win_bw = Some(c_bw);
+                let _ = &mut win_cmds;
             }
         }
-        if bt_bits < hq_bits {
-            return (bt, Some(bt_bw));
-        }
-        return (hq, Some(hq_bw));
+        return (win_cmds, win_bw);
     } else if quality >= 4 && input.len() <= 8 * 1024 * 1024 {
         return zopfli_iterative_parse(
             input,
