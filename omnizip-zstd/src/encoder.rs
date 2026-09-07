@@ -14,6 +14,7 @@
 
 pub mod block;
 pub mod cparams;
+pub mod lazy;
 pub mod ldm;
 pub mod match_finder;
 pub mod opt;

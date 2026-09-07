@@ -1,0 +1,56 @@
+# v4: post v0.21.66 (zstd opt getenv hoist) + v0.21.67 (reference lazy parser L5-12)
+# methodology identical to v3 (ours RUNS=10 in-process, ref 20x CLI loop)
+# measured under shared-box load ~22-42 — T inflated vs a quiet box; S exact
+file           codec   lvl    T(x)   S(x)        I  size ours/ref
+fits4m.bin     brotli    1   58.5x  0.760     44.5  2887682/3797977  << WHACK
+fits4m.bin     brotli   11   18.2x  1.002     18.2  1488538/1485934  << WHACK
+fits4m.bin     brotli    5   17.9x  0.939     16.8  2641545/2812411  << WHACK
+fits4m.bin     zstd      1   14.4x  0.876     12.6  3149033/3596632  << WHACK
+plists.json    brotli    5    8.8x  1.246     10.9  160057/128457  << WHACK
+plists.json    brotli    1   10.8x  0.877      9.4  146285/166739  << WHACK
+noto-otf.bin   brotli   11    8.9x  1.011      9.0  80229/79338  << WHACK
+install.log    brotli    5    8.4x  1.064      9.0  18310/17210  << WHACK
+icons.svg      brotli    5    6.8x  1.111      7.6  36675/33000  bad
+sqlite.db      brotli   11    7.4x  1.000      7.4  41293/41300  bad
+install.log    brotli    9    6.6x  1.085      7.1  18108/16688  bad
+fits4m.bin     zstd      6    7.3x  0.949      6.9  2615410/2756233  bad
+fits4m.bin     brotli    9    7.1x  0.955      6.8  2350849/2462397  bad
+icons.svg      brotli    1    7.9x  0.827      6.6  36083/43609  bad
+plists.json    brotli   11    5.5x  1.029      5.7  107787/104745  bad
+noto-otf.bin   brotli    9    5.1x  1.086      5.6  93819/86404  bad
+noto-otf.bin   brotli    1    5.9x  0.875      5.2  91229/104227  bad
+icons.svg      brotli   11    5.0x  1.022      5.1  26351/25785  bad
+sqlite.db      brotli    1    5.4x  0.929      5.1  65899/70958  bad
+plists.json    zstd      1    5.0x  0.977      4.9  152863/156468  bad
+icons.svg      brotli    9    4.3x  1.122      4.9  35146/31329  bad
+install.log    brotli   11    4.6x  1.015      4.7  15073/14850  bad
+plists.json    brotli    9    3.6x  1.257      4.5  156491/124455  bad
+install.log    brotli    1    5.6x  0.774      4.4  18180/23493  bad
+csv2m.bin      zstd      6    3.9x  0.972      3.8  315839/324867  bad
+words.txt      zstd      6    3.7x  1.004      3.7  770457/767497  bad
+rustsrc.txt    zstd      6    3.6x  1.009      3.7  448260/444132  bad
+noto-otf.bin   zstd      6    3.5x  1.000      3.5  92847/92880  bad
+sqlite.db      brotli    9    3.0x  1.152      3.5  61825/53658  bad
+noto-otf.bin   zstd      1    3.5x  1.000      3.5  100970/100948  bad
+noto-otf.bin   brotli    5    3.3x  1.058      3.5  93244/88166  bad
+plists.json    zstd      6    3.4x  0.995      3.4  135879/136576  bad
+sqlite.db      zstd      1    3.3x  0.992      3.3  64909/65443  bad
+icons.svg      zstd      1    3.1x  1.002      3.1  36222/36138  bad
+sqlite.db      zstd      6    3.1x  0.992      3.1  60600/61106  bad
+sqlite.db      brotli    5    2.6x  1.128      2.9  61787/54782
+icons.svg      zstd     19    2.9x  1.001      2.9  28463/28440
+noto-otf.bin   zstd     19    2.8x  1.003      2.8  86518/86300
+icons.svg      zstd      6    2.6x  1.004      2.6  33989/33837
+dbdump.txt     zstd      6    2.3x  0.994      2.2  72772/73221
+fits4m.bin     zstd     19    2.2x  0.996      2.2  1957645/1966084
+install.log    zstd      1    2.2x  0.999      2.2  20922/20953
+install.log    zstd      6    2.1x  0.999      2.1  17866/17882
+sqlite.db      zstd     19    1.6x  1.000      1.6  52613/52626
+plists.json    zstd     19    1.5x  1.004      1.5  122032/121542
+words.txt      zstd     19    1.4x  1.001      1.4  662340/661927
+csv2m.bin      zstd     19    1.5x  0.925      1.4  152845/165209
+rfc.txt        zstd     19    1.4x  1.000      1.4  7749/7747
+install.log    zstd     19    1.4x  1.002      1.4  16105/16068
+rustsrc.txt    zstd     19    1.3x  1.002      1.3  388383/387563
+dbdump.txt     zstd     19    1.3x  1.002      1.3  62912/62789
+rfc.txt        zstd      6    1.0x  1.000      1.0  8057/8055
