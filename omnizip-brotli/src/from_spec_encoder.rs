@@ -5291,6 +5291,18 @@ fn parse_input_with_offset_impl(
     // Candidate buffer hoisted out of the loop: a per-position Vec
     // meant an alloc/free pair per position.
     let mut cands_buf: Vec<omnizip_codecs::Lz77Match> = Vec::new();
+    // Upstream CreateBackwardReferences sparse-search: after a run of
+    // literals with no match, stop searching every position and
+    // hash-store in 8/16-byte strides (StoreEvenVec4/Store4Vec4) —
+    // the searches all miss on incompressible runs, and the strided
+    // walk is what lets the reference run FITS-class data sections at
+    // 200 MB/s while a per-position search crawls (v6 board: fits q5
+    // T=17.9x). Resets after each accepted match
+    // (position + 2*sr.len + window) and skips to the end game in the
+    // last few bytes. BROTLI_NO_SPARSE restores per-position search.
+    let sparse_window: usize = if quality < 9 { 64 } else { 512 };
+    let sparse_search = greedy_tier && !env_flag!("BROTLI_NO_SPARSE");
+    let mut apply_random_heuristics = sparse_window;
     while pos < n {
         // Global output position (across metablocks) for max_distance.
         let global_pos = mlen_offset + pos;
@@ -5663,6 +5675,12 @@ fn parse_input_with_offset_impl(
                 // lazy-search position (pos+1) is always stored (the
                 // reference's FindLongestMatch inserts it during the
                 // sr2 search).
+                // Upstream: apply_random_heuristics = position +
+                // 2*sr.len + window (reset the literal-sprees counter
+                // at every accepted match).
+                if sparse_search {
+                    apply_random_heuristics = pos + 2 * advance + sparse_window;
+                }
                 let rle_store_from = if distance < (advance as u32) >> 2 {
                     (pos + advance - 4 * distance as usize).max(pos + 2)
                 } else {
@@ -5690,6 +5708,34 @@ fn parse_input_with_offset_impl(
             }
         }
         pos += 1;
+        // Upstream no-match branch: after a literal spree, stride in
+        // 8/16-byte steps storing hashes without searching (the
+        // searches all miss); near the end, run the remainder as
+        // literals with no stores at all.
+        if sparse_search && pos > apply_random_heuristics {
+            if pos + 16 >= n - 4 {
+                pos = n;
+            } else {
+                let stride = if pos > apply_random_heuristics + 4 * sparse_window {
+                    16
+                } else {
+                    8
+                };
+                let stride_end = (pos + stride).min(n - 4);
+                while pos < stride_end {
+                    // advance()-first: the finder inserts at its
+                    // cursor, so this covers every strided position
+                    // (StoreEvenVec4/Store4Vec4 parity) and leaves
+                    // the cursor synced at `pos`.
+                    if let Some(bank) = bank_mf.as_deref_mut() {
+                        bank.advance();
+                    } else {
+                        mf.advance();
+                    }
+                    pos += 1;
+                }
+            }
+        }
     }
 
     // Trailing literals: emit a separate trailing-insert command (with
