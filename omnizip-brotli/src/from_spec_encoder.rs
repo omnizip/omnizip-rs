@@ -5082,30 +5082,66 @@ fn parse_input_with_offset_impl(
         // a/b literal-assignment contest below — the split variant is
         // worth up to 30% on periodic data (csv2m 120,012 vs 173,007
         // bytes).
+        let dict_dense = n <= 262_144
+            && (env_flag!("BROTLI_DICTCAND_ALL") || {
+                let stride = (n / 512).max(1);
+                let mut hits = 0usize;
+                let mut samples = 0usize;
+                let mut buf = [u32::MAX; 38];
+                let mut p = 0usize;
+                while p + 8 < n {
+                    if crate::encoder::static_dict::find_all_static_dictionary_matches(
+                        &input[p..],
+                        4,
+                        37.min(n - p),
+                        &mut buf,
+                    ) {
+                        hits += 1;
+                    }
+                    samples += 1;
+                    p += stride;
+                }
+                samples > 0 && (hits as f32 / samples as f32) >= 0.08
+            });
         if env_flag!("BROTLI_NO_BTOPT")
             || env_flag!("BROTLI_NO_CM")
             || n < 8
             || input.len() < 4096
-            || (n > 262_144 && !env_flag!("BROTLI_BTCAND_ALL"))
+            || !dict_dense
         {
             let (a_bits, a_bw) =
                 measure_emission_bits(&hq, input, mlen_offset, quality, is_last, ctx_in);
             let (b_bits, b_bw) = with_lit_split_override(true, || {
                 measure_emission_bits(&hq, input, mlen_offset, quality, is_last, ctx_in)
             });
-            return if b_bits < a_bits {
-                (hq, Some(b_bw))
+            let (mut win_bits, mut win_bw) = if b_bits < a_bits {
+                (b_bits, Some(b_bw))
             } else {
-                (hq, Some(a_bw))
+                (a_bits, Some(a_bw))
             };
+            // Same tree-cap refinement as the full contest (noto:
+            // 641,823 vs 657,787 bits — the cap is where the sparse
+            // class's size comes from).
+            if quality >= 10 && win_bits > 0 && !env_flag!("BROTLI_NO_TREECAP") {
+                let (c_bits, c_bw) = with_lit_tree_cap(6, || {
+                    measure_emission_bits(&hq, input, mlen_offset, quality, is_last, ctx_in)
+                });
+                if c_bits < win_bits {
+                    win_bits = c_bits;
+                    win_bw = Some(c_bw);
+                }
+            }
+            return (hq, win_bw);
         }
-        let bt = crate::encoder::btopt::parse_btopt_with(
-            input,
-            quality,
-            mlen_offset,
-            &num_matches,
-            &matches,
-        );
+        // bt runs only on dense TEXT: on dense binary (sqlite — its
+        // DB text passes the density screen) it lost every measured
+        // contest (359,318 vs hq 336,699) while costing a full DP
+        // pass plus two emissions. is_text_like splits the two
+        // classes cleanly (sqlite/noto false, rfc/plists/install
+        // true). BROTLI_BT_TEXT=0 restores bt on binary for
+        // measurement.
+        let run_bt =
+            is_text_like(input) && !matches!(std::env::var("BROTLI_BT_TEXT").as_deref(), Ok("0"));
         // Literal-assignment contest (q10/11): the decided static map
         // and the reference splitter trade wins by corpus, so each
         // parse candidate is measured under BOTH and the smallest
@@ -5121,16 +5157,26 @@ fn parse_input_with_offset_impl(
                 (a.0, a.1, false)
             }
         };
-        let (bt_bits, bt_bw, bt_split) = {
-            let a = measure_emission_bits(&bt, input, mlen_offset, quality, is_last, ctx_in);
-            let b = with_lit_split_override(true, || {
+        let (bt, bt_bits, bt_bw, bt_split) = if run_bt {
+            let bt = crate::encoder::btopt::parse_btopt_with(
+                input,
+                quality,
+                mlen_offset,
+                &num_matches,
+                &matches,
+            );
+            let (a_bits, a_bw) =
+                measure_emission_bits(&bt, input, mlen_offset, quality, is_last, ctx_in);
+            let (b_bits, b_bw) = with_lit_split_override(true, || {
                 measure_emission_bits(&bt, input, mlen_offset, quality, is_last, ctx_in)
             });
-            if b.0 < a.0 {
-                (b.0, b.1, true)
+            if b_bits < a_bits {
+                (bt, b_bits, Some(b_bw), true)
             } else {
-                (a.0, a.1, false)
+                (bt, a_bits, Some(a_bw), false)
             }
+        } else {
+            (Vec::<Command>::new(), u64::MAX, None, false)
         };
         // Fourth contest candidate (q11, small inputs): the hq parse
         // WITH static-dictionary candidates. Dictionary density helps
@@ -5152,14 +5198,21 @@ fn parse_input_with_offset_impl(
         // 5,215,719) while costing a full DP pass + two emissions;
         // the dict candidate's wins live in the small-file class
         // (rfc -100B). BROTLI_DICTCAND_ALL restores it everywhere.
-        // The dict candidate's wins live in the small-file class (rfc
-        // -100B); on chunk-scale inputs it measures within 0.05% of
-        // the plain hq parse and never wins (words 5,218,232 vs
-        // 5,215,719) while costing a full DP pass + two emissions.
-        // Gate to the same 256 KiB bound as the other small-file
-        // candidates; BROTLI_DICTCAND_ALL restores it everywhere for
+        // Content-class gate for the small-file contest candidates
+        // (dict, bt, iter). The screen samples 512 positions for
+        // static-dictionary hits: text classes 0.10-0.20
+        // (rfc/rustsrc/words/dbdump/plists/install.log), periodic and
+        // binary 0.00-0.03 (csv2m/fits/noto/sqlite/arial/rand) — 0.08
+        // sits in the empty middle. On the sparse class the hq parse
+        // plus the tree-cap refinement always wins the contest
+        // (BTOPT_DUMP, 2026-09-08: noto hq=657,787 bt=666,426
+        // hqdict=660,316 iter=709,358 -> treecap 641,823; sqlite
+        // hq=336,699 -> treecap 330,333) while the extra DPs and
+        // emissions are the whole contest overhead — I=9.6/8.7 on the
+        // v7 board. Dense text keeps the full contest (rfc's winner
+        // IS the dict candidate: hqdict=56,050 -> treecap 53,418).
+        // BROTLI_DICTCAND_ALL restores every candidate for
         // measurement.
-        let dict_dense = n <= 262_144 || env_flag!("BROTLI_DICTCAND_ALL");
         if quality >= 11 && dict_dense && !env_flag!("BROTLI_NO_DICTCAND") {
             let hq_d = crate::encoder::zopfli_hq::parse_hq_with(
                 input,
@@ -5198,7 +5251,7 @@ fn parse_input_with_offset_impl(
         // smaller under the SAME exact q11 emission, so output can
         // only improve. The n bound keeps the two extra emissions off
         // q11-scale inputs; the inversion class lives in small files.
-        if quality >= 10 && n <= 262_144 && !env_flag!("BROTLI_NO_ITERCAND") {
+        if quality >= 10 && dict_dense && !env_flag!("BROTLI_NO_ITERCAND") {
             // Third contest candidate: the in-house iterative zopfli
             // (the parse our sub-1MiB q5 tier ships), emitted with ITS
             // OWN q5-tier emission. On dictionary-dense text this beats
@@ -5244,7 +5297,7 @@ fn parse_input_with_offset_impl(
             if let Some((cmds, bw, bits)) = dict_winner {
                 (cmds, bw, bits)
             } else if bt_bits < hq_bits {
-                (bt, Some(bt_bw), bt_bits)
+                (bt, bt_bw, bt_bits)
             } else {
                 (hq, Some(hq_bw), hq_bits)
             };
