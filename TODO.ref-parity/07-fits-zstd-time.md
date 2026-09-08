@@ -1,11 +1,9 @@
 # 07 — fits zstd time class: L1 I=12.8, L6 I=9.0 (v7 board)
 
 - **Priority:** P0 (the two zstd whack cells on the v7 honest board)
-- **Status:** sub-split half DONE 2026-09-08 (v0.21.72). Remaining:
-  the lazy parser's per-op constant on binary — fits L6 sits at
-  I=7.8 with the split off (bounds-checked byte-stepping count/hash
-  vs the C's single unaligned loads; same optimization class as the
-  zopfli_hq DP constant).
+- **Status:** DONE 2026-09-08 (v0.21.72 sub-split gating + v0.21.73
+  window-form primitives). fits L6 I 7.8 -> 4.2; the zstd L6 column
+  now sits at I 1.0-4.2 across the corpus.
 
 ## Sub-split gating (v0.21.72)
 
@@ -35,3 +33,22 @@ bounds check per side, as the bank finder's `match_len_scan` did —
 measured 5-8x there), `ptr::read_unaligned`-free fused loads via
 `chunks_exact`, and precomputed reject bytes. Acceptance: fits L6
 T <= 4x with byte-identical output (pure port-speed work).
+
+## Window-form primitives (v0.21.73)
+
+The lazy parser's per-op constant was byte-indexed loads: read32/
+read64 from arrays of individually bounds-checked byte indexes (up
+to 8 panic checks per load), count stepping with two checked loads
+per tail byte, and every compare re-checking both operands. Both
+match windows are now sliced out once and stepped as equal-length
+chunks_exact iterators (the shape the bank finder's match_len_scan
+proved at 5-8x); compares are slice equality; hash4/count_match in
+the shared match finder (fast/greedy/legacy paths) got the same
+treatment. Byte-identical output (stash A/B per rewrite).
+
+Measured (user CPU time): fits L6 0.364s -> 0.198s (I 7.8 -> 4.2),
+words L6 4.7 -> 2.8, csv2m L6 4.4 -> 2.6, every small-file L6 cell
+1.0-2.6. Remaining zstd residuals (new task 09): words/rustsrc L1
+I~5.6 — the fast4 parse on text; profile before touching (the
+count/hash primitives are now shared and cheap, so the cost is
+elsewhere: per-position insert loop or per-block emission).
