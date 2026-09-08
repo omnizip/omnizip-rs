@@ -28,7 +28,7 @@ small-file T ~4x).)
 | 02 | brotli q1: two-pass default (was from-spec, I=44.5 on fits) | fits/words/csv2m q1 | done 2026-09-08 (v0.21.68; every q1 cell I=0.3-1.7) |
 | 03 | zstd fast/intermediate tiers (biggest cluster: 10 cells I=17-29) | all files L6 | done 2026-09-08 (v0.21.67; reference lazy parser, S 0.949-1.009, L6 5-46x faster; dfast/btlazy2 follow-ups listed) |
 | 04 | brotli q11 small-file contest overhead (12.5x, S>1) | rfc q11 | pending |
-| 06 | brotli q5 class: plists I=10.9 with S=1.246 (worst class), fits 16.8, install 9.0, icons 7.6 | plists/fits/install q5 | pending |
+| 06 | brotli q5 sub-1MiB class: bank hasher missing on that path (plists S=1.246) | plists/install/icons/sqlite q5 | done 2026-09-08 (v0.21.69; S 0.994-1.025, I 2.1-5.3) |
 | 07 | fits zstd L1: T=14.4x (fast parser on 4MB FITS) | fits L1 | pending |
 | 05 | csv2m time pathology — root cause 1: getenv in opt hot loop | csv2m zstd L6 I=137 | done 2026-09-07 (v0.21.66; T 202x→~112x est; re-score pending quiet box; residual = task 03) |
 
