@@ -272,13 +272,27 @@ fn encode_frame_into(
         // Threshold 0.25 total-variation distance separates cleanly:
         // FITS headers-vs-data ~0.5; repetitive/random/stationary
         // fixtures <= 0.024.
-        let sub_split = chunk_size >= 32 * 1024 && {
-            let mid = chunk_size / 2;
-            halves_diverge(
-                &plaintext[offset..offset + mid],
-                &plaintext[offset + mid..block_end],
-            )
-        };
+        // The reference block-splits only at the opt tiers; running
+        // it at every level is a size-over-time mis-tier on
+        // heterogeneous binary (fits: the L1 sub-split costs 71% of
+        // encode for a 17% size win — I 13.6 with it vs 4.6 without,
+        // v7 board). ZSTD_SUBSPLIT_ALL restores it everywhere for
+        // measurement.
+        let sub_split = chunk_size >= 32 * 1024
+            && (matches!(
+                params.strategy,
+                crate::encoder::cparams::Strategy::Btopt
+                    | crate::encoder::cparams::Strategy::Btultra
+                    | crate::encoder::cparams::Strategy::Btultra2
+            ) || std::env::var_os("ZSTD_SUBSPLIT_ALL").is_some())
+            && !std::env::var_os("ZSTD_NO_SUBSPLIT").is_some()
+            && {
+                let mid = chunk_size / 2;
+                halves_diverge(
+                    &plaintext[offset..offset + mid],
+                    &plaintext[offset + mid..block_end],
+                )
+            };
         let step = if sub_split { 16 * 1024 } else { chunk_size };
 
         if ldm_enabled {
