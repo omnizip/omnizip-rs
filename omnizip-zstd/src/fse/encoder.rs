@@ -604,20 +604,42 @@ impl CState {
         }
     }
 
+    /// Encode-step core: the state arithmetic shared by the emitting
+    /// and the counting paths (returns the pre-update state value and
+    /// its bit count, so the two can never diverge).
+    fn encode_step(&mut self, table: &CTable, symbol: u8) -> (u32, u32) {
+        let s_tt = table.symbol_tt[usize::from(symbol)];
+        let nb_bits_out = (self.value + s_tt.delta_nb_bits) >> 16;
+        let old = self.value;
+        let idx = i64::from(self.value >> nb_bits_out) + i64::from(s_tt.delta_find_state);
+        self.value = u32::from(table.state_table[idx as usize]);
+        (old, nb_bits_out)
+    }
+
     /// Encode one symbol: emit nbBits, update state. Matches C's
     /// `FSE_encodeSymbol`.
     pub fn encode(&mut self, bitc: &mut BitCStream<'_>, table: &CTable, symbol: u8) {
-        let s_tt = table.symbol_tt[usize::from(symbol)];
-        let nb_bits_out = (self.value + s_tt.delta_nb_bits) >> 16;
-        bitc.add_bits(u64::from(self.value), nb_bits_out);
-        let idx = i64::from(self.value >> nb_bits_out) + i64::from(s_tt.delta_find_state);
-        self.value = u32::from(table.state_table[idx as usize]);
+        let (old, nb_bits_out) = self.encode_step(table, symbol);
+        bitc.add_bits(u64::from(old), nb_bits_out);
+    }
+
+    /// Counting twin of [`encode`](Self::encode): same state
+    /// transitions, no bitstream — the exact-size measurement path
+    /// (`sequences::sequences_bitstream_bits`) sums these instead of
+    /// materializing bytes.
+    pub fn encode_bit_count(&mut self, table: &CTable, symbol: u8) -> u32 {
+        self.encode_step(table, symbol).1
     }
 
     /// Flush the final state. Matches C's `FSE_flushCState`.
     pub fn flush(&self, bitc: &mut BitCStream<'_>) {
         bitc.add_bits(u64::from(self.value), u32::from(self.state_log));
         bitc.flush();
+    }
+
+    /// Bits [`flush`](Self::flush) would write.
+    pub fn flush_bit_count(&self) -> u32 {
+        u32::from(self.state_log)
     }
 }
 
