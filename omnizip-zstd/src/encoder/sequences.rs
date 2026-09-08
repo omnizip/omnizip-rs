@@ -584,23 +584,57 @@ fn section_size_bits(
         Ok(t) => t,
         Err(_) => return u64::MAX,
     };
-    let mut payload: Vec<u8> = vec![0; estimated_bitstream_size(nb_seq)];
-    match encode_sequences_bitstream(
-        &mut payload,
-        ll_codes,
-        ml_codes,
-        of_codes,
-        ll_extras,
-        ml_extras,
-        off_bases,
-        &ll_ctable,
-        &ml_ctable,
-        &of_ctable,
-        nb_seq,
-    ) {
-        Ok(written) => header_bits + 8 * written as u64,
-        Err(_) => u64::MAX,
+    header_bits
+        + 8 * sequences_bitstream_bits(
+            ll_codes, ml_codes, of_codes, ll_extras, ml_extras, off_bases, &ll_ctable, &ml_ctable,
+            &of_ctable, nb_seq,
+        )
+}
+
+/// Exact byte size of [`encode_sequences_bitstream`] without
+/// materializing it: the same state arithmetic through
+/// `CState::encode_bit_count`, with the writer's close() padding
+/// (`ceil((bits + 1) / 8)`). Table-mode decisions made here are
+/// bit-for-bit the ones the emitting path would produce — this
+/// replaced a full byte-materializing measurement per candidate that
+/// dominated fast-tier encode time (words L1: 1535 of 1645 bitstream
+/// samples were measurement, not emission).
+#[must_use]
+fn sequences_bitstream_bits(
+    ll_codes: &[u8],
+    ml_codes: &[u8],
+    of_codes: &[u8],
+    ll_extras: &[u32],
+    ml_extras: &[u32],
+    off_bases: &[u32],
+    ll_ctable: &crate::fse::encoder::CTable,
+    ml_ctable: &crate::fse::encoder::CTable,
+    of_ctable: &crate::fse::encoder::CTable,
+    nb_seq: usize,
+) -> u64 {
+    if nb_seq == 0 {
+        return 0;
     }
+    let last = nb_seq - 1;
+    let mut bits: u64 = 0;
+    let mut state_ml = CState::init2(ml_ctable, ml_codes[last]);
+    let mut state_of = CState::init2(of_ctable, of_codes[last]);
+    let mut state_ll = CState::init2(ll_ctable, ll_codes[last]);
+    bits += u64::from(LL_BITS[ll_codes[last] as usize]);
+    bits += u64::from(ML_BITS[ml_codes[last] as usize]);
+    bits += u64::from(of_codes[last]);
+    for n in (0..last).rev() {
+        bits += u64::from(state_of.encode_bit_count(of_ctable, of_codes[n]));
+        bits += u64::from(state_ml.encode_bit_count(ml_ctable, ml_codes[n]));
+        bits += u64::from(state_ll.encode_bit_count(ll_ctable, ll_codes[n]));
+        bits += u64::from(LL_BITS[ll_codes[n] as usize]);
+        bits += u64::from(ML_BITS[ml_codes[n] as usize]);
+        bits += u64::from(of_codes[n]);
+    }
+    bits += u64::from(state_ml.flush_bit_count());
+    bits += u64::from(state_of.flush_bit_count());
+    bits += u64::from(state_ll.flush_bit_count());
+    (bits + 1 + 7) / 8
 }
 
 /// Estimate FSE payload cost (in bits) for a given distribution.
