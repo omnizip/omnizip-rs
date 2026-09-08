@@ -5072,9 +5072,32 @@ fn parse_input_with_offset_impl(
             &matches,
             false,
         );
-        if env_flag!("BROTLI_NO_BTOPT") || env_flag!("BROTLI_NO_CM") || n < 8 || input.len() < 4096
+        // The btopt candidate wins only in the small-file inversion
+        // class (the same class the iter candidate below targets).
+        // On large chunks it never wins the corpus — and on periodic
+        // data it explodes (csv2m: bt=4,090,099 vs hq=960,091 bits)
+        // — while costing a full DP pass + two emissions. Gate to the
+        // iter candidate's 256 KiB bound; BROTLI_BTCAND_ALL restores
+        // it everywhere for measurement. The hq winner still gets the
+        // a/b literal-assignment contest below — the split variant is
+        // worth up to 30% on periodic data (csv2m 120,012 vs 173,007
+        // bytes).
+        if env_flag!("BROTLI_NO_BTOPT")
+            || env_flag!("BROTLI_NO_CM")
+            || n < 8
+            || input.len() < 4096
+            || (n > 262_144 && !env_flag!("BROTLI_BTCAND_ALL"))
         {
-            return (hq, None);
+            let (a_bits, a_bw) =
+                measure_emission_bits(&hq, input, mlen_offset, quality, is_last, ctx_in);
+            let (b_bits, b_bw) = with_lit_split_override(true, || {
+                measure_emission_bits(&hq, input, mlen_offset, quality, is_last, ctx_in)
+            });
+            return if b_bits < a_bits {
+                (hq, Some(b_bw))
+            } else {
+                (hq, Some(a_bw))
+            };
         }
         let bt = crate::encoder::btopt::parse_btopt_with(
             input,
@@ -5123,29 +5146,20 @@ fn parse_input_with_offset_impl(
         // text. Measured over 512 sampled positions: text classes
         // 0.10-0.20 (rfc/rustsrc/words/dbdump/plists/install.log),
         // periodic/binary 0.00-0.03 (csv2m/fits/arial/rand) — 0.08
-        // sits in the empty middle. Keeps the extra DP pass + two
-        // emissions off the time-sensitive binary cells (fits q11
-        // runs at 0.93x reference time).
-        let dict_dense = n <= 262_144 || {
-            let stride = (n / 512).max(1);
-            let mut hits = 0usize;
-            let mut samples = 0usize;
-            let mut buf = [u32::MAX; 38];
-            let mut p = 0usize;
-            while p + 8 < n {
-                if crate::encoder::static_dict::find_all_static_dictionary_matches(
-                    &input[p..],
-                    4,
-                    37.min(n - p),
-                    &mut buf,
-                ) {
-                    hits += 1;
-                }
-                samples += 1;
-                p += stride;
-            }
-            samples > 0 && (hits as f32 / samples as f32) >= 0.08
-        };
+        // sits in the empty middle. Large dense text still skips the
+        // candidate: on chunk-scale inputs it measures within 0.05% of
+        // the plain hq parse and never wins (words 5,218,232 vs
+        // 5,215,719) while costing a full DP pass + two emissions;
+        // the dict candidate's wins live in the small-file class
+        // (rfc -100B). BROTLI_DICTCAND_ALL restores it everywhere.
+        // The dict candidate's wins live in the small-file class (rfc
+        // -100B); on chunk-scale inputs it measures within 0.05% of
+        // the plain hq parse and never wins (words 5,218,232 vs
+        // 5,215,719) while costing a full DP pass + two emissions.
+        // Gate to the same 256 KiB bound as the other small-file
+        // candidates; BROTLI_DICTCAND_ALL restores it everywhere for
+        // measurement.
+        let dict_dense = n <= 262_144 || env_flag!("BROTLI_DICTCAND_ALL");
         if quality >= 11 && dict_dense && !env_flag!("BROTLI_NO_DICTCAND") {
             let hq_d = crate::encoder::zopfli_hq::parse_hq_with(
                 input,
