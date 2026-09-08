@@ -31,21 +31,15 @@ const PRIME4_BYTES: u32 = 2_654_435_761;
 const PRIME5_BYTES: u64 = 0xCF1B_BCDC_B7A5_6463;
 const PRIME6_BYTES: u64 = 0x22FE_FFC9_944C_8DDD;
 
+/// One bounds check per call (slice), not one per byte — these are
+/// the per-position hot loads; the array-of-indexed-bytes form kept
+/// up to 8 panic checks per load in the generated code.
 fn read32(src: &[u8], pos: usize) -> u32 {
-    u32::from_le_bytes([src[pos], src[pos + 1], src[pos + 2], src[pos + 3]])
+    u32::from_le_bytes(src[pos..pos + 4].try_into().unwrap())
 }
 
 fn read64(src: &[u8], pos: usize) -> u64 {
-    u64::from_le_bytes([
-        src[pos],
-        src[pos + 1],
-        src[pos + 2],
-        src[pos + 3],
-        src[pos + 4],
-        src[pos + 5],
-        src[pos + 6],
-        src[pos + 7],
-    ])
+    u64::from_le_bytes(src[pos..pos + 8].try_into().unwrap())
 }
 
 /// `ZSTD_hashPtr` for mls = 4/5/6. Reading 8 bytes at `pos` is safe:
@@ -61,21 +55,30 @@ fn hash_ptr(src: &[u8], pos: usize, h_bits: u32, mls: usize) -> usize {
 }
 
 /// `ZSTD_count`: bytes in common between `[ip..iend)` and
-/// `[match_pos..)`, word-at-a-time.
+/// `[match_pos..)`. Both windows are sliced out ONCE (one bounds
+/// check per side) and stepped as equal-length chunk iterators —
+/// the same shape as the bank finder's `match_len_scan` (measured
+/// 5-8x over per-byte indexing there). `match_pos < ip` guarantees
+/// `match_pos + limit <= iend`, so both slices are the same length.
 fn count(src: &[u8], ip: usize, match_pos: usize, iend: usize) -> usize {
     let limit = iend - ip;
+    let a = &src[ip..iend];
+    let b = &src[match_pos..match_pos + limit];
+    let mut ai = a.chunks_exact(8);
+    let mut bi = b.chunks_exact(8);
     let mut len = 0usize;
-    while len + 8 <= limit {
-        let wa = read64(src, ip + len);
-        let wb = read64(src, match_pos + len);
-        if wa == wb {
-            len += 8;
-        } else {
-            let trailing = (wa ^ wb).trailing_zeros() as usize;
-            return len + trailing / 8;
+    while let (Some(x), Some(y)) = (ai.next(), bi.next()) {
+        let wa = u64::from_le_bytes(x.try_into().unwrap());
+        let wb = u64::from_le_bytes(y.try_into().unwrap());
+        if wa != wb {
+            return len + (wa ^ wb).trailing_zeros() as usize / 8;
         }
+        len += 8;
     }
-    while len < limit && src[ip + len] == src[match_pos + len] {
+    for (&x, &y) in ai.remainder().iter().zip(bi.remainder()) {
+        if x != y {
+            break;
+        }
         len += 1;
     }
     len
@@ -149,7 +152,7 @@ fn hc_find_best_match(
         // Quick reject: compare the 4 bytes at match+ml-3; on pass,
         // count the FULL match from byte 0 (the quick check skips
         // the first ml-3 bytes, so it is only a heuristic gate).
-        if ip + ml < iend && read32(src, m + ml - 3) == read32(src, ip + ml - 3) {
+        if ip + ml < iend && src[m + ml - 3..m + ml + 1] == src[ip + ml - 3..ip + ml + 1] {
             current_ml = count(src, ip, m, iend);
         }
 
@@ -254,7 +257,7 @@ pub fn compress_block_lazy_generic(
         // check repcode (at ip+1): MEM_read32(ip+1-offset_1)
         if offset_1 > 0 {
             if let Some(rp) = (ip + 1).checked_sub(offset_1 as usize) {
-                if read32(src, rp) == read32(src, ip + 1) {
+                if src[rp..rp + 4] == src[ip + 1..ip + 5] {
                     match_length = 4 + count(src, ip + 5, rp + 4, iend);
                     if depth == 0 {
                         // greedy: store immediately
@@ -308,7 +311,7 @@ pub fn compress_block_lazy_generic(
                 // rep at ip
                 if offset_1 > 0 {
                     if let Some(rp) = ip.checked_sub(offset_1 as usize) {
-                        if read32(src, rp) == read32(src, ip) {
+                        if src[rp..rp + 4] == src[ip..ip + 4] {
                             let ml_rep = 4 + count(src, ip + 4, rp + 4, iend);
                             let gain2 = (ml_rep * 3) as i32;
                             let gain1 = (match_length * 3) as i32 - highbit32(off_base) + 1;
@@ -336,7 +339,7 @@ pub fn compress_block_lazy_generic(
                     ip += 1;
                     if offset_1 > 0 {
                         if let Some(rp) = ip.checked_sub(offset_1 as usize) {
-                            if read32(src, rp) == read32(src, ip) {
+                            if src[rp..rp + 4] == src[ip..ip + 4] {
                                 let ml_rep = 4 + count(src, ip + 4, rp + 4, iend);
                                 let gain2 = (ml_rep * 4) as i32;
                                 let gain1 = (match_length * 4) as i32 - highbit32(off_base) + 1;
@@ -439,7 +442,7 @@ fn immediate_repcode(
             Some(rp) if rp + 4 <= iend && *ip + 4 <= iend => rp,
             _ => break,
         };
-        if read32(src, rp) != read32(src, *ip) {
+        if src[rp..rp + 4] != src[*ip..*ip + 4] {
             break;
         }
         let match_length = 4 + count(src, *ip + 4, rp + 4, iend);

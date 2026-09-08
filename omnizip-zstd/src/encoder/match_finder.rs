@@ -41,7 +41,7 @@ pub const REP_NUM: usize = 3;
 /// Hash 4 bytes at `data[pos..]` into `hBits` bits.
 /// Matches C's `ZSTD_hash4Ptr`.
 fn hash4(data: &[u8], pos: usize, h_bits: u32) -> u32 {
-    let val = u32::from_le_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]);
+    let val = u32::from_le_bytes(data[pos..pos + 4].try_into().unwrap());
     val.wrapping_mul(PRIME4_BYTES) >> (32 - h_bits)
 }
 
@@ -52,46 +52,29 @@ fn hash4(data: &[u8], pos: usize, h_bits: u32) -> u32 {
 /// loop for the residual 0..=7 bytes. 5-8× faster than byte-by-byte
 /// on typical inputs.
 fn count_match(a: &[u8], a_pos: usize, b: &[u8], b_pos: usize, limit: usize) -> usize {
+    // Window form: clamp once per side (preserving the old
+    // stop-at-whichever-end semantics), then step equal-length chunk
+    // iterators with no per-byte bounds checks — the array-of-indexed
+    // bytes form kept 4+ panic checks per 8-byte step and 2 per byte
+    // in the tail.
+    let limit = limit.min(a.len() - a_pos).min(b.len() - b_pos);
+    let x = &a[a_pos..a_pos + limit];
+    let y = &b[b_pos..b_pos + limit];
+    let mut xi = x.chunks_exact(8);
+    let mut yi = y.chunks_exact(8);
     let mut len = 0usize;
-    // 8-byte word stepping.
-    while len + 8 <= limit && a_pos + len + 8 <= a.len() && b_pos + len + 8 <= b.len() {
-        let wa = u64::from_le_bytes([
-            a[a_pos + len],
-            a[a_pos + len + 1],
-            a[a_pos + len + 2],
-            a[a_pos + len + 3],
-            a[a_pos + len + 4],
-            a[a_pos + len + 5],
-            a[a_pos + len + 6],
-            a[a_pos + len + 7],
-        ]);
-        let wb = u64::from_le_bytes([
-            b[b_pos + len],
-            b[b_pos + len + 1],
-            b[b_pos + len + 2],
-            b[b_pos + len + 3],
-            b[b_pos + len + 4],
-            b[b_pos + len + 5],
-            b[b_pos + len + 6],
-            b[b_pos + len + 7],
-        ]);
-        if wa == wb {
-            len += 8;
-        } else {
-            // First differing bit (from LSB) divided by 8 = first
-            // differing byte from the start of this 8-byte block.
-            let diff = wa ^ wb;
-            let trailing = diff.trailing_zeros() as usize;
-            len += trailing / 8;
-            return len;
+    while let (Some(cx), Some(cy)) = (xi.next(), yi.next()) {
+        let wx = u64::from_le_bytes(cx.try_into().unwrap());
+        let wy = u64::from_le_bytes(cy.try_into().unwrap());
+        if wx != wy {
+            return len + (wx ^ wy).trailing_zeros() as usize / 8;
         }
+        len += 8;
     }
-    // Byte-tail for the remaining 0..=7 bytes.
-    while len < limit
-        && a_pos + len < a.len()
-        && b_pos + len < b.len()
-        && a[a_pos + len] == b[b_pos + len]
-    {
+    for (&ex, &ey) in xi.remainder().iter().zip(yi.remainder()) {
+        if ex != ey {
+            break;
+        }
         len += 1;
     }
     len
