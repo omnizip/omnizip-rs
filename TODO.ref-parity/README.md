@@ -10,7 +10,7 @@ runs, 10x-loop re-measure for sub-0.05s cells).
 - **S > 1 with T > 1** — paying time AND shipping larger bytes: the
   worst class; no trade exists at all.
 
-Full table: `sweep-inequality-v5-2026-09-08.txt` (v5 — post v0.21.68 q1 flip; 6 whack cells left). `sweep-inequality-v4-2026-09-08.txt` (v4 — post v0.21.66
+Full table: `sweep-inequality-v6-2026-09-08.txt` (v6 — post v0.21.69 sub-1MiB bank; **4 whack cells left**, all FITS/q11-class). `sweep-inequality-v5-2026-09-08.txt` (v5 — post v0.21.68 q1 flip; 6 whack cells). `sweep-inequality-v4-2026-09-08.txt` (v4 — post v0.21.66
 getenv hoist + v0.21.67 reference lazy parser; zstd has NO whack
 cells left, worst zstd cell I=6.9 under box load. Methodology
 identical to v3: ours RUNS=10 in-process, reference 20x CLI loop,
@@ -30,6 +30,7 @@ small-file T ~4x).)
 | 04 | brotli q11 small-file contest overhead (12.5x, S>1) | rfc q11 | pending |
 | 06 | brotli q5 sub-1MiB class: bank hasher missing on that path (plists S=1.246) | plists/install/icons/sqlite q5 | done 2026-09-08 (v0.21.69; S 0.994-1.025, I 2.1-5.3) |
 | 07 | fits zstd L1: T=14.4x (fast parser on 4MB FITS) | fits L1 | pending |
+| 08 | fits brotli q5 >=1MiB: T=17.9x with S=0.939 (size fine, time bad) | fits q5 | pending |
 | 05 | csv2m time pathology — root cause 1: getenv in opt hot loop | csv2m zstd L6 I=137 | done 2026-09-07 (v0.21.66; T 202x→~112x est; re-score pending quiet box; residual = task 03) |
 
 ## Principles
