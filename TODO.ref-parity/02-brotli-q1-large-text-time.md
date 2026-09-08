@@ -1,39 +1,38 @@
-# 02 — brotli q1 on ≥1 MiB text: 22× slower for 11% smaller
+# 02 — brotli q1: ship the reference's own fast tier
 
 - **Priority:** P0
-- **Score evidence:** words q1 **I=19.6** (T=22×, S=0.890). The old
-  "q1 ✓ parity" standing was measured on 1–4 MB CSV/FITS; words
-  (2.5 MB wordlist) shows the two-pass path is NOT at parity on this
-  class.
-- **Status:** pending
+- **Score evidence (v4):** fits q1 **I=44.5** (T=58.5x, S=0.760) —
+  the worst cell on the board. csv2m q1 I=34, words q1 I~19.6 (v3),
+  plists q1 I=9.4, icons q1 I=6.6.
+- **Status:** done 2026-09-08 (v0.21.68)
 
-## Root cause (to confirm by profile)
+## Root cause (confirmed)
 
-q1 routes to `fast_encoder::compress_two_pass_q1` (the reference's
-two-pass fragment compressor, transliterated and once optimized:
-2026-08-21 fixed the unaligned-load/store primitives and BEAT the CLI
-on CSV/FITS). Words is a different shape: a 2.5 MB degenerate
-wordlist. Suspects, in order:
-1. **GetHashTable sizing / stored-block fallback** — the two-pass
-   emits stored blocks when the hash fills; wordlists churn the table.
-2. **Block-scan cost at 1<<17 blocks on low-entropy input** — the
-   second pass rebuilds the command tree per 128 KB block; 20 blocks
-   × table build on 24 K-entry histograms.
-3. The from-spec fallback path may be taken for this input class
-   (check the routing: `BROTLI_NO_TP` A/B to see which path ships).
+The task's original hypothesis (two-pass stored-block churn on
+wordlists) was wrong: sampling showed q1 on 4 MB input routes to the
+FROM-SPEC parse (`parse_input_with_offset_impl` +
+`HashChainMatchFinder`) — the two-pass fragment compressor sat behind
+the opt-in `BROTLI_TP` flag. The from-spec q1 was a deliberate
+size choice (11-24% smaller than ref) that predates the inequality
+lens: 5-58x slower for that size.
 
-## Plan
+## Fix (v0.21.68): flip the q1 default to the two-pass
 
-1. A/B: `BROTLI_NO_TP=1` on words q1 — is the fallback faster/smaller?
-2. Profile the two-pass on words (sample + force-frame-pointers); the
-   2026-08-21 lesson says check the load/store primitives FIRST for
-   this transliteration.
-3. If the two-pass is fundamentally mismatched to wordlist entropy,
-   route q1 large-text through the bank greedy with a size-shielded
-   contest (greedy candidate measured; ships only if within 1% of the
-   two-pass size — the I=19.6 cell wants the 22× back far more than
-   the last 2% of the 11% size lead).
+The two-pass fragment compressor is the transliterated reference
+q1 (BrotliCompressBlockFast) — A/B measured it byte-exact with the
+CLI on most content. Routing flipped to two-pass default;
+from-spec stays behind `BROTLI_FS_Q1`.
+
+Measured after the flip (ours vs ref, all 11 corpus files):
+rfc I=0.3 (S 0.969), dbdump 1.3, words 1.5 (S 0.997 — BEATS ref),
+rustsrc 1.7, csv2m 1.5 (S 1.000), **fits 1.3** (was 44.5),
+noto 0.5, sqlite 0.8, plists 1.4, install 0.4, icons 0.9.
+Every q1 cell I = 0.3-1.7; T = 0.3-1.7x; S = 0.969-1.000.
+
+One-time output change at q1; regression baseline has no q1 rows.
+Gates: brotli 104 tests, regression, property suites all green.
 
 ## Acceptance
 
-- words q1: I ≤ 3; CSV/FITS q1 cells unchanged or better.
+- [x] words q1 I <= 3 (measured 1.5); every q1 cell I <= 1.7
+- [x] CSV/FITS q1 cells: fits 44.5 -> 1.3, csv2m 34.1 -> 1.5

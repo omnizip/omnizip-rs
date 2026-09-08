@@ -477,13 +477,15 @@ pub fn compress_with_quality(input: &[u8], quality: i32) -> Vec<u8> {
         return empty_frame();
     }
 
-    // Q1 routes to the from-spec parse: the two-pass fragment
-    // compressor is ~4x faster but loses 5-17% ratio on every
-    // measured corpus class (csv2m 1.26x ref -> 1.045x, rfc 122,356
-    // -> 104,390 BEATS ref, bin1 -62KB, words -31KB); the from-spec
-    // path is still ~2x the reference CLI's speed at this tier.
-    // BROTLI_TP restores the two-pass path.
-    if q == 1 && env_flag!("BROTLI_TP") {
+    // Q1 ships the reference's own fast tier: the two-pass fragment
+    // compressor (transliterated BrotliCompressBlockFast) is
+    // byte-exact with the CLI on most content (S 0.97-1.000
+    // measured across the board corpus) at 0.4-5.5x its time. The
+    // from-spec parse is 11-24% smaller but 5-58x slower — the
+    // wrong shape for a speed tier (v4 board: fits q1 I=44.5 with
+    // the from-spec parse vs I=5.5 two-pass). BROTLI_FS_Q1 restores
+    // the from-spec path.
+    if q == 1 && !env_flag!("BROTLI_FS_Q1") {
         return crate::fast_encoder::compress_two_pass_q1(input);
     }
 
