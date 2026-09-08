@@ -27,9 +27,9 @@ use crate::encoder::distance_config::DistanceConfig;
 use crate::from_spec_encoder::empty_frame_terminator_into;
 use crate::from_spec_encoder::env_flag;
 use crate::from_spec_encoder::{
-    block_length_code, brotli_quality_config, build_rle_sequence, build_symbol_stream,
-    canonical_with_reverse, decide_literal_contexts, distance_extra_bits, lit_split_forced_now,
-    override_lengths_for_simple_form, parse_input_with_offset, reverse_bits,
+    block_length_code, brotli_quality_config, build_greedy_bank, build_rle_sequence,
+    build_symbol_stream, canonical_with_reverse, decide_literal_contexts, distance_extra_bits,
+    lit_split_forced_now, override_lengths_for_simple_form, parse_input_with_offset, reverse_bits,
     split_cmd_symbols_optimal, split_literals, split_symbol_stream_optimal,
     write_block_switch_header, write_context_map, write_simple_form_table, write_simple_one_symbol,
     write_varlen_uint8, zopfli_max_len, Command, RepBuffer, CL_CODE_TO_WIRE,
@@ -71,6 +71,11 @@ pub(crate) fn encode_huffman_chunk_into(
         max_match_length: zopfli_max_len(quality),
     };
     let mut mf = omnizip_codecs::HashChainMatchFinder::new(input, config);
+    // Same greedy-tier bank hasher as the >=1 MiB chunked path: the
+    // reference's H5/H6/H9 with short-code distance probes. Without
+    // it, sub-1 MiB structured text loses every repcode match
+    // (plists q5 was S=1.20 vs ref — ref-parity task 06).
+    let mut bank = build_greedy_bank(input, quality);
     let hist_start = mlen_offset.min(MAX_BACKWARD_DISTANCE as usize);
     let _ = hist_start; // history unavailable on this path (single-chunk callers)
     encode_huffman_chunk_body(
@@ -78,7 +83,7 @@ pub(crate) fn encode_huffman_chunk_into(
         input,
         &[],
         &mut mf,
-        None,
+        bank.as_mut(),
         mlen_offset, // MF data[0] sits at global position mlen_offset
         mlen_offset,
         is_last,

@@ -649,95 +649,8 @@ pub fn compress_with_quality(input: &[u8], quality: i32) -> Vec<u8> {
         // bucket scans instead of prev[] chain walks, with the 16
         // short-code distance probes and BackwardReferenceScore
         // matching the reference hashers.
-        let mut shared_bank = if q >= 2
-            && q < 10
-            && !env_flag!("BROTLI_NO_BANK")
-            && !env_flag!("BROTLI_NO_TEXT_BANK")
-        {
-            let n = input.len();
-            // Text params mirror the reference hashers exactly
-            // (H5 at q4-8: block min(q-1,9); H9 at q9: block 8;
-            // num_last_dists 4/10/16). Binary keeps the measured
-            // block_bits=6 tuning that beats the reference.
-            let env_block = std::env::var("BROTLI_BLOCK_BITS")
-                .ok()
-                .and_then(|v| v.parse::<usize>().ok());
-            let (block_bits, dists) = if let Some(b) = env_block {
-                (b as u32, 4u32)
-            } else if is_text_like(input) {
-                // q8-9 hold the q7 shape: the candidate inflation that
-                // was q8+ defaults (block 7-8, dists 10/16, hash5)
-                // measurably REGRESSES the rep-chain-driven parse
-                // (271-292K class vs 214-220K) — every extra
-                // explicit-distance candidate seduces the greedy walk
-                // off the periodic structure's rep continuations.
-                let b = if q >= 6 { 5 } else { (q - 1).min(9) };
-                let d = std::env::var("BROTLI_DISTS")
-                    .ok()
-                    .and_then(|v| v.parse().ok())
-                    .unwrap_or(4);
-                (b as u32, d)
-            } else {
-                // Binary: 16-slot bank at q5-8 (block_bits=4). The old
-                // 2-slot setting was measured on the pre-2026-08-27
-                // FITS where it was "size-neutral"; the regenerated
-                // fixture shows bits=4 saves 160KB on FITS and 15KB on
-                // bin1 at q5 (the noise pattern changed which entries
-                // the reject byte kills). Time cost: ~25% encode at
-                // q5 (0.18→0.23s on FITS).
-                (
-                    if q >= 9 {
-                        8
-                    } else if q >= 6 {
-                        6
-                    } else {
-                        4
-                    } as u32,
-                    if q < 7 {
-                        4
-                    } else if q < 9 {
-                        10
-                    } else {
-                        16
-                    },
-                )
-            };
-            // Upstream ChooseHasher: bucket_bits = 14 only when
-            // quality < 7 AND size_hint <= 1 MiB, else 15 (H5/H6/H9
-            // all run 15). BROTLI_BUCKET_BITS overrides for sweeps.
-            let bucket_bits = std::env::var("BROTLI_BUCKET_BITS")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(if q < 7 && n <= 1 << 20 { 14 } else { 15 });
-            let mut bank = omnizip_codecs::BankMatchFinder::new(
-                input,
-                bucket_bits,
-                block_bits,
-                dists as usize,
-            );
-            // Upstream 1.2.0 ChooseHasher: quality 5-9 with size_hint
-            // >= 1 MiB (and lgwin >= 19) runs H6 — the 5-byte 64-bit
-            // kHashMul64 hash — not H5's 4-byte kHashMul32. Smaller
-            // inputs run H5. Measured on real fixtures the 5-byte hash
-            // wins on text (longer matches per bucket) but LOSES ~4%
-            // on structured binary: a 4-byte-prefixed match with a
-            // differing 5th byte is excluded as a candidate even
-            // though a len-4 copy is legal. Content-split: text runs
-            // H6, binary keeps H5 (where our 4-byte bank beats the
-            // reference's own H6 on FITS). BROTLI_HASH5 overrides.
-            let hash5 = match std::env::var("BROTLI_HASH5").as_deref() {
-                Ok("0") | Ok("false") => false,
-                Ok("1") | Ok("true") => true,
-                // Text default OFF at every quality: with the q7-shape
-                // bank (block 6, dists 4) hash5 regresses q8 217,019 ->
-                // 274,515 (2 MiB CSV) — same explicit-distance
-                // candidate-displacement mechanism as the old q5-7
-                // cliff. Environments still force it for experiments.
-                _ => false,
-            };
-            if hash5 {
-                bank.enable_hash5();
-            }
+        let mut shared_bank = build_greedy_bank(input, q);
+        if let Some(bank) = shared_bank.as_mut() {
             // H68 tag-bank hasher (the reference's SIMD-shape q4-6
             // mode, hash_longest_match64_simd_inc.h): 8-byte hash
             // split into key + tag; the scan visits only tag-matching
@@ -749,11 +662,7 @@ pub fn compress_with_quality(input: &[u8], quality: i32) -> Vec<u8> {
             if env_flag!("BROTLI_H68") && is_text_like(input) && q <= 6 {
                 bank.enable_tag_mode();
             }
-            bank.set_max_distance(MAX_BACKWARD_DISTANCE);
-            Some(bank)
-        } else {
-            None
-        };
+        }
 
         let mut offset = 0usize;
         while offset < input.len() {
@@ -4819,6 +4728,97 @@ fn parse_input(input: &[u8]) -> Vec<Command> {
     };
     let mut mf = omnizip_codecs::HashChainMatchFinder::new(input, config);
     parse_input_with_offset(input, &[], &mut mf, None, 0, 0, 11, false, false, (0, 0)).0
+}
+
+/// H5 bank hasher for the greedy tier (q2-9): one-cache-line bucket
+/// scans instead of prev[] chain walks, with the reference's
+/// short-code distance probes and BackwardReferenceScore. Shared by
+/// the >=1 MiB chunked path and the single-metablock path — the
+/// sub-1 MiB path previously ran chain-only, costing the repcode
+/// matches on structured text (plists q5 S=1.20 vs ref).
+#[must_use]
+pub(crate) fn build_greedy_bank(
+    input: &[u8],
+    q: i32,
+) -> Option<omnizip_codecs::BankMatchFinder<'_>> {
+    if !(2..10).contains(&q) || env_flag!("BROTLI_NO_BANK") || env_flag!("BROTLI_NO_TEXT_BANK") {
+        return None;
+    }
+    let n = input.len();
+    // Text params mirror the reference hashers exactly (H5 at q4-8:
+    // block min(q-1,9); H9 at q9: block 8; num_last_dists 4/10/16).
+    // Binary keeps the measured block_bits tuning that beats the
+    // reference.
+    let env_block = std::env::var("BROTLI_BLOCK_BITS")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok());
+    let (block_bits, dists) = if let Some(b) = env_block {
+        (b as u32, 4u32)
+    } else if is_text_like(input) {
+        // q8-9 hold the q7 shape: the candidate inflation that was
+        // q8+ defaults (block 7-8, dists 10/16, hash5) measurably
+        // REGRESSES the rep-chain-driven parse (271-292K class vs
+        // 214-220K) — every extra explicit-distance candidate seduces
+        // the greedy walk off the periodic structure's rep
+        // continuations.
+        let b = if q >= 6 { 5 } else { (q - 1).min(9) };
+        let d = std::env::var("BROTLI_DISTS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(4);
+        (b as u32, d)
+    } else {
+        // Binary: 16-slot bank at q5-8 (block_bits=4). The old 2-slot
+        // setting was measured on the pre-2026-08-27 FITS where it
+        // was "size-neutral"; the regenerated fixture shows bits=4
+        // saves 160KB on FITS and 15KB on bin1 at q5 (the noise
+        // pattern changed which entries the reject byte kills). Time
+        // cost: ~25% encode at q5 (0.18→0.23s on FITS).
+        (
+            if q >= 9 {
+                8
+            } else if q >= 6 {
+                6
+            } else {
+                4
+            } as u32,
+            if q < 7 {
+                4
+            } else if q < 9 {
+                10
+            } else {
+                16
+            },
+        )
+    };
+    // Upstream ChooseHasher: bucket_bits = 14 only when quality < 7
+    // AND size_hint <= 1 MiB, else 15 (H5/H6/H9 all run 15).
+    // BROTLI_BUCKET_BITS overrides for sweeps.
+    let bucket_bits = std::env::var("BROTLI_BUCKET_BITS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(if q < 7 && n <= 1 << 20 { 14 } else { 15 });
+    let mut bank =
+        omnizip_codecs::BankMatchFinder::new(input, bucket_bits, block_bits, dists as usize);
+    // Upstream 1.2.0 ChooseHasher: quality 5-9 with size_hint >= 1 MiB
+    // (and lgwin >= 19) runs H6 — the 5-byte 64-bit kHashMul64 hash —
+    // not H5's 4-byte kHashMul32. Smaller inputs run H5. Measured on
+    // real fixtures the 5-byte hash wins on text (longer matches per
+    // bucket) but LOSES ~4% on structured binary: a 4-byte-prefixed
+    // match with a differing 5th byte is excluded as a candidate even
+    // though a len-4 copy is legal. BROTLI_HASH5 overrides; default
+    // OFF at every quality (with the q7-shape bank hash5 regresses q8
+    // 217,019 -> 274,515 on 2 MiB CSV).
+    let hash5 = match std::env::var("BROTLI_HASH5").as_deref() {
+        Ok("0") | Ok("false") => false,
+        Ok("1") | Ok("true") => true,
+        _ => false,
+    };
+    if hash5 {
+        bank.enable_hash5();
+    }
+    bank.set_max_distance(MAX_BACKWARD_DISTANCE);
+    Some(bank)
 }
 
 /// Quality → (max_chain, nice_match, use_dict_base, lazy, lazy2, hash_log).
