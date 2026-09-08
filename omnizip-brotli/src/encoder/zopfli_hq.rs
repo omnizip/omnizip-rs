@@ -94,10 +94,17 @@ const MAX_ZOPFLI_LEN: [usize; 2] = [150, 325];
 /// −8.7KB, rustsrc q11 −3.7KB) but that is a documented trade, not a
 /// default. Opt in per corpus with BROTLI_MLEN_CAP.
 fn match_len_cap() -> usize {
-    std::env::var("BROTLI_MLEN_CAP")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(1_951)
+    // Hoisted: this is called per DP candidate, and a bare env::var
+    // takes the global environ lock per call — 1,519 of 4,991 samples
+    // on sqlite q11 were getenv (the same trap as brotli's decode
+    // loop, zstd's opt parser, and zstd's fast parser before it).
+    static CAP: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *CAP.get_or_init(|| {
+        std::env::var("BROTLI_MLEN_CAP")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(1_951)
+    })
 }
 /// StartPosQueue depth (1.2.0: `q_[8]`; 1.1 had 5).
 const SPQ_SIZE: usize = 8;
@@ -678,7 +685,7 @@ pub(crate) fn collect_matches(
         // command walk; it needs dict-aware cache handling first.
         // q10/11 dictionary candidates come from btopt's dict_at path,
         // which is distance-cache-safe.
-        if std::env::var_os("BROTLI_HQ_DUMP").is_some() && i < 128 {
+        if crate::from_spec_encoder::env_flag!("BROTLI_HQ_DUMP") && i < 128 {
             let cs = if num_matches[i] > 0 {
                 &matches[matches.len() - num_matches[i] as usize..]
             } else {
@@ -1192,10 +1199,18 @@ pub(crate) fn parse_hq_with(
         nodes[0].cost = 0.0;
         let mut queue = StartPosQueue::new();
         let mut i = 0usize;
+        // Hoisted once: the raw form read + parsed the env PER
+        // POSITION (part of the sqlite-q11 getenv storm).
+        static HQ_AT: std::sync::OnceLock<Option<usize>> = std::sync::OnceLock::new();
+        let hq_at = *HQ_AT.get_or_init(|| {
+            std::env::var("BROTLI_HQ_AT")
+                .ok()
+                .and_then(|v| v.parse().ok())
+        });
         while i + 3 < n {
             let mstart = offsets[i] as usize;
             let mend = mstart + num_matches[i] as usize;
-            if std::env::var("BROTLI_HQ_AT").is_ok_and(|v| v.parse::<usize>() == Ok(i)) {
+            if hq_at == Some(i) {
                 eprintln!("HQAT pos={i} matches={:?}", &matches[mstart..mend]);
             }
             let skip = update_nodes(
