@@ -10,7 +10,7 @@ runs, 10x-loop re-measure for sub-0.05s cells).
 - **S > 1 with T > 1** — paying time AND shipping larger bytes: the
   worst class; no trade exists at all.
 
-Full table: `sweep-inequality-v9-2026-09-08.txt` (v9 — post v0.21.73; **zero whack cells**; worst: rfc q11 I=8.0 dense-text contest by design, words/rustsrc zstd L1 ~5.6, sqlite q11 5.5 = hq DP constant). `sweep-inequality-v8-2026-09-08.txt` (v8 — post v0.21.71/.72, zero whack cells). `sweep-inequality-v7-2026-09-08.txt` (v7 — honest board, 4 whack cells). `sweep-inequality-v6-2026-09-08.txt` (v6 — post v0.21.69; wall-time based, several cells load-poisoned). `sweep-inequality-v5-2026-09-08.txt` (v5 — post v0.21.68 q1 flip; 6 whack cells). `sweep-inequality-v4-2026-09-08.txt` (v4 — post v0.21.66
+Full table: `sweep-inequality-v10-2026-09-08.txt` (v10 — post v0.21.74; **zero whack cells**; zstd column I 1.0-5.2; worst: rfc q11 8.0 by design, sqlite q11 5.5 = zopfli_hq DP constant). `sweep-inequality-v9-2026-09-08.txt` (v9 — post v0.21.73). `sweep-inequality-v8-2026-09-08.txt` (v8 — post v0.21.71/.72, zero whack cells). `sweep-inequality-v7-2026-09-08.txt` (v7 — honest board, 4 whack cells). `sweep-inequality-v6-2026-09-08.txt` (v6 — post v0.21.69; wall-time based, several cells load-poisoned). `sweep-inequality-v5-2026-09-08.txt` (v5 — post v0.21.68 q1 flip; 6 whack cells). `sweep-inequality-v4-2026-09-08.txt` (v4 — post v0.21.66
 getenv hoist + v0.21.67 reference lazy parser; zstd has NO whack
 cells left, worst zstd cell I=6.9 under box load. Methodology
 identical to v3: ours RUNS=10 in-process, reference 20x CLI loop,
@@ -31,7 +31,7 @@ small-file T ~4x).)
 | 06 | brotli q5 sub-1MiB class: bank hasher missing on that path (plists S=1.246) | plists/install/icons/sqlite q5 | done 2026-09-08 (v0.21.69; S 0.994-1.025, I 2.1-5.3) |
 | 07 | fits zstd time class: sub-split (v0.21.72) + window primitives (v0.21.73) | fits L6 (I 7.8->4.2) | done 2026-09-08 |
 | 08 | fits brotli q5 large: mis-scored cell (wall-vs-user + load-246 batch) — true T~2x | — | closed 2026-09-08 (methodology fixed in v7) |
-| 09 | zstd L1 text cells: words/rustsrc I~5.6 (fast4 parse; primitives now cheap — profile the insert/emit path) | words/rustsrc L1 | pending |
+| 09 | zstd L1 emission: bitstream-size counting replaces byte-materializing measurement (v0.21.74, words L1 -41%) | words/rustsrc L1 (I 4.0-4.3) | done 2026-09-08 |
 | 05 | csv2m time pathology — root cause 1: getenv in opt hot loop | csv2m zstd L6 I=137 | done 2026-09-07 (v0.21.66; T 202x→~112x est; re-score pending quiet box; residual = task 03) |
 
 ## Principles
