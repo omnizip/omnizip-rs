@@ -2,7 +2,16 @@
 
 - **Priority:** P1 (worst S>1&T>1 class: no trade exists)
 - **Score evidence:** rfc.txt q11 **I=12.7** (T=12.5×, S=1.020).
-- **Status:** pending
+- **Status:** large-file half DONE 2026-09-08 (v0.21.70): bt and
+  dict candidates gated to n <= 256 KiB (both never win above it in
+  the corpus; bt explodes 4x on periodic). words q11 20.2s -> 8.1s
+  user (T 4.7 -> 1.9), fits q11 same-load A/B 169.6s -> 70.0s,
+  output byte-identical. The gated path still runs the hq a/b
+  literal-assignment contest (csv2m 120,012 vs 173,007 — the split
+  variant is essential). REMAINING (small files, this task's items
+  1-2): noto q11 I=9.7, sqlite q11 I=8.7, rfc q11 I=8.0 — 4
+  candidates + up to 7 emissions on 85-130 KB inputs. Plus the hq DP
+  constant factor on big binary (fits q11 T=4.7 at the DP itself).
 
 ## Root cause
 
