@@ -12,9 +12,9 @@ name = "conformance"
 path = "conformance.rs"
 
 [dev-dependencies]
-omnizip-codecs = { path = "../../omnizip-codecs", version = "0.21.76" }
-omnizip-brotli = { path = "../../omnizip-brotli", version = "0.21.76" }
-omnizip-zstd = { path = "../../omnizip-zstd", version = "0.21.76" }
-omnizip-lzma = { path = "../../omnizip-lzma", version = "0.21.76" }
-omnizip-lz4 = { path = "../../omnizip-lz4", version = "0.21.76" }
+omnizip-codecs = { path = "../../omnizip-codecs", version = "0.21.77" }
+omnizip-brotli = { path = "../../omnizip-brotli", version = "0.21.77" }
+omnizip-zstd = { path = "../../omnizip-zstd", version = "0.21.77" }
+omnizip-lzma = { path = "../../omnizip-lzma", version = "0.21.77" }
+omnizip-lz4 = { path = "../../omnizip-lz4", version = "0.21.77" }
 walkdir = "2"
