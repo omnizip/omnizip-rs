@@ -33,7 +33,8 @@ small-file T ~4x).)
 | 08 | fits brotli q5 large: mis-scored cell (wall-vs-user + load-246 batch) — true T~2x | — | closed 2026-09-08 (methodology fixed in v7) |
 | 11 | small-file greedy cells: arena package-merge killed the emission allocator storm | plists/noto q5 | done 2026-09-09 (v0.21.77) |
 | 10 | brotli block splitter: log2 table + memo DONE (v0.21.76); clustering structure remains | q11 column | partial |
-| 12 | fits q11: 87% in the H10 tree walk; window-form compare REVERTED (short-compare regime — negative result recorded) | fits q11 (I=5.1) | pending |
+| 12 | fits q11: H10 tree walk; three compare forms measured neutral — disposition ACCEPT with analysis (follow-up: instrumented node counts) | fits q11 (I=5.1) | closed 2026-09-09 (analysis) |
+| 13 | noto q9: context clustering hot; flat-matrix rewrite byte-identical but neutral — profile attribution alone insufficient, pattern recorded | noto q9 (I=4.4) | closed 2026-09-09 (investigated) |
 | 09 | zstd L1 emission: bitstream-size counting replaces byte-materializing measurement (v0.21.74, words L1 -41%) | words/rustsrc L1 (I 4.0-4.3) | done 2026-09-08 |
 | 05 | csv2m time pathology — root cause 1: getenv in opt hot loop | csv2m zstd L6 I=137 | done 2026-09-07 (v0.21.66; T 202x→~112x est; re-score pending quiet box; residual = task 03) |
 
