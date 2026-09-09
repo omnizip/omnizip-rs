@@ -40,15 +40,18 @@ Findings (2026-09-09, probes run):
    its iterator machinery eats the margin the C gets from raw
    unchecked loads — and measured neutral on fits.
 
-Options for the residual:
-- Try a leaner safe word-step (slicing `src[a..a+8]` per 8 bytes
-  with hoisted end bounds, no chunk iterators) — cheap to A/B, may
-  recover more of the C's margin.
-- Accept: fits q11 at T~5 with the analysis on record; the cell is
-  S=1.002 (parity) and the absolute cost only bites on
-  header-heavy megabyte-scale binary at q11.
-- The chain pathology itself is bounded (depth 64) — Invariant 1
-  holds; this is a constant-factor chase, not a hang risk.
+Third compare form tried (2026-09-09): lean word-step (hoisted end
+bound, plain `src[p..p+8]` loads, no iterators) — 78.0s, worse than
+both prior forms (committed 75.0-76.8, chunks_exact 75.9). THREE
+shapes measured; the compare is definitively not this loop's lever —
+the cost sits in what all forms share: forest[]/data[] cache misses
+and per-node branch work.
+
+Disposition: ACCEPT with the analysis on record. The cell is
+S=1.002 (parity); the cost only bites on header-heavy megabyte-scale
+binary at q11; the depth-64 cap keeps it bounded (Invariant 1). The
+instrumented node-count study (vs a buildable reference harness)
+remains the documented follow-up if the cell's I ever matters more.
 
 ## Remaining hypotheses for the 5x
 
