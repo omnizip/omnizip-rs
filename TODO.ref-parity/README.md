@@ -10,7 +10,7 @@ runs, 10x-loop re-measure for sub-0.05s cells).
 - **S > 1 with T > 1** — paying time AND shipping larger bytes: the
   worst class; no trade exists at all.
 
-Full table: `sweep-inequality-v14-2026-09-09.txt` (v14 — fresh q11 re-measure; **zero whack cells**; stale rows corrected: rustsrc q11 T=1.2, dbdump 1.2; worst: rfc q11 5.5 by design, fits zstd L1 5.1, fits brotli q11 5.1 = task 12). `sweep-inequality-v13-2026-09-09.txt` (v13). `sweep-inequality-v12-2026-09-09.txt` (v12). `sweep-inequality-v11-2026-09-08.txt` (v11 — post v0.21.75). `sweep-inequality-v10-2026-09-08.txt` (v10 — post v0.21.74). `sweep-inequality-v9-2026-09-08.txt` (v9 — post v0.21.73). `sweep-inequality-v8-2026-09-08.txt` (v8 — post v0.21.71/.72, zero whack cells). `sweep-inequality-v7-2026-09-08.txt` (v7 — honest board, 4 whack cells). `sweep-inequality-v6-2026-09-08.txt` (v6 — post v0.21.69; wall-time based, several cells load-poisoned). `sweep-inequality-v5-2026-09-08.txt` (v5 — post v0.21.68 q1 flip; 6 whack cells). `sweep-inequality-v4-2026-09-08.txt` (v4 — post v0.21.66
+Full table: `sweep-inequality-v15-2026-09-09.txt` (v15 — post v0.21.78; **zero whack cells, worst cell I=5.1**; rfc q11 fell to 4.3; remaining >4.5 cells: fits zstd L1 (noisy window) and fits brotli q11 (task 12 accept)). `sweep-inequality-v14-2026-09-09.txt` (v14). `sweep-inequality-v13-2026-09-09.txt` (v13). `sweep-inequality-v12-2026-09-09.txt` (v12). `sweep-inequality-v11-2026-09-08.txt` (v11 — post v0.21.75). `sweep-inequality-v10-2026-09-08.txt` (v10 — post v0.21.74). `sweep-inequality-v9-2026-09-08.txt` (v9 — post v0.21.73). `sweep-inequality-v8-2026-09-08.txt` (v8 — post v0.21.71/.72, zero whack cells). `sweep-inequality-v7-2026-09-08.txt` (v7 — honest board, 4 whack cells). `sweep-inequality-v6-2026-09-08.txt` (v6 — post v0.21.69; wall-time based, several cells load-poisoned). `sweep-inequality-v5-2026-09-08.txt` (v5 — post v0.21.68 q1 flip; 6 whack cells). `sweep-inequality-v4-2026-09-08.txt` (v4 — post v0.21.66
 getenv hoist + v0.21.67 reference lazy parser; zstd has NO whack
 cells left, worst zstd cell I=6.9 under box load. Methodology
 identical to v3: ours RUNS=10 in-process, reference 20x CLI loop,
@@ -27,7 +27,7 @@ small-file T ~4x).)
 | 01 | brotli q4-9 routing: greedy for all (was I=25-85 on sub-1MiB/text) | rfc/dbdump/plists/words/rustsrc q5+q9 | done 2026-09-07 (I -> ~1-2; sizes +6-26%) |
 | 02 | brotli q1: two-pass default (was from-spec, I=44.5 on fits) | fits/words/csv2m q1 | done 2026-09-08 (v0.21.68; every q1 cell I=0.3-1.7) |
 | 03 | zstd fast/intermediate tiers (biggest cluster: 10 cells I=17-29) | all files L6 | done 2026-09-08 (v0.21.67; reference lazy parser, S 0.949-1.009, L6 5-46x faster; dfast/btlazy2 follow-ups listed) |
-| 04 | brotli q11 contest: large-file (v0.21.70) + content-class (v0.21.71) gating done | rfc q11 (I=8.0) + hq DP constant | partial |
+| 04 | brotli q11 contest: gating (v0.21.70/.71) + conditional split-b (v0.21.78) done | rfc q11 S=1.020 header audit only | done 2026-09-09 (perf work) |
 | 06 | brotli q5 sub-1MiB class: bank hasher missing on that path (plists S=1.246) | plists/install/icons/sqlite q5 | done 2026-09-08 (v0.21.69; S 0.994-1.025, I 2.1-5.3) |
 | 07 | fits zstd time class: sub-split (v0.21.72) + window primitives (v0.21.73) | fits L6 (I 7.8->4.2) | done 2026-09-08 |
 | 08 | fits brotli q5 large: mis-scored cell (wall-vs-user + load-246 batch) — true T~2x | — | closed 2026-09-08 (methodology fixed in v7) |
