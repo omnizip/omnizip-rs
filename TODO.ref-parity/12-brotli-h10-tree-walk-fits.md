@@ -26,20 +26,29 @@ Ruled out so far:
 - candidate sharing: collect_matches runs ONCE; both hq passes
   consume the same (num_matches, matches).
 
-Remaining suspects (next probes, in order):
-1. **Instrumented node counting**: total tree-node visits and
-   compared bytes on a 512 KB FITS slice; if visits saturate the
-   depth cap on the 2880-byte header chains, the C pays the same
-   count and the gap is per-node constant — else our tree somehow
-   holds more candidates (bucket behavior on wrap?).
-2. **Per-node stepping constant**: forest[] loads are 32 MB of
-   random access; if the C's forest fits cache better (num_nodes =
-   1<<lgwin even when input is larger? verify SanitizeParams'
-   one-shot lgwin clamp for 4 MB), the walk cost diverges with
-   cache-miss rates. Measure ours at fits sized 4 MB vs 512 KB and
-   check the scaling exponent.
-3. The `out.last()`/push bookkeeping per node (cheap, but the only
-   non-C-shaped work left in the loop body).
+Findings (2026-09-09, probes run):
+1. **Scaling probe**: a 512 KB header-heavy slice takes 30.96s at
+   q11 where the linear-from-4MB prediction is 9.38s — the walk cost
+   is SUPER-LINEAR in the repetitive regions: the 2880-byte FITS
+   header chains saturate the depth-64 walk with long compares. The
+   C pays the same node counts (identical algorithm).
+2. **The likely 5x**: the C's FindMatchLengthWithLimit is
+   word-stepped (BROTLI_UNALIGNED_LOAD64 + trailing_zeros) in the
+   real C source; BOTH our port AND the reference Rust
+   transliteration use per-byte loops. Our safe window-form (the
+   chunks_exact variant) recovers only part of the word advantage —
+   its iterator machinery eats the margin the C gets from raw
+   unchecked loads — and measured neutral on fits.
+
+Options for the residual:
+- Try a leaner safe word-step (slicing `src[a..a+8]` per 8 bytes
+  with hoisted end bounds, no chunk iterators) — cheap to A/B, may
+  recover more of the C's margin.
+- Accept: fits q11 at T~5 with the analysis on record; the cell is
+  S=1.002 (parity) and the absolute cost only bites on
+  header-heavy megabyte-scale binary at q11.
+- The chain pathology itself is bounded (depth 64) — Invariant 1
+  holds; this is a constant-factor chase, not a hang risk.
 
 ## Remaining hypotheses for the 5x
 
