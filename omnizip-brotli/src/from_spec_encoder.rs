@@ -5143,21 +5143,18 @@ fn parse_input_with_offset_impl(
         let run_bt =
             is_text_like(input) && !matches!(std::env::var("BROTLI_BT_TEXT").as_deref(), Ok("0"));
         // Literal-assignment contest (q10/11): the decided static map
-        // and the reference splitter trade wins by corpus, so each
-        // parse candidate is measured under BOTH and the smallest
-        // metablock ships.
-        let (hq_bits, hq_bw, hq_split) = {
+        // and the reference splitter trade wins by corpus. Every
+        // candidate is measured under the decided assignment (a);
+        // the split assignment (b) is measured ONLY for the best
+        // candidate — and the runner-up when within 1% — because in
+        // every measured contest (8+ files, BTOPT_DUMP) the b
+        // variant lost; the unconditional a/b pairs cost 2-3 full
+        // emissions per dense chunk for nothing (rfc q11 was I=5.5).
+        let (mut hq_bits, mut hq_bw, mut hq_split) = {
             let a = measure_emission_bits(&hq, input, mlen_offset, quality, is_last, ctx_in);
-            let b = with_lit_split_override(true, || {
-                measure_emission_bits(&hq, input, mlen_offset, quality, is_last, ctx_in)
-            });
-            if b.0 < a.0 {
-                (b.0, b.1, true)
-            } else {
-                (a.0, a.1, false)
-            }
+            (a.0, a.1, false)
         };
-        let (bt, bt_bits, bt_bw, bt_split) = if run_bt {
+        let (bt, mut bt_bits, mut bt_bw, mut bt_split) = if run_bt {
             let bt = crate::encoder::btopt::parse_btopt_with(
                 input,
                 quality,
@@ -5167,14 +5164,7 @@ fn parse_input_with_offset_impl(
             );
             let (a_bits, a_bw) =
                 measure_emission_bits(&bt, input, mlen_offset, quality, is_last, ctx_in);
-            let (b_bits, b_bw) = with_lit_split_override(true, || {
-                measure_emission_bits(&bt, input, mlen_offset, quality, is_last, ctx_in)
-            });
-            if b_bits < a_bits {
-                (bt, b_bits, Some(b_bw), true)
-            } else {
-                (bt, a_bits, Some(a_bw), false)
-            }
+            (bt, a_bits, Some(a_bw), false)
         } else {
             (Vec::<Command>::new(), u64::MAX, None, false)
         };
@@ -5223,23 +5213,70 @@ fn parse_input_with_offset_impl(
                 true,
             );
             if !hq_d.is_empty() {
-                let (d_bits, d_bw, d_split) = {
-                    let a =
-                        measure_emission_bits(&hq_d, input, mlen_offset, quality, is_last, ctx_in);
-                    let b = with_lit_split_override(true, || {
-                        measure_emission_bits(&hq_d, input, mlen_offset, quality, is_last, ctx_in)
-                    });
-                    if b.0 < a.0 {
-                        (b.0, b.1, true)
-                    } else {
-                        (a.0, a.1, false)
-                    }
-                };
+                let (d_bits, d_bw) =
+                    measure_emission_bits(&hq_d, input, mlen_offset, quality, is_last, ctx_in);
                 if env_flag!("BROTLI_BTOPT_DUMP") {
-                    eprintln!("BTOPT chunk@{mlen_offset} n={n} hqdict={d_bits}(split={d_split})",);
+                    eprintln!("BTOPT chunk@{mlen_offset} n={n} hqdict={d_bits}(split=a)",);
                 }
                 if d_bits < bt_bits && d_bits < hq_bits {
                     dict_winner = Some((hq_d, Some(d_bw), d_bits));
+                }
+            }
+        }
+        // Conditional split-assignment pass: measure b for the best
+        // candidate by a-bits, and for the runner-up when within 1%.
+        // Candidates: 0 = hq, 1 = bt, 2 = dict. A deep runner-up's b
+        // is skipped — the b variant's observed effect is <2%, so a
+        // >1% gap cannot flip it (the rare-change trade documented in
+        // task 04's plan).
+        {
+            let mut order: [(u64, u8); 3] = [
+                (hq_bits, 0),
+                (bt_bits, 1),
+                (dict_winner.as_ref().map_or(u64::MAX, |w| w.2), 2),
+            ];
+            order.sort_unstable_by_key(|&(bits, _)| bits);
+            for rank in 0..2 {
+                let (a_bits, id) = order[rank];
+                if a_bits == u64::MAX {
+                    continue;
+                }
+                if rank == 1 && a_bits > order[0].0.saturating_mul(101) / 100 {
+                    break;
+                }
+                let (b_bits, b_bw) = with_lit_split_override(true, || match id {
+                    1 => measure_emission_bits(&bt, input, mlen_offset, quality, is_last, ctx_in),
+                    2 => match dict_winner.as_ref() {
+                        Some((cmds, _, _)) => measure_emission_bits(
+                            cmds,
+                            input,
+                            mlen_offset,
+                            quality,
+                            is_last,
+                            ctx_in,
+                        ),
+                        None => (u64::MAX, BitWriter::new()),
+                    },
+                    _ => measure_emission_bits(&hq, input, mlen_offset, quality, is_last, ctx_in),
+                });
+                if b_bits < a_bits {
+                    match id {
+                        0 => {
+                            hq_bits = b_bits;
+                            hq_bw = b_bw;
+                            hq_split = true;
+                        }
+                        1 => {
+                            bt_bits = b_bits;
+                            bt_bw = Some(b_bw);
+                        }
+                        _ => {
+                            if let Some(w) = dict_winner.as_mut() {
+                                w.1 = Some(b_bw);
+                                w.2 = b_bits;
+                            }
+                        }
+                    }
                 }
             }
         }
