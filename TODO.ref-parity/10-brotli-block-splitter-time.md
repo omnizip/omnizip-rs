@@ -6,7 +6,9 @@
   histogram_combine 1,274 + compare_and_push_to_queue 1,222 +
   cluster_histograms 1,021), vs the zopfli_hq DP at 31% (whose
   getenv storm, 30%, was hoisted in v0.21.75).
-- **Status:** pending
+- **Status:** log2 table + split memo DONE 2026-09-09 (v0.21.76):
+  sqlite q11 T 4.5 -> 3.8, words 1.9 -> 1.4, rfc -12%, all
+  byte-identical. Remaining: the clustering structure itself.
 
 ## Root cause shape
 
@@ -18,23 +20,27 @@ and the q11 contest measures 3-5 candidates a/b per chunk. The
 clustering is also quadratic-ish in histogram pairs
 (compare_and_push_to_queue / histogram_combine).
 
-## Plan
+## Landed (v0.21.76)
 
-1. Profile inside the splitter: population_cost vs combine vs queue
-   — the C's BrotliBlockSplitterComputeCostsFromArray equivalent and
-   where the port differs in allocation shape (per-call Vec churn
-   vs the C's arena).
-2. Candidate cheap wins:
-   a. Reuse buffers across the a/b and candidate measurements (the
-      splitter allocates histograms/indices per call).
-   b. The literal-assignment override (a/b) only changes LITERAL
-      histograms — command/distance splits are IDENTICAL between a
-      and b for the same commands: compute them once.
-   c. Same for candidates sharing the same parse (hq vs hq+dict
-      differ only in some commands... no — different parses; skip).
-3. Deeper: port the C's incremental cost updates
-   (BrotliBlockSplitterComputeCostsFromArray's running sums) if the
-   port recomputes per merge.
+- **log2() table** (bit-exact, built with .log2() itself; counts
+  <= 65536): population_cost alone was 30% of sqlite-q11 samples —
+  the libm f64::log2 per symbol also taxed bits_entropy and every
+  pair-distance in histogram_combine.
+- **One-entry split_byte_vector memo** (full-input key): the a/b
+  and tree-cap measurements of the same commands re-ran identical
+  splits. Only ~4% — the splits are mostly distinct across
+  candidates; the table was the real lever.
+
+## Remaining (deeper work)
+
+- The clustering structure itself: histogram_combine /
+  compare_and_push_to_queue evaluate pair distances whose per-symbol
+  arithmetic survives the log2 fix — the next shape is incremental
+  per-pair cost updates (running entropy sums instead of full
+  recompute per merge, as upstream's arena + BitCostDistance reuse
+  does) and buffer reuse across the 2-3 splits per emission.
+- rfc q11's S=1.020 residual is the header-wire gap (task 04 note),
+  not the splitter.
 
 ## Acceptance
 
