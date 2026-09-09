@@ -118,68 +118,74 @@ fn package_merge(symbols: &[(usize, u32)], max_length: usize, n_symbols: usize) 
     let mut sorted: Vec<(usize, u32)> = symbols.to_vec();
     sorted.sort_by_key(|&(_, f)| f);
 
-    // Each "coin" has a value (frequency) and tracks which original symbols it covers.
-    #[derive(Clone)]
-    struct Coin {
-        freq: u64,
-        symbols: Vec<usize>,
+    // Arena form: a coin is a node index. Leaves carry the symbol;
+    // packages carry child indices. The previous form allocated a
+    // Vec<usize> of covered symbols per coin, cloned them through the
+    // merge loop, and rebuilt the original-coin list every level —
+    // the realloc storm behind ~12% of plists-q5 encode samples.
+    // Comparisons and tie-breaking are byte-identical to that form,
+    // so the emitted lengths are unchanged.
+    let cap = 4 * n * max_length.max(1);
+    let mut freqs: Vec<u64> = Vec::with_capacity(cap);
+    let mut lefts: Vec<u32> = Vec::with_capacity(cap);
+    let mut rights: Vec<u32> = Vec::with_capacity(cap);
+
+    fn push_leaf(
+        freq: u32,
+        sym: usize,
+        freqs: &mut Vec<u64>,
+        lefts: &mut Vec<u32>,
+        rights: &mut Vec<u32>,
+    ) -> u32 {
+        let idx = freqs.len() as u32;
+        freqs.push(u64::from(freq));
+        lefts.push(sym as u32);
+        rights.push(u32::MAX);
+        idx
     }
 
     // Initial coins: one per symbol.
-    let mut prev_list: Vec<Coin> = sorted
+    let mut prev_list: Vec<u32> = sorted
         .iter()
-        .map(|&(sym, freq)| Coin {
-            freq: u64::from(freq),
-            symbols: vec![sym],
-        })
+        .map(|&(sym, freq)| push_leaf(freq, sym, &mut freqs, &mut lefts, &mut rights))
         .collect();
 
     // Package-merge iterations.
     for _ in 1..max_length {
         // Package: pair up adjacent coins.
-        let mut packages = Vec::new();
+        let mut packages: Vec<u32> = Vec::with_capacity(prev_list.len() / 2);
         let mut i = 0;
         while i + 1 < prev_list.len() {
-            packages.push(Coin {
-                freq: prev_list[i].freq + prev_list[i + 1].freq,
-                symbols: {
-                    let mut s = prev_list[i].symbols.clone();
-                    s.extend(&prev_list[i + 1].symbols);
-                    s
-                },
-            });
+            let l = prev_list[i] as usize;
+            let r = prev_list[i + 1] as usize;
+            let idx = freqs.len() as u32;
+            freqs.push(freqs[l] + freqs[r]);
+            lefts.push(prev_list[i]);
+            rights.push(prev_list[i + 1]);
+            packages.push(idx);
             i += 2;
         }
 
-        // Merge packages with original coins, sorted by frequency.
-        let mut merged = Vec::with_capacity(packages.len() + sorted.len());
-        let orig: Vec<Coin> = sorted
+        // Merge packages with fresh original coins, sorted by
+        // frequency (packages win ties, as before).
+        let orig: Vec<u32> = sorted
             .iter()
-            .map(|&(sym, freq)| Coin {
-                freq: u64::from(freq),
-                symbols: vec![sym],
-            })
+            .map(|&(sym, freq)| push_leaf(freq, sym, &mut freqs, &mut lefts, &mut rights))
             .collect();
-
+        let mut merged: Vec<u32> = Vec::with_capacity(packages.len() + orig.len());
         let mut pi = 0;
         let mut oi = 0;
         while pi < packages.len() && oi < orig.len() {
-            if packages[pi].freq <= orig[oi].freq {
-                merged.push(packages[pi].clone());
+            if freqs[packages[pi] as usize] <= freqs[orig[oi] as usize] {
+                merged.push(packages[pi]);
                 pi += 1;
             } else {
-                merged.push(orig[oi].clone());
+                merged.push(orig[oi]);
                 oi += 1;
             }
         }
-        while pi < packages.len() {
-            merged.push(packages[pi].clone());
-            pi += 1;
-        }
-        while oi < orig.len() {
-            merged.push(orig[oi].clone());
-            oi += 1;
-        }
+        merged.extend_from_slice(&packages[pi..]);
+        merged.extend_from_slice(&orig[oi..]);
 
         // Keep only first 2*(n-1) coins.
         let limit = 2 * (n - 1);
@@ -189,11 +195,20 @@ fn package_merge(symbols: &[(usize, u32)], max_length: usize, n_symbols: usize) 
         prev_list = merged;
     }
 
-    // Count how many times each symbol appears in the final list.
+    // Count how many times each symbol appears in the final list:
+    // occurrences of a coin's leaves across prev_list.
     let mut lengths = vec![0u8; n_symbols];
-    for coin in &prev_list {
-        for &sym in &coin.symbols {
-            lengths[sym] += 1;
+    let mut stack: Vec<u32> = Vec::new();
+    for &coin in &prev_list {
+        stack.push(coin);
+        while let Some(node) = stack.pop() {
+            let node = node as usize;
+            if rights[node] == u32::MAX {
+                lengths[lefts[node] as usize] += 1;
+            } else {
+                stack.push(lefts[node]);
+                stack.push(rights[node]);
+            }
         }
     }
 
