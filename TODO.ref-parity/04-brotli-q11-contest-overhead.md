@@ -70,3 +70,13 @@ Output byte-identical on every cell.
 - **hq DP constant**: fits q11 T=4.7 and rfc-class T are dominated by
   the zopfli_hq port's per-node cost (~3-4x the reference DP). A
   profiling pass over encoder/zopfli_hq.rs is the next sizeable win.
+
+## rustsrc q11 note (2026-09-09)
+
+The v3-era size row (373,844) was stale: since the v0.21.70/.71
+candidate gating, rustsrc q11 emits 379,830 (+1.6%) — a dict/bt
+candidate had been winning that margin on 723 KB dense text. The
+trade is I-improving per the board principle (the candidates cost a
+DP + two emissions; rustsrc q11 T was ~5 at gating time and is 1.2
+today). Recorded in the v14 board; do not chase the 1.6% with
+candidate restoration unless the I calculus changes.
