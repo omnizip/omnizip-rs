@@ -8,18 +8,38 @@
   DP nodes and not the emission.
 - **Status:** pending (one approach tried and reverted — see below)
 
-## Negative result (2026-09-09)
+## Negative result (2026-09-09, confirmed twice with verified rebuilds)
 
 Window-forming the tree's byte compare (`match_len_from` — two
-Option bounds checks per compared byte, the exact shape fixed with
-5-8x wins in zstd's count and the bank's match_len_scan) measured
-NEUTRAL-TO-NEGATIVE on fits q11 (same-load A/B: 76.5s vs 75.1s).
-**Lesson: the window form pays ~10-15 ops of setup per call; it wins
-on long compares (text matches) and loses on short ones.** The tree
-walk on binary is short-compare-dominated (candidates diverge within
-a few bytes). Reverted; do not re-apply blindly — the instinct
-"same disease, same cure" fails when the compare-length distribution
-changes.
+Option bounds checks per compared byte, the shape that won 5-8x in
+zstd's count and the bank's match_len_scan) is NEUTRAL on fits q11:
+75.9s vs 75.0-76.8s committed, ±1s repeatability, 25-crate rebuilds
+verified both sides. The walk's cost is NOT the compare arithmetic.
+
+Ruled out so far:
+- compare form (above — neutral),
+- window size: the reference's one-shot H10 also spans the full
+  input (num_nodes = min(1<<lgwin, input_size); lgwin 22 at 4 MB),
+- algorithm shape: depth cap 64, comp cap 128, 17 bucket bits,
+  0x1E35A7BD hash — all identical to H10DefaultParams; the
+  reference's own walk compare is ALSO a per-byte iter().zip() loop,
+- candidate sharing: collect_matches runs ONCE; both hq passes
+  consume the same (num_matches, matches).
+
+Remaining suspects (next probes, in order):
+1. **Instrumented node counting**: total tree-node visits and
+   compared bytes on a 512 KB FITS slice; if visits saturate the
+   depth cap on the 2880-byte header chains, the C pays the same
+   count and the gap is per-node constant — else our tree somehow
+   holds more candidates (bucket behavior on wrap?).
+2. **Per-node stepping constant**: forest[] loads are 32 MB of
+   random access; if the C's forest fits cache better (num_nodes =
+   1<<lgwin even when input is larger? verify SanitizeParams'
+   one-shot lgwin clamp for 4 MB), the walk cost diverges with
+   cache-miss rates. Measure ours at fits sized 4 MB vs 512 KB and
+   check the scaling exponent.
+3. The `out.last()`/push bookkeeping per node (cheap, but the only
+   non-C-shaped work left in the loop body).
 
 ## Remaining hypotheses for the 5x
 
