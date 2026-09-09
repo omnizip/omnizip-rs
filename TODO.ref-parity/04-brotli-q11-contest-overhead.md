@@ -80,3 +80,22 @@ trade is I-improving per the board principle (the candidates cost a
 DP + two emissions; rustsrc q11 T was ~5 at gating time and is 1.2
 today). Recorded in the v14 board; do not chase the 1.6% with
 candidate restoration unless the I calculus changes.
+
+## Conditional split-b (v0.21.78, plan item 2)
+
+Every candidate was measured under BOTH literal assignments before
+the winner was known, though b lost every observed contest (8+
+files). Now: a for all candidates; b only for the best (always) and
+the runner-up within 1% (b's observed effect <2%, so a wider gap
+cannot flip). Byte-identical on the corpus. rfc q11 T 5.4 -> 4.2
+(I 5.5 -> 4.3 — was the board's worst cell), sqlite 3.7 -> 3.0,
+plists -10%. Note the contrast with the same-day rewrite attempts
+(tasks 12/13): removing work pays; reshaping attributed-hot loops
+measured neutral three times.
+
+## Remaining (the S residual)
+
+rfc q11 ships S=1.020: content bits at parity (documented
+decomposition), the gap is header-wire encoding (context-map /
+tree-header bits). Closing it is an output-format audit, not a
+contest change — and it moves I only 4.3 -> 4.2 at current T.
