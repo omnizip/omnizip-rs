@@ -26,10 +26,23 @@ pub const SYMBOLS_PER_COMMAND_HISTOGRAM: usize = 530;
 pub const SYMBOLS_PER_DISTANCE_HISTOGRAM: usize = 544;
 pub const MIN_LENGTH_FOR_BLOCK_SPLITTING: usize = 128;
 
+/// Counts <= 65536 answer from a table built once with `.log2()`
+/// itself — bit-identical values, no libm call in the clustering hot
+/// loop (population_cost / bits_entropy / every pair-distance in
+/// histogram_combine each pay one log2 per symbol; on sqlite q11
+/// population_cost alone was 1,516 of 4,991 samples). Larger counts
+/// (a handful of dominant symbols per histogram) fall through.
+const LOG2_TABLE_MAX: u64 = 1 << 16;
+
 #[inline]
 fn log2(v: u64) -> f64 {
+    static TABLE: std::sync::OnceLock<Vec<f64>> = std::sync::OnceLock::new();
     if v == 0 {
         return -2.0;
+    }
+    if v <= LOG2_TABLE_MAX {
+        let t = TABLE.get_or_init(|| (0..=LOG2_TABLE_MAX).map(|i| (i as f64).log2()).collect());
+        return t[v as usize];
     }
     (v as f64).log2()
 }
@@ -823,6 +836,72 @@ fn cluster_blocks(
 
 /// Upstream `SplitByteVector` (literal flavor: u16-carried symbols).
 pub fn split_byte_vector(
+    data: &[u16],
+    data_size: usize,
+    symbols_per_histogram: usize,
+    max_histograms: usize,
+    sampling_stride_length: usize,
+    block_switch_cost: f64,
+    iters: usize,
+) -> BlockSplit {
+    // One-entry memo: the q11 contest measures the SAME commands 3-5x
+    // (a/b literal assignments, tree-cap re-measure) and every repeat
+    // re-ran this pure O(n * iters * histograms) split on an
+    // identical stream — 51% of sqlite-q11 samples. Keyed by the
+    // full input (data + all params); a hit returns the identical
+    // deterministic result. Key comparison is a memcmp that costs
+    // ~1% of the split it avoids.
+    use std::cell::RefCell;
+    thread_local! {
+        static MEMO: RefCell<Option<(Vec<u16>, usize, usize, usize, usize, f64, usize, BlockSplit)>> =
+            RefCell::new(None);
+    }
+    let memo_hit = MEMO.with(|m| {
+        m.borrow()
+            .as_ref()
+            .is_some_and(|(d, ds, sph, mh, ssl, cost, it, _)| {
+                *ds == data_size
+                    && *sph == symbols_per_histogram
+                    && *mh == max_histograms
+                    && *ssl == sampling_stride_length
+                    && *cost == block_switch_cost
+                    && *it == iters
+                    && d.as_slice() == data
+            })
+    });
+    if memo_hit {
+        return MEMO.with(|m| {
+            m.borrow()
+                .as_ref()
+                .map(|(_, _, _, _, _, _, _, split)| split.clone())
+                .expect("memo entry checked above")
+        });
+    }
+    let split = split_byte_vector_uncached(
+        data,
+        data_size,
+        symbols_per_histogram,
+        max_histograms,
+        sampling_stride_length,
+        block_switch_cost,
+        iters,
+    );
+    MEMO.with(|m| {
+        *m.borrow_mut() = Some((
+            data.to_vec(),
+            data_size,
+            symbols_per_histogram,
+            max_histograms,
+            sampling_stride_length,
+            block_switch_cost,
+            iters,
+            split.clone(),
+        ))
+    });
+    split
+}
+
+fn split_byte_vector_uncached(
     data: &[u16],
     data_size: usize,
     symbols_per_histogram: usize,
