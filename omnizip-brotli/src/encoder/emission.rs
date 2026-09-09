@@ -1340,20 +1340,30 @@ pub(crate) fn emit_metablock_from_commands(
     }
 
     // Build per-tree literal Huffman tables.
-    let mut lit_lengths_per_tree: Vec<omnizip_codecs::HuffmanLengths> = lit_freqs
-        .iter()
-        .map(|freq| omnizip_codecs::HuffmanLengths::build(freq, 15))
-        .collect();
-    let cmd_lengths_per_block: Vec<omnizip_codecs::HuffmanLengths> = cmd_freqs_per_block
-        .iter()
-        .map(|freq| omnizip_codecs::HuffmanLengths::build(freq, 15))
-        .collect();
+    let mut lit_lengths_per_tree: Vec<omnizip_codecs::HuffmanLengths> =
+        Vec::with_capacity(lit_freqs.len());
+    lit_lengths_per_tree.extend(
+        lit_freqs
+            .iter()
+            .map(|freq| omnizip_codecs::HuffmanLengths::build(freq, 15)),
+    );
+    let mut cmd_lengths_per_block: Vec<omnizip_codecs::HuffmanLengths> =
+        Vec::with_capacity(cmd_freqs_per_block.len());
+    cmd_lengths_per_block.extend(
+        cmd_freqs_per_block
+            .iter()
+            .map(|freq| omnizip_codecs::HuffmanLengths::build(freq, 15)),
+    );
     let cmd_lengths = omnizip_codecs::HuffmanLengths::build(&cmd_freq, 15);
     let dist_lengths_per_ctx: Vec<omnizip_codecs::HuffmanLengths> = if ntrees_d > 1 {
-        dist_freqs_per_ctx
-            .iter()
-            .map(|freq| omnizip_codecs::HuffmanLengths::build(freq, 15))
-            .collect()
+        let mut v: Vec<omnizip_codecs::HuffmanLengths> =
+            Vec::with_capacity(dist_freqs_per_ctx.len());
+        v.extend(
+            dist_freqs_per_ctx
+                .iter()
+                .map(|freq| omnizip_codecs::HuffmanLengths::build(freq, 15)),
+        );
+        v
     } else {
         vec![omnizip_codecs::HuffmanLengths::build(&dist_freq, 15)]
     };
