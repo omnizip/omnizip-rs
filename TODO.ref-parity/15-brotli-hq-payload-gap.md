@@ -4,8 +4,12 @@
 - **Score evidence (v17):** plists brotli q11 **S=1.0929**
   (114,479 vs 104,745) — 6x rfc's decomposed residual and never
   itself decomposed until 2026-09-10.
-- **Status:** decomposed; two suspects measured out; the primary
-  suspect identified for a port-parity session.
+- **Status:** FIXED 2026-09-10 (v0.21.80). The suspected
+  cost-model gap was WRONG — the model already had the UTF8 variant
+  and both suspects measured out. The actual root cause (found by
+  the dict_hits decoder probe): the sparse path disabled dictionary
+  candidates in the BASE hq parse; ref emitted 2,189 dict matches /
+  14,512 bytes, we emitted zero.
 
 ## Decomposition (BROTLI_STRUCT_DUMP, both streams, 2026-09-10)
 
@@ -57,3 +61,26 @@ q9 zopfli-iterative path).
 - plists q11 S <= 1.02; q9-cluster S re-measured; output changes
   only through the contest shields (parse candidate quality, not
   routing).
+
+## Resolution (v0.21.80)
+
+The port-session suspects were all wrong — the hq cost model already
+ports the UTF8 variant (is_mostly_utf8 branch present), SW-on-text
+was byte-identical, MLEN_CAP neutral, distance params searched. The
+decoder-side dict_hits comparison (BROTLI_DICT_COUNT) found it
+directly: **the reference's stream uses the static dictionary 2,189
+times; ours used it zero times** — the n > 256 KiB sparse path ran
+the base hq parse with dict disabled, and plists-class dense text
+lives exactly there.
+
+Fix: base-parse dictionary candidates for the sparse class, gated by
+the density screen. Small files keep the shielded hq_d candidate
+(the unshielded replacement regressed csv_100k +7%, caught by the
+regression gate pre-merge — the catch also exposed that a premature
+baseline refresh can mask a regression; refresh only AFTER the gate
+passes on the intended code).
+
+plists q11 S 1.093 -> 1.024; the changed cells measure T 0.4-0.5x
+(faster than ref — shorter command streams); plists q11 is now a
+net-win cell (I ~0.5). Remaining S=1.024: dict hits 1,799 vs ref
+2,189 — the dict-match finder's recall gap, a smaller follow-up.
