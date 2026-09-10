@@ -36,7 +36,7 @@ small-file T ~4x).)
 | 12 | fits q11: H10 tree walk; three compare forms measured neutral — disposition ACCEPT with analysis (follow-up: instrumented node counts) | fits q11 (I=5.1) | closed 2026-09-09 (analysis) |
 | 13 | noto q9: context clustering hot; flat-matrix rewrite byte-identical but neutral — profile attribution alone insufficient, pattern recorded | noto q9 (I=4.4) | closed 2026-09-09 (investigated) |
 | 14 | zstd L1 floor: both remaining leads inspected and deprioritized with evidence (Vec+copy ~5%; literals 19% share sub-threshold) | zstd L1 cells (I 3.0-4.4) | closed 2026-09-10 (inspected) |
-| 15 | plists q11 S=1.093 decomposed: 8.4% PAYLOAD gap in the hq port (sparse path; suspects narrowed to context-aware literal costs) | plists q11 + likely the q9 S-cluster | in_progress (suspects measured out; port session next) |
+| 15 | plists q11 S=1.093: sparse path had dict DISABLED in the base hq parse (ref: 2,189 dict matches, ours: 0) — FIXED | plists q11 (S 1.093→1.024, net-win cell) | done 2026-09-10 (v0.21.80) |
 | 09 | zstd L1 emission: bitstream-size counting replaces byte-materializing measurement (v0.21.74, words L1 -41%) | words/rustsrc L1 (I 4.0-4.3) | done 2026-09-08 |
 | 05 | csv2m time pathology — root cause 1: getenv in opt hot loop | csv2m zstd L6 I=137 | done 2026-09-07 (v0.21.66; T 202x→~112x est; re-score pending quiet box; residual = task 03) |
 
