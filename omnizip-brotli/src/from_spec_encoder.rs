@@ -5067,13 +5067,45 @@ fn parse_input_with_offset_impl(
         let mut tree = omnizip_codecs::BinaryTreeMatchFinder::new(input);
         let (num_matches, matches) =
             crate::encoder::zopfli_hq::collect_matches(input, &mut tree, quality);
+        // Dictionary candidates in the BASE hq parse for dense
+        // content: upstream's hq always includes them, and our
+        // n-bound-disabled base parse left a 9.9% size gap on dense
+        // text at q11 (plists: ref emits 2,189 dictionary matches /
+        // 14,512 bytes; ours emitted zero — the entire S=1.093
+        // residual, decoder-side dict_hits comparison 2026-09-10).
+        // Gated by the 512-sample density screen so sparse binary
+        // keeps the dict-free parse; BROTLI_HQ_DICT forces it on.
+        // Small files keep the plain base parse — the contest's
+        // separate hq_d candidate already covers them SHIELDED (the
+        // unshielded base-dict replacement regressed csv_100k +7% by
+        // dropping the min() protection).
+        let hq_dict = n > 262_144 && {
+            let stride = (n / 512).max(1);
+            let mut hits = 0usize;
+            let mut samples = 0usize;
+            let mut buf = [u32::MAX; 38];
+            let mut p = 0usize;
+            while p + 8 < n {
+                if crate::encoder::static_dict::find_all_static_dictionary_matches(
+                    &input[p..],
+                    4,
+                    37.min(n - p),
+                    &mut buf,
+                ) {
+                    hits += 1;
+                }
+                samples += 1;
+                p += stride;
+            }
+            samples > 0 && (hits as f32 / samples as f32) >= 0.08
+        } || env_flag!("BROTLI_HQ_DICT");
         let hq = crate::encoder::zopfli_hq::parse_hq_with(
             input,
             quality,
             mlen_offset,
             &num_matches,
             &matches,
-            false,
+            hq_dict,
         );
         // The btopt candidate wins only in the small-file inversion
         // class (the same class the iter candidate below targets).
