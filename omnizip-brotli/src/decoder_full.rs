@@ -559,6 +559,16 @@ fn dictionary_lookup(
 ///
 /// Returns `(new_bit_pos, output_bytes)`.
 #[allow(clippy::too_many_lines)]
+thread_local! {
+    static DICT_HITS: std::cell::RefCell<(u64, u64)> = const { std::cell::RefCell::new((0, 0)) };
+}
+
+/// Dictionary-match counters for the BROTLI_DICT_COUNT stream
+/// comparison (count, total copy bytes).
+pub fn dict_hits() -> (u64, u64) {
+    DICT_HITS.with(|c| *c.borrow())
+}
+
 pub(crate) fn decode_compressed_metablock_full(
     data: &[u8],
     bit_pos: usize,
@@ -1047,6 +1057,10 @@ fn finish_metablock_decode(
 
         // Static dictionary reference vs LZ77 back-reference.
         if (distance as i32) > max_distance as i32 {
+            if std::env::var_os("BROTLI_DICT_COUNT").is_some() {
+                DICT_HITS.with(|c| c.borrow_mut().0 += 1);
+                DICT_HITS.with(|c| c.borrow_mut().1 += copy_len as u64);
+            }
             if dictionary_lookup(&mut output, copy_len as u32, distance as i32, max_distance)
                 .is_none()
             {
