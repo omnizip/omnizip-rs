@@ -5919,67 +5919,140 @@ pub(crate) const CODE_LENGTH_CODE_ORDER: [u8; 18] =
 /// To avoid the decoder's iterated accumulator (which combines
 /// consecutive repeat symbols non-linearly), a literal symbol is
 /// inserted between consecutive repeats of the same value.
+/// Port of upstream `BrotliWriteHuffmanTree`'s RLE stage
+/// (entropy_encode.rs) — replaces the earlier in-house chunking that
+/// inserted a separator literal between consecutive 17/16 symbols and
+/// wrote the full zero tail. Upstream trims trailing zeros, decides
+/// RLE use per tree, chains 17/16 runs (base-8/base-4 with the -1
+/// carry — the decoder's iterated accumulator), and skips the first
+/// literal when the value repeats the previous run's. The tree
+/// descriptions had cost 2.1x the reference's (rfc q11: littrees
+/// 1,787 vs 836 bits) — the entire S=1.020 residual.
 pub(crate) fn build_rle_sequence(lengths: &[u8]) -> Vec<(u8, u8)> {
-    let n = lengths.len();
-    let mut out = Vec::with_capacity(n);
-    let mut i = 0;
-    while i < n {
-        let val = lengths[i];
-        let mut run = 1usize;
-        while i + run < n && lengths[i + run] == val {
-            run += 1;
+    let mut new_length = lengths.len();
+    while new_length > 0 && lengths[new_length - 1] == 0 {
+        new_length -= 1;
+    }
+    let (use_rle_for_non_zero, use_rle_for_zero) = if lengths.len() > 50 {
+        decide_over_rle_use(lengths, new_length)
+    } else {
+        (false, false)
+    };
+    let mut out = Vec::with_capacity(new_length);
+    let mut previous_value: u8 = 8;
+    let mut i = 0usize;
+    while i < new_length {
+        let value = lengths[i];
+        let mut reps = 1usize;
+        if (value != 0 && use_rle_for_non_zero) || (value == 0 && use_rle_for_zero) {
+            let mut k = i + 1;
+            while k < new_length && lengths[k] == value {
+                reps += 1;
+                k += 1;
+            }
         }
-
-        if val == 0 {
-            // Emit leading 1-2 zeros individually (symbol 17 needs ≥3).
-            let lead = run.min(2);
-            for _ in 0..lead {
-                out.push((0, 0));
-            }
-            run -= lead;
-            i += lead;
-            // Use symbol 17 for remaining zero runs (count 3-10).
-            // Insert a literal 0 between consecutive symbol-17s to
-            // avoid the decoder's iterated accumulator.
-            while run >= 3 {
-                let chunk = run.min(10);
-                out.push((17, (chunk - 3) as u8));
-                run -= chunk;
-                i += chunk;
-                if run >= 3 {
-                    out.push((0, 0));
-                    run -= 1;
-                    i += 1;
-                }
-            }
-            for _ in 0..run {
-                out.push((0, 0));
-            }
-            i += run;
+        if value == 0 {
+            write_repetitions_zeros(reps, &mut out);
         } else {
-            out.push((val, 0));
-            i += 1;
-            run -= 1;
-            // Use symbol 16 for repeat runs (count 3-6).
-            // Insert a literal between consecutive symbol-16s.
-            while run >= 3 {
-                let chunk = run.min(6);
-                out.push((16, (chunk - 3) as u8));
-                run -= chunk;
-                i += chunk;
-                if run >= 3 {
-                    out.push((val, 0));
-                    run -= 1;
-                    i += 1;
-                }
-            }
-            for _ in 0..run {
-                out.push((val, 0));
-            }
-            i += run;
+            write_repetitions(previous_value, value, reps, &mut out);
+            previous_value = value;
         }
+        i += reps;
     }
     out
+}
+
+/// Upstream `decide_over_rle_use`: RLE pays for a class only when the
+/// runs cover more than twice their count.
+fn decide_over_rle_use(depth: &[u8], length: usize) -> (bool, bool) {
+    let mut total_reps_zero = 0usize;
+    let mut total_reps_non_zero = 0usize;
+    let mut count_reps_zero = 1usize;
+    let mut count_reps_non_zero = 1usize;
+    let mut i = 0usize;
+    while i < length {
+        let value = depth[i];
+        let mut reps = 1usize;
+        let mut k = i + 1;
+        while k < length && depth[k] == value {
+            reps += 1;
+            k += 1;
+        }
+        if reps >= 3 && value == 0 {
+            total_reps_zero += reps;
+            count_reps_zero += 1;
+        }
+        if reps >= 4 && value != 0 {
+            total_reps_non_zero += reps;
+            count_reps_non_zero += 1;
+        }
+        i += reps;
+    }
+    (
+        total_reps_non_zero > count_reps_non_zero * 2,
+        total_reps_zero > count_reps_zero * 2,
+    )
+}
+
+/// Upstream `BrotliWriteHuffmanTreeRepetitions` (non-zero values):
+/// symbol 16 chains, most-significant digit first via reverse.
+fn write_repetitions(
+    previous_value: u8,
+    value: u8,
+    mut repetitions: usize,
+    out: &mut Vec<(u8, u8)>,
+) {
+    if previous_value != value {
+        out.push((value, 0));
+        repetitions -= 1;
+    }
+    if repetitions == 7 {
+        out.push((value, 0));
+        repetitions -= 1;
+    }
+    if repetitions < 3 {
+        for _ in 0..repetitions {
+            out.push((value, 0));
+        }
+    } else {
+        let start = out.len();
+        repetitions -= 3;
+        loop {
+            out.push((16, (repetitions & 0x3) as u8));
+            repetitions >>= 2;
+            if repetitions == 0 {
+                break;
+            }
+            repetitions -= 1;
+        }
+        out[start..].reverse();
+    }
+}
+
+/// Upstream `BrotliWriteHuffmanTreeRepetitionsZeros`: symbol 17
+/// chains (with the reps==11 quirk), most-significant digit first.
+fn write_repetitions_zeros(mut repetitions: usize, out: &mut Vec<(u8, u8)>) {
+    if repetitions == 11 {
+        out.push((0, 0));
+        repetitions -= 1;
+    }
+    if repetitions < 3 {
+        for _ in 0..repetitions {
+            out.push((0, 0));
+        }
+    } else {
+        let start = out.len();
+        repetitions -= 3;
+        loop {
+            out.push((17, (repetitions & 0x7) as u8));
+            repetitions >>= 3;
+            if repetitions == 0 {
+                break;
+            }
+            repetitions -= 1;
+        }
+        out[start..].reverse();
+    }
 }
 
 /// Write block-type code trees and initial block length (RFC 7932 §9.3).

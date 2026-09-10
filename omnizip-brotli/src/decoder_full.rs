@@ -760,8 +760,11 @@ fn finish_metablock_decode(
         Some(v) => v,
         None => read_varlen_uint8(br)? + 1,
     };
+    let p_before_cms = br.bit_pos();
     let (lit_context_map, p) = read_context_map(data, br.bit_pos(), lit_cm_size, ntreesl, 0)?;
     br.set_bit_pos(p);
+    let struct_dump = std::env::var_os("BROTLI_STRUCT_DUMP").is_some();
+    let p_after_litcm = br.bit_pos();
 
     // ----- Distance context map (§9.6) -----
     let dist_cm_size = (dist_bt.num_block_types as usize) << K_DISTANCE_CONTEXT_BITS;
@@ -771,6 +774,7 @@ fn finish_metablock_decode(
     };
     let (dist_context_map, p) = read_context_map(data, br.bit_pos(), dist_cm_size, ntreesd, 0)?;
     br.set_bit_pos(p);
+    let p_after_distcm = br.bit_pos();
     if std::env::var("BROTLI_DBG_DC").is_ok() {
         eprintln!("DCDBG ntreesd={ntreesd} cm_size={dist_cm_size} map={dist_context_map:?}");
     }
@@ -780,11 +784,29 @@ fn finish_metablock_decode(
     let t0 = std::time::Instant::now();
     let (lit_trees, p) = read_tree_group(data, br.bit_pos(), 256, ntreesl)?;
     br.set_bit_pos(p);
+    let p_after_littrees = br.bit_pos();
     let (cmd_trees, p) = read_tree_group(data, br.bit_pos(), 704, cmd_bt.num_block_types)?;
     br.set_bit_pos(p);
+    let p_after_cmdtrees = br.bit_pos();
     let dist_alphabet_size = num_direct_distance_codes as usize + (48usize << npostfix);
     let (dist_trees, p) = read_tree_group(data, br.bit_pos(), dist_alphabet_size, ntreesd)?;
     br.set_bit_pos(p);
+    let p_after_disttrees = br.bit_pos();
+    if struct_dump {
+        eprintln!(
+            "STRUCT mb@{output_base} mlen={mlen} nbl_l={} nbl_c={} nbl_d={} ntreesl={ntreesl} ntreesd={ntreesd} npostfix={npostfix} ndirect={ndirect} | pre_cm={} litcm_bits={} distcm_bits={} littrees_bits={} cmdtrees_bits={} disttrees_bits={} payload_from={}",
+            lit_bt.num_block_types,
+            cmd_bt.num_block_types,
+            dist_bt.num_block_types,
+            p_before_cms,
+            p_after_litcm - p_before_cms,
+            p_after_distcm - p_after_litcm,
+            p_after_littrees - p_after_distcm,
+            p_after_cmdtrees - p_after_littrees,
+            p_after_disttrees - p_after_cmdtrees,
+            p_after_disttrees
+        );
+    }
     let t_trees = t0.elapsed();
 
     // ----- Command loop -----
