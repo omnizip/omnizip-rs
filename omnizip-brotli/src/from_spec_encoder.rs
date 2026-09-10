@@ -3231,7 +3231,10 @@ fn zopfli_iterative_parse(
         // region-structured binary this decides copy-vs-literal far
         // better than the whole-metablock average. Text keeps the
         // global table (their UTF8 variant differs; measured later).
-        let sw_costs = if quality >= 10 && !is_text_like(input) && !env_flag!("BROTLI_NO_SW_LIT") {
+        let sw_costs = if quality >= 10
+            && (!is_text_like(input) || env_flag!("BROTLI_SW_LIT_TEXT"))
+            && !env_flag!("BROTLI_NO_SW_LIT")
+        {
             Some(sliding_window_lit_costs(input))
         } else {
             None
