@@ -93,9 +93,24 @@ plists -10%. Note the contrast with the same-day rewrite attempts
 (tasks 12/13): removing work pays; reshaping attributed-hot loops
 measured neutral three times.
 
-## Remaining (the S residual)
+## The S residual — decomposed and half-closed (v0.21.79)
 
-rfc q11 ships S=1.020: content bits at parity (documented
-decomposition), the gap is header-wire encoding (context-map /
-tree-header bits). Closing it is an output-format audit, not a
-contest change — and it moves I only 4.3 -> 4.2 at current T.
+The audit ran (2026-09-10): a new BROTLI_STRUCT_DUMP decoder stage
+dump localized rfc q11's S=1.020 EXACTLY — same metablock shape
+(6 lit trees, 2 dist trees, same nbltypes, our context maps SMALLER
+by 19 bits, our payload 427 bits BETTER), but tree descriptions
+2.1x the reference's (littrees 1,787 vs 836 bits; cmdtrees 1,010 vs
+557) = the entire 130-byte gap.
+
+- Root cause 1, FIXED (v0.21.79): build_rle_sequence's separator
+  literals + untrimmed zero tails. Reference RLE ported verbatim.
+  rfc q11 S 1.020 -> 1.0136; install q11 S 1.067 -> 1.0329; strict
+  size win on every measured cell.
+- Root cause 2, open (content-level): the remaining ~90 bytes are
+  tree-SHAPE differences — our context clustering produces length
+  distributions with more RLE runs than the reference's trees. That
+  is the clustering's trade (our payload is better by more than the
+  tree excess on rfc), not a wire defect. Closing it means trading
+  payload entropy for tree simplicity — a contest-shaped change
+  (add a clustering candidate whose trees measure smaller total),
+  viable follow-up if S<1.01 ever matters.
