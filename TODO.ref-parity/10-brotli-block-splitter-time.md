@@ -46,3 +46,44 @@ clustering is also quadratic-ish in histogram pairs
 
 - sqlite q11 T <= 3; fits/rustsrc q11 improve proportionally;
   output byte-identical (pure port-speed work).
+
+## Disposition: the clustering-structure remainder (2026-09-12)
+
+Worked as pure port-speed (byte-identical output everywhere):
+
+- **Allocation bugs fixed.** Both remap loops allocated a scratch
+  `Hist::new(data_size)` PER PROBE (the borrow checker demanded a
+  `&mut` distinct from the operands); `compare_and_push_to_queue`
+  and `histogram_combine`'s merge paid a full `clone()` (heap alloc)
+  per pair / per merge.
+- **`population_cost_pair`**: the pair evaluation (queue + both
+  remap loops) now computes the combo cost as ONE fused walk over
+  the two inputs — nonzero count, first-4 values (sparse closed
+  forms), and the main-path accumulation all ride a single
+  peekable-zip pass, no materialized sum, no bounds checks. The
+  histogram-build loops in `split_byte_vector` iterate slices
+  instead of indexing.
+- **Measured: fits4m q11 −11% (74.69/74.99 → 66.69/66.56 user
+  seconds, two interleaved rounds); small files flat** — sqlite q11
+  in-process RUNS=5: ~0.9%; plists q11 spread 1.58-1.78 across
+  identical binaries (single runs sit in the shared box's ±6-12%
+  noise floor; only the ~70s fits runs resolve). The win concentrates
+  where the splitter dominates the q11 contest — the board's worst
+  cell (fits q11, T 5.4 → ~4.8).
+
+Why no more is available bit-identically: the fits-q11 profile puts
+`population_cost_pair` at 54% of samples, but that cost IS the
+reference's own arithmetic — the count-scan early-exits at 5
+nonzeros (cheap on dense histograms, where the expensive walk was
+already single), and every remaining lever changes values or merge
+order: running-entropy incremental updates reorder f64 summation;
+pair-count pruning changes queue semantics; SIMD reorders
+accumulation. The 0.21.76 log2 table was the last safe constant.
+Output stayed byte-identical across the corpus (q5-q11 verified).
+Ships as v0.21.81 (pure speed: no size change, no cell can regress).
+
+**Status: done 2026-09-12 (v0.21.81).** Acceptance (sqlite T <= 3)
+not reached — that last mile is the reference's own arithmetic at
+Rust's per-op cost; every remaining lever (incremental sums, pair
+pruning, SIMD) changes values or merge order. Reopen only with a
+new structural signal, not profile share.

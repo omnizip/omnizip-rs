@@ -169,6 +169,104 @@ pub fn population_cost(data: &[u32]) -> f64 {
     }
 }
 
+/// `population_cost` of the SUM of two histograms, without
+/// materializing the sum. The pair evaluation in the clustering
+/// queue and both remap loops pay one walk instead of fill + add +
+/// cost (three). Arithmetic is sequence-identical to `add_hist`
+/// followed by `population_cost`: the u32 adds are exact and the
+/// f64 accumulation stays in index order, so results are
+/// bit-identical.
+fn population_cost_pair(a: &Hist, b: &Hist) -> f64 {
+    const ONE: f64 = 12.0;
+    const TWO: f64 = 20.0;
+    const THREE: f64 = 28.0;
+    const FOUR: f64 = 37.0;
+    debug_assert_eq!(a.data.len(), b.data.len());
+    let data_size = a.data.len();
+    let total = a.total + b.total;
+    if total == 0 {
+        return ONE;
+    }
+    // Single walk: the nonzero count, the first-4 values (for the
+    // sparse closed forms) and the main-path accumulation all ride
+    // one pass over a zipped iterator — no per-slot bounds checks
+    // (the index form paid two per symbol on the two input slices).
+    // Histograms that end with count <= 4 discard the accumulated
+    // bits and take the closed form — identical values.
+    let mut count = 0usize;
+    let mut sv = [0u32; 5];
+    let mut max_depth = 1usize;
+    let mut depth_histo = [0u32; CODE_LENGTH_CODES];
+    let mut bits = 0.0f64;
+    let log2total = log2(total);
+    let mut iter = a.data.iter().zip(b.data.iter()).peekable();
+    while let Some((&x, &y)) = iter.next() {
+        let c = x + y;
+        if c > 0 {
+            if count < 5 {
+                sv[count] = c;
+            }
+            count += 1;
+            let log2p = log2total - log2(u64::from(c));
+            let mut depth = (log2p + 0.5) as usize;
+            bits += u64::from(c) as f64 * log2p;
+            if depth > 15 {
+                depth = 15;
+            }
+            if depth > max_depth {
+                max_depth = depth;
+            }
+            depth_histo[depth] += 1;
+        } else {
+            let mut reps = 1usize;
+            while iter.next_if(|(&x2, &y2)| x2 + y2 == 0).is_some() {
+                reps += 1;
+            }
+            if iter.peek().is_none() {
+                break;
+            }
+            if reps < 3 {
+                depth_histo[0] += reps as u32;
+            } else {
+                reps -= 2;
+                while reps > 0 {
+                    depth_histo[REPEAT_ZERO_CODE_LENGTH] += 1;
+                    bits += 3.0;
+                    reps >>= 3;
+                }
+            }
+        }
+    }
+    match count {
+        1 => ONE,
+        2 => TWO + total as f64,
+        3 => {
+            let h0 = u64::from(sv[0]);
+            let h1 = u64::from(sv[1]);
+            let h2 = u64::from(sv[2]);
+            let hmax = h0.max(h1).max(h2);
+            THREE + (2.0 * (h0 + h1 + h2) as f64) - hmax as f64
+        }
+        4 => {
+            let mut histo = [
+                u64::from(sv[0]),
+                u64::from(sv[1]),
+                u64::from(sv[2]),
+                u64::from(sv[3]),
+            ];
+            histo.sort_unstable_by(|a, b| b.cmp(a));
+            let h23 = histo[2] + histo[3];
+            let hmax = h23.max(histo[0]);
+            FOUR + 3.0 * h23 as f64 + 2.0 * (histo[0] + histo[1]) as f64 - hmax as f64
+        }
+        _ => {
+            bits += (18 + 2 * max_depth) as f64;
+            bits += bits_entropy(&depth_histo);
+            bits
+        }
+    }
+}
+
 /// Variable-size histogram (alphabet 256 for literals, 704 commands,
 /// ≤544+NPOSTFIX distances).
 #[derive(Clone)]
@@ -244,7 +342,6 @@ fn cluster_cost_diff(size_a: u64, size_b: u64) -> f64 {
 /// Upstream `BrotliCompareAndPushToQueue`.
 fn compare_and_push_to_queue(
     out: &[Hist],
-    tmp: &mut Hist,
     cluster_size: &[u32],
     mut idx1: usize,
     mut idx2: usize,
@@ -279,9 +376,7 @@ fn compare_and_push_to_queue(
         } else {
             pairs[0].cost_diff.max(0.0)
         };
-        *tmp = out[idx1].clone();
-        tmp.add_hist(&out[idx2]);
-        let cost_combo = population_cost(&tmp.data);
+        let cost_combo = population_cost_pair(&out[idx1], &out[idx2]);
         if cost_combo < threshold - p.cost_diff {
             p.cost_combo = cost_combo;
             is_good_pair = true;
@@ -307,7 +402,6 @@ fn compare_and_push_to_queue(
 #[allow(clippy::too_many_arguments)]
 fn histogram_combine(
     out: &mut [Hist],
-    tmp: &mut Hist,
     cluster_size: &mut [u32],
     symbols: &mut [u32],
     clusters: &mut Vec<u32>,
@@ -325,7 +419,6 @@ fn histogram_combine(
         for idx2 in (idx1 + 1)..num_clusters {
             compare_and_push_to_queue(
                 out,
-                tmp,
                 cluster_size,
                 clusters[idx1] as usize,
                 clusters[idx2] as usize,
@@ -343,7 +436,10 @@ fn histogram_combine(
         }
         let best_idx1 = pairs[0].idx1 as usize;
         let best_idx2 = pairs[0].idx2 as usize;
-        out[best_idx1].add_hist(&out[best_idx2].clone());
+        // idx1 < idx2 by queue construction; split_at_mut avoids the
+        // clone() the borrow checker otherwise demands here.
+        let (before, after) = out.split_at_mut(best_idx2);
+        before[best_idx1].add_hist(&after[0]);
         out[best_idx1].bit_cost = pairs[0].cost_combo;
         cluster_size[best_idx1] += cluster_size[best_idx2];
         for s in symbols.iter_mut().take(symbols_size) {
@@ -381,7 +477,6 @@ fn histogram_combine(
         for i in 0..num_clusters {
             compare_and_push_to_queue(
                 out,
-                tmp,
                 cluster_size,
                 best_idx1,
                 clusters[i] as usize,
@@ -394,13 +489,11 @@ fn histogram_combine(
 }
 
 /// Upstream `BrotliHistogramBitCostDistance`.
-fn bit_cost_distance(histogram: &Hist, candidate: &Hist, tmp: &mut Hist) -> f64 {
+fn bit_cost_distance(histogram: &Hist, candidate: &Hist) -> f64 {
     if histogram.total == 0 {
         return 0.0;
     }
-    *tmp = histogram.clone();
-    tmp.add_hist(candidate);
-    population_cost(&tmp.data) - candidate.bit_cost
+    population_cost_pair(histogram, candidate) - candidate.bit_cost
 }
 
 /// Upstream `BrotliClusterHistograms`: cluster `input` histograms into
@@ -413,7 +506,6 @@ pub fn cluster_histograms(input: &[Hist], max_histograms: usize) -> (Vec<Hist>, 
     let mut histogram_symbols: Vec<u32> = Vec::with_capacity(in_size);
     let mut cluster_size = vec![1u32; in_size];
     let mut clusters: Vec<u32> = Vec::with_capacity(in_size);
-    let mut tmp = Hist::new(data_size);
     let max_input_histograms = 64usize;
     let pairs_capacity = max_input_histograms * max_input_histograms / 2;
     let mut pairs: Vec<HistogramPair> = Vec::with_capacity(pairs_capacity + 1);
@@ -434,7 +526,6 @@ pub fn cluster_histograms(input: &[Hist], max_histograms: usize) -> (Vec<Hist>, 
         }
         let n = histogram_combine(
             &mut out,
-            &mut tmp,
             &mut cluster_size,
             &mut histogram_symbols[i..],
             &mut clusters,
@@ -451,7 +542,6 @@ pub fn cluster_histograms(input: &[Hist], max_histograms: usize) -> (Vec<Hist>, 
     let max_num_pairs = (64 * num_clusters).min((num_clusters / 2) * num_clusters);
     num_clusters = histogram_combine(
         &mut out,
-        &mut tmp,
         &mut cluster_size,
         &mut histogram_symbols,
         &mut clusters,
@@ -469,9 +559,9 @@ pub fn cluster_histograms(input: &[Hist], max_histograms: usize) -> (Vec<Hist>, 
         } else {
             histogram_symbols[i - 1]
         } as usize;
-        let mut best_bits = bit_cost_distance(&input[i], &out[best_out], &mut tmp);
+        let mut best_bits = bit_cost_distance(&input[i], &out[best_out]);
         for &c in clusters.iter().take(num_clusters) {
-            let cur = bit_cost_distance(&input[i], &out[c as usize], &mut tmp);
+            let cur = bit_cost_distance(&input[i], &out[c as usize]);
             if cur < best_bits {
                 best_bits = cur;
                 best_out = c as usize;
@@ -732,17 +822,17 @@ fn cluster_blocks(
         let mut new_clusters: Vec<u32> = vec![0u32; num_to_combine];
         for j in 0..num_to_combine {
             histograms[j].clear();
-            for _ in 0..block_lengths[i + j] {
-                histograms[j].add(usize::from(data[pos]));
-                pos += 1;
+            let end = pos + block_lengths[i + j] as usize;
+            for &sym in &data[pos..end] {
+                histograms[j].add(usize::from(sym));
             }
+            pos = end;
             histograms[j].recompute_cost();
             new_clusters[j] = j as u32;
             symbols[j] = j as u32;
         }
         let num_new_clusters = histogram_combine(
             &mut histograms,
-            &mut tmp,
             &mut sizes,
             &mut symbols,
             &mut new_clusters,
@@ -771,7 +861,6 @@ fn cluster_blocks(
     let mut clusters: Vec<u32> = (0..num_clusters as u32).collect();
     let num_final_clusters = histogram_combine(
         &mut all_histograms,
-        &mut tmp,
         &mut cluster_size,
         &mut histogram_symbols,
         &mut clusters,
@@ -789,20 +878,19 @@ fn cluster_blocks(
     let mut next_index = 0u32;
     for blk in 0..num_blocks {
         tmp.clear();
-        for _ in 0..block_lengths[blk] {
-            tmp.add(usize::from(data[pos]));
-            pos += 1;
+        let end = pos + block_lengths[blk] as usize;
+        for &sym in &data[pos..end] {
+            tmp.add(usize::from(sym));
         }
+        pos = end;
         let mut best_out = if blk == 0 {
             histogram_symbols[0]
         } else {
             histogram_symbols[blk - 1]
         } as usize;
-        let mut best_bits =
-            bit_cost_distance(&tmp, &all_histograms[best_out], &mut Hist::new(data_size));
+        let mut best_bits = bit_cost_distance(&tmp, &all_histograms[best_out]);
         for &c in clusters.iter().take(num_final_clusters) {
-            let cur =
-                bit_cost_distance(&tmp, &all_histograms[c as usize], &mut Hist::new(data_size));
+            let cur = bit_cost_distance(&tmp, &all_histograms[c as usize]);
             if cur < best_bits {
                 best_bits = cur;
                 best_out = c as usize;
