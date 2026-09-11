@@ -563,10 +563,21 @@ thread_local! {
     static DICT_HITS: std::cell::RefCell<(u64, u64)> = const { std::cell::RefCell::new((0, 0)) };
 }
 
+thread_local! {
+    static DICT_LOG: std::cell::RefCell<Vec<(usize, usize, i32)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
 /// Dictionary-match counters for the BROTLI_DICT_COUNT stream
 /// comparison (count, total copy bytes).
 pub fn dict_hits() -> (u64, u64) {
     DICT_HITS.with(|c| *c.borrow())
+}
+
+/// Per-match dictionary log for the BROTLI_DICT_LOG stream
+/// comparison: (output position, copy length, dictionary distance).
+pub fn dict_log() -> Vec<(usize, usize, i32)> {
+    DICT_LOG.with(|c| std::mem::take(&mut *c.borrow_mut()))
 }
 
 pub(crate) fn decode_compressed_metablock_full(
@@ -1057,6 +1068,12 @@ fn finish_metablock_decode(
 
         // Static dictionary reference vs LZ77 back-reference.
         if (distance as i32) > max_distance as i32 {
+            if std::env::var_os("BROTLI_DICT_LOG").is_some() {
+                DICT_LOG.with(|c| {
+                    c.borrow_mut()
+                        .push((output_base + output.len(), copy_len, distance as i32));
+                });
+            }
             if std::env::var_os("BROTLI_DICT_COUNT").is_some() {
                 DICT_HITS.with(|c| c.borrow_mut().0 += 1);
                 DICT_HITS.with(|c| c.borrow_mut().1 += copy_len as u64);

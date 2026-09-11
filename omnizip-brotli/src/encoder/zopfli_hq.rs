@@ -595,6 +595,17 @@ pub(crate) fn long_dist_symbol(distance: u32) -> usize {
     if distance == 0 {
         return 0;
     }
+    // DELIBERATE divergence from upstream PrefixEncodeCopyDistance:
+    // this loop-form always returns the EVEN symbol of each pair (the
+    // `odd` compare can never fire after the loop breaks), pricing
+    // first-half-bucket distances one extra bit high. Making it exact
+    // (odd/even prefix split) was A/B'd across the 11-file corpus on
+    // 2026-09-11: q10+q11 net +1.23% bytes, csv2m q11 alone +41%
+    // (the +1-bit bias steers the DP onto rep codes and near matches,
+    // which is why csv2m q11 ships at S=0.796). Upstream-exact pricing
+    // exposed a second DP divergence (plists dict recall still 1,902
+    // vs ref 2,189) that this bias was masking — task 15. Until that
+    // root cause is fixed, the accidental form is the better parse.
     let d = distance - 1;
     let mut nbits = 1u32;
     while nbits < 24 {
@@ -714,6 +725,20 @@ pub(crate) fn collect_matches(
     }
     // matches is flat; per-position counts are num_matches — the
     // caller slices via prefix sums.
+    if let Some(path) = crate::from_spec_encoder::env_str!("BROTLI_HQ_MATCH_DUMP") {
+        let mut out = String::new();
+        let mut off = 0usize;
+        for (i, &cnt) in num_matches.iter().enumerate() {
+            let last = if cnt > 0 {
+                matches[off + cnt as usize - 1].1
+            } else {
+                0
+            };
+            out.push_str(&format!("{i} {cnt} {last}\n"));
+            off += cnt as usize;
+        }
+        std::fs::write(path, out).ok();
+    }
     (num_matches, matches)
 }
 
@@ -1108,7 +1133,6 @@ fn collect_dict_candidates(
                 let m = buf[l];
                 if m != u32::MAX {
                     let wl = (m & 31) as u32;
-                    // TEMP bisect knob (remove before shipping)
                     // (distance, produced length tl, word length wl)
                     flat.push((base + 1 + (m >> 5), l as u32, wl));
                 }

@@ -84,3 +84,44 @@ plists q11 S 1.093 -> 1.024; the changed cells measure T 0.4-0.5x
 (faster than ref — shorter command streams); plists q11 is now a
 net-win cell (I ~0.5). Remaining S=1.024: dict hits 1,799 vs ref
 2,189 — the dict-match finder's recall gap, a smaller follow-up.
+
+## Follow-up: the dict recall gap (2026-09-11)
+
+The 1,799-vs-2,189 recall gap decomposed cleanly with decoder-side
+per-match logs (BROTLI_DICT_LOG) joined against a per-position match
+table dump (BROTLI_HQ_MATCH_DUMP in `collect_matches`):
+
+1. **The self-gate is NOT the blocker.** Only 111/529 missing
+   (pos,len) pairs were gated out by `minlen = max(4, best_len+1)`
+   (upstream's own FindAllMatchesH10 gate — verified the same shape,
+   including its `best_len <= 2` short-scan early exit). The other
+   418 were admitted at their length, many at positions where our
+   tree found no match at all.
+2. **The finder is NOT the blocker.** A scratch example calling
+   `find_all_static_dictionary_matches` directly at all 418 missing
+   positions found every word (mostly transform-0 4-letter words:
+   "vice", "tour", "plus", "plan", ...).
+3. **The blocker is DP rejection — and a pricing bug was found and
+   deliberately NOT fixed.** `long_dist_symbol`'s `odd` term can
+   never fire (the compare re-tests the condition the loop just
+   broke on), so both DP tiers priced every first-half-bucket
+   distance one extra bit high, exactly the regime dict words live
+   in. Upstream-exact pricing (PrefixEncodeCopyDistance, verified
+   symbol+extra over 25k distances) recovered dict recall only
+   1,799→1,902 (plists q11 107,235→107,770) and cost the corpus
+   q10+q11 net **+1.23%**, csv2m q11 alone **+41%** (119,038→
+   168,169). The +1-bit bias steers the DP onto rep codes and near
+   matches, and that accidental parse is *better* than both the
+   reference's (csv2m q11 S=0.796) and our upstream-priced variant.
+   Reverted byte-identical to v0.21.80; the divergence is documented
+   in the function's comment.
+
+**Disposition: ACCEPT the residual.** plists q11 stays S≈1.024 with
+the remaining 418-dict-recall gap attributed to a second DP
+divergence that the pricing bias masks. Known leads if reopened:
+our `store_and_find_capped` drops sub-4-length tree matches
+(upstream's flat list carries len 2-3 matches at any distance); the
+pass-2 `from_commands` feedback loop; missing `backward >
+max_distance` guard on rep candidates (windowed chunks only). The
+diagnostics (DICT_LOG, DICT_WORD, HQ_MATCH_DUMP) ship env-gated for
+the next session.

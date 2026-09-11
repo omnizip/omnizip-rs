@@ -471,6 +471,14 @@ macro_rules! env_flag {
 }
 pub(crate) use env_flag;
 
+macro_rules! env_str {
+    ($name:literal) => {{
+        static CACHE: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+        CACHE.get_or_init(|| std::env::var($name).ok()).clone()
+    }};
+}
+pub(crate) use env_str;
+
 pub fn compress_with_quality(input: &[u8], quality: i32) -> Vec<u8> {
     let q = quality.clamp(0, 11);
     if input.is_empty() {
