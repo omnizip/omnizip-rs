@@ -32,7 +32,7 @@ small-file T ~4x).)
 | 07 | fits zstd time class: sub-split (v0.21.72) + window primitives (v0.21.73) | fits L6 (I 7.8->4.2) | done 2026-09-08 |
 | 08 | fits brotli q5 large: mis-scored cell (wall-vs-user + load-246 batch) — true T~2x | — | closed 2026-09-08 (methodology fixed in v7) |
 | 11 | small-file greedy cells: arena package-merge killed the emission allocator storm | plists/noto q5 | done 2026-09-09 (v0.21.77) |
-| 10 | brotli block splitter: log2 table + memo DONE (v0.21.76); clustering structure remains | q11 column | partial |
+| 10 | brotli block splitter: log2 table + memo (v0.21.76); clustering remainder done 2026-09-12 (v0.21.81) — alloc bugs fixed, fused pair-cost walk, fits4m q11 −11%; remaining cost = reference arithmetic, not reachable bit-identically | q11 column | done 2026-09-12 (v0.21.81) |
 | 12 | fits q11: H10 tree walk; three compare forms measured neutral — disposition ACCEPT with analysis (follow-up: instrumented node counts) | fits q11 (I=5.1) | closed 2026-09-09 (analysis) |
 | 13 | noto q9: context clustering hot; flat-matrix rewrite byte-identical but neutral — profile attribution alone insufficient, pattern recorded | noto q9 (I=4.4) | closed 2026-09-09 (investigated) |
 | 14 | zstd L1 floor: both remaining leads inspected and deprioritized with evidence (Vec+copy ~5%; literals 19% share sub-threshold) | zstd L1 cells (I 3.0-4.4) | closed 2026-09-10 (inspected) |
