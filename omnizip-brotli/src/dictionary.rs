@@ -412,6 +412,13 @@ pub fn dictionary_lookup(
     let word = &DICTIONARY_DATA[offset..offset + len];
     let before = output.len();
     transform_dictionary_word(output, word, transform_idx);
+    if std::env::var_os("BROTLI_DICT_WORD").is_some() {
+        eprintln!(
+            "DICTWORD word={:?} wl={len} transform={transform_idx} produced={:?}",
+            word,
+            &output[before..]
+        );
+    }
     if output.len() == before {
         // Empty output is invalid per upstream:
         // "if (len == 0 && s->distance_code <= 120) { return FAILURE; }"
