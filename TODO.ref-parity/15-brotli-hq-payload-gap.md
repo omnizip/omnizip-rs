@@ -125,3 +125,22 @@ pass-2 `from_commands` feedback loop; missing `backward >
 max_distance` guard on rep candidates (windowed chunks only). The
 diagnostics (DICT_LOG, DICT_WORD, HQ_MATCH_DUMP) ship env-gated for
 the next session.
+
+## Addendum (2026-09-12): f32-vs-f64 cost-model hypothesis — negative result
+
+Hypothesis (candidate root for the "masked second DP divergence" and the
+task-04 tree-shape S residuals): the reference's cost stack runs in f32 —
+the Rust reference port defaults `floatX = f32`
+(`~/src/external/brotli/src/enc/util.rs`, `float64` feature off) with
+`FastLog2(v≥256) = (v as f32).log2()` — while our ports are f64
+end-to-end, systematically flipping near-tie DP decisions.
+
+Checked against the **actual reference binary** (homebrew brotli 1.2.0, C,
+v1.2.0 tag, `c/enc/fast_log.{h,c}`): `FastLog2` is
+`v < 256 ? kBrotliLog2Table[v] : log2((double)v)` and the table entries are
+**exact log2 doubles** (e.g. 1.5849625007211563 = log2(3)); accumulation is
+`double` throughout. Our model (exact f64 log2, index-ordered) matches C at
+the value level. The only f32 semantics live in the Rust *port's* default
+build, which is not our oracle. **Dead end — precision divergence is
+eliminated as a root cause.** The near-tie divergence must come from
+algorithmic ordering, not arithmetic.
