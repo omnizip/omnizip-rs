@@ -537,6 +537,11 @@ impl<'a> BitCStream<'a> {
         }
     }
 
+    /// Bits currently held in the accumulator (0..64).
+    pub fn bit_pos(&self) -> u32 {
+        self.bit_pos
+    }
+
     /// Add `nbBits` from the low end of `value`. Up to 31 bits per call.
     pub fn add_bits(&mut self, value: u64, nb_bits: u32) {
         debug_assert!(

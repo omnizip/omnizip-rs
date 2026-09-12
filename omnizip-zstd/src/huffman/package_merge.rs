@@ -66,39 +66,67 @@ pub fn package_merge(freqs: &[u32], max_len: u8, lengths: &mut [u8]) {
     // package-merge with capacity bound = 2 * (m - 1).
     let bound = 2 * (m - 1);
 
-    // `list` holds coins for the current level. Each coin is (weight,
-    // set_of_symbol_indices). We represent the set as a Vec<usize>.
-    // Starting list: the original symbols, sorted by frequency.
-    let list: Vec<(u64, Vec<usize>)> = present
-        .iter()
-        .map(|&(f, i)| (u64::from(f), vec![i]))
-        .collect();
+    // Coins are (weight, arena range): the symbol-index set of each
+    // coin lives in one shared `arena` buffer instead of a per-coin
+    // Vec, so packaging copies ranges instead of allocating. The
+    // merge order, sort key, and truncation are byte-for-byte the
+    // same sequence as the per-coin-Vec form, so lengths are
+    // identical.
+    #[derive(Clone, Copy)]
+    struct Coin {
+        weight: u64,
+        start: u32,
+        len: u32,
+    }
+    let mut arena: Vec<u32> = Vec::with_capacity(m * usize::from(max_len));
+    // Append one symbol value; returns the (start, len) of the written
+    // slot.
+    fn push_val(arena: &mut Vec<u32>, v: u32) -> (u32, u32) {
+        let start = arena.len() as u32;
+        arena.push(v);
+        (start, 1)
+    }
+    // Copy the arena range [src, src+len) to the end; returns the
+    // (start, len) of the written region.
+    fn copy_range(arena: &mut Vec<u32>, src: u32, len: u32) -> (u32, u32) {
+        let start = arena.len() as u32;
+        for k in 0..len {
+            let v = arena[(src + k) as usize];
+            arena.push(v);
+        }
+        (start, len)
+    }
 
     // Previous level's packaged coins (empty for level 0).
-    let mut prev_packaged: Vec<(u64, Vec<usize>)> = Vec::new();
+    let mut prev_packaged: Vec<Coin> = Vec::new();
 
     for _level in 1..=max_len {
-        // Package: pair up prev_packaged and sort. Each package's weight
-        // is the sum of its pair. The symbol set is the union.
-        let mut packaged: Vec<(u64, Vec<usize>)> = Vec::with_capacity(prev_packaged.len() / 2);
+        // Package: pair up prev_packaged. Each package's weight is
+        // the sum of its pair; the symbol set is the concatenation of
+        // both halves (contiguous in the arena: copied back to back).
+        let mut packaged: Vec<Coin> = Vec::with_capacity(prev_packaged.len() / 2);
         for chunk in prev_packaged.chunks_exact(2) {
-            let mut combined = chunk[0].1.clone();
-            combined.extend_from_slice(&chunk[1].1);
-            packaged.push((chunk[0].0 + chunk[1].0, combined));
+            let (start, len) = copy_range(&mut arena, chunk[0].start, chunk[0].len);
+            let (_, len2) = copy_range(&mut arena, chunk[1].start, chunk[1].len);
+            packaged.push(Coin {
+                weight: chunk[0].weight + chunk[1].weight,
+                start,
+                len: len + len2,
+            });
         }
 
-        // Merge original symbols (sorted) with packaged (sorted).
-        // Since `present` is sorted and `packaged` is in pair order
-        // (which preserves sorted order), we can merge in linear time.
-        // For simplicity, merge + sort.
-        let mut merged: Vec<(u64, Vec<usize>)> = Vec::with_capacity(list.len() + packaged.len());
-        for (f, i) in &present {
-            merged.push((u64::from(*f), vec![*i]));
+        // Merge original symbols (sorted) with packaged, then sort.
+        let mut merged: Vec<Coin> = Vec::with_capacity(m + packaged.len());
+        for &(f, i) in &present {
+            let (start, len) = push_val(&mut arena, i as u32);
+            merged.push(Coin {
+                weight: u64::from(f),
+                start,
+                len,
+            });
         }
-        for pkg in packaged {
-            merged.push(pkg);
-        }
-        merged.sort_unstable_by_key(|(w, _)| *w);
+        merged.extend_from_slice(&packaged);
+        merged.sort_unstable_by_key(|c| c.weight);
 
         // Keep only the `bound` lightest.
         merged.truncate(bound);
@@ -106,9 +134,9 @@ pub fn package_merge(freqs: &[u32], max_len: u8, lengths: &mut [u8]) {
     }
 
     // Count occurrences of each symbol across all coins.
-    for (_, syms) in &prev_packaged {
-        for &s in syms {
-            lengths[s] += 1;
+    for coin in &prev_packaged {
+        for &s in &arena[coin.start as usize..(coin.start + coin.len) as usize] {
+            lengths[s as usize] += 1;
         }
     }
 
