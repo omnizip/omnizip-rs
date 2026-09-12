@@ -47,22 +47,26 @@ pub fn build_weights(literals: &[u8]) -> Vec<u8> {
         return weights;
     }
 
-    let mut lengths = huffman_lengths(&present);
     let freqs: Vec<u32> = present.iter().map(|&(_, f)| f).collect();
     // Use the optimal package-merge algorithm for length-limiting at
     // HUF_TABLELOG_MAX. Falls back to the ad-hoc method only if
     // package-merge produces an invalid Kraft sum (shouldn't happen,
     // but keep the fallback as a safety net for unusual distributions).
+    // The min-heap lengths are computed lazily on that fallback only —
+    // the heap simulation is O(n^2) and its result is discarded
+    // whenever package-merge succeeds (the normal case).
     let mut pm_lengths = vec![0u8; freqs.len()];
     crate::huffman::package_merge::package_merge(&freqs, 11, &mut pm_lengths);
-    if pm_lengths.iter().any(|&l| l > 11)
+    let lengths = if pm_lengths.iter().any(|&l| l > 11)
         || pm_lengths.iter().filter(|&&l| l > 0).count() != freqs.len()
     {
         // Package-merge produced invalid output; fall back.
+        let mut lengths = huffman_lengths(&present);
         limit_lengths(&mut lengths, 11, &freqs);
+        lengths
     } else {
-        lengths = pm_lengths;
-    }
+        pm_lengths
+    };
 
     debug_assert!(
         lengths.iter().copied().max().unwrap_or(0) <= 11,
@@ -551,7 +555,13 @@ fn encode_huffman_stream(table: &HuffmanTable, literals: &[u8]) -> Vec<u8> {
             continue;
         }
         bitc.add_bits(u64::from(code), u32::from(len));
-        bitc.flush();
+        // Codes are <= 11 bits; flush only when the accumulator could
+        // not take another code. flush() drains whole bytes and keeps
+        // the remainder, so the emitted byte sequence is identical to
+        // per-symbol flushing.
+        if bitc.bit_pos() > 52 {
+            bitc.flush();
+        }
     }
 
     bitc.close();
