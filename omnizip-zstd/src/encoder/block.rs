@@ -278,22 +278,42 @@ fn encode_frame_into(
         // encode for a 17% size win — I 13.6 with it vs 4.6 without,
         // v7 board). ZSTD_SUBSPLIT_ALL restores it everywhere for
         // measurement.
-        let sub_split = chunk_size >= 32 * 1024
+        let divergent = chunk_size >= 32 * 1024 && {
+            let mid = chunk_size / 2;
+            halves_diverge(
+                &plaintext[offset..offset + mid],
+                &plaintext[offset + mid..block_end],
+            )
+        };
+        let sub_split = divergent
             && (matches!(
                 params.strategy,
                 crate::encoder::cparams::Strategy::Btopt
                     | crate::encoder::cparams::Strategy::Btultra
                     | crate::encoder::cparams::Strategy::Btultra2
             ) || std::env::var_os("ZSTD_SUBSPLIT_ALL").is_some())
-            && !std::env::var_os("ZSTD_NO_SUBSPLIT").is_some()
-            && {
-                let mid = chunk_size / 2;
-                halves_diverge(
-                    &plaintext[offset..offset + mid],
-                    &plaintext[offset + mid..block_end],
-                )
-            };
-        let step = if sub_split { 16 * 1024 } else { chunk_size };
+            && !std::env::var_os("ZSTD_NO_SUBSPLIT").is_some();
+        // Fast-tier half-split: the reference's L1/L2 emit 64 KiB
+        // blocks on heterogeneous content (fits ref stream: first
+        // block 128 KiB then 64 KiB blocks throughout — decoder-side
+        // SEC_DUMP, 2026-09-12), halving each literal Huffman section
+        // so its table fits the local regime. Our all-or-nothing
+        // 16 KiB sub-split was a v7-board time disaster at L1; the
+        // one-halving form is the reference's own operating point:
+        // fits L1 3,782,300 -> 3,576,456 (-5.44%, smaller than the
+        // reference's 3,596,632), plists L1 -3.33%, every homogeneous
+        // corpus file byte-identical, measured user-CPU cost <=5%
+        // (2026-09-12). ZSTD_NO_HALFSPLIT disables for measurement.
+        let half_split = divergent
+            && matches!(params.strategy, crate::encoder::cparams::Strategy::Fast)
+            && std::env::var_os("ZSTD_NO_HALFSPLIT").is_none();
+        let step = if sub_split {
+            16 * 1024
+        } else if half_split {
+            chunk_size / 2
+        } else {
+            chunk_size
+        };
 
         if ldm_enabled {
             let mut sub = offset;
