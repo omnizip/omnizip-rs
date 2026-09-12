@@ -9,9 +9,9 @@ repository.workspace = true
 description = "Shared archive-container layer: entry model, reader/writer traits, security boundary, format detection, gzip/bzip2 single-file formats"
 
 [dependencies]
-omnizip-libdeflate = { path = "../omnizip-libdeflate", version = "0.21.83" }
-omnizip-lzma = { path = "../omnizip-lzma", version = "0.21.83" }
-omnizip-bzip2 = { path = "../omnizip-bzip2", version = "0.21.83" }
+omnizip-libdeflate = { path = "../omnizip-libdeflate", version = "0.21.84" }
+omnizip-lzma = { path = "../omnizip-lzma", version = "0.21.84" }
+omnizip-bzip2 = { path = "../omnizip-bzip2", version = "0.21.84" }
 
 [lints]
 workspace = true
