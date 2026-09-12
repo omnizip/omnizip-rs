@@ -5154,14 +5154,27 @@ fn parse_input_with_offset_impl(
         {
             let (a_bits, a_bw) =
                 measure_emission_bits(&hq, input, mlen_offset, quality, is_last, ctx_in);
-            let (b_bits, b_bw) = with_lit_split_override(true, || {
-                measure_emission_bits(&hq, input, mlen_offset, quality, is_last, ctx_in)
-            });
-            let (mut win_bits, mut win_bw) = if b_bits < a_bits {
-                (b_bits, Some(b_bw))
-            } else {
-                (a_bits, Some(a_bw))
-            };
+            let (mut win_bits, mut win_bw, mut winner) = (a_bits, Some(a_bw), "a");
+            // b (split literal assignment) wins only in the
+            // text/structured classes (measured 2026-09-12,
+            // BTOPT_DUMP: csv2m b=-31%, plists -7.4%, rustsrc
+            // -0.25%; binary fits/noto/sqlite all lose — including
+            // sqlite's dense-DB-text chunks). On binary the second
+            // full emission is pure overhead: fits q11 -28% wall.
+            // BROTLI_SPLITCAND_ALL restores it everywhere,
+            // BROTLI_NO_SPLITCAND disables for measurement.
+            let run_b = (is_text_like(input) || env_flag!("BROTLI_SPLITCAND_ALL"))
+                && !env_flag!("BROTLI_NO_SPLITCAND");
+            if run_b {
+                let (b_bits, b_bw) = with_lit_split_override(true, || {
+                    measure_emission_bits(&hq, input, mlen_offset, quality, is_last, ctx_in)
+                });
+                if b_bits < win_bits {
+                    win_bits = b_bits;
+                    win_bw = Some(b_bw);
+                    winner = "b";
+                }
+            }
             // Same tree-cap refinement as the full contest (noto:
             // 641,823 vs 657,787 bits — the cap is where the sparse
             // class's size comes from).
@@ -5172,7 +5185,11 @@ fn parse_input_with_offset_impl(
                 if c_bits < win_bits {
                     win_bits = c_bits;
                     win_bw = Some(c_bw);
+                    winner = "treecap";
                 }
+            }
+            if env_flag!("BROTLI_BTOPT_DUMP") {
+                eprintln!("BTOPT chunk@{mlen_offset} n={n} a={a_bits} win={winner}@{win_bits}");
             }
             return (hq, win_bw);
         }
