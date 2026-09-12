@@ -12,28 +12,28 @@ publish = false
 path = "src/lib.rs"
 
 [dev-dependencies]
-omnizip-codecs = { path = "../../omnizip-codecs", version = "0.21.81" }
-omnizip-lzma = { path = "../../omnizip-lzma", version = "0.21.81" }
-omnizip-zstd = { path = "../../omnizip-zstd", version = "0.21.81" }
-omnizip-brotli = { path = "../../omnizip-brotli", version = "0.21.81" }
-omnizip-bzip2 = { path = "../../omnizip-bzip2", version = "0.21.81" }
-omnizip-lz4 = { path = "../../omnizip-lz4", version = "0.21.81" }
-omnizip-deflate = { path = "../../omnizip-deflate", version = "0.21.81" }
-omnizip-flac = { path = "../../omnizip-flac", version = "0.21.81" }
-omnizip-libdeflate = { path = "../../omnizip-libdeflate", version = "0.21.81" }
-omnizip-ricepp = { path = "../../omnizip-ricepp", version = "0.21.81" }
-omnizip-snappy = { path = "../../omnizip-snappy", version = "0.21.81" }
+omnizip-codecs = { path = "../../omnizip-codecs", version = "0.21.82" }
+omnizip-lzma = { path = "../../omnizip-lzma", version = "0.21.82" }
+omnizip-zstd = { path = "../../omnizip-zstd", version = "0.21.82" }
+omnizip-brotli = { path = "../../omnizip-brotli", version = "0.21.82" }
+omnizip-bzip2 = { path = "../../omnizip-bzip2", version = "0.21.82" }
+omnizip-lz4 = { path = "../../omnizip-lz4", version = "0.21.82" }
+omnizip-deflate = { path = "../../omnizip-deflate", version = "0.21.82" }
+omnizip-flac = { path = "../../omnizip-flac", version = "0.21.82" }
+omnizip-libdeflate = { path = "../../omnizip-libdeflate", version = "0.21.82" }
+omnizip-ricepp = { path = "../../omnizip-ricepp", version = "0.21.82" }
+omnizip-snappy = { path = "../../omnizip-snappy", version = "0.21.82" }
 tempfile = "3"
 
 [dependencies]
-omnizip-archive-core = { path = "../../omnizip-archive-core", version = "0.21.81" }
-omnizip-tar = { path = "../../omnizip-tar", version = "0.21.81" }
-omnizip-zip = { path = "../../omnizip-zip", version = "0.21.81" }
-omnizip-cpio = { path = "../../omnizip-cpio", version = "0.21.81" }
-omnizip-sevenzip = { path = "../../omnizip-sevenzip", version = "0.21.81" }
-omnizip-xar = { path = "../../omnizip-xar", version = "0.21.81" }
-omnizip-rar = { path = "../../omnizip-rar", version = "0.21.81" }
-omnizip-rpm = { path = "../../omnizip-rpm", version = "0.21.81" }
+omnizip-archive-core = { path = "../../omnizip-archive-core", version = "0.21.82" }
+omnizip-tar = { path = "../../omnizip-tar", version = "0.21.82" }
+omnizip-zip = { path = "../../omnizip-zip", version = "0.21.82" }
+omnizip-cpio = { path = "../../omnizip-cpio", version = "0.21.82" }
+omnizip-sevenzip = { path = "../../omnizip-sevenzip", version = "0.21.82" }
+omnizip-xar = { path = "../../omnizip-xar", version = "0.21.82" }
+omnizip-rar = { path = "../../omnizip-rar", version = "0.21.82" }
+omnizip-rpm = { path = "../../omnizip-rpm", version = "0.21.82" }
 
 [lints]
 workspace = true
