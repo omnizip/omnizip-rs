@@ -237,16 +237,70 @@ pub fn encode_section(
     //    off by enough to regress small streams; the choice is made by
     //    measuring the actual encoded header + payload for both
     //    candidates (each is a few hundred bytes of scratch work).
-    let codes_ref = (
-        ll_codes.as_slice(),
-        ml_codes.as_slice(),
-        of_codes.as_slice(),
-        ll_extras.as_slice(),
-        ml_extras.as_slice(),
-        off_bases.as_slice(),
-    );
-    let measure = |ll: &TableChoice, ml: &TableChoice, of: &TableChoice| -> u64 {
-        section_size_bits(ll, ml, of, ll_max, ml_max, of_max, codes_ref, nb_seq)
+    // Per-candidate cost caching. The three FSE streams' bit costs are
+    // independent (each state machine walks its own code list), and
+    // the literal/match/offset extra bits are table-independent — so
+    // total bits = S_ll(choice) + S_ml(choice) + S_of(choice) + K,
+    // and every table-mode comparison the old full-remeasure path
+    // made (a 3-stream walk + 3 ctable builds per candidate pair) is
+    // exact arithmetic over per-candidate cached sums. The
+    // ceil((bits+1)/8) padding couples the streams, but is computed
+    // identically from the cached sums — bit-for-bit the same
+    // decisions as section_size_bits.
+    let k_extras: u64 = ll_codes
+        .iter()
+        .zip(ml_codes.iter().zip(of_codes.iter()))
+        .map(|(&l, (&m, &o))| {
+            u64::from(LL_BITS[l as usize]) + u64::from(ML_BITS[m as usize]) + u64::from(o)
+        })
+        .sum();
+    #[derive(Clone, Copy)]
+    struct StreamCost {
+        payload_bits: u64,
+        header_bytes: u32,
+        valid: bool,
+    }
+    const INVALID: StreamCost = StreamCost {
+        payload_bits: u64::MAX,
+        header_bytes: 0,
+        valid: false,
+    };
+    fn stream_payload(codes: &[u8], choice: &TableChoice, stream_max: u8) -> StreamCost {
+        // Header bytes mirror section_size_bits exactly: FSE writes
+        // the normalized-count table (length matters, bytes are
+        // re-emitted identically by the real writer later), RLE
+        // writes one byte, Predefined/Repeat write nothing.
+        let mut tmp = Vec::new();
+        if choice.mode == MODE_FSE {
+            let _ = write_ncount(&mut tmp, &choice.norm, stream_max, choice.table_log);
+        } else if choice.mode == MODE_RLE {
+            tmp.push(choice.max_sym);
+        }
+        let header = tmp.len() as u32;
+        let ctable = match choice.build_ctable() {
+            Ok(t) => t,
+            Err(_) => return INVALID,
+        };
+        let last = codes.len() - 1;
+        let mut state = CState::init2(&ctable, codes[last]);
+        let mut bits = 0u64;
+        for n in (0..last).rev() {
+            bits += u64::from(state.encode_bit_count(&ctable, codes[n]));
+        }
+        bits += u64::from(state.flush_bit_count());
+        StreamCost {
+            payload_bits: bits,
+            header_bytes: header,
+            valid: true,
+        }
+    }
+    let measure_from = |ll: StreamCost, ml: StreamCost, of: StreamCost| -> u64 {
+        if !ll.valid || !ml.valid || !of.valid {
+            return u64::MAX;
+        }
+        let header_bits = 8 * (u64::from(ll.header_bytes + ml.header_bytes + of.header_bytes)) + 8;
+        let bits = ll.payload_bits + ml.payload_bits + of.payload_bits + k_extras;
+        header_bits + 8 * ((bits + 1 + 7) / 8)
     };
 
     let ll_fse = choose_table_mode(&ll_count, ll_max, &LL_DEFAULT_NORM, 6, 35, 9, nb_seq as u64);
@@ -272,41 +326,66 @@ pub fn encode_section(
         max_sym: 28,
     };
 
+    let ll_cost = |c: &TableChoice| stream_payload(&ll_codes, c, ll_max);
+    let ml_cost = |c: &TableChoice| stream_payload(&ml_codes, c, ml_max);
+    let of_cost = |c: &TableChoice| stream_payload(&of_codes, c, of_max);
+
+    let ll_pre_c = ll_cost(&ll_pre);
+    let ml_pre_c = ml_cost(&ml_pre);
+    let of_pre_c = of_cost(&of_pre);
+    let ll_fse_c = ll_cost(&ll_fse);
+    let ml_fse_c = ml_cost(&ml_fse);
+    let of_fse_c = of_cost(&of_fse);
+
     let (ll_choice, ll_wire) = pick_table(
         ll_fse.mode == MODE_FSE && {
-            let with = measure(&ll_fse, &ml_pre, &of_pre);
-            let without = measure(&ll_pre, &ml_pre, &of_pre);
+            let with = measure_from(ll_fse_c, ml_pre_c, of_pre_c);
+            let without = measure_from(ll_pre_c, ml_pre_c, of_pre_c);
             with < without
         },
         ll_fse,
         ll_pre,
         &ll_count,
         last_tables.as_ref().map(|t| &t[0]),
-        |t| measure(t, &ml_pre, &of_pre),
+        |t| measure_from(ll_cost(t), ml_pre_c, of_pre_c),
     );
+    let ll_choice_c = if ll_choice.mode == MODE_FSE {
+        ll_fse_c
+    } else if uniform_symbol(&ll_count).is_some() && ll_choice.mode == MODE_RLE {
+        ll_cost(&ll_choice)
+    } else {
+        ll_pre_c
+    };
     let (ml_choice, ml_wire) = pick_table(
         ml_fse.mode == MODE_FSE && {
-            let with = measure(&ll_choice, &ml_fse, &of_pre);
-            let without = measure(&ll_choice, &ml_pre, &of_pre);
+            let with = measure_from(ll_choice_c, ml_fse_c, of_pre_c);
+            let without = measure_from(ll_choice_c, ml_pre_c, of_pre_c);
             with < without
         },
         ml_fse,
         ml_pre,
         &ml_count,
         last_tables.as_ref().map(|t| &t[1]),
-        |t| measure(&ll_choice, t, &of_pre),
+        |t| measure_from(ll_choice_c, ml_cost(t), of_pre_c),
     );
+    let ml_choice_c = if ml_choice.mode == MODE_FSE {
+        ml_fse_c
+    } else if uniform_symbol(&ml_count).is_some() && ml_choice.mode == MODE_RLE {
+        ml_cost(&ml_choice)
+    } else {
+        ml_pre_c
+    };
     let (of_choice, of_wire) = pick_table(
         of_fse.mode == MODE_FSE && {
-            let with = measure(&ll_choice, &ml_choice, &of_fse);
-            let without = measure(&ll_choice, &ml_choice, &of_pre);
+            let with = measure_from(ll_choice_c, ml_choice_c, of_fse_c);
+            let without = measure_from(ll_choice_c, ml_choice_c, of_pre_c);
             with < without
         },
         of_fse,
         of_pre,
         &of_count,
         last_tables.as_ref().map(|t| &t[2]),
-        |t| measure(&ll_choice, &ml_choice, t),
+        |t| measure_from(ll_choice_c, ml_choice_c, of_cost(t)),
     );
 
     // 5. Write modes byte: [LL(2)] [OF(2)] [ML(2)] [reserved(2)].
@@ -543,100 +622,6 @@ fn choose_table_mode(
 /// ctables. Measurement, not estimation — the entropy approximation
 /// regressed small streams by a byte.
 #[allow(clippy::too_many_arguments)]
-fn section_size_bits(
-    ll: &TableChoice,
-    ml: &TableChoice,
-    of: &TableChoice,
-    ll_max: u8,
-    ml_max: u8,
-    of_max: u8,
-    codes: (&[u8], &[u8], &[u8], &[u32], &[u32], &[u32]),
-    nb_seq: usize,
-) -> u64 {
-    let (ll_codes, ml_codes, of_codes, ll_extras, ml_extras, off_bases) = codes;
-    let mut tmp: Vec<u8> = Vec::new();
-    if ll.mode == MODE_FSE {
-        let _ = write_ncount(&mut tmp, &ll.norm, ll_max, ll.table_log);
-    } else if ll.mode == MODE_RLE {
-        tmp.push(ll.max_sym);
-    }
-    if of.mode == MODE_FSE {
-        let _ = write_ncount(&mut tmp, &of.norm, of_max, of.table_log);
-    } else if of.mode == MODE_RLE {
-        tmp.push(of.max_sym);
-    }
-    if ml.mode == MODE_FSE {
-        let _ = write_ncount(&mut tmp, &ml.norm, ml_max, ml.table_log);
-    } else if ml.mode == MODE_RLE {
-        tmp.push(ml.max_sym);
-    }
-    let header_bits = 8 * tmp.len() as u64 + 8; // + modes byte
-
-    let ll_ctable = match ll.build_ctable() {
-        Ok(t) => t,
-        Err(_) => return u64::MAX,
-    };
-    let ml_ctable = match ml.build_ctable() {
-        Ok(t) => t,
-        Err(_) => return u64::MAX,
-    };
-    let of_ctable = match of.build_ctable() {
-        Ok(t) => t,
-        Err(_) => return u64::MAX,
-    };
-    header_bits
-        + 8 * sequences_bitstream_bits(
-            ll_codes, ml_codes, of_codes, ll_extras, ml_extras, off_bases, &ll_ctable, &ml_ctable,
-            &of_ctable, nb_seq,
-        )
-}
-
-/// Exact byte size of [`encode_sequences_bitstream`] without
-/// materializing it: the same state arithmetic through
-/// `CState::encode_bit_count`, with the writer's close() padding
-/// (`ceil((bits + 1) / 8)`). Table-mode decisions made here are
-/// bit-for-bit the ones the emitting path would produce — this
-/// replaced a full byte-materializing measurement per candidate that
-/// dominated fast-tier encode time (words L1: 1535 of 1645 bitstream
-/// samples were measurement, not emission).
-#[must_use]
-fn sequences_bitstream_bits(
-    ll_codes: &[u8],
-    ml_codes: &[u8],
-    of_codes: &[u8],
-    ll_extras: &[u32],
-    ml_extras: &[u32],
-    off_bases: &[u32],
-    ll_ctable: &crate::fse::encoder::CTable,
-    ml_ctable: &crate::fse::encoder::CTable,
-    of_ctable: &crate::fse::encoder::CTable,
-    nb_seq: usize,
-) -> u64 {
-    if nb_seq == 0 {
-        return 0;
-    }
-    let last = nb_seq - 1;
-    let mut bits: u64 = 0;
-    let mut state_ml = CState::init2(ml_ctable, ml_codes[last]);
-    let mut state_of = CState::init2(of_ctable, of_codes[last]);
-    let mut state_ll = CState::init2(ll_ctable, ll_codes[last]);
-    bits += u64::from(LL_BITS[ll_codes[last] as usize]);
-    bits += u64::from(ML_BITS[ml_codes[last] as usize]);
-    bits += u64::from(of_codes[last]);
-    for n in (0..last).rev() {
-        bits += u64::from(state_of.encode_bit_count(of_ctable, of_codes[n]));
-        bits += u64::from(state_ml.encode_bit_count(ml_ctable, ml_codes[n]));
-        bits += u64::from(state_ll.encode_bit_count(ll_ctable, ll_codes[n]));
-        bits += u64::from(LL_BITS[ll_codes[n] as usize]);
-        bits += u64::from(ML_BITS[ml_codes[n] as usize]);
-        bits += u64::from(of_codes[n]);
-    }
-    bits += u64::from(state_ml.flush_bit_count());
-    bits += u64::from(state_of.flush_bit_count());
-    bits += u64::from(state_ll.flush_bit_count());
-    (bits + 1 + 7) / 8
-}
-
 /// Estimate FSE payload cost (in bits) for a given distribution.
 fn estimate_cost(count: &[u32], norm: &[i16], table_log: u8, max_sym: u8) -> u64 {
     let table_size = 1u64 << table_log;
