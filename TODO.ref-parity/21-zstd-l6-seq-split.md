@@ -61,3 +61,21 @@ keep T ≈ 8 on fits — still unshippable.
 The −13.8% fits L6 size is banked knowledge; the gate revert restores
 byte-identical v0.21.84 outputs (verified: fits L6 2,877,075, fits L1
 3,576,456, plists L6 140,659).
+
+## Re-measurement (2026-09-13, post v0.21.88 — tasks 22/23/25 landed)
+
+The gate extension was re-measured after three releases that directly
+cut per-partition emission cost (two-queue tables .85, histogram .86,
+seqcost cache .87):
+
+- fits L6 with splitter: 4.49s/6 user vs ref 0.97s/20 → **T = 15.4**
+  (was ~31 pre-.85). Size 2,482,006 (−13.6% vs unsplit 2,877,070 —
+  the banked win intact, modulo tie-noise), round-trip ok.
+- Profile: `derive_splits` = 77% of the split encode (the
+  trial-emission loop — `estimate_partition` still runs full
+  `encode_content_parts` per candidate); final per-partition
+  emissions ~23%.
+- Bar to ship on I: T ≤ 3.0 (to beat the unsplit I=2.7 given
+  S=0.901). Both the trial loop (incremental entropy estimates — the
+  reference's shape, a full port) and the emission per-op gap would
+  need ~5x. STILL BLOCKED; chain unchanged, numbers refreshed.
