@@ -9,13 +9,31 @@ use crate::huffman::HuffmanTable;
 use crate::ZstdError;
 
 /// Build a per-byte frequency table from `literals`.
+///
+/// Four interleaved counter arrays break the load-increment-store
+/// dependency chain on the same cache line; the exact u32 sums are
+/// combined in fixed index order (integer addition is exact), so the
+/// result is identical to the single-array walk.
 #[must_use]
 pub fn count_frequencies(literals: &[u8]) -> [u32; 256] {
-    let mut counts = [0u32; 256];
-    for &b in literals {
-        counts[usize::from(b)] += 1;
+    let mut a = [0u32; 256];
+    let mut b = [0u32; 256];
+    let mut c = [0u32; 256];
+    let mut d = [0u32; 256];
+    let mut chunks = literals.chunks_exact(4);
+    for ch in &mut chunks {
+        a[usize::from(ch[0])] += 1;
+        b[usize::from(ch[1])] += 1;
+        c[usize::from(ch[2])] += 1;
+        d[usize::from(ch[3])] += 1;
     }
-    counts
+    for &x in chunks.remainder() {
+        a[usize::from(x)] += 1;
+    }
+    for i in 0..256 {
+        a[i] += b[i] + c[i] + d[i];
+    }
+    a
 }
 
 /// Build a Huffman code from frequencies. Returns 256 weights (0 for
@@ -92,7 +110,7 @@ fn unlimited_huffman_lengths(symbols: &[(u8, u32)]) -> Option<Vec<u8>> {
         return Some(vec![1, 1]);
     }
     let mut order: Vec<u16> = (0..m as u16).collect();
-    order.sort_by(|&a, &b| {
+    order.sort_unstable_by(|&a, &b| {
         let fa = u64::from(symbols[usize::from(a)].1);
         let fb = u64::from(symbols[usize::from(b)].1);
         fb.cmp(&fa).then(a.cmp(&b))
