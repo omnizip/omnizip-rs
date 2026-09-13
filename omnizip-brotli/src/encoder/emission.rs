@@ -411,11 +411,20 @@ pub(crate) fn emit_metablock_from_commands(
         } else {
             None
         };
-    let lit_split_on = quality >= 4
+    // q4-5 skips the literal split entirely: with the decided static
+    // map chosen, extra literal blocks only pay switch codes —
+    // measured byte-identical on binary and SMALLER on text
+    // (words -1,027B, dbdump -597B, plists -482B, install -165B,
+    // icons -75B; q6-9 deltas are +-0.2% and stay split) while the
+    // split's find/clustering work was 9-17% of q5 encode on dense
+    // text (BROTLI_Q5 balance sweep, 2026-09-13). BROTLI_FORCE_LIT_SPLIT
+    // restores.
+    let lit_split_on = quality >= 6
         && stream.literals.len() >= 4096
         && use_context
         && decided_early.is_none()
         && !env_flag!("BROTLI_NO_LIT_SPLIT");
+    let lit_split_on = lit_split_on || lit_split_forced_now();
     // Scale the block budget with the literal count: small inputs
     // lose more to block/tree overhead than they gain from sharper
     // local statistics (measured crossover near ~2K literals/block).

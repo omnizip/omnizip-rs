@@ -4842,7 +4842,17 @@ pub(crate) fn brotli_quality_config(
         match quality {
             0..=1 => (24, 64, false, true, false, 17),
             2..=3 => (8, 16, true, true, false, 16),
-            4..=5 => (16, 96, true, true, true, 17),
+            4..=5 => {
+                // BROTLI_Q5CFG="chain,nice,1/0dict,1/0lazy,1/0lazy2"
+                // — measurement override for the balance sweep.
+                if let Ok(cfg) = std::env::var("BROTLI_Q5CFG") {
+                    let v: Vec<u32> = cfg.split(',').filter_map(|x| x.parse().ok()).collect();
+                    if v.len() == 5 {
+                        return (v[0], v[1], v[2] != 0, v[3] != 0, v[4] != 0, 17);
+                    }
+                }
+                (16, 96, true, true, true, 17)
+            }
             6..=7 => (32, 192, true, true, true, 17),
             8..=9 => (64, 256, true, true, true, 18),
             10 => (128, 512, true, true, true, 18),
