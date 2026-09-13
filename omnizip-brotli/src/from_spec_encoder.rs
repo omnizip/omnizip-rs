@@ -5289,7 +5289,14 @@ fn parse_input_with_offset_impl(
         // is skipped — the b variant's observed effect is <2%, so a
         // >1% gap cannot flip it (the rare-change trade documented in
         // task 04's plan).
-        {
+        // Binary-class inputs skip the pass entirely — same winner
+        // table as the reduced path's b gate (task 16): every
+        // measured b win is Text/Structured; on the one dense-binary
+        // full-contest input (sqlite) b lost every chunk
+        // (BTOPT_DUMP, 2026-09-13: hq 331,981, b not taken,
+        // split=false). BROTLI_SPLITCAND_ALL restores for
+        // measurement.
+        if is_text_like(input) || env_flag!("BROTLI_SPLITCAND_ALL") {
             let mut order: [(u64, u8); 3] = [
                 (hq_bits, 0),
                 (bt_bits, 1),
