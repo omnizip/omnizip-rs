@@ -47,25 +47,30 @@ pub fn build_weights(literals: &[u8]) -> Vec<u8> {
         return weights;
     }
 
-    let freqs: Vec<u32> = present.iter().map(|&(_, f)| f).collect();
-    // Use the optimal package-merge algorithm for length-limiting at
-    // HUF_TABLELOG_MAX. Falls back to the ad-hoc method only if
-    // package-merge produces an invalid Kraft sum (shouldn't happen,
-    // but keep the fallback as a safety net for unusual distributions).
-    // The min-heap lengths are computed lazily on that fallback only —
-    // the heap simulation is O(n^2) and its result is discarded
-    // whenever package-merge succeeds (the normal case).
-    let mut pm_lengths = vec![0u8; freqs.len()];
-    crate::huffman::package_merge::package_merge(&freqs, 11, &mut pm_lengths);
-    let lengths = if pm_lengths.iter().any(|&l| l > 11)
-        || pm_lengths.iter().filter(|&&l| l > 0).count() != freqs.len()
-    {
-        // Package-merge produced invalid output; fall back.
-        let mut lengths = huffman_lengths(&present);
-        limit_lengths(&mut lengths, 11, &freqs);
-        lengths
-    } else {
-        pm_lengths
+    // Fast path: the unlimited-depth Huffman tree via the two-queue
+    // merge (the reference's HUF_buildTree shape, O(m) after the
+    // sort). When the tree's depth already fits HUF_TABLELOG_MAX the
+    // lengths are the constrained optimum too — identical to what
+    // package-merge returns for a fitting tree — so package-merge's
+    // 11-level coin machinery only runs on genuinely skewed
+    // distributions whose tree exceeds the cap.
+    let lengths = match unlimited_huffman_lengths(&present) {
+        Some(l) => l,
+        None => {
+            let freqs: Vec<u32> = present.iter().map(|&(_, f)| f).collect();
+            let mut pm_lengths = vec![0u8; freqs.len()];
+            crate::huffman::package_merge::package_merge(&freqs, 11, &mut pm_lengths);
+            if pm_lengths.iter().any(|&l| l > 11)
+                || pm_lengths.iter().filter(|&&l| l > 0).count() != freqs.len()
+            {
+                // Package-merge produced invalid output; fall back.
+                let mut lengths = huffman_lengths(&present);
+                limit_lengths(&mut lengths, 11, &freqs);
+                lengths
+            } else {
+                pm_lengths
+            }
+        }
     };
 
     debug_assert!(
@@ -78,6 +83,103 @@ pub fn build_weights(literals: &[u8]) -> Vec<u8> {
         weights[usize::from(byte)] = max_len.saturating_sub(lengths[i]) + 1;
     }
     weights
+}
+
+fn unlimited_huffman_lengths(symbols: &[(u8, u32)]) -> Option<Vec<u8>> {
+    let m = symbols.len();
+    debug_assert!(m >= 2);
+    if m == 2 {
+        return Some(vec![1, 1]);
+    }
+    let mut order: Vec<u16> = (0..m as u16).collect();
+    order.sort_by(|&a, &b| {
+        let fa = u64::from(symbols[usize::from(a)].1);
+        let fb = u64::from(symbols[usize::from(b)].1);
+        fb.cmp(&fa).then(a.cmp(&b))
+    });
+
+    // Node array: 0..m = leaves (sorted count-descending in `order`
+    // indexing), m..=2m-2 = internal parents created smallest-sum
+    // first; slot 2m-2 is the root. HUF_buildTree shape: lowS walks
+    // the leaf queue up from the smallest, lowN walks the parent
+    // queue from the first created, nodeNb is the creation head
+    // (always > lowN — an unwritten slot is never consumed).
+    let n_nodes = 2 * m - 1;
+    let mut count = vec![0u64; n_nodes];
+    let mut parent = vec![0u16; n_nodes];
+    for i in 0..m {
+        count[i] = u64::from(symbols[usize::from(order[i])].1);
+    }
+    const BARRIER: u64 = 1 << 62;
+
+    let node_root = (n_nodes - 1) as i32;
+    let mut low_s = m as i32 - 1;
+    // First parent: the two smallest leaves.
+    let a = low_s;
+    let b = low_s - 1;
+    count[m] = count[a as usize] + count[b as usize];
+    parent[a as usize] = m as u16;
+    parent[b as usize] = m as u16;
+    low_s -= 2;
+    let mut low_n = m as i32;
+    let mut node_nb = m as i32 + 1;
+
+    while node_nb <= node_root {
+        let take_two = |low_s: &mut i32, low_n: &mut i32| -> (i32, i32) {
+            let pick = |low_s: &mut i32, low_n: &mut i32| -> i32 {
+                let leaf = if *low_s >= 0 {
+                    count[*low_s as usize]
+                } else {
+                    BARRIER
+                };
+                let par = if *low_n < node_nb {
+                    count[*low_n as usize]
+                } else {
+                    BARRIER
+                };
+                if leaf < par {
+                    let x = *low_s;
+                    *low_s -= 1;
+                    x
+                } else {
+                    let x = *low_n;
+                    *low_n += 1;
+                    x
+                }
+            };
+            let n1 = pick(low_s, low_n);
+            let n2 = pick(low_s, low_n);
+            (n1, n2)
+        };
+        let (n1, n2) = take_two(&mut low_s, &mut low_n);
+        debug_assert!(n1 >= 0 && n2 >= 0);
+        count[node_nb as usize] = count[n1 as usize] + count[n2 as usize];
+        parent[n1 as usize] = node_nb as u16;
+        parent[n2 as usize] = node_nb as u16;
+        node_nb += 1;
+    }
+
+    // Depths: root 0; every parent has a higher index than its
+    // children, so one descending pass settles internals first.
+    let mut depth = vec![0u8; n_nodes];
+    for i in (m..n_nodes - 1).rev() {
+        depth[i] = depth[usize::from(parent[i])] + 1;
+    }
+    let mut lengths = vec![0u8; m];
+    let mut max_len = 0u8;
+    for i in 0..m {
+        let d = depth[usize::from(parent[i])] + 1;
+        lengths[i] = d;
+        max_len = max_len.max(d);
+    }
+    if max_len > 11 {
+        return None;
+    }
+    let mut out = vec![0u8; m];
+    for (sorted_i, &sym_i) in order.iter().enumerate() {
+        out[usize::from(sym_i)] = lengths[sorted_i];
+    }
+    Some(out)
 }
 
 /// Compute Huffman code lengths via the standard min-heap algorithm.
