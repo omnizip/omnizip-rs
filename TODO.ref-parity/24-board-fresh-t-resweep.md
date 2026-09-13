@@ -52,3 +52,24 @@ memcpy-stable ref at load 15-22), or a real q9/L19 regression the
 carried values predate. The q9 class-coherence is suspicious either
 way — RE-CHECK ON A QUIET BOX before treating either direction as
 truth. Nothing shipped on the basis of these readings.
+
+## Resolution (same day, quiet box, load 4-6)
+
+All 13 flagged cells re-measured quiet — the readings STAND (brotli q9
+1.24–1.96 across the column; words zstd L1 3.65, L19 1.95, csv2m L19
+2.43, dbdump L19 2.33). Suspecting a code regression, a TAG BISECT
+was run:
+
+- brotli q9 on fits: v0.21.78 / .80 / .81 / .82 / current =
+  2.64 / 2.56 / 2.63 / 2.65 / 2.44 s per 3 runs — flat, current
+  fastest. The .81 splitter-fusion suspect is cleared.
+- zstd words L19: v0.21.82 / .83 / .85 / current = 5.85 / 6.09 /
+  5.98 / 5.68 s per 5 runs — flat, current fastest.
+
+**Conclusion: no code regression.** The carried T values for these
+cells were REF-SIDE artifacts of the pre-task-24 methodology (the
+`date` second-granularity on the reference CLI loops — see the
+methodology section). The fresh quiet values are the truth and the 12
+cells moved to them in the v26 board (install brotli q9 improved
+1.7→1.41). Board: median I=1.40, 73/77 ≤3 — the honest floor of the
+current implementation on this box.
