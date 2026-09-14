@@ -978,10 +978,53 @@ pub(crate) fn emit_metablock_from_commands(
     }
     // --- Distance block splitting: NBLTYPES_D > 1 with per-block-type
     // context maps (before NPOSTFIX per the wire order). ---
+    // Concentration pre-gate: when the distance-symbol distribution
+    // is concentrated (top-4 codes cover >=88% of the stream), the
+    // split fragments local patterns and LOSES size (words: +401B
+    // with split vs without) while paying the full DP + clustering —
+    // 53% of q5 encode. Concentrated streams skip it entirely.
+    // csv2m/plists class as multi-modal (they NEED the split).
+    // BROTLI_FORCE_DSPLIT overrides.
+    // Stationarity pre-gate: compare first-half vs second-half
+    // distance-symbol histograms (L1/total). A stationary stream
+    // (words: every segment has the same shape) gains nothing from
+    // the split and pays 53% of q5 encode; a non-stationary one
+    // (csv2m: early=explicit, late=rep riding) NEEDS it. Threshold
+    // 0.08 sits in the empty middle of the measured corpus.
+    // BROTLI_FORCE_DSPLIT overrides.
+    let dist_stationary = {
+        let total = stream.dist_symbols.len();
+        if total < 2048 {
+            true
+        } else {
+            let mid = total / 2;
+            let mut h1 = [0u32; 1024];
+            let mut h2 = [0u32; 1024];
+            for (i, &s) in stream.dist_symbols.iter().enumerate() {
+                let idx = (s as usize).min(1023);
+                if i < mid {
+                    h1[idx] += 1;
+                } else {
+                    h2[idx] += 1;
+                }
+            }
+            let l1: u64 = h1
+                .iter()
+                .zip(h2.iter())
+                .map(|(&a, &b)| {
+                    let da = u64::from(a) * (total as u64) / (mid as u64);
+                    let db = u64::from(b) * (total as u64) / ((total - mid) as u64);
+                    da.abs_diff(db)
+                })
+                .sum();
+            l1 <= (u64::from(total as u32) * 8) / 100
+        }
+    };
     let dist_split_on = quality >= 4
         && stream.dist_symbols.len() >= 1024
         && dist_cfg.alphabet_size() <= 256
         && !env_flag!("BROTLI_NO_DSPLIT")
+        && (env_flag!("BROTLI_FORCE_DSPLIT") || quality > 5 || !dist_stationary)
         && (quality >= 8 || is_text_like(input));
     // Reference 1.2.0 distance block split (SplitByteVector on the
     // distance-symbol stream). The in-house DP capped blocks at 4 and
@@ -999,10 +1042,27 @@ pub(crate) fn emit_metablock_from_commands(
     } else if ref_dist_split {
         let syms: Vec<u16> = stream.dist_symbols.iter().map(|&s| s as u16).collect();
         let iters = if quality >= 11 { 10 } else { 3 };
+        // Coarser histogram sampling (task 35): the O(m^2) clustering
+        // over sampled distance histograms was 53% of q5 text encode
+        // (rustsrc/words); sampling 4096 symbols per histogram instead
+        // of the reference's 544 cuts the histogram count ~8x for
+        // ±0.11% size (measured 11 corpus files + the 100 KB CSV
+        // regression fixture, 2026-09-14: csv2m -0.117% IMPROVES,
+        // icons +0.110% worst, csv_100k +0.042%; q9+ keeps 544 —
+        // csv2m q9 measured +0.246% at 6144, q9's finer tier needs
+        // the reference's density). BROTLI_DPH overrides.
+        let dph = std::env::var("BROTLI_DPH")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(if quality <= 5 {
+                4096
+            } else {
+                crate::encoder::block_splitter::SYMBOLS_PER_DISTANCE_HISTOGRAM
+            });
         let split = crate::encoder::block_splitter::split_byte_vector(
             &syms,
             256,
-            crate::encoder::block_splitter::SYMBOLS_PER_DISTANCE_HISTOGRAM,
+            dph,
             crate::encoder::block_splitter::MAX_COMMAND_HISTOGRAMS,
             crate::encoder::block_splitter::DISTANCE_STRIDE_LENGTH,
             crate::encoder::block_splitter::DISTANCE_BLOCK_SWITCH_COST,
