@@ -79,3 +79,25 @@ seqcost cache .87):
   S=0.901). Both the trial loop (incremental entropy estimates — the
   reference's shape, a full port) and the emission per-op gap would
   need ~5x. STILL BLOCKED; chain unchanged, numbers refreshed.
+
+## Gate 2 research closure (2026-09-14): the cheap estimator does not exist
+
+The semi-exact program: (1) pure Shannon entropy — task 27, blind
+(csv2m +4.6%); (2) + real Huffman lengths (two-queue) + FSE
+normalization costs (nbBits = tableLog − highbit(norm[s]), exact
+rounding model) + real write_ncount header sizes + Repeat_Mode
+exact-match discount — words within 6 bytes and plists +0.06% of the
+exact splitter, **but csv2m still +5.5%**. The decisive dump: the
+exact splitter's csv2m L19 output is **250 partitions with a rich
+per-partition table-mode mix** (32× OF=RLE, 28× OF=REP+ML=REP, 20×
+ML=Predefined …) — the 7KB win comes from pick_table's MEASURED
+per-partition mode search (RLE 1-byte / REPEAT 0-byte / Predefined
+0-byte tables), which no histogram-level model reproduces. A faithful
+estimator must replicate the emitter's mode search — at which point
+it IS the emitter; the only remaining lever is write-elision via the
+.87 cached-cost machinery (~1.4×, vs the gate's 5× bar).
+
+**Task 21's reopen condition is now precise: it needs ~5× cheaper
+exact emission, or a fundamentally different splitting algorithm —
+not a better estimator. Experimental code preserved in the session
+scratch (/tmp/zwork/se_v2.rs); main reverted byte-identical.**
