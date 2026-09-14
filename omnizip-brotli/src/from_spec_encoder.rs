@@ -5203,15 +5203,18 @@ fn parse_input_with_offset_impl(
             }
             return (hq, win_bw);
         }
-        // bt runs only on dense TEXT: on dense binary (sqlite — its
-        // DB text passes the density screen) it lost every measured
-        // contest (359,318 vs hq 336,699) while costing a full DP
-        // pass plus two emissions. is_text_like splits the two
-        // classes cleanly (sqlite/noto false, rfc/plists/install
-        // true). BROTLI_BT_TEXT=0 restores bt on binary for
-        // measurement.
-        let run_bt =
-            is_text_like(input) && !matches!(std::env::var("BROTLI_BT_TEXT").as_deref(), Ok("0"));
+        // bt runs on dense TEXT at q10 only. At q11 the hqdict
+        // candidate covers every corpus win bt ever had (measured
+        // 2026-09-14: 11-file q11 byte-identical with bt off; rfc
+        // q11 T 6.1 -> 2.0 when bt+iter both off). q10 keeps bt —
+        // rfc's winner IS bt there (7045; without it 7622). Binary
+        // never runs it (sqlite lost every contest). BROTLI_BT_TEXT=1
+        // forces on at q11; =0 forces off everywhere.
+        let run_bt = match std::env::var("BROTLI_BT_TEXT").as_deref() {
+            Ok("0") | Ok("false") => false,
+            Ok("1") | Ok("true") => is_text_like(input),
+            _ => is_text_like(input) && quality < 11,
+        };
         // Literal-assignment contest (q10/11): the decided static map
         // and the reference splitter trade wins by corpus. Every
         // candidate is measured under the decided assignment (a);
@@ -5365,7 +5368,11 @@ fn parse_input_with_offset_impl(
         // smaller under the SAME exact q11 emission, so output can
         // only improve. The n bound keeps the two extra emissions off
         // q11-scale inputs; the inversion class lives in small files.
-        if quality >= 10 && dict_dense && !env_flag!("BROTLI_NO_ITERCAND") {
+        // iter default OFF (2026-09-14): never wins any corpus cell
+        // at q10/q11; rfc q10 is STRICTLY smaller without it
+        // (7045->6951) and the full contest is faster by a whole DP
+        // pass + emission. BROTLI_ITERCAND=1 restores for measurement.
+        if quality >= 10 && dict_dense && env_flag!("BROTLI_ITERCAND") {
             // Third contest candidate: the in-house iterative zopfli
             // (the parse our sub-1MiB q5 tier ships), emitted with ITS
             // OWN q5-tier emission. On dictionary-dense text this beats
