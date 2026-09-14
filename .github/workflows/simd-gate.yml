@@ -1,0 +1,23 @@
+# Task 30 (TODO.ref-parity/30-simd-toolchain-gate.md): a canary for
+# `portable_simd` stabilization. The job is continue-on-error today;
+# when Rust ships std::simd stable this goes green — flip it to a
+# required check and reopen the SIMD program (matcher scan, FSE state
+# stepping, histograms per task 30's plan).
+name: SIMD gate (portable_simd canary)
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "0 6 * * 1" # weekly Monday check — stabilization arrives via toolchain bump
+jobs:
+  canary:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Compile the std::simd canary
+        run: rustc --edition 2021 -o /tmp/canary tools/simd_canary.rs
+      - name: Run
+        run: /tmp/canary
