@@ -5061,12 +5061,22 @@ fn parse_input_with_offset_impl(
                 mf.set_max_match_length(nice_match);
             }
         }
-        if quality < 10 && input.len() >= 2 << 20 {
-            // The lazy lookahead walks the MF's own chain cap, and its
-            // decisions shape the whole parse: measured at 21MB, the
-            // q8-9 matcher config (chain 64, nice 256) reaches 3.03%
-            // where the q4-7 config (16, 96) lands at 6.34-10%. Below
-            // 2 MiB the override slightly hurts (1MB: 4.33->4.60%).
+        // The >= 2 MiB override is the deliberate time-for-ratio trade
+        // measured at 21MB (chain 64/nice 256 reaches 3.03% vs 16/96's
+        // 6.34-10%); task 40 re-balances it per cell against the I bar.
+        // BROTLI_MFOVR="chain,nice" overrides for measurement; =0
+        // disables the override entirely.
+        if let Ok(cfg) = std::env::var("BROTLI_MFOVR") {
+            if cfg == "0" {
+                // no override
+            } else {
+                let v: Vec<u32> = cfg.split(',').filter_map(|x| x.parse().ok()).collect();
+                if v.len() == 2 && input.len() >= 2 << 20 && quality < 10 {
+                    mf.set_max_chain_length(v[0]);
+                    mf.set_nice_match(v[1]);
+                }
+            }
+        } else if quality < 10 && input.len() >= 2 << 20 {
             mf.set_max_chain_length(64);
             mf.set_nice_match(256);
         }
