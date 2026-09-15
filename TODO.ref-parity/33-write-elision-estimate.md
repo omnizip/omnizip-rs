@@ -1,7 +1,6 @@
 # Task 33 — write-elision for estimate_partition (designed, load-blocked)
 
-Status: pending (2026-09-14; timing verification blocked — box load 142
-from other users' CPU burners; the canon forbids conclusions >20)
+Status: in progress (2026-09-15; slice 1 shipped v0.21.95 — scratch reuse; the full no-write variant pending)
 
 ## Design (ready to execute on a quiet box)
 
@@ -38,3 +37,21 @@ default column −8–12% (csv2m L19 T ~2.4 → ~2.1–2.2; 5 cells move
 - csv2m/words/plists/noto/sqlite/dbdump L19 within ±0.2% of v0.21.89
   (sweep), round-trips green, quiet-box T per canon (load <10,
   ≥2s/side, /usr/bin/time user).
+
+
+## Slice 1 (shipped v0.21.95): scratch reuse across trials
+
+`estimate_partition` allocated a fresh `Vec::new()` per trial (3+ per
+derive_splits node) whose ONLY consumer is `.len()` — one buffer now
+threads through the recursion, cleared per trial, capacity retained
+(1<<17 pre-allocated). Byte-identical by construction; 33/33 corpus
+cells L1/L6/L19 identical to v0.21.94. Quiet-load-9 A/B: words L19
+1.09→1.02s (−6%), csv2m 1.18→1.13 (−4%), small files flat — the trial
+cost is the emission WORK, not the allocations, so the full no-write
+variant (the design above) remains the lever. words L19 board I 1.95
+→ ~1.85.
+
+Fresh profile confirming the design's target (words L1, 5s sample):
+encode_frame_into (parse) 51%, encode_content_parts→encode_section
+29% — the L1 cells' residual is per-op floor; the L19 derive-splits
+share is where write-elision applies.

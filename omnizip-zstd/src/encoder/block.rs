@@ -1072,12 +1072,16 @@ fn estimate_partition(
     seq_from: usize,
     seq_to: usize,
     state: &SplitEntropyState,
+    scratch: &mut Vec<u8>,
 ) -> Option<(usize, SplitEntropyState)> {
-    let mut scratch = Vec::new();
+    // The trial's byte buffer is only read for its length — reuse one
+    // allocation across the recursion (thousands of trials each paid
+    // growth-doubling vec allocs; capacity is retained on clear).
+    scratch.clear();
     let mut huf = state.huf.clone();
     let mut tables = state.tables.clone();
     let reps = encode_content_parts(
-        &mut scratch,
+        scratch,
         &literals[lit_from..lit_to],
         &sequences[seq_from..seq_to],
         &mut huf,
@@ -1114,6 +1118,7 @@ fn derive_splits(
                 0
             }
     };
+    let mut scratch = Vec::with_capacity(1 << 17);
     let Some((whole, _)) = estimate_partition(
         literals,
         sequences,
@@ -1122,6 +1127,7 @@ fn derive_splits(
         start,
         end,
         state,
+        &mut scratch,
     ) else {
         return;
     };
@@ -1133,6 +1139,7 @@ fn derive_splits(
         start,
         mid,
         state,
+        &mut scratch,
     ) else {
         return;
     };
@@ -1144,6 +1151,7 @@ fn derive_splits(
         mid,
         end,
         &first_state,
+        &mut scratch,
     ) else {
         return;
     };
