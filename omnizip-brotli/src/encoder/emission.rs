@@ -262,6 +262,22 @@ pub(crate) fn encode_huffman_chunk_body(
 
 /// Emission stage shared by the real encoder and parse-candidate
 /// scoring: everything from the parsed command list to the last
+thread_local! {
+    static ASSIGN_A_WON: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Whether the most recent metablock emission picked its literal
+/// context map via the `cmap_a` clustering path — the ONLY assignment
+/// option that reads the literal-tree cap. The tree-cap refinement
+/// candidate re-measures under a smaller cap; when the winner came
+/// from a cap-insensitive path (R/B/C) the re-measure is byte-identical
+/// and is skipped (fits q11: the R option's 245-tree map wins, so the
+/// second full emission — half the encode — produced identical bits
+/// every time).
+pub(crate) fn assign_used_cluster_cap() -> bool {
+    ASSIGN_A_WON.with(|c| c.get())
+}
+
 /// tree-coded symbol. Pure with respect to `bw` — identical commands
 /// produce identical bits.
 #[allow(clippy::too_many_lines)]
@@ -873,12 +889,13 @@ pub(crate) fn emit_metablock_from_commands(
                 cmap_r = symbols.iter().map(|&sy| sy as u8).collect();
             }
         }
-        let (cmap, tree_count) = if cost_r < cost_a && cost_r < cost_b && cost_r < cost_c {
-            (cmap_r, count_r)
+        let (cmap, tree_count, winner_a) = if cost_r < cost_a && cost_r < cost_b && cost_r < cost_c
+        {
+            (cmap_r, count_r, false)
         } else if cost_c < cost_a && cost_c < cost_b {
-            (cmap_c, count_c)
+            (cmap_c, count_c, false)
         } else if cost_b < cost_a && !env_flag!("BROTLI_NO_SINGLETONS") {
-            (cmap_b, count_b)
+            (cmap_b, count_b, false)
         } else {
             (
                 cmap_a.clone(),
@@ -887,8 +904,10 @@ pub(crate) fn emit_metablock_from_commands(
                     .copied()
                     .max()
                     .map_or(1, |m| usize::from(m) + 1),
+                true,
             )
         };
+        ASSIGN_A_WON.with(|c| c.set(winner_a));
         if env_flag!("BROTLI_DBG_CTX") {
             eprintln!(
                 "ASSIGN cost_a={cost_a:.0} cost_b={cost_b:.0} cost_c={cost_c:.0} cost_r={cost_r:.0} trees={tree_count}"
