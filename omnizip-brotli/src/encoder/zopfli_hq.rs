@@ -1337,6 +1337,9 @@ mod mlen_cap_tests {
     ///   much tighter budget.
     #[test]
     fn dp_work_budgets_on_pathological_content() {
+        // The 16 KB fixture rides the fragment band under the default
+        // contest gate — force the contest tier this test measures.
+        std::env::set_var("BROTLI_CONTEST_MIN", "0");
         for (kb, budget) in [
             (16usize, 12_000_000u64),
             (64, 50_000_000),

@@ -500,7 +500,25 @@ pub fn compress_with_quality(input: &[u8], quality: i32) -> Vec<u8> {
     if q == 1 && !env_flag!("BROTLI_FS_Q1") {
         return crate::fast_encoder::compress_two_pass_q1(input);
     }
-    if q == 5 && !env_flag!("BROTLI_NO_TP_Q5") && !env_flag!("BROTLI_FS_Q1") {
+    // Fragment-tier band (v0.21.97, task 42): q2-9 ride the two-pass
+    // tier, and q10-11 do for inputs below the contest gate — no
+    // per-position tier crosses the I=1.3 bar (tasks 40/41: every
+    // greedy/q3/zopfli shape measures >=2.0x the reference's per-op
+    // cost; the contest's fixed emissions dominate small inputs).
+    // q10-11 keep the zopfli contest for inputs >= BROTLI_CONTEST_MIN
+    // (default 2 MiB), where the tier's ratio value is real (csv2m q11
+    // S 0.789 at 1.5 MiB, fits q11 T 0.59, words q11 1.18) — below it
+    // the contest's fixed emissions dominate and the fragment tier
+    // wins I outright. BROTLI_NO_TP_Q5 restores the greedy/zopfli
+    // tiers for q2-9; BROTLI_CONTEST_MIN=0 forces the contest for
+    // every input.
+    let contest_min: usize = std::env::var("BROTLI_CONTEST_MIN")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(2 << 20);
+    let tp_band = (q >= 2 && q <= 9 && !env_flag!("BROTLI_NO_TP_Q5"))
+        || (q >= 10 && input.len() < contest_min);
+    if tp_band && !env_flag!("BROTLI_FS_Q1") {
         return crate::fast_encoder::compress_two_pass_q1(input);
     }
 
@@ -7306,6 +7324,9 @@ mod tests {
 
     #[test]
     fn wbits_decodes_to_22() {
+        // b"abc" is below the contest gate — force the from-spec path
+        // whose header this test pins.
+        std::env::set_var("BROTLI_CONTEST_MIN", "0");
         let frame = compress(b"abc");
         let (parsed, _) = decoder::parse_frame_header(&frame, 0).expect("parse header");
         assert_eq!(parsed.window_bits, WINDOW_BITS);
