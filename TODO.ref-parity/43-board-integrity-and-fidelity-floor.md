@@ -37,3 +37,16 @@ brotli q1 (transliteration loop), zstd L1 (fast parser), L6 (lazy2),
 L19 (btopt DP), L6-fits (task-21 gate). portable_simd (E0654
 re-verified on 1.98 stable this session; canary watching) is the
 single mechanical unlock for all 21.
+
+## Addendum: the LTO/codegen-units lever — measured flat (2026-09-15)
+
+The workspace shipped with cargo's default release profile (no
+`[profile.release]` section: codegen-units=16, no LTO) — the one
+remaining global lever. Tested `lto = "thin"` + `codegen-units = 1`:
+outputs byte-identical everywhere (brotli's two >=2MiB contest cells,
+zstd L1/L3/L6/L12/L19 x 11 files = 55/55), but timing FLAT on the
+loop canon at quiet load — words brotli q1 5.24->5.32s, dbdump zstd
+L19 24.42->24.36s, words L1 3.13->3.16s, csv2m L19 45.02->46.97s
+(noise; the hot loops are single-crate and already fully inlined).
+REVERTED, not shipped — no measured gain, double build cost. The
+floor diagnosis stands confirmed a fourth way.
