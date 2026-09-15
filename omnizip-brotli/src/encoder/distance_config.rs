@@ -170,7 +170,8 @@ impl DistanceConfig {
                 if !ok {
                     break;
                 }
-                let cost = crate::encoder::block_splitter::population_cost(&hist) + extra_bits;
+                let cost =
+                    f64::from(crate::encoder::block_splitter::population_cost(&hist)) + extra_bits;
                 if cost > best_cost {
                     break;
                 }
