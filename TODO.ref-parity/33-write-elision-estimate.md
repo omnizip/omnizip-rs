@@ -55,3 +55,29 @@ Fresh profile confirming the design's target (words L1, 5s sample):
 encode_frame_into (parse) 51%, encode_content_parts→encode_section
 29% — the L1 cells' residual is per-op floor; the L19 derive-splits
 share is where write-elision applies.
+
+
+## Slice 2 plan (next session — execute mechanically)
+
+`encode_content_parts` (block.rs:1277) materializes EVERY candidate
+before length-comparing: `raw_literals` (raw write), `huf_literals`
+(full Huffman payload), `treeless_literals` (second full payload), and
+the sequences section per mode. A trial needs only the winning LENGTH.
+
+1. `huffman::encoder`: add `measure_encode_literals(literals,
+   treeless) -> Option<usize>` = header bytes + `Σ f·len` bits via the
+   proven `huffman_cost_from_hist` (Σ over the two-queue lengths),
+   rounding the payload UP to bytes; header size = write the 1-byte
+   header + reuse the ncount scratch (O(256)) for `write_ncount`'s
+   length. Same err contract as the materializing variant.
+2. `estimate_partition`: call a new `measure_content_parts` that uses
+   (1) for the three literal candidates and the `.87` `stream_payload`
+   machinery for the sequences section (real pick_table decisions,
+   real rep-state carry — the gate-2 lesson: NO histogram-level
+   approximation survives csv2m's mode search).
+3. `derive_splits`/the byte-based final `write_split_blocks` stay
+   exact; only trial scoring switches to bits.
+4. Acceptance (unchanged): csv2m L19 within +0.2% of v0.21.89 bytes
+   (152,843), all L1/L6/L16-19 corpus round-trips, quiet-box T per
+   canon; expected derive −30–50% (writes are 40–60% of trial cost —
+   slice 1 proved allocations are NOT the cost, the writes are).
