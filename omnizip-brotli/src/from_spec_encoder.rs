@@ -5164,6 +5164,7 @@ fn parse_input_with_offset_impl(
         {
             let (a_bits, a_bw) =
                 measure_emission_bits(&hq, input, mlen_offset, quality, is_last, ctx_in);
+            let a_cap_sensitive = crate::encoder::emission::assign_used_cluster_cap();
             let (mut win_bits, mut win_bw, mut winner) = (a_bits, Some(a_bw), "a");
             // b (split literal assignment) wins only in the
             // text/structured classes (measured 2026-09-12,
@@ -5188,7 +5189,15 @@ fn parse_input_with_offset_impl(
             // Same tree-cap refinement as the full contest (noto:
             // 641,823 vs 657,787 bits — the cap is where the sparse
             // class's size comes from).
-            if quality >= 10 && win_bits > 0 && !env_flag!("BROTLI_NO_TREECAP") {
+            // Cap-insensitive winners (the R/B/C assignment paths
+            // never read the tree cap) make the re-measure
+            // byte-identical — skip it. BROTLI_TREECAP_ALL restores
+            // for measurement.
+            if quality >= 10
+                && win_bits > 0
+                && !env_flag!("BROTLI_NO_TREECAP")
+                && (a_cap_sensitive || env_flag!("BROTLI_TREECAP_ALL"))
+            {
                 let (c_bits, c_bw) = with_lit_tree_cap(6, || {
                     measure_emission_bits(&hq, input, mlen_offset, quality, is_last, ctx_in)
                 });
@@ -5227,6 +5236,7 @@ fn parse_input_with_offset_impl(
             let a = measure_emission_bits(&hq, input, mlen_offset, quality, is_last, ctx_in);
             (a.0, a.1, false)
         };
+        let hq_cap_sensitive = crate::encoder::emission::assign_used_cluster_cap();
         let (bt, mut bt_bits, mut bt_bw, mut bt_split) = if run_bt {
             let bt = crate::encoder::btopt::parse_btopt_with(
                 input,
@@ -5241,6 +5251,7 @@ fn parse_input_with_offset_impl(
         } else {
             (Vec::<Command>::new(), u64::MAX, None, false)
         };
+        let bt_cap_sensitive = run_bt && crate::encoder::emission::assign_used_cluster_cap();
         // Fourth contest candidate (q11, small inputs): the hq parse
         // WITH static-dictionary candidates. Dictionary density helps
         // text (rfc -100B, rustsrc -1,926B) but HURTS csv-like data
@@ -5250,6 +5261,7 @@ fn parse_input_with_offset_impl(
         // regress against any of them. The n bound keeps the extra DP
         // pass + two emissions off q11-scale inputs.
         let mut dict_winner: Option<(Vec<Command>, Option<BitWriter>, u64)> = None;
+        let mut dict_cap_sensitive = false;
         // Density screen for inputs beyond the unconditional small-file
         // bound: dictionary candidates only pay on dictionary-dense
         // text. Measured over 512 sampled positions: text classes
@@ -5294,6 +5306,7 @@ fn parse_input_with_offset_impl(
                 if d_bits < bt_bits && d_bits < hq_bits {
                     dict_winner = Some((hq_d, Some(d_bw), d_bits));
                 }
+                dict_cap_sensitive = crate::encoder::emission::assign_used_cluster_cap();
             }
         }
         // Conditional split-assignment pass: measure b for the best
@@ -5414,6 +5427,7 @@ fn parse_input_with_offset_impl(
                 if bt_bits < hq_bits { "BT" } else { "HQ" }
             );
         }
+        let dict_won = dict_winner.is_some();
         let (mut win_cmds, mut win_bw, mut win_bits): (Vec<Command>, Option<BitWriter>, u64) =
             if let Some((cmds, bw, bits)) = dict_winner {
                 (cmds, bw, bits)
@@ -5422,6 +5436,13 @@ fn parse_input_with_offset_impl(
             } else {
                 (hq, Some(hq_bw), hq_bits)
             };
+        let winner_cap_sensitive = if dict_won {
+            dict_cap_sensitive
+        } else if bt_bits < hq_bits {
+            bt_cap_sensitive
+        } else {
+            hq_cap_sensitive
+        };
         // Tree-cap refinement: re-measure the winner under a small
         // literal-tree clustering cap. On text the natural clustering
         // produces dozens of literal trees whose headers cost more
@@ -5431,7 +5452,11 @@ fn parse_input_with_offset_impl(
         // byte-identical). Shielded: ships only when strictly
         // smaller, so cap-insensitive inputs keep their exact output
         // at the cost of one extra emission measurement.
-        if quality >= 10 && win_bits > 0 && !env_flag!("BROTLI_NO_TREECAP") {
+        if quality >= 10
+            && win_bits > 0
+            && !env_flag!("BROTLI_NO_TREECAP")
+            && (winner_cap_sensitive || env_flag!("BROTLI_TREECAP_ALL"))
+        {
             let (c_bits, c_bw) = with_lit_tree_cap(6, || {
                 measure_emission_bits(&win_cmds, input, mlen_offset, quality, is_last, ctx_in)
             });
