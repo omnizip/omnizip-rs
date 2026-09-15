@@ -1,6 +1,6 @@
 # Task 33 — write-elision for estimate_partition (designed, load-blocked)
 
-Status: in progress (2026-09-15; slice 1 shipped v0.21.95 — scratch reuse; the full no-write variant pending)
+Status: closed (2026-09-15; slice 1 shipped v0.21.95; slice 2 measured out)
 
 ## Design (ready to execute on a quiet box)
 
@@ -81,3 +81,26 @@ the sequences section per mode. A trial needs only the winning LENGTH.
    (152,843), all L1/L6/L16-19 corpus round-trips, quiet-box T per
    canon; expected derive −30–50% (writes are 40–60% of trial cost —
    slice 1 proved allocations are NOT the cost, the writes are).
+
+
+## Closure (2026-09-15): slice 2 is not the L19 lever
+
+Fresh loop-harness profiles (6s samples, zloop_tmp):
+- dbdump L19: `encode_frame_into` = **97%** of encode (the btopt DP);
+  `compress_block_opt_with_prefix` ≈ 65%, `insert_bt_and_get_all_matches`
+  ≈ 30% (of which `count_abs` ≈ 25% — already u64-word-stepped with
+  XOR/trailing_zeros, i.e. at the scalar floor). derive_splits +
+  estimate_partition = **0.7%**.
+- csv2m L19: derive ≈ 15% (heavier splitting) — a perfect write-elision
+  (−50% of derive) caps at −7% total. csv2m L19 I 2.4 → ~2.25 at best.
+
+The design's "L16-19 column −8-12%" estimate came from the task-21
+world (L5-L12-gated splitter trials); the default column's splitter is
+already cheap (task 25's caching + slice 1) and the btopt DP is the
+whole cost. Same closure class as task 27: measured, documented, not
+retried. The slice-2 plan below is left for reference only.
+
+**The zstd default columns are parse-floor:** L1 (words 3.65 = 51%
+parse + 29% seq emission) and L19 (dbdump 2.33 = 97% opt DP) both sit
+at the task-30 safe-Rust per-op floor; the escape hatches remain task
+36's three (portable_simd, task 21's 5× emitter cut, size-for-time).
