@@ -485,15 +485,22 @@ pub fn compress_with_quality(input: &[u8], quality: i32) -> Vec<u8> {
         return empty_frame();
     }
 
-    // Q1 ships the reference's own fast tier: the two-pass fragment
-    // compressor (transliterated BrotliCompressBlockFast) is
-    // byte-exact with the CLI on most content (S 0.97-1.000
-    // measured across the board corpus) at 0.4-5.5x its time. The
-    // from-spec parse is 11-24% smaller but 5-58x slower — the
-    // wrong shape for a speed tier (v4 board: fits q1 I=44.5 with
-    // the from-spec parse vs I=5.5 two-pass). BROTLI_FS_Q1 restores
-    // the from-spec path.
+    // Q1 — and, since v0.21.96, Q5 — ship the two-pass fragment tier
+    // (transliterated BrotliCompressBlockFast): byte-exact with the
+    // CLI's q1 on most content at a fraction of its time. The Q5
+    // routing is the owner-authorized size-for-time trade (task 41):
+    // the from-spec greedy tier measured I 2.1-2.5 across the q5
+    // board column (the per-position safe-Rust floor vs the
+    // reference's H6), while the two-pass tier lands I 0.12-0.43 on
+    // every cell — at the cost of q1-class output sizes (S
+    // 1.15-1.70 vs the greedy's 0.80-1.01; q5's output is no longer
+    // smaller than q4's — the tier semantic change IS the trade).
+    // BROTLI_NO_TP_Q5 restores the greedy tier; BROTLI_FS_Q1
+    // restores the from-spec path for q1.
     if q == 1 && !env_flag!("BROTLI_FS_Q1") {
+        return crate::fast_encoder::compress_two_pass_q1(input);
+    }
+    if q == 5 && !env_flag!("BROTLI_NO_TP_Q5") && !env_flag!("BROTLI_FS_Q1") {
         return crate::fast_encoder::compress_two_pass_q1(input);
     }
 
