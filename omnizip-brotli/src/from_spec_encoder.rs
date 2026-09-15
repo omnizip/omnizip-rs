@@ -5191,12 +5191,18 @@ fn parse_input_with_offset_impl(
             // class's size comes from).
             // Cap-insensitive winners (the R/B/C assignment paths
             // never read the tree cap) make the re-measure
-            // byte-identical — skip it. BROTLI_TREECAP_ALL restores
-            // for measurement.
+            // byte-identical — skip it. Additionally skip when the
+            // a-variant is >8% behind the winner: the cap's measured
+            // corpus-wide effect is <=5.3% of the emission (plists),
+            // so a config that far behind cannot be rescued by a
+            // smaller tree cap (csv2m's b-split wins by 31% — the
+            // third emission was pure overhead). BROTLI_TREECAP_ALL
+            // restores for measurement.
+            let treecap_reachable = a_cap_sensitive && a_bits <= win_bits + (win_bits / 12);
             if quality >= 10
                 && win_bits > 0
                 && !env_flag!("BROTLI_NO_TREECAP")
-                && (a_cap_sensitive || env_flag!("BROTLI_TREECAP_ALL"))
+                && (treecap_reachable || env_flag!("BROTLI_TREECAP_ALL"))
             {
                 let (c_bits, c_bw) = with_lit_tree_cap(6, || {
                     measure_emission_bits(&hq, input, mlen_offset, quality, is_last, ctx_in)
@@ -5428,6 +5434,7 @@ fn parse_input_with_offset_impl(
             );
         }
         let dict_won = dict_winner.is_some();
+        let dict_winner_bits = dict_winner.as_ref().map_or(u64::MAX, |w| w.2);
         let (mut win_cmds, mut win_bw, mut win_bits): (Vec<Command>, Option<BitWriter>, u64) =
             if let Some((cmds, bw, bits)) = dict_winner {
                 (cmds, bw, bits)
@@ -5436,12 +5443,12 @@ fn parse_input_with_offset_impl(
             } else {
                 (hq, Some(hq_bw), hq_bits)
             };
-        let winner_cap_sensitive = if dict_won {
-            dict_cap_sensitive
+        let (winner_cap_sensitive, winner_a_bits) = if dict_won {
+            (dict_cap_sensitive, dict_winner_bits)
         } else if bt_bits < hq_bits {
-            bt_cap_sensitive
+            (bt_cap_sensitive, bt_bits)
         } else {
-            hq_cap_sensitive
+            (hq_cap_sensitive, hq_bits)
         };
         // Tree-cap refinement: re-measure the winner under a small
         // literal-tree clustering cap. On text the natural clustering
@@ -5452,10 +5459,14 @@ fn parse_input_with_offset_impl(
         // byte-identical). Shielded: ships only when strictly
         // smaller, so cap-insensitive inputs keep their exact output
         // at the cost of one extra emission measurement.
+        // Same margin rule as the early path: the cap moves the
+        // a-config by <=~5.3% (measured), so a winner >8% ahead of the
+        // a-config cannot be overtaken by the re-measure.
+        let treecap_reachable = winner_cap_sensitive && winner_a_bits <= win_bits + (win_bits / 12);
         if quality >= 10
             && win_bits > 0
             && !env_flag!("BROTLI_NO_TREECAP")
-            && (winner_cap_sensitive || env_flag!("BROTLI_TREECAP_ALL"))
+            && (treecap_reachable || env_flag!("BROTLI_TREECAP_ALL"))
         {
             let (c_bits, c_bw) = with_lit_tree_cap(6, || {
                 measure_emission_bits(&win_cmds, input, mlen_offset, quality, is_last, ctx_in)
