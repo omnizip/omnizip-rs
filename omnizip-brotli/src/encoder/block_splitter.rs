@@ -26,62 +26,107 @@ pub const SYMBOLS_PER_COMMAND_HISTOGRAM: usize = 530;
 pub const SYMBOLS_PER_DISTANCE_HISTOGRAM: usize = 544;
 pub const MIN_LENGTH_FOR_BLOCK_SPLITTING: usize = 128;
 
-/// Counts <= 65536 answer from a table built once with `.log2()`
-/// itself — bit-identical values, no libm call in the clustering hot
-/// loop (population_cost / bits_entropy / every pair-distance in
-/// histogram_combine each pay one log2 per symbol; on sqlite q11
-/// population_cost alone was 1,516 of 4,991 samples). Larger counts
-/// (a handful of dominant symbols per histogram) fall through.
-const LOG2_TABLE_MAX: u64 = 1 << 16;
+/// Cost-precision float for every splitter/clustering decision. The
+/// reference computes these in f32 with FastLog2 (a 256-entry table +
+/// log2f); our f64-exact port paid 6x per pair-evaluation on
+/// centroid-scale histograms — bin counts past 65,536 fell off the
+/// 512KB table into a libm call, and the table itself (512KB) thrashed
+/// cache. f32 + the deterministic polynomial below restores the
+/// reference's per-op shape; merge decisions shift slightly (one-time
+/// output change per release).
+type CostF = f32;
+
+/// Degree-10 Chebyshev interpolation of log2 on the mantissa range
+/// [1,2): max abs error 1.4e-9 (an f32 ulp at log2(256)=8 is 9.5e-7,
+/// so the f32 cast is stable). Pure IEEE arithmetic — bit-identical on
+/// every platform, unlike a libm call.
+const LOG2_POLY: [f64; 11] = [
+    1.36670953018613725e-09,
+    1.44269470892719687e+00,
+    -7.21333994820877233e-01,
+    4.80679905013112918e-01,
+    -3.58827872898978995e-01,
+    2.79186738503886367e-01,
+    -2.09680780562168212e-01,
+    1.36703380979143641e-01,
+    -6.78804384859705012e-02,
+    2.17202779572819582e-02,
+    -3.26192670399161463e-03,
+];
 
 #[inline]
-fn log2(v: u64) -> f64 {
-    static TABLE: std::sync::OnceLock<Vec<f64>> = std::sync::OnceLock::new();
+fn poly_log2(x: f64) -> f64 {
+    let bits = x.to_bits();
+    let e = f64::from(((bits >> 52) & 0x7FF) as i32 - 1023);
+    let m = f64::from_bits((bits & 0x000F_FFFF_FFFF_FFFF) | 0x3FF0_0000_0000_0000);
+    let t = m - 1.0;
+    let mut r = 0.0f64;
+    for &c in LOG2_POLY.iter().rev() {
+        r = r * t + c;
+    }
+    e + r
+}
+
+#[inline]
+fn fast_log2(v: u64) -> CostF {
     if v == 0 {
         return -2.0;
     }
-    if v <= LOG2_TABLE_MAX {
-        let t = TABLE.get_or_init(|| (0..=LOG2_TABLE_MAX).map(|i| (i as f64).log2()).collect());
+    if v < 256 {
+        let t = SMALL_LOG2.get_or_init(small_log2_table);
         return t[v as usize];
     }
-    (v as f64).log2()
+    poly_log2(v as f64) as CostF
+}
+
+/// Exact log2 values for the dense small-count range (the unmerged
+/// per-block histograms live here); 1KB, L1-resident like the
+/// reference's g_lg2.
+static SMALL_LOG2: std::sync::OnceLock<[f32; 256]> = std::sync::OnceLock::new();
+
+fn small_log2_table() -> [f32; 256] {
+    let mut t = [0f32; 256];
+    for (i, x) in t.iter_mut().enumerate() {
+        *x = poly_log2(f64::from(u32::try_from(i).unwrap())) as CostF;
+    }
+    t
 }
 
 /// Upstream `BitCost`.
 #[inline]
-fn bit_cost(count: u64) -> f64 {
+fn bit_cost(count: u64) -> CostF {
     if count == 0 {
         -2.0
     } else {
-        log2(count)
+        fast_log2(count)
     }
 }
 
 /// Upstream `BrotliBitsEntropy` over a histogram slice.
-pub fn bits_entropy(population: &[u32]) -> f64 {
+pub fn bits_entropy(population: &[u32]) -> CostF {
     let mut sum: u64 = 0;
-    let mut retval = 0.0f64;
+    let mut retval = 0.0f32;
     for &p in population {
         let p = u64::from(p);
         sum += p;
-        retval -= p as f64 * log2(p);
+        retval -= p as CostF * fast_log2(p);
     }
     if sum > 0 {
-        retval += sum as f64 * log2(sum);
+        retval += sum as CostF * fast_log2(sum);
     }
-    if retval < sum as f64 {
-        retval = sum as f64;
+    if retval < sum as CostF {
+        retval = sum as CostF;
     }
     retval
 }
 
 /// Upstream `BrotliPopulationCost`: estimated bits to encode a
 /// histogram's tree + payload, including the code-length-code model.
-pub fn population_cost(data: &[u32]) -> f64 {
-    const ONE: f64 = 12.0;
-    const TWO: f64 = 20.0;
-    const THREE: f64 = 28.0;
-    const FOUR: f64 = 37.0;
+pub fn population_cost(data: &[u32]) -> CostF {
+    const ONE: CostF = 12.0;
+    const TWO: CostF = 20.0;
+    const THREE: CostF = 28.0;
+    const FOUR: CostF = 37.0;
     let data_size = data.len();
     let total: u64 = data.iter().map(|&x| u64::from(x)).sum();
     if total == 0 {
@@ -100,13 +145,13 @@ pub fn population_cost(data: &[u32]) -> f64 {
     }
     match count {
         1 => ONE,
-        2 => TWO + total as f64,
+        2 => TWO + total as CostF,
         3 => {
             let h0 = u64::from(data[s[0]]);
             let h1 = u64::from(data[s[1]]);
             let h2 = u64::from(data[s[2]]);
             let hmax = h0.max(h1).max(h2);
-            THREE + (2.0 * (h0 + h1 + h2) as f64) - hmax as f64
+            THREE + (2.0 * (h0 + h1 + h2) as CostF) - hmax as CostF
         }
         4 => {
             let mut histo = [
@@ -118,19 +163,19 @@ pub fn population_cost(data: &[u32]) -> f64 {
             histo.sort_unstable_by(|a, b| b.cmp(a));
             let h23 = histo[2] + histo[3];
             let hmax = h23.max(histo[0]);
-            FOUR + 3.0 * h23 as f64 + 2.0 * (histo[0] + histo[1]) as f64 - hmax as f64
+            FOUR + 3.0 * h23 as CostF + 2.0 * (histo[0] + histo[1]) as CostF - hmax as CostF
         }
         _ => {
             let mut max_depth = 1usize;
             let mut depth_histo = [0u32; CODE_LENGTH_CODES];
-            let mut bits = 0.0f64;
-            let log2total = log2(total);
+            let mut bits = 0.0f32;
+            let log2total = fast_log2(total);
             let mut i = 0usize;
             while i < data_size {
                 if data[i] > 0 {
-                    let log2p = log2total - log2(u64::from(data[i]));
+                    let log2p = log2total - fast_log2(u64::from(data[i]));
                     let mut depth = (log2p + 0.5) as usize;
-                    bits += u64::from(data[i]) as f64 * log2p;
+                    bits += u64::from(data[i]) as CostF * log2p;
                     if depth > 15 {
                         depth = 15;
                     }
@@ -162,7 +207,7 @@ pub fn population_cost(data: &[u32]) -> f64 {
                     }
                 }
             }
-            bits += (18 + 2 * max_depth) as f64;
+            bits += (18 + 2 * max_depth) as CostF;
             bits += bits_entropy(&depth_histo);
             bits
         }
@@ -176,11 +221,11 @@ pub fn population_cost(data: &[u32]) -> f64 {
 /// followed by `population_cost`: the u32 adds are exact and the
 /// f64 accumulation stays in index order, so results are
 /// bit-identical.
-fn population_cost_pair(a: &Hist, b: &Hist) -> f64 {
-    const ONE: f64 = 12.0;
-    const TWO: f64 = 20.0;
-    const THREE: f64 = 28.0;
-    const FOUR: f64 = 37.0;
+fn population_cost_pair(a: &Hist, b: &Hist) -> CostF {
+    const ONE: CostF = 12.0;
+    const TWO: CostF = 20.0;
+    const THREE: CostF = 28.0;
+    const FOUR: CostF = 37.0;
     debug_assert_eq!(a.data.len(), b.data.len());
     let data_size = a.data.len();
     let total = a.total + b.total;
@@ -197,8 +242,8 @@ fn population_cost_pair(a: &Hist, b: &Hist) -> f64 {
     let mut sv = [0u32; 5];
     let mut max_depth = 1usize;
     let mut depth_histo = [0u32; CODE_LENGTH_CODES];
-    let mut bits = 0.0f64;
-    let log2total = log2(total);
+    let mut bits = 0.0f32;
+    let log2total = fast_log2(total);
     let mut iter = a.data.iter().zip(b.data.iter()).peekable();
     while let Some((&x, &y)) = iter.next() {
         let c = x + y;
@@ -207,9 +252,9 @@ fn population_cost_pair(a: &Hist, b: &Hist) -> f64 {
                 sv[count] = c;
             }
             count += 1;
-            let log2p = log2total - log2(u64::from(c));
+            let log2p = log2total - fast_log2(u64::from(c));
             let mut depth = (log2p + 0.5) as usize;
-            bits += u64::from(c) as f64 * log2p;
+            bits += u64::from(c) as CostF * log2p;
             if depth > 15 {
                 depth = 15;
             }
@@ -239,13 +284,13 @@ fn population_cost_pair(a: &Hist, b: &Hist) -> f64 {
     }
     match count {
         1 => ONE,
-        2 => TWO + total as f64,
+        2 => TWO + total as CostF,
         3 => {
             let h0 = u64::from(sv[0]);
             let h1 = u64::from(sv[1]);
             let h2 = u64::from(sv[2]);
             let hmax = h0.max(h1).max(h2);
-            THREE + (2.0 * (h0 + h1 + h2) as f64) - hmax as f64
+            THREE + (2.0 * (h0 + h1 + h2) as CostF) - hmax as CostF
         }
         4 => {
             let mut histo = [
@@ -257,10 +302,10 @@ fn population_cost_pair(a: &Hist, b: &Hist) -> f64 {
             histo.sort_unstable_by(|a, b| b.cmp(a));
             let h23 = histo[2] + histo[3];
             let hmax = h23.max(histo[0]);
-            FOUR + 3.0 * h23 as f64 + 2.0 * (histo[0] + histo[1]) as f64 - hmax as f64
+            FOUR + 3.0 * h23 as CostF + 2.0 * (histo[0] + histo[1]) as CostF - hmax as CostF
         }
         _ => {
-            bits += (18 + 2 * max_depth) as f64;
+            bits += (18 + 2 * max_depth) as CostF;
             bits += bits_entropy(&depth_histo);
             bits
         }
@@ -273,7 +318,7 @@ fn population_cost_pair(a: &Hist, b: &Hist) -> f64 {
 pub struct Hist {
     pub data: Vec<u32>,
     pub total: u64,
-    pub bit_cost: f64,
+    pub bit_cost: CostF,
 }
 
 impl Hist {
@@ -319,8 +364,8 @@ impl Hist {
 struct HistogramPair {
     idx1: u32,
     idx2: u32,
-    cost_diff: f64,
-    cost_combo: f64,
+    cost_diff: CostF,
+    cost_combo: CostF,
 }
 
 #[inline]
@@ -334,9 +379,10 @@ fn pair_is_less(p1: &HistogramPair, p2: &HistogramPair) -> bool {
 /// Upstream `ClusterCostDiff`: entropy reduction of the context map
 /// when combining two clusters.
 #[inline]
-fn cluster_cost_diff(size_a: u64, size_b: u64) -> f64 {
+fn cluster_cost_diff(size_a: u64, size_b: u64) -> CostF {
     let size_c = size_a + size_b;
-    size_a as f64 * log2(size_a) + size_b as f64 * log2(size_b) - size_c as f64 * log2(size_c)
+    size_a as CostF * fast_log2(size_a) + size_b as CostF * fast_log2(size_b)
+        - size_c as CostF * fast_log2(size_c)
 }
 
 /// Upstream `BrotliCompareAndPushToQueue`.
@@ -372,7 +418,7 @@ fn compare_and_push_to_queue(
         is_good_pair = true;
     } else {
         let threshold = if pairs.is_empty() {
-            1e99
+            1e38
         } else {
             pairs[0].cost_diff.max(0.0)
         };
@@ -411,7 +457,7 @@ fn histogram_combine(
     max_clusters: usize,
     max_num_pairs: usize,
 ) -> usize {
-    let mut cost_diff_threshold = 0.0f64;
+    let mut cost_diff_threshold = 0.0f32;
     let mut min_cluster_size = 1usize;
     pairs.clear();
 
@@ -430,7 +476,7 @@ fn histogram_combine(
 
     while num_clusters > min_cluster_size {
         if pairs[0].cost_diff >= cost_diff_threshold {
-            cost_diff_threshold = 1e99;
+            cost_diff_threshold = 1e38;
             min_cluster_size = max_clusters;
             continue;
         }
@@ -489,7 +535,7 @@ fn histogram_combine(
 }
 
 /// Upstream `BrotliHistogramBitCostDistance`.
-fn bit_cost_distance(histogram: &Hist, candidate: &Hist) -> f64 {
+fn bit_cost_distance(histogram: &Hist, candidate: &Hist) -> CostF {
     if histogram.total == 0 {
         return 0.0;
     }
@@ -539,6 +585,17 @@ pub fn cluster_histograms(input: &[Hist], max_histograms: usize) -> (Vec<Hist>, 
         i += num_to_combine;
     }
 
+    if std::env::var("BROTLI_HIER_CLUST").as_deref() != Ok("0") {
+        num_clusters = hier_reduce(
+            &mut out,
+            &mut cluster_size,
+            &mut histogram_symbols,
+            &mut clusters,
+            &mut pairs,
+            num_clusters,
+            in_size,
+        );
+    }
     let max_num_pairs = (64 * num_clusters).min((num_clusters / 2) * num_clusters);
     num_clusters = histogram_combine(
         &mut out,
@@ -682,8 +739,8 @@ fn find_blocks(
     block_switch_bitcost: f64,
     num_histograms: usize,
     histograms: &[Hist],
-    insert_cost: &mut [f64],
-    cost: &mut [f64],
+    insert_cost: &mut [CostF],
+    cost: &mut [CostF],
     switch_signal: &mut [u8],
     block_id: &mut [u8],
 ) -> usize {
@@ -699,7 +756,7 @@ fn find_blocks(
 
     insert_cost.iter_mut().for_each(|c| *c = 0.0);
     for (i, h) in histograms.iter().enumerate() {
-        insert_cost[i] = log2(h.total);
+        insert_cost[i] = fast_log2(h.total);
     }
     let mut i = alphabet_size;
     while i != 0 {
@@ -716,8 +773,8 @@ fn find_blocks(
         let ix = byte_ix * bitmap_len;
         let symbol = usize::from(data[byte_ix]);
         let insert_cost_ix = symbol * num_histograms;
-        let mut min_cost = 1e99f64;
-        let mut block_switch_cost = block_switch_bitcost;
+        let mut min_cost = 1e30f32;
+        let mut block_switch_cost: CostF = block_switch_bitcost as CostF;
         for k in 0..num_histograms {
             cost[k] += insert_cost[insert_cost_ix + k];
             if cost[k] < min_cost {
@@ -726,7 +783,7 @@ fn find_blocks(
             }
         }
         if byte_ix < 2000 {
-            block_switch_cost *= 0.77 + (0.07 / 2000.0) * byte_ix as f64;
+            block_switch_cost *= 0.77f32 + (0.07f32 / 2000.0) * byte_ix as CostF;
         }
         for k in 0..num_histograms {
             cost[k] -= min_cost;
@@ -781,6 +838,57 @@ fn build_block_histograms(data: &[u16], block_ids: &[u8], hists: &mut [Hist]) {
 
 /// Upstream `ClusterBlocks`: batched pre-clustering + final clustering,
 /// then per-block best-histogram assignment.
+
+/// Hierarchical centroid reduction: the flat final combine is O(k^2)
+/// pair evaluations and every evaluation walks two full histograms —
+/// on centroid-scale inputs that is bandwidth-bound (fits q11: 15,262
+/// survivors of the 64-wide batch loop = 116M evaluations, ~19s).
+/// Re-window the survivors in 64-wide batches force-merged to at most
+/// `HIER_WINDOW_TARGET` each, repeating until at most
+/// `HIER_CENTROID_TARGET` remain; the flat combine then runs on the
+/// reduced set. Merge trees change (sizes move <0.1% on the corpus);
+/// the final remap — every input row against every final cluster — is
+/// untouched. `BROTLI_HIER_CLUST=0` restores the flat single-level
+/// combine.
+const HIER_CENTROID_TARGET: usize = 2048;
+const HIER_WINDOW_TARGET: usize = 16;
+
+#[allow(clippy::too_many_arguments)]
+fn hier_reduce(
+    out: &mut [Hist],
+    cluster_size: &mut [u32],
+    symbols: &mut [u32],
+    clusters: &mut Vec<u32>,
+    pairs: &mut Vec<HistogramPair>,
+    mut num_clusters: usize,
+    symbols_size: usize,
+) -> usize {
+    while num_clusters > HIER_CENTROID_TARGET {
+        let mut survivors: Vec<u32> = Vec::with_capacity(num_clusters);
+        let mut start = 0usize;
+        while start < num_clusters {
+            let ntc = (num_clusters - start).min(HISTOGRAMS_PER_BATCH);
+            let mut window: Vec<u32> = clusters[start..start + ntc].to_vec();
+            let n = histogram_combine(
+                out,
+                cluster_size,
+                symbols,
+                &mut window,
+                pairs,
+                ntc,
+                ntc,
+                HIER_WINDOW_TARGET,
+                HISTOGRAMS_PER_BATCH * HISTOGRAMS_PER_BATCH / 2,
+            );
+            survivors.extend_from_slice(&window[..n]);
+            start += ntc;
+        }
+        num_clusters = survivors.len();
+        *clusters = survivors;
+    }
+    num_clusters
+}
+
 fn cluster_blocks(
     data: &[u16],
     data_size: usize,
@@ -856,9 +964,20 @@ fn cluster_blocks(
         i += HISTOGRAMS_PER_BATCH;
     }
 
+    let mut clusters: Vec<u32> = (0..num_clusters as u32).collect();
+    if std::env::var("BROTLI_HIER_CLUST").as_deref() != Ok("0") {
+        num_clusters = hier_reduce(
+            &mut all_histograms,
+            &mut cluster_size,
+            &mut histogram_symbols,
+            &mut clusters,
+            &mut pairs,
+            num_clusters,
+            num_blocks,
+        );
+    }
     max_num_pairs = (64 * num_clusters).min((num_clusters / 2) * num_clusters);
     pairs.clear();
-    let mut clusters: Vec<u32> = (0..num_clusters as u32).collect();
     let num_final_clusters = histogram_combine(
         &mut all_histograms,
         &mut cluster_size,
@@ -871,9 +990,12 @@ fn cluster_blocks(
         max_num_pairs,
     );
 
-    // Assign each block to its best final histogram.
+    // Assign each block to its best final histogram. Block symbols
+    // index the FULL histogram set (ids are absolute; the hier
+    // reduction leaves gaps), so the dense index table is sized by
+    // all_histograms.len(), not the survivor count.
     let invalid_index = u32::MAX;
-    let mut new_index = vec![invalid_index; num_clusters];
+    let mut new_index = vec![invalid_index; all_histograms.len()];
     pos = 0;
     let mut next_index = 0u32;
     for blk in 0..num_blocks {
@@ -1026,8 +1148,8 @@ fn split_byte_vector_uncached(
     let mut num_blocks = 0usize;
     let alphabet_size = data_size;
     let max_histograms_buf = num_histograms;
-    let mut insert_cost = vec![0.0f64; alphabet_size * max_histograms_buf];
-    let mut cost = vec![0.0f64; num_histograms];
+    let mut insert_cost = vec![0.0f32; alphabet_size * max_histograms_buf];
+    let mut cost = vec![0.0f32; num_histograms];
     let bitmaplen = (num_histograms + 7) >> 3;
     let mut switch_signal = vec![0u8; length * bitmaplen];
     for _ in 0..iters {
