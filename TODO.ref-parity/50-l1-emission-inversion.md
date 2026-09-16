@@ -6,39 +6,46 @@ of the "language floor" — the 1.1x criterion stands)
 ## What the owner's challenge exposed
 
 "Rust must be at worst 1.1x of C in all workloads — this is either an
-algo problem or a code optimization problem." Reopened accordingly;
-three experiments this session:
+algo problem or a code optimization problem." Three experiments:
 
-1. Half-split at Fast on words L1: 3.39 -> 3.32s (~2%) — minor waste,
-   but it buys the -5.44% fits size win; left alone.
-2. Redundant guard trim in the fast matcher (5 branches/position
-   removed — the guards re-derive loop invariants the C never checks):
-   byte-identical, timing FLAT. The branches were predicted/fused.
-3. Fresh symbolicated profile of words L1: **encode_section owns ~65%
-   of the encode** (encode_frame_into splits ~1200 parse / ~1350 with
-   1116 under encode_content_parts -> encode_section), NOT the
-   matcher. The six-confirmation "parse floor" story was built on an
-   under-read profile.
+1. Half-split at Fast on words L1: ~2% — minor, buys the fits size win.
+2. Redundant guard trim in the fast matcher (5 branches/position):
+   byte-identical, FLAT. Branches were predicted.
+3. Fresh profile: **encode_section owns ~65%** of words zstd L1. The
+   mode search walks each sequence stream 2-3x (per candidate mode)
+   with a full build_ctable each — the C's ZSTD_selectEncodingType
+   uses entropy heuristics and re-encodes nothing.
 
-## The suspect (next session's lever)
+## Measured (2026-09-16, loop canon, load 30-40)
 
-`encode_section`'s mode search (task 25's cached-cost machinery) runs
-`stream_payload` per candidate mode — predefined AND FSE for each of
-the 3 streams — and each call walks the FULL code array
-(`encode_bit_count` per symbol) plus a complete `build_ctable`.
-Per block that is 6+ full walks + 6 table builds before the real
-emission; the C's ZSTD_selectEncodingType picks modes from cheap
-entropy heuristics and re-encodes nothing. On words L1 (~20 blocks,
-~700K sequences) that multiplies the per-sequence work several-fold.
+- **Mode-search walks = 10-16% of encode** on text L1 (words 3.22→2.89
+  with walks disabled via the ZSTD_NO_WALK probe, csv2m 1.73→1.46).
+  Real but NOT the 65% the profile suggested.
+- **Self-draining BitCStream.add_bits** (removes the 5-per-sequence
+  eager flush() calls): byte-identical (121/121 across 11 levels),
+  but timing is a wash-to-regression (dbdump L19 consistently +5%,
+  csv2m L19 mixed, words L1 flat). REVERTED — the removed flushes
+  were already cheap; the drain-in-branch defeats optimization.
 
-## Plan
+## The real 65%: the FINAL writer's per-sequence cost
 
-1. Single-pass cost accumulation: one walk computing all candidate
-   modes' costs together (the bit counts share the same symbol
-   stream), or entropy-preselection like the C (pick the mode before
-   any walk; verify against the exact chooser via the corpus sweep).
-2. Re-profile; then the parse (~35%) gets the same treatment only if
-   still needed for the 1.1x bar.
-3. The 1.1x criterion replaces "floor" language in all remaining
-   cells: brotli q1 (CreateCommands), zstd L6/L19 walks get the same
-   emission-first audit.
+After subtracting the 10-16% mode-search walks, ~50% of words L1
+sits in the FINAL bitstream writer loop (encode_section +14444
+offset region). This is ONE walk over ~700K sequences doing: 3 FSE
+state-machine steps + ~6 add_bits + ~5 flush() calls per sequence.
+The C's equivalent (ZSTD_encodeSequences_body) does the same 3 state
+steps + ~6 BIT_addBits but with inline raw-pointer stores. The
+per-sequence cost difference (ours ~22ns, C ~10-15ns) at this volume
+= the dominant residual. Next session: attribute the writer's
+per-sequence cost further (is it the FSE state machine's table
+lookups through the CState struct, the BitCStream's Vec-target
+stores, or the extras path's double indexing), then optimize.
+
+## Plan (next session)
+
+1. Instrument the writer loop: separate costs of state-machine steps
+   vs bit writes vs extras indexing (env-gated counters).
+2. Optimize the dominant component (likely the Vec-target bit writes:
+   pre-allocate exact capacity, write via raw slices not extend).
+3. Re-audit all 21+ "floor" cells under the 1.1x criterion with
+   instruction-attributed profiles.
