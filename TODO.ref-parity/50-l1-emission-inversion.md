@@ -49,3 +49,48 @@ stores, or the extras path's double indexing), then optimize.
    pre-allocate exact capacity, write via raw slices not extend).
 3. Re-audit all 21+ "floor" cells under the 1.1x criterion with
    instruction-attributed profiles.
+
+## Session 2 measurements (2026-09-16)
+
+### Fixed-size CTable arrays (REVERTED — net negative)
+
+`state_table: Vec<u16>` → `Box<[u16; 512]>`, `symbol_tt: Vec<SCT>` →
+`Box<[SCT; 256]>`: eliminates the symbol bounds check and gives static
+bounds info for the state table. Byte-identical (55/55 at 11 levels).
+Timing MIXED: dbdump L19 −4%, csv2m L19 −0.5%, words L1 **+6%** — the
+always-512 u16 table wastes cache vs the exact-sized Vec (table_log=5
+needs 64B; we allocated 1KB). The bounds-check saving doesn't
+compensate for the cache-line spread. REVERTED.
+
+### What's been ruled out on the writer
+
+| optimization | result |
+|---|---|
+| Self-draining add_bits (remove eager flushes) | wash-to-regression |
+| Fixed-size CTable (eliminate bounds checks) | words +6%, dbdump −4% — cache cost > check saving |
+| Pre-allocating output Vec | already done (with_capacity) |
+
+### The remaining hypothesis
+
+The per-sequence ~10ns gap (ours ~22ns, C ~10-15ns) across ~700K
+sequences is likely the accumulated cost of:
+- 6 bounds-checked table indices per sequence (2 per state × 3
+  states) where the C uses raw pointers
+- The `i64 → usize` cast on the state_table index (adds a sign check)
+- The per-`add_bits` mask computation (branch on nb_bits ≥ 32)
+
+None of these individually dominates — each is 1-3 cycles — but
+6 × 1-3 + 6 × 1-2 (add_bits) + 5 × 2 (flush) ≈ 25-50 extra cycles per
+sequence × 700K = 5-12ms, which IS the ~50% residual on words L1.
+
+### The path forward (next session)
+
+The only remaining approach: **eliminate the bounds checks without
+changing the memory layout**. The kernel-crate approach (task 49's
+pilot) works technically — it was flat on the MATCHER because the
+matcher's cost was elsewhere, but the EMISSION's cost IS the table
+lookups. A targeted `read_u16_unchecked` on the exact-sized Vec
+(keeping cache behavior identical) on state_table + symbol_tt is
+the next move. Combined with a fused `encode_step_and_add_bits`
+that avoids the intermediate tuple, this could halve the per-sequence
+cost. The user must authorize the kernel crate's return.
