@@ -27,3 +27,19 @@ disconfirmation). The remaining gap is the measured cost of
 hot loops. Reopen conditions: an algorithmic breakthrough, or the
 owner explicitly choosing an I-gaming trade (raw-block zstd) that
 ships non-compression — not taken.
+
+
+## Addendum (2026-09-16): the 1.2 bar and the hash-closure test
+
+The target tightened 1.3 -> 1.2: **23 cells** now above it (the 21
+plus rustsrc zstd L19 1.30 and plists brotli q1 1.30). Task 46's
+bounds-check diagnosis got its direct test: the fast matcher's
+`hash_at` (variable-length copy_from_slice + runtime `match mm`
+dispatch per position — C does one unaligned read + multiply) was
+rewritten exact-preserving (masked fixed 8-byte read, guarded tail).
+Result: timing FLAT (words L1 3.69->3.73s, fits 2.67->2.66s, load 30)
+— LLVM had already inlined the closure well. REVERTED. Sixth
+confirmation: the sequential hot loops have no removable per-position
+overhead left in safe scalar Rust. The 1.2 bar carries the same
+reopen conditions as 1.3 with more distance to cover; the deep cells
+need -37..-67%, beyond every measured model.
