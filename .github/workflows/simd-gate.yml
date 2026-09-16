@@ -13,11 +13,22 @@ on:
 jobs:
   canary:
     runs-on: ubuntu-latest
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - name: Compile the std::simd canary
-        run: rustc --edition 2021 -o /tmp/canary tools/simd_canary.rs
-      - name: Run
-        run: /tmp/canary
+      # INVERTED POLARITY (task 44): with continue-on-error, BOTH states
+      # produced a green run conclusion — the weekly cron looked
+      # identical whether the gate had flipped or not (and a
+      # run-level "success" grep reads as flipped). Now: unstable
+      # (expected) => green run; COMPILES => red run with an
+      # annotation naming the reopen procedure. The red run is the
+      # alarm — do not "fix" it by reverting this inversion.
+      - name: std::simd canary (red = stabilized, act on it)
+        run: |
+          if rustc --edition 2021 -o /tmp/canary tools/simd_canary.rs 2>/tmp/canary_err.txt; then
+            echo "::error::std::simd COMPILED on stable rustc — portable_simd stabilized! Reopen task 30 (TODO.ref-parity/30-simd-toolchain-gate.md) and the SIMD program: the ~15 hot loops it unlocks are catalogued there; the remaining 21 board cells are gated on exactly this."
+            /tmp/canary
+            exit 1
+          fi
+          echo "still unstable (expected); first error:"
+          head -1 /tmp/canary_err.txt
