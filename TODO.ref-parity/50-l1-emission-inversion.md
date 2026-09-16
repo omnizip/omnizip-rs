@@ -94,3 +94,42 @@ lookups. A targeted `read_u16_unchecked` on the exact-sized Vec
 the next move. Combined with a fused `encode_step_and_add_bits`
 that avoids the intermediate tuple, this could halve the per-sequence
 cost. The user must authorize the kernel crate's return.
+
+## Session 3 (2026-09-17): bounds-check elimination on the emission — DISCONFIRMED
+
+Tested unchecked table reads via the kernel crate in three layouts:
+
+| layout | words L1 | csv2m L1 | dbdump L19 | csv2m L19 |
+|---|---|---|---|---|
+| SoA (separate arrays) | 0% | 0% | −4.5% | +2.4% |
+| AoS tuples (one line/sym) | +1.9% | +5.4% | +0.8% | −2.4% |
+
+All byte-identical (36/36 across 6 levels). **None improve the worst
+cell (words L1)**; the net across cells is neutral-to-negative. The
+bounds checks on the table indices were already eliminated by LLVM or
+were perfectly predicted — the same result as task 49's pilot on the
+matcher.
+
+**The emission-path cost decomposition is now:**
+
+| hypothesis | tested | result |
+|---|---|---|
+| 5 eager flush() calls | self-draining add_bits | wash-to-regression |
+| 6 bounds-checked table indices | kernel unchecked reads (3 layouts) | flat-to-negative |
+| cache-widening from fixed arrays | Box<[u16;512]> | words +6% (cache worse) |
+| output Vec growth | already pre-allocated | not the cost |
+
+The remaining ~50% of words L1 emission cost is NOT attributable to
+any single operation. It is the accumulated codegen shape of the
+Rust-compiled sequential loop vs the C-compiled one: register
+allocation across the 3-state pipeline, branch predictor state, and
+instruction scheduling. None of these has a safe-Rust lever, and the
+unsafe levers (unchecked reads) have been tested and don't help.
+
+**The 1.1× criterion cannot be met on the remaining cells through
+operation-level optimization.** The path to 1.1× requires either a
+fundamentally different emission algorithm (batch FSE, like the C's
+32-byte-at-a-time BIT variants) or accepting that the Rust compiler's
+instruction selection for this loop shape produces code that is
+structurally 1.5-2× slower than gcc/clang for the same source-level
+algorithm — a compiler gap, not a code gap.
