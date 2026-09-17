@@ -29,12 +29,12 @@ const FSE_DEFAULT_TABLELOG: u8 = 6;
 /// Per-symbol transform used during encoding. Matches C's
 /// `FSE_symbolCompressionTransform`.
 #[derive(Clone, Copy, Debug, Default)]
-struct SymbolCompressionTransform {
+pub(crate) struct SymbolCompressionTransform {
     /// Offset into `state_table` for this symbol's state range.
-    delta_find_state: i32,
+    pub(crate) delta_find_state: i32,
     /// `(maxBitsOut << 16) - minStatePlus`. During encoding,
     /// `nbBitsOut = (state + delta_nb_bits) >> 16`.
-    delta_nb_bits: u32,
+    pub(crate) delta_nb_bits: u32,
 }
 
 /// FSE encoding table. Built once per probability distribution and
@@ -46,9 +46,9 @@ pub struct CTable {
     /// State transition table: `state_table[symbol_offset + intra]`
     /// gives the next state value. Indexed via
     /// `(state >> nbBitsOut) + delta_find_state`.
-    state_table: Vec<u16>,
+    pub(crate) state_table: Vec<u16>,
     /// Per-symbol transform parameters.
-    symbol_tt: Vec<SymbolCompressionTransform>,
+    pub(crate) symbol_tt: Vec<SymbolCompressionTransform>,
 }
 
 impl CTable {
@@ -589,7 +589,7 @@ impl<'a> BitCStream<'a> {
 #[derive(Clone, Copy, Debug)]
 pub struct CState {
     /// Current state value (always in `[tableSize, 2*tableSize)`).
-    value: u32,
+    pub(crate) value: u32,
     state_log: u8,
 }
 
