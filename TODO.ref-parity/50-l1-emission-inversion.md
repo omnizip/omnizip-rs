@@ -200,3 +200,16 @@ benchmarks (zloop/gloop).
 2. zstd fast matcher parse (51% of words L1): closures → local
    variables, inline hash computation.
 3. zstd lazy chain walk (L6 cells): the chain-walk loop shape.
+
+## Session 4 (2026-09-17): brotli hash inline — FLAT; brotli q1 confirmed compiler-optimal
+
+Inlined the Hash function at 2 call sites in CreateCommands
+(sub-slice → direct load + arithmetic): 3/3 interleaved rounds flat
+(4.45 vs 4.46, 4.45 vs 4.47, 4.39 vs 4.36 — all within noise at load
+~65). The Hash was already being inlined by LLVM. REVERTED.
+
+The brotli two-pass CreateCommands is confirmed structurally optimal
+for rustc: pre-allocated buffers, direct slice writes, simple hash,
+no Vec round trips. The 1.37× residual is the accumulated codegen
+shape of the labeled-loop transliteration of the C's goto-based
+control flow — no source-level change identified that helps.
