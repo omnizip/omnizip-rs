@@ -709,69 +709,133 @@ fn encode_sequences_bitstream(
     of_ctable: &CTable,
     nb_seq: usize,
 ) -> Result<usize, ZstdError> {
-    // We write into a Vec since BIT_CStream needs growable storage.
-    let mut out_vec: Vec<u8> = Vec::with_capacity(dst.len());
-    let mut bitc = BitCStream::new(&mut out_vec);
+    // Structural writer (task 50 attempt 2): local-variable state
+    // machines, pre-allocated buffer, macro-based bit ops.
+    let max_out = nb_seq.saturating_mul(8) + 32;
+    let mut buf = vec![0u8; max_out];
+    let mut pos: usize = 0;
+    let mut container: u64 = 0;
+    let mut bit_pos: u32 = 0;
+
+    macro_rules! flush_bits {
+        () => {{
+            let nb_bytes = (bit_pos >> 3) as usize;
+            if nb_bytes > 0 && pos + 8 <= buf.len() {
+                let bytes = container.to_le_bytes();
+                buf[pos..pos + 8].copy_from_slice(&bytes);
+                pos += nb_bytes;
+                bit_pos &= 7;
+                container = if nb_bytes >= 8 {
+                    0
+                } else {
+                    container >> (nb_bytes * 8)
+                };
+            }
+        }};
+    }
+
+    macro_rules! add_bits {
+        ($v:expr, $n:expr) => {{
+            let v = $v;
+            let n = $n;
+            if n > 0 {
+                if bit_pos + n > 64 {
+                    flush_bits!();
+                }
+                let mask: u64 = if n >= 64 { u64::MAX } else { (1u64 << n) - 1 };
+                container |= (v & mask) << bit_pos;
+                bit_pos += n;
+            }
+        }};
+    }
 
     if nb_seq == 0 {
-        return Ok(0);
+        return Err(ZstdError::Corrupt {
+            reason: "empty stream".into(),
+        });
     }
 
-    // Initialize 3 states from the LAST sequence's codes.
-    // Order in C: ML, OF, LL.
-    let mut state_ml = CState::init2(ml_ctable, ml_codes[nb_seq - 1]);
-    let mut state_of = CState::init2(of_ctable, of_codes[nb_seq - 1]);
-    let mut state_ll = CState::init2(ll_ctable, ll_codes[nb_seq - 1]);
+    let init_ml = CState::init2(ml_ctable, ml_codes[nb_seq - 1]);
+    let init_of = CState::init2(of_ctable, of_codes[nb_seq - 1]);
+    let init_ll = CState::init2(ll_ctable, ll_codes[nb_seq - 1]);
+
+    // Local state values (register-resident).
+    let mut st_ml: u32 = init_ml.value;
+    let mut st_of: u32 = init_of.value;
+    let mut st_ll: u32 = init_ll.value;
 
     // Write the last sequence's extra bits.
-    bitc.add_bits(
+    add_bits!(
         u64::from(ll_extras[nb_seq - 1]),
-        u32::from(LL_BITS[ll_codes[nb_seq - 1] as usize]),
+        u32::from(LL_BITS[ll_codes[nb_seq - 1] as usize])
     );
-    bitc.flush();
-    bitc.add_bits(
+    add_bits!(
         u64::from(ml_extras[nb_seq - 1]),
-        u32::from(ML_BITS[ml_codes[nb_seq - 1] as usize]),
+        u32::from(ML_BITS[ml_codes[nb_seq - 1] as usize])
     );
-    bitc.flush();
-    bitc.add_bits(
+    add_bits!(
         u64::from(off_bases[nb_seq - 1]),
-        u32::from(of_codes[nb_seq - 1]),
+        u32::from(of_codes[nb_seq - 1])
     );
-    bitc.flush();
 
-    // Encode remaining sequences in reverse (nb_seq-2 down to 0).
-    // Each iteration: encode OF, ML, LL symbols via FSE, then write extras.
     for n in (0..nb_seq - 1).rev() {
-        // FSE state updates (writes bits for the next symbol's state).
-        state_of.encode(&mut bitc, of_ctable, of_codes[n]);
-        state_ml.encode(&mut bitc, ml_ctable, ml_codes[n]);
-        bitc.flush();
-        state_ll.encode(&mut bitc, ll_ctable, ll_codes[n]);
-        bitc.flush();
+        // Inline FSE state steps (3 per sequence).
+        let sym_of = of_codes[n] as usize;
+        let tt_of = &of_ctable.symbol_tt[sym_of];
+        let nb_of = (st_of + tt_of.delta_nb_bits) >> 16;
+        add_bits!(u64::from(st_of), nb_of);
+        st_of = u32::from(
+            of_ctable.state_table
+                [((i64::from(st_of >> nb_of) + i64::from(tt_of.delta_find_state)) as usize)],
+        );
 
-        // Extra bits for this sequence.
-        bitc.add_bits(
+        let sym_ml = ml_codes[n] as usize;
+        let tt_ml = &ml_ctable.symbol_tt[sym_ml];
+        let nb_ml = (st_ml + tt_ml.delta_nb_bits) >> 16;
+        add_bits!(u64::from(st_ml), nb_ml);
+        st_ml = u32::from(
+            ml_ctable.state_table
+                [((i64::from(st_ml >> nb_ml) + i64::from(tt_ml.delta_find_state)) as usize)],
+        );
+
+        let sym_ll = ll_codes[n] as usize;
+        let tt_ll = &ll_ctable.symbol_tt[sym_ll];
+        let nb_ll = (st_ll + tt_ll.delta_nb_bits) >> 16;
+        add_bits!(u64::from(st_ll), nb_ll);
+        st_ll = u32::from(
+            ll_ctable.state_table
+                [((i64::from(st_ll >> nb_ll) + i64::from(tt_ll.delta_find_state)) as usize)],
+        );
+
+        add_bits!(
             u64::from(ll_extras[n]),
-            u32::from(LL_BITS[ll_codes[n] as usize]),
+            u32::from(LL_BITS[ll_codes[n] as usize])
         );
-        bitc.add_bits(
+        add_bits!(
             u64::from(ml_extras[n]),
-            u32::from(ML_BITS[ml_codes[n] as usize]),
+            u32::from(ML_BITS[ml_codes[n] as usize])
         );
-        bitc.flush();
-        bitc.add_bits(u64::from(off_bases[n]), u32::from(of_codes[n]));
-        bitc.flush();
+        add_bits!(u64::from(off_bases[n]), u32::from(of_codes[n]));
+
+        flush_bits!();
     }
 
-    // Flush final states in reverse init order: ML, OF, LL.
-    state_ml.flush(&mut bitc);
-    state_of.flush(&mut bitc);
-    state_ll.flush(&mut bitc);
+    // Flush final states.
+    add_bits!(u64::from(st_ml), u32::from(ml_ctable.table_log()));
+    flush_bits!();
+    add_bits!(u64::from(st_of), u32::from(of_ctable.table_log()));
+    flush_bits!();
+    add_bits!(u64::from(st_ll), u32::from(ll_ctable.table_log()));
 
-    let written = bitc.close();
-    let len = written.min(dst.len());
-    dst[..len].copy_from_slice(&out_vec[..len]);
+    add_bits!(1, 1);
+    flush_bits!();
+    if bit_pos > 0 && pos < buf.len() {
+        buf[pos] = container as u8;
+        pos += 1;
+    }
+
+    let len = pos.min(dst.len());
+    dst[..len].copy_from_slice(&buf[..len]);
     Ok(len)
 }
 
