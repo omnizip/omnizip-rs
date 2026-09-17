@@ -893,6 +893,14 @@ pub fn compress_block_fast4_with_prefix(
     let h_bits = ms.hash_log;
     // C ZSTD_hashPtr keyed on mls (5/6/7 at L1-4, 4 otherwise).
     let hash_at = |p: usize| -> usize {
+        // Fast path for mls=4 (L1): single u32 load + multiply — no
+        // buffer fill, no avail computation, no match dispatch. mm is
+        // loop-invariant so the branch is always predicted.
+        if mm == 4 {
+            let v = u32::from_le_bytes(src[p..p + 4].try_into().unwrap());
+            return ((v.wrapping_mul(2_654_435_761) >> (32 - h_bits.min(32))) as usize)
+                & ((1usize << h_bits.min(32)) - 1);
+        }
         let avail = (src.len() - p).min(mm.max(4));
         if avail < 4 {
             return 0;
