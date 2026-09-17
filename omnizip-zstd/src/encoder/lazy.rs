@@ -44,12 +44,18 @@ fn read64(src: &[u8], pos: usize) -> u64 {
 
 /// `ZSTD_hashPtr` for mls = 4/5/6. Reading 8 bytes at `pos` is safe:
 /// hash positions are always < ilimit = iend - 8.
+#[inline(always)]
 fn hash_ptr(src: &[u8], pos: usize, h_bits: u32, mls: usize) -> usize {
-    let h = match mls {
-        4 => u64::from(read32(src, pos).wrapping_mul(PRIME4_BYTES)) >> (32 - h_bits),
-        6 => (read64(src, pos) << 16).wrapping_mul(PRIME6_BYTES) >> (64 - h_bits),
-        // default: 5
-        _ => (read64(src, pos) << 24).wrapping_mul(PRIME5_BYTES) >> (64 - h_bits),
+    // L5/L6 lazy tiers are loop-invariant; specialize mls=4 (the
+    // common L6 path) before the general dispatch. One 32-bit load,
+    // one multiply, one shift — matching ZSTD_hashPtr.
+    if mls == 4 {
+        return (read32(src, pos).wrapping_mul(PRIME4_BYTES) >> (32 - h_bits)) as usize;
+    }
+    let h = if mls == 6 {
+        (read64(src, pos) << 16).wrapping_mul(PRIME6_BYTES) >> (64 - h_bits)
+    } else {
+        (read64(src, pos) << 24).wrapping_mul(PRIME5_BYTES) >> (64 - h_bits)
     };
     h as usize
 }
