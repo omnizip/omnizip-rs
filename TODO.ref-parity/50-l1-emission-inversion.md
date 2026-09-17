@@ -170,3 +170,33 @@ gap** for sequential bit-manipulation loops. No source-level change
 closes it. The paths are: (a) a fundamentally different algorithm
 (e.g., table-driven batch encoding), (b) rustc improvement, or
 (c) hand-written assembly (forbidden by the workspace invariant).
+
+## CORRECTION + SHIP (2026-09-17): structural writer is 7% FASTER, shipped as v0.21.98
+
+The earlier "12× slower" was a **measurement error** — box load
+(~106) during the test suite caused both versions to run at 650-730s.
+Interleaved zloop A/B at the same load:
+
+| round | orig (s/50 it) | struct (s/50 it) |
+|---|---|---|
+| 1 | 1.77 | 1.61 |
+| 2 | 1.71 | 1.58 |
+| 3 | 1.71 | 1.67 |
+| 4 | 1.80 | 1.64 |
+
+**4/4 consistent: structural is 7% faster.** Shipped as v0.21.98
+(PR #625). Byte-identical 42/42, tests 191/191.
+
+LESSON (standing): NEVER use test-suite wall time for perf
+conclusions on a shared box. ALWAYS use interleaved targeted
+benchmarks (zloop/gloop).
+
+## Next targets (the structural technique generalizes)
+
+1. brotli two-pass CreateCommands (92% of q1 encode, cells at
+   1.37-1.46×): already uses pre-allocated buffers and direct slice
+   writes; the structural gain may be smaller but the cells are
+   closest to the 1.1× bar.
+2. zstd fast matcher parse (51% of words L1): closures → local
+   variables, inline hash computation.
+3. zstd lazy chain walk (L6 cells): the chain-walk loop shape.
