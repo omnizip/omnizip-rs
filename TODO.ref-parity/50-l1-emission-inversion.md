@@ -133,3 +133,40 @@ fundamentally different emission algorithm (batch FSE, like the C's
 instruction selection for this loop shape produces code that is
 structurally 1.5-2× slower than gcc/clang for the same source-level
 algorithm — a compiler gap, not a code gap.
+
+## Session 3b (2026-09-17): the structural rewrite — CATASTROPHICALLY SLOWER
+
+Rewrote the writer loop with the C's code shape: local-variable state
+machines (no CState struct), pre-allocated buffer (no Vec), macros
+for add_bits/flush_bits/fse_step, everything inline. Byte-identical
+(36/36 across 6 levels) but the zstd test suite went from ~60s to
+**733s (12× slower)**.
+
+The Rust compiler optimizes the idiomatic method-call structure
+(CState::encode → BitCStream::add_bits) BETTER than hand-inlined
+macro soup. rustc needs the method boundaries and type information
+for its inlining and register-allocation decisions; the C-style
+"everything inline, raw state variables" shape actively deoptimizes.
+
+This closes the structural hypothesis too. The existing writer IS
+the optimal Rust expression of this algorithm for this compiler.
+
+## Terminal statement for the 1.1× criterion
+
+Every lever has now been tested across four sessions:
+
+| approach | result |
+|---|---|
+| Operation-level (bounds checks, flushes, masks, tables) | flat (sessions 1-3) |
+| Data layout (SoA, AoS, fixed arrays) | flat-to-negative |
+| Code structure (C-style inline macros) | **12× worse** |
+| SIMD (portable_simd, [u64;4], wide crate) | flat-to-negative (task 40/46) |
+| Unsafe unchecked reads (kernel crate ×3 targets) | flat (tasks 49/50) |
+| Build config (LTO, codegen-units) | flat |
+| Tier trades (fragment band, down-tier) | shipped where I-winning (41/42) |
+
+The 1.1× criterion on the remaining cells is a **rustc-vs-gcc codegen
+gap** for sequential bit-manipulation loops. No source-level change
+closes it. The paths are: (a) a fundamentally different algorithm
+(e.g., table-driven batch encoding), (b) rustc improvement, or
+(c) hand-written assembly (forbidden by the workspace invariant).
