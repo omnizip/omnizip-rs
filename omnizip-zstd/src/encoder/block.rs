@@ -603,6 +603,172 @@ pub fn encode_frame_with_dict(
     Ok(out)
 }
 
+/// Compress `input` into a STANDALONE-DECODABLE frame warmed by
+/// `window` (prior content, e.g. the previous chunk's tail).
+///
+/// Unlike [`encode_frame_with_dict`] (whose frames need the dict to
+/// decode), the window is emitted as raw blocks at the head of the
+/// frame, so any conformant ZSTD decoder resolves the warmed
+/// back-references. The output frame decodes to exactly
+/// `window || input`; callers slice their logical content by
+/// `window.len()` (LimniFS: `SliceRef::drop_byte_start`).
+///
+/// Strategy: seed the match finder with the window positions (the
+/// same `seed_prefix` the dict path uses), then compress the input
+/// region with matches allowed back into the window. The frame is
+/// single-segment (window = content size), so every in-frame
+/// distance is format-legal; the matchfinder's distance cap is the
+/// full frame length.
+///
+/// Deterministic: output depends only on (window, input, level).
+///
+/// # Errors
+///
+/// Returns [`ZstdError::Corrupt`] on internal arithmetic overflow.
+pub fn encode_frame_warm(window: &[u8], input: &[u8], level: u8) -> Result<Vec<u8>, ZstdError> {
+    use crate::encoder::cparams::Strategy;
+    use crate::encoder::match_finder::{
+        compress_block_fast_with_prefix, compress_block_lazy2_with_prefix,
+        compress_block_lazy_with_prefix,
+    };
+
+    let total_len = window.len() + input.len();
+    let mut params = crate::encoder::cparams::get_params_for(level, total_len);
+    params.hash_log = cap_hash_log_for_input(params.hash_log, total_len);
+
+    let mut virtual_stream: Vec<u8> = Vec::with_capacity(total_len);
+    virtual_stream.extend_from_slice(window);
+    let prefix_len = virtual_stream.len();
+    virtual_stream.extend_from_slice(input);
+
+    let mut out = Vec::with_capacity(total_len / 2 + 64);
+    let mut match_state = MatchState::new(params.hash_log);
+    // Seed with the hash family the finder at THIS level probes
+    // (mls-keyed; hash4 seeding never hits at min_match >= 5).
+    let warm_min_match = params.min_match.max(5) as usize;
+    match_state.seed_prefix_mls(&virtual_stream, prefix_len, warm_min_match);
+
+    out.extend_from_slice(&crate::constants::MAGIC_BYTES);
+    // No Dictionary_ID: the window is frame content, not a dict.
+    write_frame_header(&mut out, total_len, None);
+
+    // Window as raw blocks: `last` only if there is no input.
+    for (i, chunk) in window.chunks(BLOCK_MAX_SIZE).enumerate() {
+        let is_last_window_block = i + 1 == window.len().div_ceil(BLOCK_MAX_SIZE);
+        let hdr: u32 =
+            (chunk.len() as u32) << 3 | (is_last_window_block && input.is_empty()) as u32;
+        out.extend_from_slice(&hdr.to_le_bytes()[..3]);
+        out.extend_from_slice(chunk);
+    }
+
+    // Opt-tier strategies are not wired for warm frames (the opt
+    // planner has no seeded-prefix entry point); they defer DOWN to
+    // Lazy2 rather than erroring. Review decision: acceptable for
+    // the warm use case (ratio tiers rarely want a raw-block
+    // prefix), flagged in the PR description.
+    let strategy = if matches!(
+        params.strategy,
+        Strategy::Btopt | Strategy::Btultra | Strategy::Btultra2
+    ) {
+        Strategy::Lazy2
+    } else {
+        params.strategy
+    };
+
+    let mut rep_offsets = [1u32, 4, 8];
+    let mut last_huf_weights: Option<Vec<u8>> = None;
+    let mut offset = prefix_len;
+    let end = virtual_stream.len();
+
+    while offset < end {
+        let remaining = end - offset;
+        let chunk_size = remaining.min(BLOCK_MAX_SIZE);
+        let is_last = offset + chunk_size == end;
+
+        let mut seq_store = SeqStore::new();
+        seq_store.reset(rep_offsets);
+        let min_match = params.min_match.max(5) as usize;
+        // Single-segment frame: every in-frame distance is legal.
+        let max_dist = total_len;
+
+        match strategy {
+            Strategy::Fast | Strategy::DoubleFast => {
+                crate::encoder::match_finder::compress_block_fast4_with_prefix(
+                    &virtual_stream[..offset + chunk_size],
+                    offset,
+                    &mut seq_store,
+                    &mut match_state,
+                    min_match,
+                    max_dist,
+                );
+            }
+            Strategy::Greedy => {
+                compress_block_fast_with_prefix(
+                    &virtual_stream[..offset + chunk_size],
+                    offset,
+                    &mut seq_store,
+                    &mut match_state,
+                    min_match,
+                );
+            }
+            Strategy::Lazy => {
+                compress_block_lazy_with_prefix(
+                    &virtual_stream[..offset + chunk_size],
+                    offset,
+                    &mut seq_store,
+                    &mut match_state,
+                    min_match,
+                );
+            }
+            Strategy::Lazy2 | Strategy::Btlazy2 => {
+                compress_block_lazy2_with_prefix(
+                    &virtual_stream[..offset + chunk_size],
+                    offset,
+                    &mut seq_store,
+                    &mut match_state,
+                    min_match,
+                );
+            }
+            _ => unreachable!("strategy mapped to a wired tier above"),
+        }
+
+        let block_initial_reps = rep_offsets;
+        let chunk = &virtual_stream[offset..offset + chunk_size];
+
+        if chunk.len() >= 2 && chunk.iter().all(|&b| b == chunk[0]) {
+            write_rle_block(&mut out, chunk[0], chunk.len(), is_last);
+            last_huf_weights = None;
+        } else {
+            let mut compressed_content = Vec::new();
+            let mut block_tables = None;
+            let encode_result = encode_compressed_content(
+                &mut compressed_content,
+                &seq_store,
+                &mut last_huf_weights,
+                &mut block_tables,
+                block_initial_reps,
+            );
+            let encode_ok = encode_result.is_ok();
+
+            if encode_ok && compressed_content.len() < chunk.len() {
+                rep_offsets = encode_result.as_ref().map_or(block_initial_reps, |&r| r);
+                write_compressed_block_header(&mut out, compressed_content.len(), is_last);
+                out.extend_from_slice(&compressed_content);
+            } else {
+                write_raw_block(&mut out, chunk, is_last);
+                last_huf_weights = None;
+            }
+        }
+        offset += chunk_size;
+    }
+
+    // Checksum over the full frame content (window + input).
+    let checksum = xxhash::zstd_frame_checksum(&virtual_stream);
+    out.extend_from_slice(&checksum.to_le_bytes());
+
+    Ok(out)
+}
+
 /// Write the frame header using the smallest FCS encoding that fits,
 /// matching the C reference's priority order.
 ///

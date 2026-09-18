@@ -139,3 +139,15 @@ pub fn encode_frame_with_dict(
 ) -> Result<Vec<u8>, ZstdError> {
     block::encode_frame_with_dict(plaintext, level, dict)
 }
+
+/// Compress `input` warmed by `window` into a STANDALONE-decodable
+/// frame (decodes to `window || input`). See
+/// [`block::encode_frame_warm`].
+///
+/// # Errors
+///
+/// Returns [`ZstdError::Corrupt`] on internal failures or when the
+/// level's strategy tier is not wired for warm encoding.
+pub fn encode_frame_warm(window: &[u8], input: &[u8], level: u8) -> Result<Vec<u8>, ZstdError> {
+    block::encode_frame_warm(window, input, level)
+}

@@ -40,6 +40,29 @@ pub const REP_NUM: usize = 3;
 
 /// Hash 4 bytes at `data[pos..]` into `hBits` bits.
 /// Matches C's `ZSTD_hash4Ptr`.
+/// The 5/6/7-byte hash families `compress_block_fast4_with_prefix`
+/// probes at min_match >= 5 (mirrors the closure's mm branch; kept
+/// standalone so seeding and probing agree byte-for-byte).
+pub(crate) fn hash_mls(data: &[u8], pos: usize, mm: usize, h_bits: u32) -> u32 {
+    let mut buf = [0u8; 8];
+    let avail = (data.len() - pos).min(mm.max(4));
+    if avail < 4 {
+        return 0;
+    }
+    buf[..avail].copy_from_slice(&data[pos..pos + avail]);
+    let v64 = match mm {
+        5 => (u64::from_le_bytes(buf) << 24).wrapping_mul(889_523_592_379),
+        6 => (u64::from_le_bytes(buf) << 16).wrapping_mul(227_718_039_650_203),
+        7 => (u64::from_le_bytes(buf) << 8).wrapping_mul(58_295_818_150_454_627),
+        _ => {
+            return (((u32::from_le_bytes(buf[..4].try_into().unwrap()).wrapping_mul(2_654_435_761))
+                >> (32 - h_bits.min(32))) as u32)
+                & ((1u32 << h_bits.min(32)) - 1);
+        }
+    };
+    (((v64 >> (64 - h_bits)) as u32) & ((1u32 << h_bits) - 1)).min((1u32 << h_bits) - 1)
+}
+
 fn hash4(data: &[u8], pos: usize, h_bits: u32) -> u32 {
     let val = u32::from_le_bytes(data[pos..pos + 4].try_into().unwrap());
     val.wrapping_mul(PRIME4_BYTES) >> (32 - h_bits)
@@ -242,6 +265,23 @@ impl MatchState {
     /// the start of the prefix). The block-level compressors must be
     /// told the `prefix_len` offset so their own positions stay
     /// consistent.
+    /// Seed with the MLS-keyed hash family the block finders
+    /// actually probe at `min_match >= 5` (`seed_prefix` uses the
+    /// 4-byte hash; at mls >= 5 the fast/lazy finders hash with the
+    /// 5/6/7-byte families, so a hash4-seeded table never hits).
+    pub(crate) fn seed_prefix_mls(&mut self, buf: &[u8], prefix_len: usize, mls: usize) {
+        let mm = mls.max(MIN_MATCH);
+        if prefix_len < mm {
+            return;
+        }
+        let limit = prefix_len - mm + 1;
+        for pos in 0..limit {
+            let h = hash_mls(buf, pos, mm, self.hash_log);
+            self.hash_table[h as usize] = pos as u32;
+        }
+        self.next_to_update = prefix_len as u32;
+    }
+
     pub(crate) fn seed_prefix(&mut self, buf: &[u8], prefix_len: usize) {
         if prefix_len < MIN_MATCH {
             return;
