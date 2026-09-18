@@ -616,12 +616,23 @@ pub fn encode_frame_with_dict(
 /// `window || input`; callers slice their logical content by
 /// `window.len()` (LimniFS: `SliceRef::drop_byte_start`).
 ///
+/// Opt-tier note: Btopt/Btultra/Btultra2 defer to Lazy2 in warm
+/// mode — the opt planner has no seeded entry point. Acceptable for
+/// the warm use case (LimniFS uses default tier); block them if a
+/// caller needs opt-tier warm compression.
+///
 /// Strategy: seed the match finder with the window positions (the
 /// same `seed_prefix` the dict path uses), then compress the input
 /// region with matches allowed back into the window. The frame is
 /// single-segment (window = content size), so every in-frame
 /// distance is format-legal; the matchfinder's distance cap is the
-/// full frame length.
+/// full frame length. This is intentionally WIDER than the dict
+/// path's `1 << window_log` cap: warm-start frames use a
+/// single-segment header (FCS_Field_Size covers the entire output),
+/// so the decoder's backward window covers the whole frame and
+/// every distance resolves. The dict path uses a smaller window_log
+/// because its frame declares a window that may be smaller than the
+/// total content.
 ///
 /// Deterministic: output depends only on (window, input, level).
 ///
