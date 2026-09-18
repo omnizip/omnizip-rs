@@ -457,9 +457,12 @@ pub fn encode_frame_with_dict(
         crate::encoder::opt::OptState::new(&params, virtual_stream.len(), opt_level)
     });
 
-    // Seed the hash table with dictionary positions.
-    if prefix_len >= 4 {
-        match_state.seed_prefix(&virtual_stream, prefix_len);
+    // Seed the hash table with dictionary positions, using the
+    // finder's hash family (mls) — seed_prefix uses hash4 which is
+    // invisible to mls>=5 probes (task: LimniFS handoff bug #2).
+    let seed_mls = params.min_match.max(4) as usize;
+    if prefix_len >= seed_mls {
+        match_state.seed_prefix_mls(&virtual_stream, prefix_len, seed_mls);
     }
 
     // Magic.
