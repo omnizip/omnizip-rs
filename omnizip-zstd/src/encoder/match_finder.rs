@@ -926,6 +926,12 @@ pub fn compress_block_fast4_with_prefix(
     max_dist: usize,
 ) -> usize {
     let mm = min_match.max(MIN_MATCH);
+    // Pre-allocate for the whole block — the growth-doubling of the
+    // literals + sequences Vecs was ~10% of encode on text L1
+    // (measured: 22+10 realloc samples in a 6436-sample profile).
+    let cap = src.len() - prefix_len;
+    seq_store.literals.reserve(cap);
+    seq_store.sequences.reserve(cap / 4 + 16);
     if src.len() < prefix_len + 16 {
         seq_store.literals.extend_from_slice(&src[prefix_len..]);
         return src.len() - prefix_len;
@@ -1186,7 +1192,8 @@ pub fn compress_block_fast4_with_prefix(
     if anchor < iend {
         seq_store.literals.extend_from_slice(&src[anchor..iend]);
     }
-    if std::env::var("ZSTD_FAST_STATS").is_ok() {
+    static FAST_STATS: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if *FAST_STATS.get_or_init(|| std::env::var("ZSTD_FAST_STATS").is_ok()) {
         let mbytes: u32 = seq_store.sequences.iter().map(|s| s.match_length).sum();
         eprintln!(
             "FAST4 mm={mm} hbits={h_bits} seqs={} lits={} mbytes={mbytes}",
