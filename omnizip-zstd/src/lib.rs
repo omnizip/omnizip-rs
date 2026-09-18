@@ -712,8 +712,8 @@ mod tests {
 
         // Compress a new sample (not in the corpus) with the dict.
         let sample = b"{\"id\":99,\"name\":\"newitem\",\"type\":\"product\",\"price\":50}".to_vec();
-        let compressed =
-            compress_with_dict(&sample, ZstdLevel::Default, &dict).unwrap_or_else(|e| panic!("encode failed: {}", e));
+        let compressed = compress_with_dict(&sample, ZstdLevel::Default, &dict)
+            .unwrap_or_else(|e| panic!("encode failed: {}", e));
         let decompressed = decompress_with_dict(&compressed, sample.len() as u32, &dict)
             .expect("decode with dict");
         assert_eq!(decompressed, sample);
@@ -750,17 +750,13 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .concat();
-        let with_dict = compress_with_dict(&input, ZstdLevel::Default, &dict)
-            .expect("encode with dict");
+        let with_dict =
+            compress_with_dict(&input, ZstdLevel::Default, &dict).expect("encode with dict");
         let without_dict = compress(&input, ZstdLevel::Default).expect("encode without dict");
 
         // Round-trip.
-        let decompressed = decompress_with_dict(
-            &with_dict,
-            input.len() as u32,
-            &dict,
-        )
-        .expect("decode with dict");
+        let decompressed =
+            decompress_with_dict(&with_dict, input.len() as u32, &dict).expect("decode with dict");
         assert_eq!(decompressed, input);
 
         // The dict-compressed output should be smaller.
@@ -802,8 +798,8 @@ mod tests {
             sample.extend_from_slice(&base_sample);
         }
 
-        let with_dict =
-            compress_with_dict(&sample, ZstdLevel::Default, &dict).unwrap_or_else(|e| panic!("encode failed: {}", e));
+        let with_dict = compress_with_dict(&sample, ZstdLevel::Default, &dict)
+            .unwrap_or_else(|e| panic!("encode failed: {}", e));
         let without_dict = compress(&sample, ZstdLevel::Default).expect("encode no dict");
 
         // The hash-family fix (seed_prefix_mls, matching the finder's
