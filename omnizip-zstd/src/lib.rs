@@ -294,6 +294,33 @@ pub fn compress_with_dict(
 ///
 /// Deterministic: output depends only on `(window, input, level)`.
 ///
+/// # When NOT to use
+///
+/// Each warm frame stores the window as raw bytes, so it only pays
+/// off when the window is shared across many frames or not stored
+/// at all. For content-addressed stores that deduplicate on a
+/// plaintext hash, warm frames are position-dependent and will
+/// reduce or eliminate deduplication; measure before adopting.
+///
+/// Two structural causes (measured: LimniFS 5 MB binary, 8 KiB
+/// windows, +4.85% WORSE than per-chunk `compress`):
+///
+/// 1. **Window fee >= bounded savings.** The window rides as raw
+///    bytes (W bytes per frame). At most W bytes per frame can become
+///    back-references, and matched bytes that compress well save
+///    less than raw. Net per frame <= 0. Match *coverage* != savings:
+///    multi-copy coverage of the same window content is already
+///    deduplicated intra-frame by plain zstd for free.
+/// 2. **Dedup destruction.** Warm output is position-dependent (the
+///    same logical content at different stream positions produces
+///    different frames). Consumers keying stored frames on a content
+///    hash (e.g. `DropId = BLAKE3(plaintext)`) must hash the full
+///    frame — logical duplicates at different positions stop
+///    deduplicating.
+///
+/// Stays useful where: the window is a shared side table (not
+/// re-stored per frame), or consumers don't dedup on content hashes.
+///
 /// # Errors
 ///
 /// Returns [`ZstdError::Corrupt`] on internal failures or when the
