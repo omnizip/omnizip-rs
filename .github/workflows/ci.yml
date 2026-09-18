@@ -179,7 +179,19 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        # Full matrix: linux amd64 (ubuntu-latest), linux arm64
+        # (ubuntu-24.04-arm native runner), macOS arm64 (macos-latest),
+        # macOS Intel (macos-15-intel), Windows amd64 (windows-latest).
+        # ppc64le/s390x are covered by the cross-compile job below
+        # (qemu, no native runners available).
+        os:
+          [
+            ubuntu-latest,
+            ubuntu-24.04-arm,
+            macos-latest,
+            macos-15-intel,
+            windows-latest,
+          ]
         group:
           - name: codecs-parity-a
             crates: omnizip-codecs omnizip-brotli
@@ -241,6 +253,45 @@ jobs:
           done
 
 
+
+  # ============================================================================
+  # Cross-compile for ppc64le/s390x (no native runners; qemu via cross).
+  # Build-only: catches platform-specific compile errors and
+  # endianness assumptions. Runtime testing via release wheels.
+  # ============================================================================
+  cross-compile:
+    name: Cross-compile (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    needs: [preflight]
+    if: needs.preflight.outputs.should_run == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - powerpc64le-unknown-linux-gnu
+          - s390x-unknown-linux-gnu
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install cross
+        run: cargo install cross --locked
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: cross-${{ matrix.target }}
+          cache-on-failure: true
+
+      - name: Build workspace
+        run: cross build --workspace --target ${{ matrix.target }} --exclude fuzz-smoke
+
+      - name: Build tests
+        run: cross build --workspace --target ${{ matrix.target }} --tests --exclude fuzz-smoke
 
   # ============================================================================
   # Semver Compatibility Check
