@@ -284,6 +284,24 @@ pub fn compress_with_dict(
     encoder::encode_frame_with_dict(plaintext, level.as_reference_level(), dict)
 }
 
+/// Compress `input` into a STANDALONE-decodable frame warmed by
+/// `window` (prior content). The output frame decodes to exactly
+/// `window || input` with the plain [`decompress`] — no dict, no
+/// custom decode path — so callers slice their logical content by
+/// `window.len()`. The window is carried as raw blocks; the input
+/// region's matchfinder is seeded with the window positions
+/// (`seed_prefix`), letting its literals back-reference the window.
+///
+/// Deterministic: output depends only on `(window, input, level)`.
+///
+/// # Errors
+///
+/// Returns [`ZstdError::Corrupt`] on internal failures or when the
+/// level maps to an opt-tier strategy (not wired for warm frames).
+pub fn compress_warm(window: &[u8], input: &[u8], level: ZstdLevel) -> Result<Vec<u8>, ZstdError> {
+    encoder::encode_frame_warm(window, input, level.as_reference_level())
+}
+
 /// Decompress a ZSTD frame produced by [`compress_with_dict`].
 ///
 /// Primes the decoder's output window with the dictionary content so
