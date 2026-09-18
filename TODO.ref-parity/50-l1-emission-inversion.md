@@ -213,3 +213,34 @@ for rustc: pre-allocated buffers, direct slice writes, simple hash,
 no Vec round trips. The 1.37× residual is the accumulated codegen
 shape of the labeled-loop transliteration of the C's goto-based
 control flow — no source-level change identified that helps.
+
+## Session 5 (2026-09-19): fused mode walk SHIPPED; literal pre-check reverted
+
+**Shipped: fused mode-search walks** (PR #637): one walk per stream
+advancing both candidate state machines. words L1 **−8.4%**, csv2m
+L1 **−6.5%**. The two state machines are independent — costs are
+bit-identical to separate walks. Halves code-array passes 6→3.
+
+**Attempted + reverted: literal Huffman pre-check**: estimate huf
+size from histogram, skip the Huffman encode when raw clearly wins.
+BREAKS the treeless state chain: huf_weights=None means the NEXT
+block's treeless comparison uses stale weights from a PREVIOUS
+block. The optimization requires separating weight computation from
+literal encoding (the weights are needed for the treeless chain even
+when the Huffman bytes aren't built).
+
+## Cumulative words zstd L1 (campaign total)
+
+| improvement | delta | source |
+|---|---|---|
+| structural sequence writer | −7% | v0.21.98 |
+| mm=4 hash fast path | ~−4% | PR #627 |
+| env::var hoist + seq_store pre-alloc | −3.3% | PR #636 |
+| **fused mode-search walks** | **−8.4%** | PR #637 |
+| **cumulative** | **~−20%** | 3.65 → ~2.9× |
+
+**Next target**: the literal Huffman build still materializes all
+candidates. The fix requires splitting `encode_literals_internal`
+into a weights-only path (for the treeless chain) + an encode path
+(only when Huffman wins), preserving the weights even when bytes
+are skipped. Estimated ~5% on L1 text.
