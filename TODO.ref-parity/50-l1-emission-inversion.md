@@ -244,3 +244,31 @@ candidates. The fix requires splitting `encode_literals_internal`
 into a weights-only path (for the treeless chain) + an encode path
 (only when Huffman wins), preserving the weights even when bytes
 are skipped. Estimated ~5% on L1 text.
+
+## Session 5b (2026-09-19): Huffman weights/encode split — REVERTED (trial-path exactness)
+
+Implemented `compute_huf_info` (weights + wire + O(alphabet) size
+estimate) + `encode_literals_from_info` (encode with pre-computed
+weights). Wired into `encode_content_parts`: skip the expensive
+literal-byte encode when the estimate says raw wins, preserving the
+weights for the treeless chain.
+
+**Result**: 4 cells DIFF at L19/L22 (csv2m, noto) — the size
+estimate doesn't exactly match the actual encode output, and the
+block-splitting trial path (`estimate_partition` →
+`encode_content_parts`) uses the return value for split decisions.
+A ±1-byte difference in the estimate changes the split points.
+
+**Root cause**: `encode_content_parts` serves two masters:
+- Trial path (block splitting): needs EXACT sizes
+- Final emission: needs actual bytes
+
+The split must be path-aware: trials always encode (exact); only
+the FINAL emission can use the skip optimization. This requires
+threading a `trial: bool` parameter through the call chain, or
+separating the two paths into distinct functions.
+
+**Next session**: add `encode_content_parts_exact` (always encodes,
+used by trials) vs `encode_content_parts_fast` (uses the split,
+used by final emission). The trial path is only called during block
+splitting (btopt+ levels); the final path runs at every level.
