@@ -326,16 +326,68 @@ pub fn encode_section(
         max_sym: 28,
     };
 
+    // Fused mode-search: advance both candidate state machines per
+    // symbol in ONE walk (halves the code-array passes from 6 to 3,
+    // reads codes[n] once — better cache + ILP). The two state
+    // machines are independent, so the costs are bit-identical to
+    // the separate-walk form.
+    let stream_payload_pair =
+        |codes: &[u8], ca: &TableChoice, cb: &TableChoice, mx: u8| -> (StreamCost, StreamCost) {
+            let mut tmp_a = Vec::new();
+            let mut tmp_b = Vec::new();
+            if ca.mode == MODE_FSE {
+                let _ = write_ncount(&mut tmp_a, &ca.norm, mx, ca.table_log);
+            } else if ca.mode == MODE_RLE {
+                tmp_a.push(ca.max_sym);
+            }
+            if cb.mode == MODE_FSE {
+                let _ = write_ncount(&mut tmp_b, &cb.norm, mx, cb.table_log);
+            } else if cb.mode == MODE_RLE {
+                tmp_b.push(cb.max_sym);
+            }
+            let ctable_a = match ca.build_ctable() {
+                Ok(t) => t,
+                Err(_) => return (INVALID, INVALID),
+            };
+            let ctable_b = match cb.build_ctable() {
+                Ok(t) => t,
+                Err(_) => return (INVALID, INVALID),
+            };
+            let last = codes.len() - 1;
+            let mut state_a = CState::init2(&ctable_a, codes[last]);
+            let mut state_b = CState::init2(&ctable_b, codes[last]);
+            let mut bits_a = 0u64;
+            let mut bits_b = 0u64;
+            for n in (0..last).rev() {
+                let sym = codes[n];
+                bits_a += u64::from(state_a.encode_bit_count(&ctable_a, sym));
+                bits_b += u64::from(state_b.encode_bit_count(&ctable_b, sym));
+            }
+            bits_a += u64::from(state_a.flush_bit_count());
+            bits_b += u64::from(state_b.flush_bit_count());
+            (
+                StreamCost {
+                    payload_bits: bits_a,
+                    header_bytes: tmp_a.len() as u32,
+                    valid: true,
+                },
+                StreamCost {
+                    payload_bits: bits_b,
+                    header_bytes: tmp_b.len() as u32,
+                    valid: true,
+                },
+            )
+        };
+
+    let (ll_pre_c, ll_fse_c) = stream_payload_pair(&ll_codes, &ll_pre, &ll_fse, ll_max);
+    let (ml_pre_c, ml_fse_c) = stream_payload_pair(&ml_codes, &ml_pre, &ml_fse, ml_max);
+    let (of_pre_c, of_fse_c) = stream_payload_pair(&of_codes, &of_pre, &of_fse, of_max);
+
+    // Single-table cost for the pick_table RLE/Repeat evaluation
+    // (one candidate at a time — not fusable).
     let ll_cost = |c: &TableChoice| stream_payload(&ll_codes, c, ll_max);
     let ml_cost = |c: &TableChoice| stream_payload(&ml_codes, c, ml_max);
     let of_cost = |c: &TableChoice| stream_payload(&of_codes, c, of_max);
-
-    let ll_pre_c = ll_cost(&ll_pre);
-    let ml_pre_c = ml_cost(&ml_pre);
-    let of_pre_c = of_cost(&of_pre);
-    let ll_fse_c = ll_cost(&ll_fse);
-    let ml_fse_c = ml_cost(&ml_fse);
-    let of_fse_c = of_cost(&of_fse);
 
     let (ll_choice, ll_wire) = pick_table(
         ll_fse.mode == MODE_FSE && {
