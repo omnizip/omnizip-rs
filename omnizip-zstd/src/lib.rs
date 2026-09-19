@@ -569,6 +569,55 @@ mod tests {
         }
     }
 
+    /// omnizip issue #315: the original 318-byte limnifs metadata blob
+    /// as filed (binary header + literal text + binary tail + embedded
+    /// second record). Failed at 0.16.76 on Fastest/Fast/Default/Better
+    /// (checksum mismatch) while Best and the system zstd CLI decoded
+    /// the frames cleanly. Fixed on the 0.16.x line; the 163-byte
+    /// delta-debugged derivative is pinned in `codec.rs` — this pins
+    /// the blob exactly as reported.
+    #[test]
+    fn issue_315_original_blob_round_trips_all_levels() {
+        const B64: &str = "AgAAAAIAAAAAAAAApIEAAAAAAAAAAAAAjfBCgS8IzhiN8EKBLwjOGAEAAAAEpQAAAGR1cGxpY2F0ZSBpbmxpbmUgY29udGVudDogdGhlIHNhbWUgMjAwLWlzaCBieXRlcyBpbiB0aHJlZSBmaWxlcywgc28gdGhlIHdyaXRlcidzIGlubGluZSBkZWR1cCBmaXJlcyBvbiBldmVyeSByZWFsaXN0aWMgdHJlZS4gUGFkZGluZyBwYWRkaW5nIHBhZGRpbmcgcGFkZGluZyBwYWRkaW5nIQEAAAAAAAAA7UEAAAAAAAAAAAAABelAgS8IzhgF6UCBLwjOGAEAAAAA0n/vT8wNhb/EicVbOmpyaI3ka3H9+fam7ksII2Ipyd4BAAAAAQEAAAAJAAAAZHVwLWEudHh0AgAAAAAAAAAB";
+        fn b64(s: &str) -> Vec<u8> {
+            let s: Vec<u8> = s.bytes().filter(|b| !b.is_ascii_whitespace()).collect();
+            let (mut out, mut acc, mut nbits) = (Vec::with_capacity(s.len() / 4 * 3), 0u32, 0);
+            for b in s {
+                if b == b'=' {
+                    break;
+                }
+                let v = match b {
+                    b'A'..=b'Z' => b - b'A',
+                    b'a'..=b'z' => b - b'a' + 26,
+                    b'0'..=b'9' => b - b'0' + 52,
+                    b'+' => 62,
+                    b'/' => 63,
+                    _ => panic!("bad b64"),
+                } as u32;
+                acc = (acc << 6) | v;
+                nbits += 6;
+                if nbits >= 8 {
+                    nbits -= 8;
+                    out.push(((acc >> nbits) & 0xFF) as u8);
+                }
+            }
+            out
+        }
+        let input = b64(B64);
+        assert_eq!(input.len(), 318);
+        for level in [
+            ZstdLevel::Fastest,
+            ZstdLevel::Fast,
+            ZstdLevel::Default,
+            ZstdLevel::Better,
+            ZstdLevel::Best,
+        ] {
+            let compressed = compress(&input, level).expect("encode");
+            let decompressed = decompress(&compressed, input.len() as u32).expect("decode");
+            assert_eq!(decompressed, input, "round-trip mismatch at {level:?}");
+        }
+    }
+
     /// Self-round-trip over deterministic mixed text+binary corpora at
     /// every level. Size sweeps over uniform inputs don't exercise the
     /// regime where matches/reps fire mid-literal; these shapes (binary
