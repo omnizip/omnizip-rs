@@ -1,6 +1,13 @@
 # Task 54 — password provider abstraction
 
-Status: open (part of task 51 phase 1)
+Status: done (2026-09-19 — `omnizip-archive-core::password`:
+PasswordProvider trait (Static/Env/File/Fn providers — Fn is the
+Ruby-bridge seam) + PasswordValidator port (policy rules, strength
+score 0-100, weak/fair/good/strong labels, Ruby formula). ozip
+--password-prompt/--password-file/--password-env flags. ZipCrypto
+READ confirmed ABSENT (ZipMethod has no crypt variant) — recorded
+as follow-up task (RC4 traditional PKWARE decrypt + fixtures);
+WinZip AES read/write already exists)
 
 ## Gap
 
