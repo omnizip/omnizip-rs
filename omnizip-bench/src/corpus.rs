@@ -397,11 +397,7 @@ mod tests {
             for f in spec.files {
                 assert!(seen.insert(*f), "{}: duplicate file entry {f}", spec.name);
             }
-            assert!(
-                !spec.url.is_empty(),
-                "{}: missing download URL",
-                spec.name
-            );
+            assert!(!spec.url.is_empty(), "{}: missing download URL", spec.name);
         }
     }
 }
