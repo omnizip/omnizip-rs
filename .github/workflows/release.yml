@@ -15,6 +15,15 @@ on:
     branches:
       - main
   workflow_dispatch:
+    inputs:
+      command:
+        description: "release-pr opens the version-bump PR (via the CI PAT); release publishes what the manifests say"
+        required: true
+        default: "release"
+        type: choice
+        options:
+          - release
+          - release-pr
 
 env:
   GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -43,8 +52,11 @@ jobs:
         uses: MarcoIeni/release-plz-action@v0.5.131
         with:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # release_always = true in release-plz.toml means we publish
-          # directly on push to main. Running release-pr too fails with
-          # 403 because GitHub Actions isn't permitted to create PRs here.
-          # Use `release` only.
-          command: release
+          # release-pr creates PRs; the repo setting blocks
+          # GITHUB_TOKEN-created PRs, so that command rides the CI
+          # PAT (the restriction binds GITHUB_TOKEN only).
+          PAT_TOKEN: ${{ inputs.command == 'release-pr' && secrets.OMNIZIP_CI_PAT_TOKEN || '' }}
+          # Push to main always publishes (release_always in
+          # release-plz.toml). The release-pr COMMAND is dispatch-
+          # only: it opens the next version-bump PR through the PAT.
+          command: ${{ inputs.command || 'release' }}
