@@ -1,6 +1,8 @@
 # Task 52 — checksum registry (pluggable checksum family)
 
-Status: open (part of task 51 phase 1)
+Status: done (2026-09-19 — omnizip-checksum crate. crc64-xz check
+value verified against xz --check=crc64 ground truth; crc32 wraps the
+codecs-crate SSOT rather than reimplementing)
 
 ## Gap
 

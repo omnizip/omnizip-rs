@@ -1,0 +1,17 @@
+[package]
+name = "omnizip-checksum"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Pluggable checksum registry for omnizip — crc32, crc64-xz, crc64-ecma, streaming verifier"
+keywords = ["compression", "checksum", "crc32", "crc64", "verify"]
+categories = ["compression", "algorithms"]
+
+[dependencies]
+omnizip-codecs.workspace = true
+
+[lints]
+workspace = true
