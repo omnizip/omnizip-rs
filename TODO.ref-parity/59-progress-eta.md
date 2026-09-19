@@ -1,7 +1,12 @@
 # Task 59 — progress / ETA reporting
 
-Status: open (part of task 51 phase 2; wires into 57 streaming and
-58 parallel — design the trait first so those tasks can call it)
+Status: done (2026-09-19 — omnizip-codecs::progress: Operation,
+ProgressReporter (defaulted methods → implementers override what
+they need), Silent, CallbackReporter (the ozip/Ruby-bridge seam),
+ProgressTracker (EMA rate + ETA, Instant feeds reporting only).
+3 tests incl. the event-sequence and overflow-saturation cases.
+WIRING lands with 57/58 — their long-running loops are the call
+sites; this module is the contract they consume)
 
 ## Gap
 
