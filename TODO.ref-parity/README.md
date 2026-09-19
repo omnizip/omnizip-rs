@@ -61,6 +61,18 @@ small-file T ~4x).)
 | 35 | brotli distance-split cost at q5 text: 53% of rustsrc/words q5 encode for ±0.5% size; csv2m NEEDS it (+3.2% without). Designed: cap sampled histograms, pre-cluster sampling, or a multi-modality cost gate. Parked at load 25+ | rustsrc q5 I 3.8→2.2, plists 3.2→2.1 | done 2026-09-14 (v0.21.91) |
 | 09 | zstd L1 emission: bitstream-size counting replaces byte-materializing measurement (v0.21.74, words L1 -41%) | words/rustsrc L1 (I 4.0-4.3) | done 2026-09-08 |
 | 05 | csv2m time pathology — root cause 1: getenv in opt hot loop | csv2m zstd L6 I=137 | done 2026-09-07 (v0.21.66; T 202x→~112x est; re-score pending quiet box; residual = task 03) |
+| 51 | **Ruby⇄Rust alignment master plan** — the app-layer gap table (11 items, rubyzip_compat dropped by owner), 4 phases, dependency graph, cross-cutting invariants | — | open 2026-09-19 |
+| 52 | checksum registry — pluggable crc32/crc64/digest family + verifier (feeds 55) | — | open 2026-09-19 |
+| 53 | xz/lzip/lzma-alone as first-class single-file formats (detect + ozip t/l/x/c + metadata parity) | — | open 2026-09-19 |
+| 54 | password provider abstraction — Static/Prompt/Env/File + validator; ZipCrypto-read gap check while wiring | — | open 2026-09-19 |
+| 55 | ozip commands — verify/repair/parity/metadata/profile (clap subcommands, c/x/t/l aliased) | — | open 2026-09-19 |
+| 56 | implementation tiers — registry wire_format + impl_name (deflate/libdeflate the live pair; pure-Rust-only policy) | — | open 2026-09-19 |
+| 57 | chunked streaming — StreamingCompressor/Decompressor traits; block boundaries = f(input, declared chunk_size), NEVER push arrival; impl order zstd→deflate→bzip2→lzma/xz→brotli | — | open 2026-09-19 |
+| 58 | generic parallel engine — generalize zstd compress_mt job-split to any codec + entry-level archive create/extract; thread-count-invariant output | — | open 2026-09-19 |
+| 59 | progress/ETA — ProgressReporter trait (Silent default) + rate tracker; wires into 57/58; never on the data path | — | open 2026-09-19 |
+| 60 | compression profiles + detector — port the 6 Ruby profiles field-by-field; content-class sniff → profile choice | — | open 2026-09-19 |
+| 61 | format converter — ConversionRegistry + extract-repack strategy, entry-at-a-time bounded-memory repack, batch | — | open 2026-09-19 |
+| 62 | Ruby acceleration — magnus native gem behind implementations/ tier, pure-Ruby fallback, byte-identical differential gate | — | open 2026-09-19 |
 
 ## Principles
 
