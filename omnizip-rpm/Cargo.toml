@@ -15,11 +15,11 @@ name = "omnizip_rpm"
 path = "src/lib.rs"
 
 [dependencies]
-omnizip-archive-core = { path = "../omnizip-archive-core" }
-omnizip-cpio = { path = "../omnizip-cpio" }
-omnizip-lzma = { path = "../omnizip-lzma" }
-omnizip-zstd = { path = "../omnizip-zstd" }
-omnizip-crypto = { path = "../omnizip-crypto" }
+omnizip-archive-core = { path = "../omnizip-archive-core", version = "0.21.100" }
+omnizip-cpio = { path = "../omnizip-cpio", version = "0.21.100" }
+omnizip-lzma = { path = "../omnizip-lzma", version = "0.21.100" }
+omnizip-zstd = { path = "../omnizip-zstd", version = "0.21.100" }
+omnizip-crypto = { path = "../omnizip-crypto", version = "0.21.100" }
 
 [lints]
 workspace = true

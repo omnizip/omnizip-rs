@@ -20,15 +20,15 @@ name = "omnizip_bench"
 path = "src/lib.rs"
 
 [dependencies]
-omnizip-iso = { path = "../omnizip-iso" }
-omnizip-rar = { path = "../omnizip-rar" }
-omnizip-rpm = { path = "../omnizip-rpm" }
-omnizip-xar = { path = "../omnizip-xar" }
-omnizip-sevenzip = { path = "../omnizip-sevenzip" }
-omnizip-cpio = { path = "../omnizip-cpio" }
-omnizip-zip = { path = "../omnizip-zip" }
-omnizip-tar = { path = "../omnizip-tar" }
-omnizip-archive-core = { path = "../omnizip-archive-core" }
+omnizip-iso = { path = "../omnizip-iso", version = "0.21.100" }
+omnizip-rar = { path = "../omnizip-rar", version = "0.21.100" }
+omnizip-rpm = { path = "../omnizip-rpm", version = "0.21.100" }
+omnizip-xar = { path = "../omnizip-xar", version = "0.21.100" }
+omnizip-sevenzip = { path = "../omnizip-sevenzip", version = "0.21.100" }
+omnizip-cpio = { path = "../omnizip-cpio", version = "0.21.100" }
+omnizip-zip = { path = "../omnizip-zip", version = "0.21.100" }
+omnizip-tar = { path = "../omnizip-tar", version = "0.21.100" }
+omnizip-archive-core = { path = "../omnizip-archive-core", version = "0.21.100" }
 omnizip-codecs = { path = "../omnizip-codecs", version = "0.21.100" }
 omnizip-lzma = { path = "../omnizip-lzma", version = "0.21.100" }
 omnizip-zstd = { path = "../omnizip-zstd", version = "0.21.100" }
