@@ -37,6 +37,7 @@ pub mod encoder;
 pub mod frame;
 pub mod fse;
 pub mod huffman;
+pub mod incremental;
 pub mod literals;
 pub mod predef_tables;
 pub mod sequences;
