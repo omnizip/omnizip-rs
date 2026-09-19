@@ -58,23 +58,54 @@ pub struct Rar5Reader {
     password: Option<Vec<u8>>,
 }
 
-/// The RAR5 recovery record ("RR" service header): where its
-/// recovery sectors live and which RR version produced them.
-/// The RS repair math (recovery across damaged sectors) is the
-/// follow-up — see TODO.ref-parity/55.
+/// The RAR5 recovery record ("RR" service header), per the unrar
+/// 7.2 source (arcread.cpp: the data area's first vint is the
+/// recovery percent) and validated against the CI fixtures: the
+/// `{RB}` magic + header CRC32 follow, then the RS recovery
+/// sectors. The RS repair math needs the rar.archiver layout
+/// (unrar only verifies presence) — see TODO.ref-parity/55.
 #[derive(Debug, Clone, Copy)]
 pub struct RecoveryRecord {
-    /// RR body version vint (position pending the instrumented-unrar
-    /// oracle pass; None only when the body is empty).
-    pub version: Option<u64>,
-    /// Recovery-sector data range in the archive bytes.
+    /// Recovery percent vint (how much redundancy `rar a -rrN`
+    /// added) — validated: 3 for -rr3, 10 for -rr10.
+    pub percent: Option<u64>,
+    /// The `{RB}` recovery-header CRC32 (LE u32 after the magic).
+    pub crc32: Option<u32>,
+    /// Recovery-sector blob range in the archive bytes.
     pub data_start: usize,
     pub data_end: usize,
 }
 
-fn first_vint(data: &[u8], at: usize) -> Option<u64> {
-    let mut pos = at;
-    read_vint(data, &mut pos).ok().map(|(v, _)| v)
+fn parse_rr_body(data: &[u8], start: usize, end: usize) -> RecoveryRecord {
+    let mut percent = None;
+    let mut crc = None;
+    if let Some(magic) = data[start..end].windows(4).position(|w| w == b"{RB}") {
+        let magic_at = start + magic;
+        // The percent vint ends exactly at the magic; it is a
+        // single byte for <= 127% (the practical range). The RR
+        // service header's reported data area starts AT the magic,
+        // so this reads one byte before it — within the block.
+        if magic_at > 0 {
+            let mut pos = magic_at - 1;
+            if let Ok((v, _len)) = read_vint(data, &mut pos) {
+                // read_vint advances `pos` past the vint; it must
+                // end exactly at the magic for the byte to BE the
+                // percent vint.
+                if pos == magic_at {
+                    percent = Some(v);
+                }
+            }
+        }
+        crc = data
+            .get(magic_at + 4..magic_at + 8)
+            .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]));
+    }
+    RecoveryRecord {
+        percent,
+        crc32: crc,
+        data_start: start,
+        data_end: end,
+    }
 }
 
 impl Rar5Reader {
@@ -215,11 +246,7 @@ impl Rar5Reader {
                     // recovery sectors.
                     if let Ok(Some(entry)) = parse_file_header(data, &block) {
                         if entry.name == "RR" && recovery.is_none() {
-                            recovery = Some(RecoveryRecord {
-                                version: first_vint(data, entry.data.0),
-                                data_start: entry.data.0,
-                                data_end: entry.data.1,
-                            });
+                            recovery = Some(parse_rr_body(data, entry.data.0, entry.data.1));
                         }
                     }
                 }
@@ -1066,21 +1093,19 @@ mod rr_tests {
     /// archives; plain twins report none.
     #[test]
     fn recovery_record_presence_and_metadata() {
-        for (with_rr, plain) in [
-            ("small_rr3.rar", "small_plain.rar"),
-            ("mixed_rr10.rar", "mixed_plain.rar"),
+        for (with_rr, plain, expected_percent) in [
+            ("small_rr3.rar", "small_plain.rar", 3),
+            ("mixed_rr10.rar", "mixed_plain.rar", 10),
         ] {
             let reader = Rar5Reader::from_bytes(&fixture(with_rr)).unwrap();
             let rr = reader
                 .recovery_record()
                 .unwrap_or_else(|| panic!("{with_rr}: no RR service header found"));
-            // Verified against the CI fixtures: the span covers the
-            // recovery sectors. The exact version-vint position
-            // within the RR body awaits the instrumented-unrar
-            // oracle pass (see TODO.ref-parity/55) — assert shape,
-            // not the unconfirmed field.
+            // Validated against the CI fixtures + the unrar 7.2
+            // source: percent first, then the {RB} header.
             assert!(rr.data_end > rr.data_start, "{with_rr}: empty RR span");
-            assert!(rr.version.is_some(), "{with_rr}: no version vint candidate");
+            assert_eq!(rr.percent, Some(expected_percent), "{with_rr}: percent");
+            assert!(rr.crc32.is_some(), "{with_rr}: no RR-header CRC32");
 
             let plain_reader = Rar5Reader::from_bytes(&fixture(plain)).unwrap();
             assert!(
