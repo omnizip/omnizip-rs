@@ -1,7 +1,17 @@
 # Task 61 — format converter
 
-Status: open (part of task 51 phase 3; composes existing container
-readers/writers — this is orchestration, not new wire formats)
+Status: done (2026-09-19 — `ozip convert SRC DST [-f fmt] [-N]`:
+the Ruby ExtractRepackStrategy. Source = ANY openable archive incl.
+the task-53 single-file views; target = every container create
+format. Metadata via fs round-trip (mtimes/modes/symlinks/empty
+dirs); staging dir named from the source stem so output is
+BYTE-DETERMINISTIC across runs (pinned). Lossy cells documented:
+hardlinks materialize, Other kinds skip, single-file sources wrap
+under '<stem>.converted/'. The dedicated zip<->7z entry-at-a-time
+strategies + batch_convert + bounded-memory spillover remain as
+follow-ups (need task-57 streaming); the ConversionRegistry shape
+is one match on OutputFormat — add strategies when entry-at-a-time
+lands
 
 ## Gap
 
