@@ -119,8 +119,10 @@ pub fn known_corpora() -> &'static [CorpusSpec] {
         CorpusSpec {
             name: "calgary",
             description: "Calgary compression corpus (classic, ~3 MB)",
-            approx_size: 3_000_000,
-            url: "http://corpus.canterbury.ac.nz/resources/cantrbry.zip",
+            approx_size: 3_251_493,
+            // The Calgary corpus is hosted alongside the Canterbury
+            // one. Verified 2026-09-19: 18 files, 3,251,493 bytes.
+            url: "https://corpus.canterbury.ac.nz/resources/calgary.zip",
             files: &[
                 "bib", "book1", "book2", "geo", "news", "obj1", "obj2", "paper1", "paper2",
                 "paper3", "paper4", "paper5", "paper6", "pic", "progc", "progl", "progp", "trans",
@@ -129,21 +131,24 @@ pub fn known_corpora() -> &'static [CorpusSpec] {
         CorpusSpec {
             name: "canterbury",
             description: "Canterbury corpus (updated Calgary, ~3 MB)",
-            approx_size: 3_000_000,
-            url: "http://corpus.canterbury.ac.nz/resources/cantrbry.zip",
+            approx_size: 2_810_784,
+            // cantrbry.zip as currently served (verified 2026-09-19)
+            // holds these 11 files — no bible.txt; lecture.txt,
+            // lcet10.txt and sep9811.txt live in the *large*
+            // corpus zip, not this one.
+            url: "https://corpus.canterbury.ac.nz/resources/cantrbry.zip",
             files: &[
-                "grammar.lsp",
-                "xargs.1",
-                "fields.c",
+                "alice29.txt",
+                "asyoulik.txt",
                 "cp.html",
+                "fields.c",
                 "grammar.lsp",
-                "lecture.txt",
-                "lctet10.txt",
+                "kennedy.xls",
+                "lcet10.txt",
                 "plrabn12.txt",
                 "ptt5",
                 "sum",
-                "kennedy.xls",
-                "sep9811.txt",
+                "xargs.1",
             ],
         },
         CorpusSpec {
@@ -377,5 +382,26 @@ mod tests {
             ],
         );
         assert_eq!(c.total_size(), 300);
+    }
+
+    /// Issue #326: the canterbury spec shipped a duplicate file entry
+    /// plus names from the large-corpus zip, and calgary pointed at
+    /// the canterbury zip — neither loadable. Duplicates and empty
+    /// lists are structurally wrong for every spec; the exact file
+    /// lists are verified by loading the corpora.
+    #[test]
+    fn corpus_specs_have_unique_nonempty_file_lists() {
+        for spec in known_corpora() {
+            assert!(!spec.files.is_empty(), "{}: empty file list", spec.name);
+            let mut seen = std::collections::HashSet::new();
+            for f in spec.files {
+                assert!(seen.insert(*f), "{}: duplicate file entry {f}", spec.name);
+            }
+            assert!(
+                !spec.url.is_empty(),
+                "{}: missing download URL",
+                spec.name
+            );
+        }
     }
 }
