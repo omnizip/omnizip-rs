@@ -51,11 +51,10 @@ jobs:
       - name: Run release-plz
         uses: MarcoIeni/release-plz-action@v0.5.131
         with:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # release-pr creates PRs; the repo setting blocks
-          # GITHUB_TOKEN-created PRs, so that command rides the CI
-          # PAT (the restriction binds GITHUB_TOKEN only).
-          PAT_TOKEN: ${{ inputs.command == 'release-pr' && secrets.OMNIZIP_CI_PAT_TOKEN || '' }}
+          # workflow-token PRs, so that command rides the CI PAT
+          # through the same input (the action takes one token).
+          GITHUB_TOKEN: ${{ inputs.command == 'release-pr' && secrets.OMNIZIP_CI_PAT_TOKEN || secrets.GITHUB_TOKEN }}
           # Push to main always publishes (release_always in
           # release-plz.toml). The release-pr COMMAND is dispatch-
           # only: it opens the next version-bump PR through the PAT.
