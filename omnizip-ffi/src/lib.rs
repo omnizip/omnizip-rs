@@ -56,9 +56,9 @@ fn set_last_error(msg: String) {
 
 fn codec_by_name(name: &str) -> Result<Box<dyn Codec>, String> {
     match name {
-        "zstd" => Ok(Box::new(omnizip_zstd::codec::ZstdCodec)),
-        "bzip2" => Ok(Box::new(omnizip_bzip2::codec::Bzip2Codec)),
-        "lzma" | "xz" => Ok(Box::new(omnizip_lzma::codec::LzmaCodec)),
+        "zstd" => Ok(Box::new(omnizip_zstd::ZstdCodec)),
+        "bzip2" => Ok(Box::new(omnizip_bzip2::Bzip2Codec)),
+        "lzma" | "xz" => Ok(Box::new(omnizip_lzma::LzmaCodec)),
         other => Err(format!(
             "unknown codec '{other}' (available: zstd, bzip2, lzma)"
         )),
