@@ -1,6 +1,6 @@
 # Task 61 — format converter
 
-Status: done (2026-09-19 — `ozip convert SRC DST [-f fmt] [-N]`:
+Status: done + batch (2026-09-19 second pass — `ozip convert SOURCE... DIR -f fmt` batch form (Ruby batch_convert): unambiguous arity rule (2 paths = single, >=3 = batch with dir last) so a mistyped batch can never silently degrade into single mode and overwrite a source; convert owns its arg shape via convert_command (the router no longer strips its first path). The Ruby 'dedicated' zip<->7z strategies are THEMSELVES extract-repack (Dir.mktmpdir + repack_tree — read them before assuming entry-copy); entry-at-a-time has no Ruby counterpart and remains an optional optimization. Original:
 the Ruby ExtractRepackStrategy. Source = ANY openable archive incl.
 the task-53 single-file views; target = every container create
 format. Metadata via fs round-trip (mtimes/modes/symlinks/empty

@@ -454,3 +454,59 @@ fn parity_and_profile_commands() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Task 61: batch convert — `SOURCE... DIR` with `-f` converts every
+/// source into the directory; the single-source form keeps working.
+#[test]
+fn batch_convert_converts_each_source() {
+    fn os(s: &str) -> &std::ffi::OsStr {
+        s.as_ref()
+    }
+    let dir = std::env::temp_dir().join(format!("ozip-batch-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    for name in ["a", "b"] {
+        std::fs::write(dir.join(format!("{name}.txt")), format!("{name} payload\n")).unwrap();
+        let (ok, _, err) = run(&[
+            os("c"),
+            dir.join(format!("{name}.zip")).as_os_str(),
+            dir.join(format!("{name}.txt")).as_os_str(),
+        ]);
+        assert!(ok, "create {name}: {err}");
+    }
+    let out_dir = dir.join("converted");
+
+    let (ok, _, err) = run(&[
+        os("convert"),
+        os("-f"),
+        os("7z"),
+        dir.join("a.zip").as_os_str(),
+        dir.join("b.zip").as_os_str(),
+        out_dir.as_os_str(),
+    ]);
+    assert!(ok, "batch convert: {err}");
+
+    for name in ["a", "b"] {
+        let (ok, listing, err) = run(&[os("t"), out_dir.join(format!("{name}.7z")).as_os_str()]);
+        assert!(ok, "list {name}.7z: {err}");
+        assert!(
+            listing.contains(&format!("{name}.txt")),
+            "{name}.7z listing missing the entry: {listing}"
+        );
+    }
+
+    // Single form still works: two paths only.
+    let (ok, _, err) = run(&[
+        os("convert"),
+        dir.join("a.zip").as_os_str(),
+        dir.join("s.tar.gz").as_os_str(),
+        os("-f"),
+        os("tar.gz"),
+    ]);
+    assert!(ok, "single convert: {err}");
+    let (ok, listing, _) = run(&[os("t"), dir.join("s.tar.gz").as_os_str()]);
+    assert!(ok);
+    assert!(listing.contains("a.txt"), "{listing}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

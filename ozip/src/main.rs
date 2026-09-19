@@ -343,6 +343,9 @@ fn run_container(args: &[String]) -> Result<(), String> {
     if command != "c" && volume.is_some() {
         return Err("--volume only applies to ozip c".into());
     }
+    if command == "convert" {
+        return container::convert_command(&paths, format.as_deref(), level, password.as_deref());
+    }
     let archive = paths.remove(0);
     match command {
         "c" => container::create(
@@ -357,19 +360,6 @@ fn run_container(args: &[String]) -> Result<(), String> {
         "t" => container::list(&archive, false, password.as_deref()),
         "l" => container::list(&archive, true, password.as_deref()),
         "verify" => container::verify(&archive, password.as_deref()),
-        "convert" => {
-            let dst = paths
-                .first()
-                .cloned()
-                .ok_or_else(|| "ozip convert: a destination path is required".to_string())?;
-            container::convert(
-                &archive,
-                &dst,
-                format.as_deref(),
-                level,
-                password.as_deref(),
-            )
-        }
         "metadata" => container::metadata(&archive, password.as_deref()),
         _ => unreachable!(),
     }
