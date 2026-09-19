@@ -33,7 +33,7 @@ In omnizip-codecs:
   Fastest. Unknown name → error listing available (mirrors codec
   and checksum registries).
 - Document the contract: same wire_format ⇒ outputs
-  interchangable (decoders are shared); encoder outputs may differ
+  interchangeable (decoders are shared); encoder outputs may differ
   between impls — determinism is per-impl-name, not per-format.
 
 ## Acceptance
