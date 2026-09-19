@@ -1,7 +1,10 @@
 # Task 56 — implementation tiers in the codec registry
 
-Status: open (part of task 51 phase 1; smallest item — registry
-metadata only)
+Status: done (2026-09-19 — `Codec::{wire_format, impl_name}` trait
+defaults (OCP: zero changes to existing impls; libdeflate declares
+DEFLATE), `CodecRegistry::{for_format, codec_for_format}` +
+`ImplPreference`; selection = registration order (Vec, never hash
+iteration)
 
 ## Gap
 

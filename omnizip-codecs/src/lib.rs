@@ -59,5 +59,5 @@ pub use memory_budget::MemoryBudget;
 pub use options::Options;
 pub use parallel_batch::ParallelBatch;
 pub use profile::{Profile, ProfileKind};
-pub use registry::CodecRegistry;
+pub use registry::{CodecRegistry, ImplPreference};
 pub use streaming::{StreamingDecoder, StreamingEncoder};

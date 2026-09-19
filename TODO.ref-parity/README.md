@@ -66,7 +66,7 @@ small-file T ~4x).)
 | 53 | xz/lzip/lzma-alone as first-class single-file formats (detect + ozip t/l/x/c + metadata parity) | — | open 2026-09-19 |
 | 54 | password provider abstraction — Static/Prompt/Env/File + validator; ZipCrypto-read gap check while wiring | — | open 2026-09-19 |
 | 55 | ozip commands — verify/repair/parity/metadata/profile (clap subcommands, c/x/t/l aliased) | — | open 2026-09-19 |
-| 56 | implementation tiers — registry wire_format + impl_name (deflate/libdeflate the live pair; pure-Rust-only policy) | — | open 2026-09-19 |
+| 56 | implementation tiers — registry wire_format + impl_name (deflate/libdeflate the live pair; pure-Rust-only policy) | — | done 2026-09-19 (Codec defaults + codec_for_format/ImplPreference; libdeflate declares DEFLATE) |
 | 57 | chunked streaming — StreamingCompressor/Decompressor traits; block boundaries = f(input, declared chunk_size), NEVER push arrival; impl order zstd→deflate→bzip2→lzma/xz→brotli | — | open 2026-09-19 |
 | 58 | generic parallel engine — generalize zstd compress_mt job-split to any codec + entry-level archive create/extract; thread-count-invariant output | — | open 2026-09-19 |
 | 59 | progress/ETA — ProgressReporter trait (Silent default) + rate tracker; wires into 57/58; never on the data path | — | open 2026-09-19 |

@@ -40,6 +40,66 @@ impl CodecRegistry {
         self.codecs.iter().find(|c| c.id() == id).map(Box::as_ref)
     }
 
+    /// All registered implementations that read/write the wire
+    /// format `id`, in registration order (deterministic — the Vec,
+    /// never hash iteration). Index 0 is the house default.
+    #[must_use]
+    pub fn for_format(&self, id: CodecId) -> Vec<&dyn Codec> {
+        self.codecs
+            .iter()
+            .filter(|c| c.wire_format() == id)
+            .map(Box::as_ref)
+            .collect()
+    }
+
+    /// Pick an implementation of wire format `id`.
+    ///
+    /// `Default` selects the first registered impl (the house
+    /// default); `Named` selects by [`Codec::impl_name`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`OmnizipError::Unsupported`] when no impl of `id` is
+    /// registered, or when `Named` matches no impl (the reason
+    /// lists the available names).
+    pub fn codec_for_format(
+        &self,
+        id: CodecId,
+        preference: ImplPreference,
+    ) -> Result<&dyn Codec, OmnizipError> {
+        let impls = self.for_format(id);
+        match preference {
+            ImplPreference::Default => impls.first().copied().ok_or_else(|| self.no_format(id)),
+            ImplPreference::Named(want) => impls
+                .iter()
+                .find(|c| c.impl_name() == want)
+                .copied()
+                .ok_or_else(|| {
+                    let names = impls
+                        .iter()
+                        .map(|c| c.impl_name())
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    OmnizipError::Unsupported {
+                        codec: id,
+                        reason: format!(
+                            "no implementation named '{want}' for format {id} (available: {names})"
+                        ),
+                    }
+                }),
+        }
+    }
+
+    fn no_format(&self, id: CodecId) -> OmnizipError {
+        OmnizipError::Unsupported {
+            codec: id,
+            reason: format!(
+                "no codec registered for format {id} (registered: {registered})",
+                registered = self.registered_names()
+            ),
+        }
+    }
+
     fn registered_names(&self) -> String {
         self.codecs
             .iter()
@@ -123,6 +183,17 @@ impl std::fmt::Debug for CodecRegistry {
 }
 
 static DEFAULT_REGISTRY: OnceLock<CodecRegistry> = OnceLock::new();
+
+/// How a caller picks an implementation of a wire format — see
+/// [`CodecRegistry::codec_for_format`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImplPreference {
+    /// The house default: the first registered impl of the format.
+    Default,
+    /// A specific implementation by [`Codec::impl_name`] (e.g.
+    /// `"libdeflate"` for the DEFLATE format).
+    Named(&'static str),
+}
 
 /// Returns the process-wide default registry, initialised lazily.
 ///
@@ -217,5 +288,127 @@ mod tests {
         assert!(CompressionLevel::fastest() < CompressionLevel::default());
         assert!(CompressionLevel::default() < CompressionLevel::best());
         assert_eq!(CompressionLevel::default().to_string(), "level-6");
+    }
+
+    /// Alternative implementation of a format: different id, same
+    /// wire format, distinct `impl_name`.
+    struct AltCodec {
+        id: CodecId,
+        format: CodecId,
+    }
+
+    impl Codec for AltCodec {
+        fn id(&self) -> CodecId {
+            self.id
+        }
+        fn name(&self) -> &'static str {
+            "alt"
+        }
+        fn wire_format(&self) -> CodecId {
+            self.format
+        }
+        fn impl_name(&self) -> &'static str {
+            "alt"
+        }
+        fn compress(
+            &self,
+            plaintext: &[u8],
+            _level: CompressionLevel,
+        ) -> Result<Vec<u8>, OmnizipError> {
+            Ok(plaintext.to_vec())
+        }
+        fn decompress(
+            &self,
+            compressed: &[u8],
+            expected_len: u32,
+        ) -> Result<Vec<u8>, OmnizipError> {
+            let expected = usize::try_from(expected_len).unwrap_or(0);
+            if compressed.len() != expected {
+                return Err(OmnizipError::LengthMismatch {
+                    codec: self.id,
+                    expected: expected_len,
+                    actual: compressed.len(),
+                });
+            }
+            Ok(compressed.to_vec())
+        }
+    }
+
+    const FORMAT_ID: CodecId = CodecId::new(0xFFFD);
+    const ALT_ID: CodecId = CodecId::new(0xFFFC);
+
+    #[test]
+    fn wire_format_defaults_to_id() {
+        let codec = NoopCodec { id: NOOP_ID };
+        assert_eq!(codec.wire_format(), NOOP_ID);
+        assert_eq!(codec.impl_name(), "reference");
+    }
+
+    #[test]
+    fn for_format_returns_impls_in_registration_order() {
+        let mut registry = CodecRegistry::new();
+        registry.register(Box::new(NoopCodec { id: FORMAT_ID }));
+        registry.register(Box::new(AltCodec {
+            id: ALT_ID,
+            format: FORMAT_ID,
+        }));
+        let impls = registry.for_format(FORMAT_ID);
+        assert_eq!(impls.len(), 2);
+        assert_eq!(impls[0].id(), FORMAT_ID);
+        assert_eq!(impls[1].id(), ALT_ID);
+        // Deterministic across queries (Vec order, not hash order).
+        let again: Vec<CodecId> = registry
+            .for_format(FORMAT_ID)
+            .into_iter()
+            .map(|c: &dyn Codec| c.id())
+            .collect();
+        let first: Vec<CodecId> = impls.iter().map(|c| c.id()).collect();
+        assert_eq!(again, first);
+    }
+
+    #[test]
+    fn default_preference_picks_first_registered() {
+        let mut registry = CodecRegistry::new();
+        registry.register(Box::new(NoopCodec { id: FORMAT_ID }));
+        registry.register(Box::new(AltCodec {
+            id: ALT_ID,
+            format: FORMAT_ID,
+        }));
+        let picked = registry
+            .codec_for_format(FORMAT_ID, ImplPreference::Default)
+            .expect("default impl");
+        assert_eq!(picked.id(), FORMAT_ID);
+    }
+
+    #[test]
+    fn named_preference_selects_impl() {
+        let mut registry = CodecRegistry::new();
+        registry.register(Box::new(NoopCodec { id: FORMAT_ID }));
+        registry.register(Box::new(AltCodec {
+            id: ALT_ID,
+            format: FORMAT_ID,
+        }));
+        let picked = registry
+            .codec_for_format(FORMAT_ID, ImplPreference::Named("alt"))
+            .expect("alt impl");
+        assert_eq!(picked.id(), ALT_ID);
+    }
+
+    #[test]
+    fn unknown_name_and_unknown_format_error() {
+        let mut registry = CodecRegistry::new();
+        registry.register(Box::new(NoopCodec { id: FORMAT_ID }));
+        let err = registry
+            .codec_for_format(FORMAT_ID, ImplPreference::Named("nope"))
+            .err()
+            .expect("unknown impl name must error");
+        assert!(err.to_string().contains("nope"), "{err}");
+        assert!(err.to_string().contains("reference"), "{err}");
+
+        let err = registry
+            .codec_for_format(ALT_ID, ImplPreference::Default)
+            .err()
+            .expect("unregistered format must error");
+        assert!(matches!(err, OmnizipError::Unsupported { .. }));
     }
 }
