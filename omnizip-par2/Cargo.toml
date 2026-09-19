@@ -1,5 +1,4 @@
 [package]
-publish = false
 name = "omnizip-par2"
 version.workspace = true
 edition.workspace = true
