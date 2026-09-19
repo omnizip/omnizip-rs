@@ -272,3 +272,31 @@ separating the two paths into distinct functions.
 used by trials) vs `encode_content_parts_fast` (uses the split,
 used by final emission). The trial path is only called during block
 splitting (btopt+ levels); the final path runs at every level.
+
+## Session 5c (2026-09-19): Huffman final-emission skip — REVERTED (estimate overhead = encode cost)
+
+Implemented the trial/final separation (`final_emission: bool`
+param on `encode_content_parts`). The skip works correctly (all
+sizes identical, 35/35 round-trips, 192/192 tests). But the TIMING
+is negative on random data: **+30% slower** (0.26→0.34s per 200
+iterations).
+
+**Root cause**: `compute_huf_info` calls `build_weights` (which
+internally calls `count_frequencies` — an O(n) walk) AND
+`count_frequencies` again for the bit estimate. Two O(n) walks
+versus the original's one O(n) walk + encode. The savings from
+skipping the bit-writes (~50% of encode cost) don't exceed the
+overhead of the extra histogram walk (~50% of encode cost).
+
+**The concept is sound but the implementation needs to avoid the
+redundant count_frequencies** — either by returning counts from
+build_weights or by computing the estimate directly from the
+weights (code_length = tableLog + 1 - weight, so Σ count × (TL+1-w)
+can be computed from the histogram + weights without building the
+HuffmanTable).
+
+**Conclusion**: the Huffman literal encode cannot be profitably
+skipped without restructuring the weights pipeline to share the
+histogram. The two O(n) passes (histogram + encode) are both
+needed; the question is whether they can be fused (compute the
+estimate DURING the histogram walk, before the tree is built).
