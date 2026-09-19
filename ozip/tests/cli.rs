@@ -374,3 +374,83 @@ fn convert_between_formats() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Task 55 slice 2: `ozip parity` — create → verify OK → corrupt →
+/// verify red (slice-indexed) → repair byte-exact; `ozip profile`
+/// lists the shipped presets.
+#[test]
+fn parity_and_profile_commands() {
+    fn os(s: &str) -> &std::ffi::OsStr {
+        s.as_ref()
+    }
+    let dir = std::env::temp_dir().join(format!("ozip-parity-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let src = dir.join("data.bin");
+    let mut body = vec![0u8; 8192];
+    for (i, b) in body.iter_mut().enumerate() {
+        *b = (i % 251) as u8;
+    }
+    std::fs::write(&src, &body).unwrap();
+
+    // create + verify green.
+    let (ok, _, err) = run(&[
+        os("parity"),
+        os("create"),
+        src.as_os_str(),
+        os("-n"),
+        os("6"),
+    ]);
+    assert!(ok, "parity create: {err}");
+    let par2 = dir.join("data.bin.par2");
+    let (ok, out, err) = run(&[
+        os("parity"),
+        os("verify"),
+        src.as_os_str(),
+        par2.as_os_str(),
+    ]);
+    assert!(ok, "parity verify: {err}");
+    assert!(out.contains("OK"), "{out}");
+
+    // Corrupt one slice; verify goes red with the slice index.
+    let damaged = dir.join("damaged.bin");
+    let mut raw = body.clone();
+    raw[100] ^= 0xFF;
+    std::fs::write(&damaged, &raw).unwrap();
+    // par2 tracks the original name: work under that name.
+    let work = dir.join("work");
+    std::fs::create_dir_all(&work).unwrap();
+    std::fs::copy(&par2, work.join("data.bin.par2")).unwrap();
+    std::fs::write(work.join("data.bin"), &raw).unwrap();
+    let (ok, _, _) = run(&[
+        os("parity"),
+        os("verify"),
+        work.join("data.bin").as_os_str(),
+        work.join("data.bin.par2").as_os_str(),
+    ]);
+    assert!(!ok, "parity verify accepted corruption");
+
+    // Repair restores the original bytes exactly.
+    let (ok, _, err) = run(&[
+        os("parity"),
+        os("repair"),
+        work.join("data.bin").as_os_str(),
+        work.join("data.bin.par2").as_os_str(),
+        os("-o"),
+        work.join("fixed.bin").as_os_str(),
+    ]);
+    assert!(ok, "parity repair: {err}");
+    assert_eq!(std::fs::read(work.join("fixed.bin")).unwrap(), body);
+
+    // profile list/show.
+    let (ok, out, err) = run(&[os("profile"), os("list")]);
+    assert!(ok, "profile list: {err}");
+    assert!(out.contains("balanced") && out.contains("maximum"), "{out}");
+    let (ok, out, err) = run(&[os("profile"), os("show"), os("maximum")]);
+    assert!(ok, "profile show: {err}");
+    assert!(out.contains("solid:       true"), "{out}");
+    let (ok, _, _) = run(&[os("profile"), os("show"), os("nope")]);
+    assert!(!ok, "unknown profile must fail");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

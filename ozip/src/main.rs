@@ -30,6 +30,8 @@ fn usage(codecs: &[CodecSpec]) {
     println!("    ozip t ARCHIVE                        list entry names");
     println!("    ozip verify ARCHIVE                   structural + checksum verification");
     println!("    ozip convert SRC DST                  re-encode into another format");
+    println!("    ozip parity create|verify|repair      PAR2 recovery sets");
+    println!("    ozip profile list|show                named compression profiles");
     println!("    ozip metadata ARCHIVE                 entry table as JSON");
     println!("    ozip l ARCHIVE                        long listing (mode/size/mtime)");
     println!("    ozip --list-codecs                    codec registry");
@@ -108,6 +110,12 @@ fn run() -> Result<(), String> {
         "c" | "x" | "t" | "l" | "verify" | "metadata" | "convert"
     ) {
         return run_container(&args);
+    }
+    if args[0] == "parity" {
+        return container::parity(&args[1..]);
+    }
+    if args[0] == "profile" {
+        return profile_command(&args[1..]);
     }
 
     let decompress = args.iter().any(|a| a == "-d");
@@ -374,5 +382,49 @@ fn main() -> ExitCode {
             eprintln!("ozip: {e}");
             ExitCode::FAILURE
         }
+    }
+}
+
+fn profile_command(args: &[String]) -> Result<(), String> {
+    match args.first().map(String::as_str) {
+        Some("list") => {
+            println!(
+                "{:<10} {:<8} {:<6} {:<10} {:<6} DESCRIPTION",
+                "NAME", "CODEC", "LEVEL", "FILTER", "SOLID"
+            );
+            for p in omnizip_codecs::profile::named_profiles() {
+                println!(
+                    "{:<10} {:<8} {:<6} {:<10} {:<6} {}",
+                    p.name,
+                    p.codec,
+                    p.level,
+                    match p.filter {
+                        omnizip_codecs::profile::ProfileFilter::None => "-",
+                        omnizip_codecs::profile::ProfileFilter::BcjX86 => "bcj_x86",
+                        omnizip_codecs::profile::ProfileFilter::Auto => "auto",
+                    },
+                    if p.solid { "yes" } else { "no" },
+                    p.description
+                );
+            }
+            Ok(())
+        }
+        Some("show") => {
+            let name = args
+                .get(1)
+                .ok_or_else(|| "ozip profile show: a profile name is required".to_string())?;
+            let p = omnizip_codecs::profile::named_profile(name)
+                .ok_or_else(|| format!("unknown profile '{name}' (see: ozip profile list)"))?;
+            println!("name:        {}", p.name);
+            println!("codec:       {}", p.codec);
+            println!("level:       {}", p.level);
+            println!("solid:       {}", p.solid);
+            println!("description: {}", p.description);
+            Ok(())
+        }
+        other => Err(format!(
+            "ozip profile: expected list|show, got {}",
+            other.unwrap_or("(nothing)")
+        )),
     }
 }

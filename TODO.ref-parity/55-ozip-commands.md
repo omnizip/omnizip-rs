@@ -1,13 +1,12 @@
 # Task 55 — ozip commands: verify / repair / parity / metadata / profile
 
-Status: partially done (2026-09-19 — `verify` and `metadata`
-shipped with pin tests; verify = full structural + checksum read
-of every entry, zip CRC32 verified by the reader on read; red on
-corruption with per-entry FAIL lines. REMAINING in this task:
-`parity create/verify/repair` (wraps omnizip-par2), `archive
-repair` (port Ruby's semantics), `profile list|show` (needs 60).
-clap migration deferred: the hand-rolled router grew the commands
-without a new dependency — revisit if the command count doubles)
+Status: partially done (2026-09-19, TWO slices — (1) verify +
+metadata; (2) parity create/verify/repair over omnizip-par2 [full
+cycle pinned: create → verify OK → corruption detected with slice
+index → repair byte-exact] + profile list/show over task 60's
+named presets. clap still deferred. REMAINING: archive repair
+(Ruby's archive_repair semantics — zip local-header salvage etc.;
+the par2 path above IS the recovery story for parity sets).
 
 ## Gap
 
