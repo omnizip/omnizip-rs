@@ -34,7 +34,7 @@ const NAMES: [&str; SITES] = [
 ];
 
 thread_local! {
-    static WORK_UNITS: [Cell<u64>; SITES] = const { [const { Cell::new(0) }; SITES] };
+    static WORK_UNITS: [Cell<u64>; SITES] = std::array::from_fn(|_| Cell::new(0));
 }
 
 /// Record `n` units of DP work at `site` (one call per loop
