@@ -9,7 +9,7 @@ mod reader;
 mod writer;
 
 pub use reader::ZipReader;
-pub use writer::{ZipMethod, ZipWriter};
+pub use writer::{parallel_create, ZipMethod, ZipWriter};
 
 pub(crate) const LOCAL_SIG: u32 = 0x0403_4B50;
 pub(crate) const CENTRAL_SIG: u32 = 0x0201_4B50;

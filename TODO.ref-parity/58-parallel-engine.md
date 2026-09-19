@@ -23,8 +23,16 @@ default extract_to now uses (the security boundary was refactored
 into ONE function; security corpus 11/11 green). Output
 equivalence pinned: every file byte-identical to serial across
 threads=1/3/8; shared decode == trait decode for every entry.
-Writer-side parallel CREATE remains unimplemented (compress-
-concurrent/emit-serialized); extract covers the CPU-bound leg
+Writer-side parallel CREATE SHIPPED (2026-09-20, zip flagship):
+ZipWriter::prepare (pure compress+crc+size precompute, thread-safe)
++ add_file_prepared (serial emission; add_file = prepare + emit —
+SSOT); parallel_create(files, method, threads) = strided parallel
+prepare + serial emit in ENTRY ORDER => byte-identical to the
+serial writer for ANY thread count (pinned t=1/3/8 vs serial,
+including the uncompressed-size field the first cut missed —
+PreparedEntry carries the plaintext size). Round-trip pinned. The
+generic pattern generalizes to the other writers as their
+compress-with seams allow
 
 ## Gap
 
