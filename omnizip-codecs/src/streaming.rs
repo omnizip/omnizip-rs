@@ -146,6 +146,54 @@ impl StreamingEncoder for ChunkedStreamEncoder {
     }
 }
 
+/// [`StreamingDecoder`] over any [`Codec`](crate::Codec) — the
+/// decoder leg of task 57.
+///
+/// ## v1 semantics (documented, not hidden)
+///
+/// Compressed bytes buffer until [`finish`](StreamingDecoder::finish)
+/// — push partitioning never changes the result, and the decode
+/// runs once over the concatenation. Output memory is bounded per
+/// call (each `write` returns what was decodable so far: nothing,
+/// in v1); the INPUT buffer is the caller's compressed stream,
+/// typically many times smaller than the plaintext it expands to.
+/// Incremental per-frame decoding (zstd magic-scanning) is the
+/// follow-up recorded in the task file.
+pub struct ChunkedStreamDecoder {
+    codec: Box<dyn crate::Codec>,
+    expected_len: u32,
+    buf: Vec<u8>,
+}
+
+impl ChunkedStreamDecoder {
+    /// `expected_len` = the exact plaintext size when known;
+    /// `u32::MAX` delegates to codecs' length-agnostic paths where
+    /// they exist (the same contract the FFI's unknown-length
+    /// decode uses).
+    #[must_use]
+    pub fn new(codec: Box<dyn crate::Codec>, expected_len: u32) -> Self {
+        Self {
+            codec,
+            expected_len,
+            buf: Vec::new(),
+        }
+    }
+}
+
+impl StreamingDecoder for ChunkedStreamDecoder {
+    fn write(&mut self, input: &[u8]) -> Result<Vec<u8>, OmnizipError> {
+        self.buf.extend_from_slice(input);
+        // v1: decode happens at finish; nothing decodable to return
+        // incrementally yet.
+        Ok(Vec::new())
+    }
+
+    fn finish(mut self) -> Result<Vec<u8>, OmnizipError> {
+        let compressed = std::mem::take(&mut self.buf);
+        self.codec.decompress(&compressed, self.expected_len)
+    }
+}
+
 #[cfg(test)]
 mod chunked_tests {
     use super::{ChunkedStreamEncoder, StreamingEncoder};
@@ -268,5 +316,80 @@ mod chunked_tests {
         let mut e = ChunkedStreamEncoder::new(Box::new(TaggedCodec), level, 64);
         let out = e.finish().unwrap();
         assert_eq!(out, TaggedCodec.compress(&[], level).unwrap());
+    }
+}
+
+#[cfg(test)]
+mod chunked_decoder_tests {
+    use super::{ChunkedStreamDecoder, StreamingDecoder};
+    use crate::codec::CodecId;
+    use crate::level::CompressionLevel;
+    use crate::{Codec, OmnizipError};
+
+    struct UpperCodec;
+
+    impl Codec for UpperCodec {
+        fn id(&self) -> CodecId {
+            CodecId::new(0xFF04)
+        }
+        fn name(&self) -> &'static str {
+            "upper"
+        }
+        fn compress(&self, p: &[u8], _l: CompressionLevel) -> Result<Vec<u8>, OmnizipError> {
+            Ok(p.iter().map(|b| b.to_ascii_uppercase()).collect())
+        }
+        fn decompress(&self, c: &[u8], expected: u32) -> Result<Vec<u8>, OmnizipError> {
+            let out: Vec<u8> = c.iter().map(|b| b.to_ascii_lowercase()).collect();
+            if out.len() as u32 != expected && expected != u32::MAX {
+                return Err(OmnizipError::LengthMismatch {
+                    codec: self.id(),
+                    expected,
+                    actual: out.len(),
+                });
+            }
+            Ok(out)
+        }
+    }
+
+    /// Partition invariance: the same compressed stream decodes to
+    /// the same plaintext regardless of write partitioning.
+    #[test]
+    fn partition_invariance() -> Result<(), OmnizipError> {
+        let compressed =
+            UpperCodec.compress(b"Hello Streaming World", CompressionLevel::default())?;
+        let mut partitions: Vec<Vec<usize>> = vec![vec![compressed.len()]];
+        let mut i = 0;
+        while i < compressed.len() {
+            partitions.push(vec![i + 1, compressed.len() - i - 1]);
+            i += 7;
+        }
+        for partition in &partitions {
+            let mut d = ChunkedStreamDecoder::new(Box::new(UpperCodec), 21);
+            let mut offset = 0;
+            for &n in partition {
+                d.write(&compressed[offset..offset + n])?;
+                offset += n;
+            }
+            assert_eq!(offset, compressed.len());
+            assert_eq!(
+                d.finish()?,
+                b"hello streaming world",
+                "partition {partition:?}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn unknown_length_and_errors() -> Result<(), OmnizipError> {
+        let compressed = UpperCodec.compress(b"ABC", CompressionLevel::default())?;
+        let mut d = ChunkedStreamDecoder::new(Box::new(UpperCodec), u32::MAX);
+        d.write(&compressed)?;
+        assert_eq!(d.finish()?, b"abc");
+
+        let mut d = ChunkedStreamDecoder::new(Box::new(UpperCodec), 99);
+        d.write(&compressed)?;
+        assert!(d.finish().is_err());
+        Ok(())
     }
 }

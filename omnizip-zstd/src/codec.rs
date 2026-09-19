@@ -189,6 +189,43 @@ mod tests {
     }
 }
 
+/// Streaming zstd decoder (TODO.ref-parity/57, decoder leg): v1
+/// buffers the compressed stream and decodes at `finish`
+/// (`expected_len = u32::MAX` uses the length-agnostic path).
+/// Output equals the one-shot [`decompress`] exactly.
+pub fn streaming_decoder(expected_len: u32) -> omnizip_codecs::streaming::ChunkedStreamDecoder {
+    let codec: Box<dyn omnizip_codecs::Codec> = if expected_len == u32::MAX {
+        Box::new(LenientZstdCodec)
+    } else {
+        Box::new(ZstdCodec)
+    };
+    omnizip_codecs::streaming::ChunkedStreamDecoder::new(codec, expected_len)
+}
+
+/// ZstdCodec except `decompress` ignores `expected_len` — wraps the
+/// length-agnostic free function. Used by [`streaming_decoder`]
+/// for unknown-length (streaming) callers; the strict codec stays
+/// the registry default.
+struct LenientZstdCodec;
+
+impl Codec for LenientZstdCodec {
+    fn id(&self) -> CodecId {
+        CodecId::ZSTD
+    }
+    fn name(&self) -> &'static str {
+        "zstd"
+    }
+    fn compress(&self, plaintext: &[u8], level: CompressionLevel) -> Result<Vec<u8>, OmnizipError> {
+        ZstdCodec.compress(plaintext, level)
+    }
+    fn decompress(&self, compressed: &[u8], _expected_len: u32) -> Result<Vec<u8>, OmnizipError> {
+        crate::decompress(compressed, u32::MAX).map_err(|e| OmnizipError::DecodeFailed {
+            codec: CodecId::ZSTD,
+            reason: e.to_string(),
+        })
+    }
+}
+
 /// Bounded-memory streaming zstd encoder (TODO.ref-parity/57): one
 /// independent frame per `chunk_size` plaintext bytes, concatenated
 /// (multi-frame output — decodes with [`decompress`] and any zstd
@@ -252,5 +289,26 @@ mod streaming_tests {
         };
         assert_eq!(baseline, dribble);
         assert_eq!(baseline, one_shot_write);
+    }
+}
+
+#[cfg(test)]
+mod streaming_decoder_tests {
+    use crate::codec::streaming_decoder;
+    use omnizip_codecs::streaming::StreamingDecoder;
+
+    #[test]
+    fn streaming_decode_matches_one_shot() {
+        let input: Vec<u8> = (0..30_000u32).map(|i| (i % 251) as u8).collect();
+        let compressed = crate::encoder::block::encode_frame_compressed(&input, 6).unwrap();
+        let mut d = streaming_decoder(u32::MAX);
+        // adversarial partition
+        let mut i = 0;
+        while i < compressed.len() {
+            let n = 13.min(compressed.len() - i);
+            d.write(&compressed[i..i + n]).unwrap();
+            i += n;
+        }
+        assert_eq!(d.finish().unwrap(), input);
     }
 }

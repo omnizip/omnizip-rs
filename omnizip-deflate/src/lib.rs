@@ -133,3 +133,49 @@ mod tests {
         assert!(compressed.len() < data.len());
     }
 }
+
+/// Bounded-memory streaming deflate encoder (TODO.ref-parity/57):
+/// one independent zlib stream per `chunk_size` plaintext bytes,
+/// concatenated. Output is a pure function of (input, chunk_size);
+/// push partitioning never affects the bytes.
+///
+/// Concatenation note: raw zlib streams do not officially
+/// concatenate the way gzip members or zstd frames do — downstream
+/// consumers should re-inflate each chunk, or use a container
+/// format. Prefer gzip/bzip2/zstd/xz for cross-tool concatenated
+/// streaming.
+pub fn streaming_encoder(
+    level: omnizip_codecs::CompressionLevel,
+    chunk_size: usize,
+) -> omnizip_codecs::streaming::ChunkedStreamEncoder {
+    omnizip_codecs::streaming::ChunkedStreamEncoder::new(Box::new(DeflateCodec), level, chunk_size)
+}
+
+#[cfg(test)]
+mod streaming_tests {
+    use super::streaming_encoder;
+    use omnizip_codecs::streaming::StreamingEncoder;
+    use omnizip_codecs::CompressionLevel;
+
+    #[test]
+    fn chunked_output_is_deterministic_across_partitions() {
+        let input: Vec<u8> = (0..20_000u32).map(|i| (i % 249) as u8).collect();
+        let one_shot_write = {
+            let mut e = streaming_encoder(CompressionLevel::default(), 4096);
+            e.write(&input).unwrap();
+            e.finish().unwrap()
+        };
+        let dribble = {
+            let mut e = streaming_encoder(CompressionLevel::default(), 4096);
+            let mut i = 0;
+            while i < input.len() {
+                let n = 1 + (i % 17);
+                let n = n.min(input.len() - i);
+                e.write(&input[i..i + n]).unwrap();
+                i += n;
+            }
+            e.finish().unwrap()
+        };
+        assert_eq!(one_shot_write, dribble);
+    }
+}

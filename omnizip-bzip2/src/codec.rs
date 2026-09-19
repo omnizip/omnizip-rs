@@ -435,3 +435,40 @@ mod tests {
         }
     }
 }
+
+/// Bounded-memory streaming bzip2 encoder (TODO.ref-parity/57): one
+/// independent bzip2 stream per `chunk_size` plaintext bytes —
+/// concatenated bzip2 streams are a standard, `bzip2 -d` handles
+/// them. Output is a pure function of (input, chunk_size).
+#[must_use]
+pub fn streaming_encoder(
+    level: CompressionLevel,
+    chunk_size: usize,
+) -> omnizip_codecs::streaming::ChunkedStreamEncoder {
+    omnizip_codecs::streaming::ChunkedStreamEncoder::new(Box::new(Bzip2Codec), level, chunk_size)
+}
+
+#[cfg(test)]
+mod streaming_tests {
+    use super::streaming_encoder;
+    use omnizip_codecs::level::CompressionLevel;
+    use omnizip_codecs::streaming::StreamingEncoder;
+
+    #[test]
+    fn partition_invariance() {
+        let input: Vec<u8> = (0..30_000u32).map(|i| (i % 249) as u8).collect();
+        let baseline = {
+            let mut e = streaming_encoder(CompressionLevel::default(), 8192);
+            e.write(&input).unwrap();
+            e.finish().unwrap()
+        };
+        let mut e = streaming_encoder(CompressionLevel::default(), 8192);
+        let mut i = 0;
+        while i < input.len() {
+            let n = 101.min(input.len() - i);
+            e.write(&input[i..i + n]).unwrap();
+            i += n;
+        }
+        assert_eq!(e.finish().unwrap(), baseline);
+    }
+}
