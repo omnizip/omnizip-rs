@@ -193,13 +193,61 @@ mod tests {
 /// buffers the compressed stream and decodes at `finish`
 /// (`expected_len = u32::MAX` uses the length-agnostic path).
 /// Output equals the one-shot [`decompress`] exactly.
-pub fn streaming_decoder(expected_len: u32) -> omnizip_codecs::streaming::ChunkedStreamDecoder {
-    let codec: Box<dyn omnizip_codecs::Codec> = if expected_len == u32::MAX {
-        Box::new(LenientZstdCodec)
-    } else {
-        Box::new(ZstdCodec)
-    };
-    omnizip_codecs::streaming::ChunkedStreamDecoder::new(codec, expected_len)
+#[must_use]
+pub fn streaming_decoder(expected_len: u32) -> ZstdStreamingDecoder {
+    ZstdStreamingDecoder {
+        incremental: expected_len == u32::MAX,
+        inner: None,
+        legacy: None,
+    }
+}
+
+/// Streaming zstd decode: unknown-length (`u32::MAX`) callers get
+/// TRUE incremental decoding (per-frame span parsing — a complete
+/// frame's plaintext is returned by the very `write` that completed
+/// it); exact-length callers get the buffered decode-at-finish
+/// leg. Both produce the one-shot output exactly.
+pub struct ZstdStreamingDecoder {
+    incremental: bool,
+    inner: Option<crate::incremental::IncrementalDecoder>,
+    legacy: Option<omnizip_codecs::streaming::ChunkedStreamDecoder>,
+}
+
+impl omnizip_codecs::streaming::StreamingDecoder for ZstdStreamingDecoder {
+    fn write(&mut self, input: &[u8]) -> Result<Vec<u8>, OmnizipError> {
+        if self.incremental {
+            let inner = self
+                .inner
+                .get_or_insert_with(crate::incremental::IncrementalDecoder::new);
+            return inner.write(input).map_err(|e| OmnizipError::DecodeFailed {
+                codec: CodecId::ZSTD,
+                reason: e.to_string(),
+            });
+        }
+        let legacy = self.legacy.get_or_insert_with(|| {
+            omnizip_codecs::streaming::ChunkedStreamDecoder::new(
+                Box::new(LenientZstdCodec),
+                u32::MAX,
+            )
+        });
+        legacy.write(input)
+    }
+
+    fn finish(mut self) -> Result<Vec<u8>, OmnizipError> {
+        if self.incremental {
+            let mut inner = self
+                .inner
+                .take()
+                .unwrap_or_else(crate::incremental::IncrementalDecoder::new);
+            return inner.finish().map_err(|e| OmnizipError::DecodeFailed {
+                codec: CodecId::ZSTD,
+                reason: e.to_string(),
+            });
+        }
+        self.legacy
+            .take()
+            .map_or_else(|| Ok(Vec::new()), |legacy| legacy.finish())
+    }
 }
 
 /// ZstdCodec except `decompress` ignores `expected_len` — wraps the
@@ -302,13 +350,34 @@ mod streaming_decoder_tests {
         let input: Vec<u8> = (0..30_000u32).map(|i| (i % 251) as u8).collect();
         let compressed = crate::encoder::block::encode_frame_compressed(&input, 6).unwrap();
         let mut d = streaming_decoder(u32::MAX);
-        // adversarial partition
+        // Incremental contract: output arrives AT WRITE for every
+        // completed frame; finish returns only the tail. Adversarial
+        // 13-byte partition; a single frame completes only at the end.
+        let mut got = Vec::new();
         let mut i = 0;
         while i < compressed.len() {
             let n = 13.min(compressed.len() - i);
-            d.write(&compressed[i..i + n]).unwrap();
+            got.extend_from_slice(&d.write(&compressed[i..i + n]).unwrap());
             i += n;
         }
-        assert_eq!(d.finish().unwrap(), input);
+        got.extend_from_slice(&d.finish().unwrap());
+        assert_eq!(got, input);
+    }
+
+    #[test]
+    fn streaming_decode_is_incremental_across_frames() {
+        // Multi-frame stream: a complete frame must decode DURING
+        // write, not only at finish.
+        let a: Vec<u8> = std::iter::repeat(b'x').take(5000).collect();
+        let b: Vec<u8> = (0..5000u32).map(|i| (i % 251) as u8).collect();
+        let fa = crate::encoder::block::encode_frame_compressed(&a, 3).unwrap();
+        let fb = crate::encoder::block::encode_frame_compressed(&b, 3).unwrap();
+
+        let mut d = streaming_decoder(u32::MAX);
+        let out1 = d.write(&fa).unwrap();
+        assert_eq!(out1, a, "first frame did not decode incrementally");
+        let out2 = d.write(&fb).unwrap();
+        assert_eq!(out2, b, "second frame did not decode incrementally");
+        assert!(d.finish().unwrap().is_empty());
     }
 }
