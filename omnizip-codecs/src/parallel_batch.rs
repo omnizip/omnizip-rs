@@ -166,6 +166,98 @@ fn num_cpus() -> usize {
         .max(1)
 }
 
+/// Single-input parallel compression for ANY codec — the
+/// generalized form of zstd's `compress_mt` job split (task 58).
+///
+/// `plaintext` is split into fixed `job_size` chunks (an explicit
+/// parameter: the caller owns the output contract — job boundaries
+/// are part of it); each job is compressed independently and the
+/// results concatenate in job order.
+///
+/// ## Determinism
+///
+/// Output is byte-identical for any `threads` (jobs are assigned to
+/// workers in fixed strided groups, results indexed by job) and for
+/// `threads <= 1` or single-job inputs equals the codec's one-shot
+/// output exactly.
+///
+/// ## Concatenation contract
+///
+/// The codec's output must be independently stream-concatenatable
+/// (zstd multi-frame, gzip multi-member, bzip2 and xz multistream
+/// qualify; raw single-stream deflate does not). Callers pick codecs
+/// with this property — `parallel_compress` cannot verify it.
+///
+/// # Errors
+///
+/// The first job error (in job order) propagates; worker panics
+/// surface as errors via `join`.
+pub fn parallel_compress(
+    codec: &dyn crate::Codec,
+    plaintext: &[u8],
+    level: crate::CompressionLevel,
+    threads: usize,
+    job_size: usize,
+) -> Result<Vec<u8>, crate::OmnizipError> {
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = (threads, job_size);
+        return codec.compress(plaintext, level);
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let job_size = job_size.max(1);
+        if threads <= 1 || plaintext.len() <= job_size {
+            return codec.compress(plaintext, level);
+        }
+        let jobs: Vec<&[u8]> = plaintext.chunks(job_size).collect();
+        let workers = threads.min(jobs.len());
+        let per = jobs.len().div_ceil(workers);
+        let mut results: Vec<Option<Result<Vec<u8>, crate::OmnizipError>>> =
+            (0..jobs.len()).map(|_| None).collect();
+        let mut worker_panicked = false;
+        std::thread::scope(|scope| {
+            let handles: Vec<_> = results
+                .chunks_mut(per)
+                .zip(jobs.chunks(per))
+                .map(|(slot, job_chunk)| {
+                    scope.spawn(move || {
+                        for (slot, job) in slot.iter_mut().zip(job_chunk) {
+                            *slot = Some(codec.compress(job, level));
+                        }
+                    })
+                })
+                .collect();
+            for h in handles {
+                if h.join().is_err() {
+                    worker_panicked = true;
+                }
+            }
+        });
+        if worker_panicked {
+            // Surface as job errors rather than unwinding further.
+            for slot in &mut results {
+                if slot.is_none() {
+                    *slot = Some(Err(crate::OmnizipError::EncodeFailed {
+                        codec: codec.id(),
+                        reason: "parallel worker panicked".to_string(),
+                    }));
+                }
+            }
+        }
+        let mut out = Vec::with_capacity(plaintext.len() / 2 + 64 * jobs.len());
+        for (i, r) in results.into_iter().enumerate() {
+            out.extend_from_slice(&r.unwrap_or_else(|| {
+                Err(crate::OmnizipError::EncodeFailed {
+                    codec: codec.id(),
+                    reason: format!("job {i} produced no result"),
+                })
+            })?);
+        }
+        Ok(out)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -264,5 +356,131 @@ mod tests {
             .map(|r| r.expect("compress failed"))
             .collect();
         assert_eq!(run1, run2);
+    }
+}
+
+#[cfg(test)]
+mod parallel_compress_tests {
+    use super::parallel_compress;
+    use crate::codec::CodecId;
+    use crate::level::CompressionLevel;
+    use crate::{Codec, OmnizipError};
+
+    /// Identity codec that tags each job with its length prefix, so
+    /// job splitting and ordering are observable in the output.
+    struct TaggedCodec;
+
+    impl Codec for TaggedCodec {
+        fn id(&self) -> CodecId {
+            CodecId::new(0xFF01)
+        }
+        fn name(&self) -> &'static str {
+            "tagged"
+        }
+        fn compress(
+            &self,
+            plaintext: &[u8],
+            _level: CompressionLevel,
+        ) -> Result<Vec<u8>, OmnizipError> {
+            let mut out = u32::try_from(plaintext.len())
+                .unwrap()
+                .to_le_bytes()
+                .to_vec();
+            out.extend_from_slice(plaintext);
+            Ok(out)
+        }
+        fn decompress(
+            &self,
+            _compressed: &[u8],
+            _expected_len: u32,
+        ) -> Result<Vec<u8>, OmnizipError> {
+            unimplemented!("test codec: compress-only")
+        }
+    }
+
+    /// Fails every job past the first — error propagation check.
+    struct FlakyCodec;
+
+    impl Codec for FlakyCodec {
+        fn id(&self) -> CodecId {
+            CodecId::new(0xFF02)
+        }
+        fn name(&self) -> &'static str {
+            "flaky"
+        }
+        fn compress(&self, _p: &[u8], _l: CompressionLevel) -> Result<Vec<u8>, OmnizipError> {
+            Err(OmnizipError::EncodeFailed {
+                codec: self.id(),
+                reason: "planned failure".into(),
+            })
+        }
+        fn decompress(&self, _c: &[u8], _e: u32) -> Result<Vec<u8>, OmnizipError> {
+            unimplemented!("test codec: compress-only")
+        }
+    }
+
+    fn data(len: usize) -> Vec<u8> {
+        (0..len)
+            .map(|i| u8::try_from(i % 251).expect("< 251"))
+            .collect()
+    }
+
+    #[test]
+    fn thread_count_invariant_output() {
+        // Every config that SPLITS (threads >= 2) must produce the
+        // same bytes regardless of worker count. (threads <= 1 is
+        // the documented one-shot shortcut — covered by
+        // single_job_equals_one_shot.)
+        let input = data(10_000);
+        let level = CompressionLevel::default();
+        let t2 = parallel_compress(&TaggedCodec, &input, level, 2, 1024).unwrap();
+        let t8 = parallel_compress(&TaggedCodec, &input, level, 8, 1024).unwrap();
+        let t16 = parallel_compress(&TaggedCodec, &input, level, 16, 1024).unwrap();
+        assert_eq!(t2, t8);
+        assert_eq!(t8, t16);
+    }
+
+    #[test]
+    fn single_job_equals_one_shot() {
+        let input = data(500);
+        let level = CompressionLevel::default();
+        let one_shot = TaggedCodec.compress(&input, level).unwrap();
+        let parallel = parallel_compress(&TaggedCodec, &input, level, 8, 4096).unwrap();
+        assert_eq!(one_shot, parallel);
+    }
+
+    #[test]
+    fn jobs_split_and_ordered() {
+        // 3000 bytes / 1024-job = 3 jobs (1024, 1024, 952): each
+        // output segment = LE length tag + payload, concatenated in
+        // job order.
+        let input = data(3000);
+        let out =
+            parallel_compress(&TaggedCodec, &input, CompressionLevel::default(), 4, 1024).unwrap();
+        let mut expect = Vec::new();
+        for chunk in input.chunks(1024) {
+            expect.extend_from_slice(&u32::try_from(chunk.len()).unwrap().to_le_bytes());
+            expect.extend_from_slice(chunk);
+        }
+        assert_eq!(out, expect);
+    }
+
+    #[test]
+    fn job_error_propagates() {
+        let input = data(3000);
+        let err = match parallel_compress(&FlakyCodec, &input, CompressionLevel::default(), 4, 1024)
+        {
+            Err(e) => e,
+            Ok(_) => panic!("codec failure must propagate"),
+        };
+        assert!(err.to_string().contains("planned failure"), "{err}");
+    }
+
+    #[test]
+    fn empty_and_tiny_inputs() {
+        let level = CompressionLevel::default();
+        assert!(parallel_compress(&TaggedCodec, &[], level, 4, 1024).is_ok());
+        let tiny = parallel_compress(&TaggedCodec, b"xy", level, 4, 1024).unwrap();
+        assert_eq!(tiny, TaggedCodec.compress(b"xy", level).unwrap());
     }
 }
