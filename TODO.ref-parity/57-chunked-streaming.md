@@ -1,7 +1,17 @@
 # Task 57 — chunked streaming: bounded-memory codec APIs
 
-Status: open (part of task 51 phase 2; the biggest architectural
-item — the determinism design below is the crux)
+Status: partially done (2026-09-19, encoder leg — the orphaned
+streaming_api.rs REMOVED (never a declared module; streaming.rs was
+always the SSOT); ChunkedStreamEncoder in streaming.rs over ANY
+owned Box<dyn Codec>: buffers to the declared chunk_size, encodes
+each chunk as an independent stream, concatenates (same contract
+as parallel_compress). Partition invariance proven on the tagged
+codec (seeded random partitions, 5 shapes) AND on real zstd bytes
+(byte-by-byte dribble vs one-shot write). omnizip-zstd::
+streaming_encoder + multi-frame round-trip through our decoder AND
+the system zstd CLI (oracle-verified on 100 KB). Decoder v1 =
+decode-on-finish documented; incremental per-frame decoding and
+per-codec streamers (bzip2/deflate/xz) remain
 
 ## Gap
 

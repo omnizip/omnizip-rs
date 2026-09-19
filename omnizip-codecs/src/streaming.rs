@@ -65,3 +65,208 @@ pub trait StreamingDecoder {
     /// Returns an error if the stream is truncated or corrupt.
     fn finish(self) -> Result<Vec<u8>, OmnizipError>;
 }
+
+// ============================================================================
+// ChunkedStreamEncoder — bounded-memory streaming over ANY codec
+// (TODO.ref-parity/57, encoder leg).
+//
+// The determinism rule: the output is a pure function of (input
+// bytes, input length, declared chunk_size) — the implementation
+// buffers internally until a full chunk is assembled, so WHEN bytes
+// arrive via `write` never affects the output. Each chunk is
+// encoded as an independent stream and the results concatenate in
+// chunk order; the concatenation contract is the same one
+// parallel_compress documents (zstd multi-frame, gzip multi-member,
+// bzip2/xz multistream).
+// ============================================================================
+
+/// [`StreamingEncoder`] over any [`Codec`](crate::Codec), with a
+/// declared chunk size that owns the output contract.
+///
+/// Memory bound: `chunk_size` of buffered plaintext plus the
+/// in-flight chunk's compressed form.
+pub struct ChunkedStreamEncoder {
+    codec: Box<dyn crate::Codec>,
+    level: crate::CompressionLevel,
+    chunk_size: usize,
+    buf: Vec<u8>,
+    out: Vec<u8>,
+}
+
+impl ChunkedStreamEncoder {
+    /// Stream-compress with `codec` at `level`, one independent
+    /// stream per `chunk_size` plaintext bytes. Owns the codec, so
+    /// call sites stay lifetime-free.
+    #[must_use]
+    pub fn new(
+        codec: Box<dyn crate::Codec>,
+        level: crate::CompressionLevel,
+        chunk_size: usize,
+    ) -> Self {
+        Self {
+            codec,
+            level,
+            chunk_size: chunk_size.max(1),
+            buf: Vec::new(),
+            out: Vec::new(),
+        }
+    }
+
+    fn flush_chunk(&mut self) -> Result<(), OmnizipError> {
+        if self.buf.is_empty() {
+            return Ok(());
+        }
+        let chunk = std::mem::take(&mut self.buf);
+        let compressed = self.codec.compress(&chunk, self.level)?;
+        self.out.extend_from_slice(&compressed);
+        Ok(())
+    }
+}
+
+impl StreamingEncoder for ChunkedStreamEncoder {
+    fn write(&mut self, input: &[u8]) -> Result<(), OmnizipError> {
+        self.buf.extend_from_slice(input);
+        while self.buf.len() >= self.chunk_size {
+            // Split at the declared boundary: buf[drain] is the chunk.
+            let chunk: Vec<u8> = self.buf.drain(..self.chunk_size).collect();
+            let compressed = self.codec.compress(&chunk, self.level)?;
+            self.out.extend_from_slice(&compressed);
+        }
+        Ok(())
+    }
+
+    fn finish(mut self) -> Result<Vec<u8>, OmnizipError> {
+        self.flush_chunk()?;
+        if self.out.is_empty() {
+            // No input at all: an empty chunk still encodes (codecs'
+            // empty-input behavior is part of their contract).
+            return self.codec.compress(&[], self.level);
+        }
+        Ok(self.out)
+    }
+}
+
+#[cfg(test)]
+mod chunked_tests {
+    use super::{ChunkedStreamEncoder, StreamingEncoder};
+    use crate::codec::CodecId;
+    use crate::level::CompressionLevel;
+    use crate::{Codec, OmnizipError};
+
+    /// A codec whose output = 4-byte LE length tag + payload, so
+    /// chunk boundaries are observable in the output.
+    struct TaggedCodec;
+
+    impl Codec for TaggedCodec {
+        fn id(&self) -> CodecId {
+            CodecId::new(0xFF03)
+        }
+        fn name(&self) -> &'static str {
+            "tagged"
+        }
+        fn compress(&self, p: &[u8], _l: CompressionLevel) -> Result<Vec<u8>, OmnizipError> {
+            let mut out = u32::try_from(p.len()).unwrap().to_le_bytes().to_vec();
+            out.extend_from_slice(p);
+            Ok(out)
+        }
+        fn decompress(&self, _c: &[u8], _e: u32) -> Result<Vec<u8>, OmnizipError> {
+            unimplemented!("test codec")
+        }
+    }
+
+    fn data(len: usize) -> Vec<u8> {
+        (0..len)
+            .map(|i| u8::try_from(i % 249).expect("<249"))
+            .collect()
+    }
+
+    fn push_all(
+        enc: &mut ChunkedStreamEncoder,
+        input: &[u8],
+        partition: &[usize],
+    ) -> Result<(), OmnizipError> {
+        let mut i = 0;
+        for &n in partition {
+            enc.write(&input[i..i + n])?;
+            i += n;
+        }
+        assert_eq!(i, input.len());
+        Ok(())
+    }
+
+    /// THE determinism property: the same input + chunk size produce
+    /// byte-identical output regardless of how writes were
+    /// partitioned (1B..chunk_size random boundaries, seeded).
+    #[test]
+    fn partition_invariance() -> Result<(), OmnizipError> {
+        let mut rng = 0xC0FFEE_u64;
+        let mut next = move || {
+            rng ^= rng << 13;
+            rng ^= rng >> 7;
+            rng ^= rng << 17;
+            rng
+        };
+        for (len, chunk) in [(0_usize, 16), (1, 16), (100, 16), (4096, 512), (5000, 1024)] {
+            let input = data(len);
+            let level = CompressionLevel::default();
+            let baseline = {
+                let mut e = ChunkedStreamEncoder::new(Box::new(TaggedCodec), level, chunk);
+                e.write(&input)?;
+                e.finish()?
+            };
+            for trial in 0..8 {
+                let mut partition = Vec::new();
+                let mut left = len;
+                while left > 0 {
+                    let n = (next() as usize % chunk + 1).min(left);
+                    partition.push(n);
+                    left -= n;
+                }
+                let mut e = ChunkedStreamEncoder::new(Box::new(TaggedCodec), level, chunk);
+                push_all(&mut e, &input, &partition)?;
+                assert_eq!(
+                    e.finish()?,
+                    baseline,
+                    "len {len} chunk {chunk} trial {trial} partition {partition:?}"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn chunk_boundaries_in_output() {
+        // 3000 bytes, chunk 1024 -> 3 chunks: tags 1024, 1024, 952.
+        let input = data(3000);
+        let mut e =
+            ChunkedStreamEncoder::new(Box::new(TaggedCodec), CompressionLevel::default(), 1024);
+        e.write(&input).unwrap();
+        let out = e.finish().unwrap();
+        let mut expect = Vec::new();
+        for c in input.chunks(1024) {
+            expect.extend_from_slice(&u32::try_from(c.len()).unwrap().to_le_bytes());
+            expect.extend_from_slice(c);
+        }
+        assert_eq!(out, expect);
+    }
+
+    #[test]
+    fn single_chunk_equals_one_shot() {
+        let input = data(777);
+        let level = CompressionLevel::default();
+        let mut e = ChunkedStreamEncoder::new(Box::new(TaggedCodec), level, 4096);
+        e.write(&input).unwrap();
+        assert_eq!(
+            e.finish().unwrap(),
+            TaggedCodec.compress(&input, level).unwrap()
+        );
+    }
+
+    #[test]
+    fn empty_input_encodes_empty_chunk() {
+        let level = CompressionLevel::default();
+        let mut e = ChunkedStreamEncoder::new(Box::new(TaggedCodec), level, 64);
+        let out = e.finish().unwrap();
+        assert_eq!(out, TaggedCodec.compress(&[], level).unwrap());
+    }
+}

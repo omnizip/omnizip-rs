@@ -188,3 +188,69 @@ mod tests {
         }
     }
 }
+
+/// Bounded-memory streaming zstd encoder (TODO.ref-parity/57): one
+/// independent frame per `chunk_size` plaintext bytes, concatenated
+/// (multi-frame output — decodes with [`decompress`] and any zstd
+/// CLI). Output is a pure function of (input, chunk_size): push
+/// partitioning never affects the bytes.
+#[must_use]
+pub fn streaming_encoder(
+    level: CompressionLevel,
+    chunk_size: usize,
+) -> omnizip_codecs::streaming::ChunkedStreamEncoder {
+    omnizip_codecs::streaming::ChunkedStreamEncoder::new(Box::new(ZstdCodec), level, chunk_size)
+}
+
+#[cfg(test)]
+mod streaming_tests {
+    use super::streaming_encoder;
+    use crate::decompress;
+    use omnizip_codecs::level::CompressionLevel;
+    use omnizip_codecs::streaming::StreamingEncoder;
+
+    fn data(len: usize) -> Vec<u8> {
+        (0..len)
+            .map(|i| u8::try_from(i % 251).expect("<251"))
+            .collect()
+    }
+
+    #[test]
+    fn multi_frame_round_trips_through_our_decoder() {
+        for (len, chunk) in [(0_usize, 64), (1, 64), (5000, 1024)] {
+            let input = data(len);
+            let mut e = streaming_encoder(CompressionLevel::default(), chunk);
+            e.write(&input).unwrap();
+            let out = e.finish().unwrap();
+            let decoded = decompress(&out, u32::MAX).unwrap();
+            assert_eq!(decoded, input, "len {len} chunk {chunk}");
+        }
+    }
+
+    #[test]
+    fn partition_invariance_on_real_zstd_bytes() {
+        let input = data(8192);
+        let level = CompressionLevel::default();
+        let baseline = {
+            let mut e = streaming_encoder(level, 1024);
+            e.write(&input).unwrap();
+            e.finish().unwrap()
+        };
+        // Two adversarial partitions: single-byte writes and one
+        // giant write.
+        let dribble = {
+            let mut e = streaming_encoder(level, 1024);
+            for b in &input {
+                e.write(std::slice::from_ref(b)).unwrap();
+            }
+            e.finish().unwrap()
+        };
+        let one_shot_write = {
+            let mut e = streaming_encoder(level, 1024);
+            e.write(&input).unwrap();
+            e.finish().unwrap()
+        };
+        assert_eq!(baseline, dribble);
+        assert_eq!(baseline, one_shot_write);
+    }
+}
