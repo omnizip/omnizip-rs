@@ -154,6 +154,17 @@ impl ZipWriter {
         data: &[u8],
         options: &WriteOptions,
     ) -> Result<(), ArchiveError> {
+        self.write_entry_full(entry, kind_marker, data, options, None)
+    }
+
+    fn write_entry_full(
+        &mut self,
+        entry: &NewEntry,
+        kind_marker: u8,
+        data: &[u8],
+        options: &WriteOptions,
+        prepared: Option<&PreparedEntry>,
+    ) -> Result<(), ArchiveError> {
         use omnizip_archive_core::EntryKind;
         let is_dir = kind_marker == 1;
         let is_link = matches!(entry.kind, EntryKind::Symlink(_));
@@ -163,14 +174,21 @@ impl ZipWriter {
         } else {
             self.method.code()
         };
-        let content_crc = if is_dir { 0 } else { crc32(data) };
+        let content_crc = if is_dir {
+            0
+        } else {
+            prepared.map_or_else(|| crc32(data), |p| p.crc32)
+        };
         let mut stored_crc = content_crc;
         let mut stored_method = method;
         let mut version_needed_override: Option<u16> = None;
         let mut payload = if is_dir {
             Vec::new()
         } else {
-            compress_with(self.method, data)?
+            match prepared {
+                Some(p) => p.payload.clone(),
+                None => compress_with(self.method, data)?,
+            }
         };
         if let Some(pw) = self.password.clone() {
             if !is_dir {
@@ -203,7 +221,10 @@ impl ZipWriter {
             version_needed_override.unwrap_or_else(|| self.method.version_needed())
         };
         let csize = payload.len() as u64;
-        let usize_ = data.len() as u64;
+        let usize_ = match prepared {
+            Some(p) => p.size,
+            None => data.len() as u64,
+        };
         let zip64 = csize >= u32::MAX as u64 || usize_ >= u32::MAX as u64;
 
         let mtime = if options.mtime == 0 {
@@ -301,6 +322,55 @@ fn compress_with(method: ZipMethod, data: &[u8]) -> Result<Vec<u8>, ArchiveError
             .map_err(|e| ArchiveError::InvalidArchive(format!("bzip2: {e}"))),
         ZipMethod::Zstd => omnizip_zstd::compress(data, omnizip_zstd::ZstdLevel::Default)
             .map_err(|e| ArchiveError::InvalidArchive(format!("zstd: {e}"))),
+    }
+}
+
+/// An entry's compression, computed ahead of time (pure function
+/// of method + data — safe to run on any thread). Feeding it back
+/// via [`ZipWriter::add_file_prepared`] skips the inline work, so
+/// compression can happen concurrently while emission stays
+/// serialized in entry order (task 58's parallel create).
+pub struct PreparedEntry {
+    /// CRC-32 of the PLAINTEXT (zip stores the uncompressed CRC,
+    /// even for encrypted entries — AE-2 zeroes it on the wire but
+    /// derives its salt from it).
+    pub crc32: u32,
+    /// Plaintext size — the local/central size fields when the
+    /// inline `data` slice is absent.
+    pub size: u64,
+    /// Compressed plaintext payload (pre-encryption).
+    pub payload: Vec<u8>,
+}
+
+impl ZipWriter {
+    /// Precompute an entry's compression. Identical bytes to the
+    /// inline path (`add_file` delegates here).
+    ///
+    /// # Errors
+    ///
+    /// Compression failure of the selected method.
+    pub fn prepare(method: ZipMethod, data: &[u8]) -> Result<PreparedEntry, ArchiveError> {
+        Ok(PreparedEntry {
+            crc32: crc32(data),
+            size: data.len() as u64,
+            payload: compress_with(method, data)?,
+        })
+    }
+
+    /// Append a file entry from a [`PreparedEntry`] — the serial
+    /// emission half of parallel creation. Directories and symlinks
+    /// keep their regular methods (no compression to precompute).
+    ///
+    /// # Errors
+    ///
+    /// See [`ArchiveWriter::add_file`].
+    pub fn add_file_prepared(
+        &mut self,
+        entry: &NewEntry,
+        prepared: &PreparedEntry,
+        options: &WriteOptions,
+    ) -> Result<(), ArchiveError> {
+        self.write_entry_full(entry, 0, &[], options, Some(prepared))
     }
 }
 
@@ -544,5 +614,146 @@ mod tests {
     #[test]
     fn dos_time_epoch() {
         assert_eq!(dos_datetime(0), (0, 0x21)); // 1980-01-01 00:00
+    }
+}
+
+/// Parallel archive creation (task 58's writer leg): every entry's
+/// compression (the CPU-bound half) runs across worker threads via
+/// the strided-job pattern; emission is serialized in ENTRY ORDER,
+/// so the output is byte-identical to the serial [`ZipWriter`] for
+/// any thread count — including `threads <= 1` (pure serial).
+///
+/// # Errors
+///
+/// First entry failure in job order, or writer failure during
+/// emission.
+pub fn parallel_create(
+    files: &[(NewEntry, Vec<u8>)],
+    method: ZipMethod,
+    threads: usize,
+) -> Result<Vec<u8>, ArchiveError> {
+    use omnizip_archive_core::ArchiveWriter as _;
+
+    let mut prepared: Vec<Option<Result<PreparedEntry, ArchiveError>>> =
+        (0..files.len()).map(|_| None).collect();
+    if threads > 1 && files.len() > 1 {
+        let workers = threads.min(files.len());
+        let per = files.len().div_ceil(workers);
+        std::thread::scope(|scope| {
+            let handles: Vec<_> = prepared
+                .chunks_mut(per)
+                .zip(files.chunks(per))
+                .map(|(slot, chunk)| {
+                    scope.spawn(move || {
+                        for (slot, (entry, data)) in slot.iter_mut().zip(chunk) {
+                            let kind = &entry.kind;
+                            let compressible = !matches!(
+                                kind,
+                                omnizip_archive_core::EntryKind::Directory
+                                    | omnizip_archive_core::EntryKind::Symlink(_)
+                            );
+                            *slot = if compressible {
+                                Some(ZipWriter::prepare(method, data))
+                            } else {
+                                None
+                            };
+                        }
+                    })
+                })
+                .collect();
+            for h in handles {
+                let _ = h.join();
+            }
+        });
+    } else {
+        for (slot, (entry, data)) in prepared.iter_mut().zip(files) {
+            let compressible = !matches!(
+                entry.kind,
+                omnizip_archive_core::EntryKind::Directory
+                    | omnizip_archive_core::EntryKind::Symlink(_)
+            );
+            *slot = if compressible {
+                Some(ZipWriter::prepare(method, data))
+            } else {
+                None
+            };
+        }
+    }
+
+    // Serial emission, entry order.
+    let mut writer = ZipWriter::new().with_method(method);
+    let options = WriteOptions::deterministic();
+    for (slot, (entry, data)) in prepared.into_iter().zip(files) {
+        match slot {
+            Some(Ok(p)) => writer.add_file_prepared(entry, &p, &options)?,
+            Some(Err(e)) => return Err(e),
+            None => match entry.kind {
+                omnizip_archive_core::EntryKind::Directory => {
+                    writer.add_directory(entry, &options)?
+                }
+                omnizip_archive_core::EntryKind::Symlink(_) => {
+                    writer.add_symlink(entry, &options)?
+                }
+                _ => {
+                    // Non-compressible by policy above cannot happen
+                    // for regular files; fall back to the inline path.
+                    use omnizip_archive_core::ArchiveWriter as _;
+                    writer.add_file(entry, &data, &options)?
+                }
+            },
+        }
+    }
+    writer.finish_bytes()
+}
+
+#[cfg(test)]
+mod parallel_tests {
+    use super::parallel_create;
+    use omnizip_archive_core::write_options::WriteOptions;
+    use omnizip_archive_core::{ArchiveReader as _, ArchiveWriter as _, NewEntry};
+
+    fn corpus(n: usize) -> Vec<(NewEntry, Vec<u8>)> {
+        let options = WriteOptions::deterministic();
+        (0..n)
+            .map(|i| {
+                let body: Vec<u8> = (0..(30_000 + i * 997))
+                    .map(|j| ((j % 251) as u8).wrapping_add(i as u8))
+                    .collect();
+                (NewEntry::file(format!("f{i}.bin"), &options), body)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn thread_invariant_and_serial_identical() {
+        let files = corpus(12);
+        let options = WriteOptions::deterministic();
+        // Serial reference.
+        let mut w = crate::ZipWriter::new().with_method(crate::ZipMethod::Deflate);
+        for (entry, data) in &files {
+            w.add_file(entry, data, &options).unwrap();
+        }
+        let serial = w.finish_bytes().unwrap();
+
+        for threads in [1_usize, 3, 8] {
+            let out = parallel_create(&files, crate::ZipMethod::Deflate, threads).unwrap();
+            assert_eq!(
+                out, serial,
+                "parallel output differs from serial at threads={threads}"
+            );
+        }
+    }
+
+    #[test]
+    fn parallel_output_round_trips() {
+        let files = corpus(8);
+        let out = parallel_create(&files, crate::ZipMethod::Deflate, 4).unwrap();
+        let mut reader = crate::ZipReader::from_bytes(&out).unwrap();
+        let entries = reader.entries().unwrap();
+        assert_eq!(entries.len(), files.len());
+        for (i, (entry, data)) in files.iter().enumerate() {
+            assert_eq!(entries[i].name, entry.name);
+            assert_eq!(&reader.read_entry(i).unwrap(), data);
+        }
     }
 }
