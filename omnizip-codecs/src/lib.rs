@@ -22,6 +22,7 @@ pub mod arith;
 pub mod bitstream;
 pub mod capabilities;
 pub mod checksum;
+pub mod chunked;
 mod codec;
 mod codec_errors;
 mod content_type;
