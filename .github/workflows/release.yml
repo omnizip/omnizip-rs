@@ -42,6 +42,7 @@ jobs:
       - name: Run release-plz
         uses: MarcoIeni/release-plz-action@v0.5.131
         with:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # release_always = true in release-plz.toml means we publish
           # directly on push to main. Running release-pr too fails with
           # 403 because GitHub Actions isn't permitted to create PRs here.
