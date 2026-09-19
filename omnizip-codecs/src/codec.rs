@@ -96,6 +96,28 @@ pub trait Codec: Send + Sync {
     /// Human-readable name for diagnostics.
     fn name(&self) -> &'static str;
 
+    /// The wire format this codec reads and writes. Defaults to
+    /// [`Self::id`] — the canonical implementation of a format.
+    /// An alternative implementation of the same format returns the
+    /// canonical id instead (e.g. the libdeflate codec returns
+    /// [`CodecId::DEFLATE`]), making it selectable through
+    /// [`CodecRegistry::codec_for_format`](crate::CodecRegistry::codec_for_format).
+    ///
+    /// Contract: codecs sharing a wire format produce mutually
+    /// decodable output (the decoder side is shared); their encoder
+    /// outputs may differ — determinism is per implementation, not
+    /// per format.
+    fn wire_format(&self) -> CodecId {
+        self.id()
+    }
+
+    /// Implementation name for tier selection. Defaults to
+    /// `"reference"`. Used with
+    /// [`ImplPreference::Named`](crate::ImplPreference::Named).
+    fn impl_name(&self) -> &'static str {
+        "reference"
+    }
+
     /// Compress `plaintext` at `level`.
     ///
     /// # Errors

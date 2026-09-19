@@ -86,6 +86,17 @@ impl Codec for LibdeflateCodec {
         "libdeflate"
     }
 
+    /// Reads/writes the DEFLATE wire format (RFC 1951) — an
+    /// alternative implementation of `CodecId::DEFLATE`, selectable
+    /// via [`CodecRegistry::codec_for_format`](omnizip_codecs::CodecRegistry::codec_for_format).
+    fn wire_format(&self) -> CodecId {
+        CodecId::DEFLATE
+    }
+
+    fn impl_name(&self) -> &'static str {
+        "libdeflate"
+    }
+
     fn compress(&self, plaintext: &[u8], level: CompressionLevel) -> Result<Vec<u8>, OmnizipError> {
         // Level 0 is zlib's "no compression": stored blocks only.
         if level.as_u8() == 0 {
