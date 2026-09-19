@@ -203,7 +203,7 @@ jobs:
             crates: >-
               omnizip-bzip2 omnizip-lz4 omnizip-snappy omnizip-ppmd omnizip-glza
               omnizip-zpaq omnizip-fsst omnizip-ricepp omnizip-blosc
-              omnizip-checksum omnizip-filters omnizip-crypto
+              omnizip-checksum omnizip-ffi omnizip-filters omnizip-crypto
           - name: containers-a
             crates: omnizip-archive-core omnizip-tar omnizip-zip omnizip-cpio omnizip-sevenzip omnizip-rpm
           - name: containers-b

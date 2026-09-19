@@ -29,7 +29,7 @@
 
 mod bwt;
 mod bz2;
-mod codec;
+pub mod codec;
 mod crc32;
 mod huffman;
 mod mtf;

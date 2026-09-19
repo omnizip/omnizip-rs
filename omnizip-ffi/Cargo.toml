@@ -1,0 +1,28 @@
+[package]
+name = "omnizip-ffi"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "C-ABI cdylib exposing the omnizip codecs — the Ruby gem's Rust-accelerated path (TODO.ref-parity/62)"
+keywords = ["compression", "ffi", "ruby", "bindings"]
+categories = ["compression", "external-ffi-bindings"]
+
+# NOTE: deliberately does NOT inherit the workspace lints — the
+# `#![forbid(unsafe_code)]` workspace policy cannot be lifted for the
+# raw-pointer boundary, which requires targeted `unsafe`. The crate
+# keeps `deny(unsafe_code)` with `#[allow]` scoped to the shim module
+# only; every block carries a SAFETY contract.
+
+[lib]
+crate-type = ["cdylib", "lib"]
+
+[dependencies]
+omnizip-codecs.workspace = true
+omnizip-zstd.workspace = true
+omnizip-bzip2.workspace = true
+omnizip-lzma.workspace = true
+
+[dev-dependencies]

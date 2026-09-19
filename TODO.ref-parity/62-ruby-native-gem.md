@@ -1,7 +1,23 @@
 # Task 62 — Ruby acceleration: native gem exposing the Rust codecs
 
-Status: open (part of task 51 phase 4; gate = phases 1–3 landed or
-explicitly de-scoped by the owner)
+Status: partially done (2026-09-19, RUST SIDE COMPLETE AND PROVEN —
+omnizip-ffi cdylib: C ABI (ozip_compress/ozip_decompress/
+ozip_last_error/ozip_free) over zstd/bzip2/lzma(+xz alias),
+catch_unwind at every entry, thread-local last-error, explicit
+buffer ownership (ozip_free), per-item allow(unsafe_code) on the
+raw-pointer shim only (crate stays deny; the workspace forbid
+cannot be scoped — lint-exception documented in Cargo.toml).
+PROVEN FROM REAL RUBY: ruby 3.4.8 + stdlib Fiddle round-trips 200 KB
+through all three codecs with a working error surface
+(tests/ruby_fiddle_smoke.rb, run after cargo build --release -p
+omnizip-ffi). DESIGN CHANGE vs the original sketch: Fiddle over a
+cdylib REPLACES magnus/rb-sys as the binding mechanism — no
+compiled Ruby extension, no rake-compiler, works with the stdlib
+alone; magnus remains an option if zero-copy RSTRING access ever
+matters. REMAINING: the gem-side tier (implementations/rust +
+Fiddle loader + pure-Ruby fallback) — a PR against ../omnizip,
+gated on the owner's alignment call; prebuilt per-platform dylib
+distribution story
 
 ## Goal
 
