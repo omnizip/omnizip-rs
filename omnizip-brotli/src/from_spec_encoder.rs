@@ -3180,7 +3180,7 @@ fn zopfli_collect_tree(
             if hash_len < 16 {
                 if let Some((d, wl, tl)) = dict_hash::find_match(input, pos, max_dist) {
                     if tl >= MIN_MATCH && pos + tl as usize <= n {
-                        let is_better = first.is_none_or(|(_, l)| tl > l);
+                        let is_better = first.map_or(true, |(_, l)| tl > l);
                         if is_better {
                             dict_at[pos] = Some((d, wl.min(MAX_COPY).max(MIN_MATCH), tl));
                         }
@@ -3763,7 +3763,7 @@ fn zopfli_iterative_parse(
             if env_flag!("BROTLI_STATS") {
                 eprintln!("zopfli exact: best={best_bits:?} candidate={bits_iter}");
             }
-            if best_bits.is_none_or(|b| bits_iter < b) {
+            if best_bits.map_or(true, |b| bits_iter < b) {
                 best_bits = Some(bits_iter);
                 best_commands = commands_iter.clone();
                 winner_bw = Some(iter_bw);

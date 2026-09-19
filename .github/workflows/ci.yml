@@ -294,6 +294,42 @@ jobs:
         run: cross build --workspace --target ${{ matrix.target }} --tests --exclude fuzz-smoke
 
   # ============================================================================
+  # MSRV — the declared rust-version (workspace 1.75) must stay true.
+  # Issue #638: the floor was violated by post-1.75 language features
+  # (inline-const in statics, is_none_or) and only surfaced as a
+  # downstream MSRV-CI failure. This leg compiles the codec crates
+  # (the published set consumers resolve) at the declared floor with
+  # the committed lock. The container/bench/harness crates are out of
+  # scope: their dependency closures (ureq→idna_adapter, clap_lex,
+  # aes→cipher→block-buffer) contain edition2024 manifests that cargo
+  # 1.75 cannot even parse, so their real floor is cargo-capability
+  # bound, not language bound.
+  # ============================================================================
+  msrv:
+    name: MSRV (1.75)
+    runs-on: ubuntu-latest
+    needs: [preflight]
+    if: needs.preflight.outputs.should_run == 'true'
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust 1.75
+        uses: dtolnay/rust-toolchain@1.75.0
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+        key: msrv-1.75
+
+      - name: Check codec crates at the declared floor
+        run: >
+          cargo check --locked --lib --tests
+          -p omnizip-codecs -p omnizip-brotli -p omnizip-zstd -p omnizip-lzma
+          -p omnizip-bzip2 -p omnizip-deflate -p omnizip-deflate64 -p omnizip-lz4
+          -p omnizip-snappy -p omnizip-ppmd -p omnizip-glza -p omnizip-zpaq
+          -p omnizip-fsst -p omnizip-ricepp -p omnizip-flac -p omnizip-filters
+          -p omnizip-libdeflate -p omnizip-blosc
+
+  # ============================================================================
   # Semver Compatibility Check
   # ============================================================================
   semver:
@@ -328,7 +364,7 @@ jobs:
   ci-success:
     name: CI Success
     runs-on: ubuntu-latest
-    needs: [typos, security, lint, machete, publish-check, test]
+    needs: [typos, security, lint, machete, publish-check, test, msrv]
     if: always()
     steps:
       - name: Report status
