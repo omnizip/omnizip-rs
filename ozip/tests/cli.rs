@@ -272,3 +272,47 @@ fn single_file_formats_view_as_one_entry_archives() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Task 55: `ozip verify` — green on every created format, red
+/// (exit 1) on a corrupted zip; `ozip metadata` emits valid JSON
+/// with the entry table.
+#[test]
+fn verify_and_metadata_commands() {
+    fn os(s: &str) -> &std::ffi::OsStr {
+        s.as_ref()
+    }
+    let dir = std::env::temp_dir().join(format!("ozip-verify-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let src = dir.join("data.txt");
+    std::fs::write(&src, b"verify me\n").unwrap();
+
+    for ext in ["zip", "tar", "tgz"] {
+        let arc = dir.join(format!("arch.{ext}"));
+        let (ok, _, err) = run(&[os("c"), arc.as_os_str(), src.as_os_str()]);
+        assert!(ok, "create {ext}: {err}");
+        let (ok, out, err) = run(&[os("verify"), arc.as_os_str()]);
+        assert!(ok, "verify {ext} failed: {err}");
+        assert!(out.contains("all 1 entries verified"), "{ext}: {out}");
+    }
+
+    // Corruption flips a mid-payload byte — verify must go red.
+    let arc = dir.join("corrupt.zip");
+    std::fs::copy(dir.join("arch.zip"), &arc).unwrap();
+    let mut raw = std::fs::read(&arc).unwrap();
+    let mid = raw.len() / 2;
+    raw[mid] ^= 0xFF;
+    std::fs::write(&arc, &raw).unwrap();
+    let (ok, _, _) = run(&[os("verify"), arc.as_os_str()]);
+    assert!(!ok, "verify accepted a corrupted zip");
+
+    // metadata: parseable JSON header + entry table.
+    let (ok, out, err) = run(&[os("metadata"), dir.join("arch.zip").as_os_str()]);
+    assert!(ok, "metadata failed: {err}");
+    let text = out;
+    assert!(text.contains("\"entry_count\": 1"), "{text}");
+    assert!(text.contains("\"name\": \"data.txt\""), "{text}");
+    assert!(text.contains("\"kind\": \"file\""), "{text}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
