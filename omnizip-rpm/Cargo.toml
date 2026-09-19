@@ -1,5 +1,4 @@
 [package]
-publish = false
 name = "omnizip-rpm"
 version.workspace = true
 edition.workspace = true

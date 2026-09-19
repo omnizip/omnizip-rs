@@ -1,5 +1,4 @@
 [package]
-publish = false
 name = "omnizip-crypto"
 version.workspace = true
 edition.workspace = true

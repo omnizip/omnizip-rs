@@ -1,5 +1,4 @@
 [package]
-publish = false
 name = "omnizip-rar"
 version.workspace = true
 edition.workspace = true
