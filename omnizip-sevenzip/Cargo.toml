@@ -14,12 +14,12 @@ name = "omnizip_sevenzip"
 path = "src/lib.rs"
 
 [dependencies]
-omnizip-archive-core = { path = "../omnizip-archive-core", version = "0.21.100" }
-omnizip-lzma = { path = "../omnizip-lzma", version = "0.21.100" }
-omnizip-bzip2 = { path = "../omnizip-bzip2", version = "0.21.100" }
-omnizip-libdeflate = { path = "../omnizip-libdeflate", version = "0.21.100" }
-omnizip-filters = { path = "../omnizip-filters", version = "0.21.100" }
-omnizip-crypto = { path = "../omnizip-crypto", version = "0.21.100" }
+omnizip-archive-core = { path = "../omnizip-archive-core", version = "0.21.101" }
+omnizip-lzma = { path = "../omnizip-lzma", version = "0.21.101" }
+omnizip-bzip2 = { path = "../omnizip-bzip2", version = "0.21.101" }
+omnizip-libdeflate = { path = "../omnizip-libdeflate", version = "0.21.101" }
+omnizip-filters = { path = "../omnizip-filters", version = "0.21.101" }
+omnizip-crypto = { path = "../omnizip-crypto", version = "0.21.101" }
 
 [lints]
 workspace = true
