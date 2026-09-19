@@ -121,52 +121,172 @@ pub trait ArchiveReader {
         policy: &security::SecurityPolicy,
     ) -> Result<(), ArchiveError> {
         let entries = self.entries()?;
+        // Serialized path through the SHARED security helper — the
+        // same write_entry_secured the parallel extractor uses.
+        // Symlinks stay ordered after their containing entries in
+        // archive order (entry list order preserved).
         for (index, entry) in entries.iter().enumerate() {
-            // Root-denoting entries (bsdtar's `./`) are skipped, not
-            // rejected — they name the output directory itself.
-            let Some(safe) = policy.sanitize_entry(&entry.name)? else {
-                continue;
-            };
-            let dest = output_dir.join(&safe);
-            // A previously extracted symlink must never sit on the
-            // path of a later mkdir/write — that is the classic
-            // pivot-then-write attack.
-            if !policy.allow_symlink_escape {
-                ensure_no_symlink_ancestor(output_dir, &safe)?;
-            }
-            match entry.kind {
-                EntryKind::Directory => {
-                    std::fs::create_dir_all(&dest)
-                        .map_err(|e| ArchiveError::io("create_dir", &dest, e))?;
-                }
-                EntryKind::Symlink(ref target) => {
-                    policy.validate_symlink_target(target, &safe)?;
-                    if let Some(parent) = dest.parent() {
-                        std::fs::create_dir_all(parent)
-                            .map_err(|e| ArchiveError::io("mkdir", parent, e))?;
-                    }
-                    #[cfg(unix)]
-                    std::os::unix::fs::symlink(target, &dest)
-                        .map_err(|e| ArchiveError::io("symlink", &dest, e))?;
-                    #[cfg(not(unix))]
-                    return Err(ArchiveError::UnsupportedFeature {
-                        reason: "symlink extraction requires a unix host".into(),
-                    });
-                }
-                _ => {
-                    if let Some(parent) = dest.parent() {
-                        std::fs::create_dir_all(parent)
-                            .map_err(|e| ArchiveError::io("mkdir", parent, e))?;
-                    }
-                    let data = self.read_entry(index)?;
-                    policy.check_decompression_budget(data.len() as u64, entry)?;
-                    std::fs::write(&dest, &data)
-                        .map_err(|e| ArchiveError::io("write", &dest, e))?;
-                }
+            if matches!(entry.kind, EntryKind::Directory | EntryKind::Symlink(_)) {
+                write_entry_secured(output_dir, policy, entry, None)?;
+            } else {
+                let data = self.read_entry(index)?;
+                write_entry_secured(output_dir, policy, entry, Some(&data))?;
             }
         }
         Ok(())
     }
+}
+
+/// Write one entry under `output_dir`, behind the full security
+/// boundary (sanitize, symlink-ancestor guard, symlink validation,
+/// decompression budget). Shared by the serial default
+/// [`ArchiveReader::extract_to`] and [`extract_parallel`] — ONE
+/// security path, never two.
+fn write_entry_secured(
+    output_dir: &Path,
+    policy: &security::SecurityPolicy,
+    entry: &ArchiveEntry,
+    data: Option<&[u8]>,
+) -> Result<(), ArchiveError> {
+    let Some(safe) = policy.sanitize_entry(&entry.name)? else {
+        return Ok(());
+    };
+    let dest = output_dir.join(&safe);
+    if !policy.allow_symlink_escape {
+        ensure_no_symlink_ancestor(output_dir, &safe)?;
+    }
+    match entry.kind {
+        EntryKind::Directory => {
+            std::fs::create_dir_all(&dest).map_err(|e| ArchiveError::io("create_dir", &dest, e))?;
+        }
+        EntryKind::Symlink(ref target) => {
+            policy.validate_symlink_target(target, &safe)?;
+            if let Some(parent) = dest.parent() {
+                std::fs::create_dir_all(parent)
+                    .map_err(|e| ArchiveError::io("mkdir", parent, e))?;
+            }
+            #[cfg(unix)]
+            std::os::unix::fs::symlink(target, &dest)
+                .map_err(|e| ArchiveError::io("symlink", &dest, e))?;
+            #[cfg(not(unix))]
+            return Err(ArchiveError::UnsupportedFeature {
+                reason: "symlink extraction requires a unix host".into(),
+            });
+        }
+        _ => {
+            let data = data.ok_or_else(|| {
+                ArchiveError::InvalidArchive(format!("entry '{}' has no data reader", entry.name))
+            })?;
+            if let Some(parent) = dest.parent() {
+                std::fs::create_dir_all(parent)
+                    .map_err(|e| ArchiveError::io("mkdir", parent, e))?;
+            }
+            policy.check_decompression_budget(data.len() as u64, entry)?;
+            std::fs::write(&dest, data).map_err(|e| ArchiveError::io("write", &dest, e))?;
+        }
+    }
+    Ok(())
+}
+
+/// Readers whose entry decode needs no mutable state can expose it
+/// through `&self`, unlocking [`extract_parallel`]. Implementing
+/// this is OPTIONAL per reader (OCP): only readers proven
+/// mutation-free in their decode path qualify.
+pub trait ParallelReader {
+    /// Decode entry `index` (from `entries()[index]`) through a
+    /// shared reference.
+    ///
+    /// # Errors
+    ///
+    /// Reader-specific decode errors.
+    fn read_entry_shared(&self, index: usize) -> Result<Vec<u8>, ArchiveError>;
+}
+
+/// Parallel extraction for [`ParallelReader`] readers: entries
+/// decode across worker threads, each write behind the SAME
+/// security boundary as the serial path (`write_entry_secured`).
+///
+/// Directory creation is a serialized PRE-PASS in entry order —
+/// workers never race mkdir, and every `dest.parent()` exists
+/// before any file write begins.
+///
+/// Output equivalence: the set of files on disk equals the serial
+/// extraction exactly (same bytes, same modes/symlinks); order of
+/// creation is the only difference and is unobservable.
+///
+/// # Errors
+///
+/// First worker error in job order, or the same security errors
+/// the serial path raises.
+pub fn extract_parallel<R: ParallelReader + Sync>(
+    reader: &R,
+    entries: &[ArchiveEntry],
+    output_dir: &Path,
+    policy: &security::SecurityPolicy,
+    threads: usize,
+) -> Result<(), ArchiveError> {
+    // `entries` comes from the caller's `entries()` call — parsing
+    // completes (and any `&mut` reader use ends) before threads
+    // begin.
+    std::fs::create_dir_all(output_dir).map_err(|e| ArchiveError::io("mkdir", output_dir, e))?;
+
+    // Serialized directory pre-pass, in entry order.
+    for entry in entries {
+        if matches!(entry.kind, EntryKind::Directory) {
+            write_entry_secured(output_dir, policy, entry, None)?;
+        }
+    }
+
+    let files: Vec<usize> = entries
+        .iter()
+        .enumerate()
+        .filter(|(_, e)| !matches!(e.kind, EntryKind::Directory | EntryKind::Symlink(_)))
+        .map(|(i, _)| i)
+        .collect();
+    if threads <= 1 || files.len() <= 1 {
+        for &index in &files {
+            let data = reader.read_entry_shared(index)?;
+            write_entry_secured(output_dir, policy, &entries[index], Some(&data))?;
+        }
+        return Ok(());
+    }
+
+    let workers = threads.min(files.len());
+    let per = files.len().div_ceil(workers);
+    let mut failures: Vec<Option<ArchiveError>> = (0..files.len()).map(|_| None).collect();
+    std::thread::scope(|scope| {
+        let handles: Vec<_> = failures
+            .chunks_mut(per)
+            .zip(files.chunks(per))
+            .map(|(slot, chunk)| {
+                scope.spawn(move || {
+                    for (slot, &index) in slot.iter_mut().zip(chunk) {
+                        *slot = reader
+                            .read_entry_shared(index)
+                            .and_then(|data| {
+                                write_entry_secured(
+                                    output_dir,
+                                    policy,
+                                    &entries[index],
+                                    Some(&data),
+                                )
+                            })
+                            .err();
+                    }
+                })
+            })
+            .collect();
+        for h in handles {
+            let _ = h.join();
+        }
+    });
+    for (i, err) in failures.into_iter().enumerate() {
+        if let Some(e) = err {
+            let _ = i; // first failure in job order wins
+            return Err(e);
+        }
+    }
+    Ok(())
 }
 
 /// Reject `safe` paths (relative to `root`) whose intermediate
