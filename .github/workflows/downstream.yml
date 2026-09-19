@@ -76,4 +76,9 @@ jobs:
       - name: Canary run (bump the pin when green)
         run: tests/downstream/canary.sh
         env:
-          GH_TOKEN: ${{ github.token }}
+          # PAT, not github.token: the repo setting "Allow GitHub
+          # Actions to create and approve pull requests" is off, and
+          # that restriction binds GITHUB_TOKEN only. A PAT opens the
+          # pin-bump PR regardless. (canary.sh still degrades to a
+          # printed manual link if this secret is ever missing.)
+          GH_TOKEN: ${{ secrets.OMNIZIP_CI_PAT_TOKEN }}
