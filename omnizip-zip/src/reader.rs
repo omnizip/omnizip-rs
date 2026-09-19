@@ -248,15 +248,39 @@ impl ArchiveReader for ZipReader {
     }
 
     fn read_entry(&mut self, index: usize) -> Result<Vec<u8>, ArchiveError> {
+        self.read_entry_inner(index)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rejects_garbage() {
+        assert!(ZipReader::from_bytes(b"not a zip at all").is_err());
+    }
+}
+
+impl omnizip_archive_core::ParallelReader for ZipReader {
+    /// Zip decode needs no mutable state: the central directory is
+    /// fully parsed at open; each entry decodes from the immutable
+    /// archive buffer.
+    fn read_entry_shared(&self, index: usize) -> Result<Vec<u8>, ArchiveError> {
+        self.read_entry_inner(index)
+    }
+}
+
+impl ZipReader {
+    /// The single decode path (SSOT): `ArchiveReader::read_entry`
+    /// and `ParallelReader::read_entry_shared` both delegate here.
+    fn read_entry_inner(&self, index: usize) -> Result<Vec<u8>, ArchiveError> {
         let (data_start, csize, method) = self.raw_entry(index)?;
         let raw = self
             .data
             .get(data_start..data_start + csize)
             .ok_or_else(|| ArchiveError::InvalidArchive("truncated entry data".into()))?;
 
-        // WinZip AES: decrypt + authenticate, then decompress the
-        // inner method. Wrong passwords fail on the verification
-        // bytes (never on padding).
         let (method, buffer): (u16, Vec<u8>) = if method == crate::aes::METHOD_AES {
             let info = self.entries[index].aes.ok_or_else(|| {
                 ArchiveError::InvalidArchive("AES entry missing the 0x9901 extra field".into())
@@ -315,15 +339,5 @@ impl ArchiveReader for ZipReader {
             )));
         }
         Ok(out)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn rejects_garbage() {
-        assert!(ZipReader::from_bytes(b"not a zip at all").is_err());
     }
 }

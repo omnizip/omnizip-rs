@@ -11,16 +11,20 @@ gzip multi-member, bzip2/xz multistream qualify; raw deflate does
 not). Tests: tagged-codec split/order/invariance, flaky-codec
 propagation, empty/tiny. ALSO: fixed the tracker test race from
 task 59 (zero-duration first update skipped — sleep-seeded).
-REMAINING: archive-level parallel create/extract — DESIGN PASS
-REQUIRED FIRST (2026-09-19 note): extract needs the readers'
-read_entry to be callable concurrently (readers hold mutable
-offsets; &mut self blocks parallel decode) — the refactor is per-
-crate reader Sync-ification (share the immutable archive buffer +
-per-entry offsets snapshot); create needs writer-level support to
-compress concurrently and serialize emission in entry order (the
-deterministic order rule pins output to entry-list order). Do NOT
-parallelize around these constraints — the invariants outrank the
-speedup
+FINAL (2026-09-19/20 third pass) — PARALLEL EXTRACT SHIPPED per
+the design pass: ParallelReader side-trait (read_entry_shared via
+&self; OPTIONAL per reader, OCP — ZipReader first, its decode
+proven mutation-free; both paths delegate ONE read_entry_inner —
+SSOT). extract_parallel in archive-core: serialized directory
+pre-pass in entry order (no mkdir races, parents exist before
+writes), strided worker groups over file indices, every write
+behind write_entry_secured — the SAME security helper the serial
+default extract_to now uses (the security boundary was refactored
+into ONE function; security corpus 11/11 green). Output
+equivalence pinned: every file byte-identical to serial across
+threads=1/3/8; shared decode == trait decode for every entry.
+Writer-side parallel CREATE remains unimplemented (compress-
+concurrent/emit-serialized); extract covers the CPU-bound leg
 
 ## Gap
 

@@ -133,3 +133,62 @@ fn reader_parses_zip64_central_sizes() {
         "64-bit size from zip64 extra"
     );
 }
+
+/// Task 58: parallel extraction through ParallelReader — same
+/// bytes on disk as the serial path, across thread counts.
+#[test]
+fn parallel_extract_matches_serial() {
+    use omnizip_archive_core::security::SecurityPolicy;
+    use omnizip_archive_core::{extract_parallel, ArchiveReader, ArchiveWriter, ParallelReader};
+
+    let dir = std::env::temp_dir().join(format!("zip-parx-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let mut writer = omnizip_zip::ZipWriter::new().with_method(omnizip_zip::ZipMethod::Deflate);
+    let options = omnizip_archive_core::WriteOptions::deterministic();
+    for i in 0..24 {
+        let name = format!("d{i}/f{i}.txt");
+        let entry = omnizip_archive_core::NewEntry::file(&name, &options);
+        let body: Vec<u8> = (0..(2000 + i * 137)).map(|j| (j % 251 + i) as u8).collect();
+        writer.add_file(&entry, &body, &options).unwrap();
+    }
+    let bytes = writer.finish_bytes().unwrap();
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("a.zip"), &bytes).unwrap();
+
+    let policy = SecurityPolicy::default();
+    let serial = dir.join("serial");
+    {
+        let mut r = omnizip_zip::ZipReader::from_bytes(&bytes).unwrap();
+        r.extract_to(&serial, &policy).unwrap();
+    }
+
+    for threads in [1usize, 3, 8] {
+        let out = dir.join(format!("t{threads}"));
+        let r = omnizip_zip::ZipReader::from_bytes(&bytes).unwrap();
+        let entries = {
+            let mut rr = omnizip_zip::ZipReader::from_bytes(&bytes).unwrap();
+            rr.entries().unwrap()
+        };
+        extract_parallel(&r, &entries, &out, &policy, threads).unwrap();
+        // Every file byte-identical to the serial extraction.
+        for i in 0..24 {
+            let name = format!("d{i}/f{i}.txt");
+            let a = std::fs::read(serial.join(&name)).unwrap();
+            let b = std::fs::read(out.join(&name)).unwrap();
+            assert_eq!(a, b, "{name} differs at threads={threads}");
+        }
+    }
+
+    // read_entry_shared is the same decode as read_entry.
+    {
+        let mut r = omnizip_zip::ZipReader::from_bytes(&bytes).unwrap();
+        let shared = omnizip_zip::ZipReader::from_bytes(&bytes).unwrap();
+        for i in 0..24 {
+            let a = r.read_entry(i).unwrap();
+            let b = shared.read_entry_shared(i).unwrap();
+            assert_eq!(a, b, "shared decode differs at {i}");
+        }
+    }
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
