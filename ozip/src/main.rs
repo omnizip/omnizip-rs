@@ -41,6 +41,9 @@ fn usage(codecs: &[CodecSpec]) {
     println!("    -f FMT   container format override (tar, tar.gz, zip, cpio, ...)");
     println!("    -C DIR   extraction directory (ozip x)");
     println!("    -p PASS  archive password (7z encrypted streams/headers)");
+    println!("    --password-prompt          read the password from stdin");
+    println!("    --password-file PATH       first line of PATH is the password");
+    println!("    --password-env VAR         password from environment variable VAR");
     println!("    --volume N  split 7z output into N-byte .001/.002 parts (ozip c)");
     println!();
     println!("CODECS:");
@@ -266,6 +269,40 @@ fn run_container(args: &[String]) -> Result<(), String> {
         }
         if a == "-p" {
             password = args.get(i + 1).cloned();
+            i += 2;
+            continue;
+        }
+        if a == "--password-prompt" {
+            print!("password: ");
+            if std::io::Write::flush(&mut std::io::stdout()).is_err() {
+                return Err("writing prompt failed".to_string());
+            }
+            let mut line = String::new();
+            if let Err(e) = std::io::stdin().read_line(&mut line) {
+                return Err(format!("reading password: {e}"));
+            }
+            let trimmed = line.trim_end_matches(['\n', '\r']).to_string();
+            password = Some(trimmed);
+            i += 1;
+            continue;
+        }
+        if a == "--password-file" {
+            let path = args
+                .get(i + 1)
+                .ok_or_else(|| "--password-file needs a path".to_string())?;
+            let raw = std::fs::read_to_string(path).map_err(|e| format!("reading {path}: {e}"))?;
+            password = match raw.lines().next() {
+                Some(line) => Some(line.to_string()),
+                None => return Err(format!("{path} is empty")),
+            };
+            i += 2;
+            continue;
+        }
+        if a == "--password-env" {
+            let var = args
+                .get(i + 1)
+                .ok_or_else(|| "--password-env needs a variable name".to_string())?;
+            password = Some(std::env::var(var).map_err(|e| format!("reading ${var}: {e}"))?);
             i += 2;
             continue;
         }

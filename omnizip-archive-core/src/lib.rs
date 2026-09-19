@@ -17,6 +17,7 @@ pub use formats::gzip::crc32;
 pub mod detect;
 pub mod error;
 pub mod formats;
+pub mod password;
 pub mod security;
 pub mod write_options;
 
