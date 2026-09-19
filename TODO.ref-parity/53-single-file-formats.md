@@ -1,6 +1,15 @@
 # Task 53 — xz / lzip / lzma-alone as first-class single-file formats
 
-Status: open (part of task 51 phase 1)
+Status: done (2026-09-19 — detection + lzip/alone/gzip/bzip2 modules
+already existed (SSOT survey); this added: the single-file archive
+view (t/l/x see one entry; payload tar still unwraps first),
+`ozip c -f gzip|bzip2|xz|zstd|lzip|lzma` single-file create (Ruby
+compress_command semantics; dir/multi-input = guidance error), and
+the CodecSpec table moved into container.rs as the SSOT for both
+`-d` codec mode and the archive view. Pin test in ozip/tests/cli.rs;
+system gzip/xz/bzip2 decode our output. Remaining follow-up noted:
+gzip FNAME is not extracted on READ for entry naming — suffix
+stripping is used for all formats)
 
 ## Gap
 

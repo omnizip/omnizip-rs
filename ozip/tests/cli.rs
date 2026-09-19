@@ -213,3 +213,62 @@ fn extraction_rejects_traversal() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Task 53: a single-file codec payload is a one-entry archive —
+/// `c -f <codec>` compresses the file itself, `t` lists the stripped
+/// name, `x` restores the bytes; and a `.tgz` still unwraps to the
+/// tar inside (the historical behavior is preserved).
+#[test]
+fn single_file_formats_view_as_one_entry_archives() {
+    fn os(s: &str) -> &std::ffi::OsStr {
+        s.as_ref()
+    }
+    let dir = std::env::temp_dir().join(format!("ozip-single-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let src = dir.join("notes.txt");
+    std::fs::write(&src, b"hello single-file world\n").unwrap();
+
+    let payload: &[&str] = &["gz", "bz2", "xz", "zst", "lz", "lzma"];
+    for ext in payload {
+        let arc = dir.join(format!("notes.txt.{ext}"));
+
+        // c -f <codec> compresses the single file.
+        let (ok, _, err) = run(&[os("c"), os("-f"), os(ext), arc.as_os_str(), src.as_os_str()]);
+        assert!(ok, "c -f {ext} failed: {err}");
+
+        // t lists the stripped entry name.
+        let (ok, out, err) = run(&[os("t"), arc.as_os_str()]);
+        assert!(ok, "t {ext} failed: {err}");
+        assert!(out.contains("notes.txt"), "t {ext} did not list notes.txt");
+
+        // x restores the exact bytes.
+        let out_dir = dir.join(format!("out-{ext}"));
+        std::fs::create_dir_all(&out_dir).unwrap();
+        let (ok, _, err) = run(&[os("x"), arc.as_os_str(), os("-C"), out_dir.as_os_str()]);
+        assert!(ok, "x {ext} failed: {err}");
+        let restored = std::fs::read(out_dir.join("notes.txt")).expect("restored file");
+        assert_eq!(restored, b"hello single-file world\n", "{ext} content");
+    }
+
+    // Directory + single-file format is a guidance error.
+    let (ok, _, err) = run(&[
+        os("c"),
+        os("-f"),
+        os("gzip"),
+        dir.join("bad.gz").as_os_str(),
+        dir.as_os_str(),
+    ]);
+    assert!(!ok, "dir input + gzip format must fail");
+    assert!(err.contains("single file"), "unexpected error: {err}");
+
+    // .tgz keeps unwrapping to the tar inside.
+    let (ok, _, err) = run(&[os("c"), dir.join("arch.tgz").as_os_str(), src.as_os_str()]);
+    assert!(ok, "tgz create failed: {err}");
+    let (ok, out, err) = run(&[os("t"), dir.join("arch.tgz").as_os_str()]);
+    assert!(ok, "tgz t failed: {err}");
+    assert!(out.contains("notes.txt"), "tgz t lost the tar listing");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
