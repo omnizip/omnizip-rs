@@ -72,7 +72,7 @@ small-file T ~4x).)
 | 59 | progress/ETA — ProgressReporter trait (Silent default) + rate tracker; wires into 57/58; never on the data path | — | done 2026-09-19 (module + tests; wiring lands with 57/58) |
 | 60 | compression profiles + detector — port the 6 Ruby profiles field-by-field; content-class sniff → profile choice | — | done 2026-09-19 (5 presets + Custom + detect_profile in codecs::profile; SSOT: no new crate) |
 | 61 | format converter — ConversionRegistry + extract-repack strategy, entry-at-a-time bounded-memory repack, batch | — | done 2026-09-19 (extract-repack + deterministic output; entry-at-a-time/batch = follow-ups needing 57) |
-| 62 | Ruby acceleration — magnus native gem behind implementations/ tier, pure-Ruby fallback, byte-identical differential gate | — | open 2026-09-19 |
+| 62 | Ruby acceleration — native binding behind implementations/ tier, pure-Ruby fallback, byte-identical differential gate | — | partial 2026-09-19 (omnizip-ffi cdylib PROVEN from real Ruby via Fiddle; gem-side tier PR remaining) |
 
 ## Principles
 
