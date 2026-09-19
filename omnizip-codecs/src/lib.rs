@@ -34,7 +34,7 @@ pub mod matchfinder;
 pub mod memory_budget;
 mod options;
 mod parallel_batch;
-mod profile;
+pub mod profile;
 pub mod progress;
 mod registry;
 pub mod streaming;
