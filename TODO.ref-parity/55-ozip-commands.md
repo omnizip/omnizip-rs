@@ -1,7 +1,13 @@
 # Task 55 — ozip commands: verify / repair / parity / metadata / profile
 
-Status: open (part of task 51 phase 1; depends on 52; profile
-subcommands depend on 60)
+Status: partially done (2026-09-19 — `verify` and `metadata`
+shipped with pin tests; verify = full structural + checksum read
+of every entry, zip CRC32 verified by the reader on read; red on
+corruption with per-entry FAIL lines. REMAINING in this task:
+`parity create/verify/repair` (wraps omnizip-par2), `archive
+repair` (port Ruby's semantics), `profile list|show` (needs 60).
+clap migration deferred: the hand-rolled router grew the commands
+without a new dependency — revisit if the command count doubles)
 
 ## Gap
 
@@ -14,7 +20,7 @@ total).
 
 ## Scope
 
-- Move ozip to clap subcommands (clap is already a workspace dep via
+- (deferred) Move ozip to clap subcommands (clap is already a workspace dep via
   bench) keeping the short forms `c/x/t/l` as aliases — no behavior
   change to existing commands.
 - `ozip verify <archive>`: structural check + per-entry checksum

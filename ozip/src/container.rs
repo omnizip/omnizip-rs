@@ -674,6 +674,28 @@ impl Opened {
         }
     }
 
+    /// Read one entry's bytes (the ArchiveReader seam, plus the
+    /// single-file view).
+    fn read_entry(&mut self, index: usize) -> Result<Vec<u8>, String> {
+        match self {
+            Self::SingleFile { data, .. } => {
+                if index == 0 {
+                    Ok(data.clone())
+                } else {
+                    Err(format!("entry index {index} out of range"))
+                }
+            }
+            Self::Tar(r) => r.read_entry(index).map_err(|e| e.to_string()),
+            Self::Zip(r) => r.read_entry(index).map_err(|e| e.to_string()),
+            Self::Cpio(r) => r.read_entry(index).map_err(|e| e.to_string()),
+            Self::SevenZip(r) => r.read_entry(index).map_err(|e| e.to_string()),
+            Self::Rpm(r) => r.read_entry(index).map_err(|e| e.to_string()),
+            Self::Iso(r) => r.read_entry(index).map_err(|e| e.to_string()),
+            Self::Rar5(r) => r.read_entry(index).map_err(|e| e.to_string()),
+            Self::Rar4(r) => r.read_entry(index).map_err(|e| e.to_string()),
+        }
+    }
+
     fn extract_to(&mut self, dir: &Path) -> Result<(), String> {
         let policy = SecurityPolicy::default();
         match self {
@@ -845,6 +867,116 @@ fn open_bytes_named(
         )),
         _ => Err("unsupported archive format".into()),
     }
+}
+
+/// `ozip verify ARCHIVE` — structural + checksum verification:
+/// open the archive, parse every entry, and read every byte (zip
+/// re-checks each entry's CRC32 on read; the single-file
+/// decompressors verify their own trailers; container decoders
+/// verify their block/stream digests). Prints one line per entry
+/// and a summary; exits non-zero on any failure.
+pub(crate) fn verify(archive: &Path, password: Option<&str>) -> Result<(), String> {
+    let mut opened = open_archive(archive, password)?;
+    let entries = opened.entries()?;
+    let mut failed = 0_usize;
+    let mut checked = 0_usize;
+    for (index, entry) in entries.iter().enumerate() {
+        if matches!(entry.kind, EntryKind::Directory) {
+            println!("ok     dir  {}", entry.name);
+            continue;
+        }
+        checked += 1;
+        match opened.read_entry(index) {
+            Ok(bytes) => {
+                if let Some(size) = entry.size {
+                    if bytes.len() as u64 != size {
+                        failed += 1;
+                        println!(
+                            "FAIL   {}   size stored {} read {}",
+                            entry.name,
+                            size,
+                            bytes.len()
+                        );
+                        continue;
+                    }
+                }
+                println!("ok     {}   {} bytes", entry.name, bytes.len());
+            }
+            Err(e) => {
+                failed += 1;
+                println!("FAIL   {}   {}", entry.name, e);
+            }
+        }
+    }
+    if failed > 0 {
+        Err(format!("{failed} of {checked} entries failed verification"))
+    } else {
+        println!("all {checked} entries verified");
+        Ok(())
+    }
+}
+
+/// Minimal JSON string escaping (quotes, backslash, control bytes
+/// as \u00XX). Stable output: no maps iterated, archive order.
+fn json_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// `ozip metadata ARCHIVE` — the entry table as JSON (Ruby
+/// metadata_command parity at our ArchiveEntry fidelity).
+pub(crate) fn metadata(archive: &Path, password: Option<&str>) -> Result<(), String> {
+    let mut opened = open_archive(archive, password)?;
+    let entries = opened.entries()?;
+    println!("{{");
+    println!(
+        "  \"archive\": \"{}\",",
+        json_escape(&archive.to_string_lossy())
+    );
+    println!("  \"entry_count\": {},", entries.len());
+    println!("  \"entries\": [");
+    for (i, entry) in entries.iter().enumerate() {
+        let kind = match &entry.kind {
+            EntryKind::Directory => "directory",
+            EntryKind::Regular => "file",
+            EntryKind::Symlink(_) | EntryKind::HardLink(_) => "link",
+            EntryKind::Other(_) => "other",
+        };
+        let comma = if i + 1 == entries.len() { "" } else { "," };
+        println!("    {{");
+        println!("      \"name\": \"{}\",", json_escape(&entry.name));
+        println!("      \"kind\": \"{kind}\",");
+        println!(
+            "      \"size\": {},",
+            entry.size.map_or("null".to_string(), |s| s.to_string())
+        );
+        println!(
+            "      \"mtime\": {},",
+            entry.mtime.map_or("null".to_string(), |t| t.to_string())
+        );
+        println!(
+            "      \"mode\": {},",
+            entry
+                .mode
+                .map_or("null".to_string(), |m| format!("0o{:o}", m))
+        );
+        println!(
+            "      \"method\": {}",
+            entry.method.map_or("null".to_string(), |m| m.to_string())
+        );
+        println!("    }}{comma}");
+    }
+    println!("  ]");
+    println!("}}");
+    Ok(())
 }
 
 /// `ozip x ARCHIVE [-C DIR]` — extract under DIR (default `.`).

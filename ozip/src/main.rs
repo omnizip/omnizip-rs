@@ -28,6 +28,8 @@ fn usage(codecs: &[CodecSpec]) {
     println!("    ozip c ARCHIVE INPUT...               create archive (format by ext or -f)");
     println!("    ozip x ARCHIVE [-C DIR]               extract archive (auto-detect)");
     println!("    ozip t ARCHIVE                        list entry names");
+    println!("    ozip verify ARCHIVE                   structural + checksum verification");
+    println!("    ozip metadata ARCHIVE                 entry table as JSON");
     println!("    ozip l ARCHIVE                        long listing (mode/size/mtime)");
     println!("    ozip --list-codecs                    codec registry");
     println!("    ozip --formats                        container registry");
@@ -100,7 +102,10 @@ fn run() -> Result<(), String> {
     }
 
     // Container commands: c (create), x (extract), t (list), l (long).
-    if matches!(args[0].as_str(), "c" | "x" | "t" | "l") {
+    if matches!(
+        args[0].as_str(),
+        "c" | "x" | "t" | "l" | "verify" | "metadata"
+    ) {
         return run_container(&args);
     }
 
@@ -342,6 +347,8 @@ fn run_container(args: &[String]) -> Result<(), String> {
         "x" => container::extract(&archive, out_dir.as_deref(), password.as_deref()),
         "t" => container::list(&archive, false, password.as_deref()),
         "l" => container::list(&archive, true, password.as_deref()),
+        "verify" => container::verify(&archive, password.as_deref()),
+        "metadata" => container::metadata(&archive, password.as_deref()),
         _ => unreachable!(),
     }
 }
