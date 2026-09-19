@@ -11,8 +11,16 @@ gzip multi-member, bzip2/xz multistream qualify; raw deflate does
 not). Tests: tagged-codec split/order/invariance, flaky-codec
 propagation, empty/tiny. ALSO: fixed the tracker test race from
 task 59 (zero-duration first update skipped — sleep-seeded).
-REMAINING: archive-level parallel create/extract (entry
-distribution via bounded channels, writer serialization)
+REMAINING: archive-level parallel create/extract — DESIGN PASS
+REQUIRED FIRST (2026-09-19 note): extract needs the readers'
+read_entry to be callable concurrently (readers hold mutable
+offsets; &mut self blocks parallel decode) — the refactor is per-
+crate reader Sync-ification (share the immutable archive buffer +
+per-entry offsets snapshot); create needs writer-level support to
+compress concurrently and serialize emission in entry order (the
+deterministic order rule pins output to entry-list order). Do NOT
+parallelize around these constraints — the invariants outrank the
+speedup
 
 ## Gap
 
