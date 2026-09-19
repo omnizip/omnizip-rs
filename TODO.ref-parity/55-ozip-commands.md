@@ -4,9 +4,17 @@ Status: partially done (2026-09-19, TWO slices — (1) verify +
 metadata; (2) parity create/verify/repair over omnizip-par2 [full
 cycle pinned: create → verify OK → corruption detected with slice
 index → repair byte-exact] + profile list/show over task 60's
-named presets. clap still deferred. REMAINING: archive repair
-(Ruby's archive_repair semantics — zip local-header salvage etc.;
-the par2 path above IS the recovery story for parity sets).
+named presets. clap still deferred. REMAINING: archive repair — SCOPE RESOLVED (2026-09-19): Ruby's
+archive_repair is RAR recovery-record repair ONLY (formats/rar/
+archive_repairer.rb: ArchiveVerifier + recovery_record +
+parity_handler; everything else prints 'not supported'). Porting
+it = RAR5 RR/RS record parsing + recovery in omnizip-rar.
+BLOCKED on test fixtures: the local `rar` binary is
+Gatekeeper-killed (memory: never-use-unrar context) so recovery-
+record archives cannot be created locally; unblock = obtain RR
+fixtures from CI (apt rar on ubuntu runner) or libarchive corpus.
+Our parity commands (shipped above) are the general recovery
+story.
 
 ## Gap
 
