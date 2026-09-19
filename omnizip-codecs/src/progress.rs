@@ -233,6 +233,9 @@ mod tests {
     #[test]
     fn tracker_rates_and_eta() {
         let mut t = ProgressTracker::new(1000);
+        // The tracker skips zero-duration updates (no rate derivable);
+        // guarantee a measurable interval before the first one.
+        std::thread::sleep(std::time::Duration::from_millis(2));
         t.update(100);
         let (done, total, rate, eta) = t.snapshot();
         assert_eq!((done, total), (100, 1000));

@@ -1,7 +1,18 @@
 # Task 58 — generic parallel engine
 
-Status: open (part of task 51 phase 2; the job-split model is
-already proven inside zstd compress_mt — generalize it)
+Status: partially done (2026-09-19 — intra-stream parallel_compress
+in omnizip-codecs::parallel_batch (SSOT home; no new crate — the
+batch module already owned parallelism): any Codec, explicit
+job_size (caller owns the output contract), fixed strided worker
+groups + results indexed by job = thread-count-invariant output;
+threads<=1/single-job = exact one-shot; worker panics surface as
+job errors; concatenation contract documented (zstd multi-frame,
+gzip multi-member, bzip2/xz multistream qualify; raw deflate does
+not). Tests: tagged-codec split/order/invariance, flaky-codec
+propagation, empty/tiny. ALSO: fixed the tracker test race from
+task 59 (zero-duration first update skipped — sleep-seeded).
+REMAINING: archive-level parallel create/extract (entry
+distribution via bounded channels, writer serialization)
 
 ## Gap
 
