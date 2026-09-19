@@ -1,6 +1,16 @@
 # Task 60 — compression profiles + content-class detector
 
-Status: open (part of task 51 phase 3)
+Status: done (2026-09-19 — omnizip-codecs::profile extended (SSOT
+home; the intent-based Profile stays the codec-facing API): the 5
+named presets ported FIELD-BY-FIELD (fast=deflate/1, balanced=
+deflate/6, binary=lzma2/6+bcj_x86, archive=store/0, maximum=lzma2/9
++auto+solid; lzma2→LZMA codec id, store→STORE), CustomProfile
+inheritance semantics, detect_profile(): magic sniff (ELF/Mach-O/
+PE→binary; zip/gz/xz/zst/bzip2/png/jpg/gif/mp3→archive) then
+content_type → Ruby priority selection incl. the VESTIGIAL :text
+priority entry (no text profile ships in Ruby's registry either —
+balanced wins; quirk documented). Module went pub. Mapping-table
++ detector tests pin both directions
 
 ## Gap
 
@@ -14,7 +24,7 @@ plus balanced and custom. Rust: nothing.
 
 ## Scope
 
-New crate `omnizip-profile` (depends on omnizip-codecs only):
+(SSOT decision: no new crate — profile.rs in omnizip-codecs is the single home. Originally sketched as a new crate; the existing intent-based Profile + private content_type made extension the SSOT-correct call.)
 
 - `Profile` struct: name, codec, level, solid flag, options;
   `registry()` with the six shipped profiles ported FIELD BY FIELD
