@@ -199,13 +199,31 @@ unsafe fn try_decompress(
         // SAFETY: caller guarantees readability for input_len.
         unsafe { std::slice::from_raw_parts(input, input_len) }
     };
-    let expected = u32::try_from(expected_len).unwrap_or(u32::MAX);
-    let result = std::panic::catch_unwind(|| {
-        codec_by_name(&name).and_then(|c| {
-            c.decompress(data, expected)
-                .map_err(|e: OmnizipError| e.to_string())
+    // expected_len == usize::MAX means "unknown": streaming
+    // callers (the Ruby tier) cannot know the plaintext size. The
+    // Codec trait enforces exact lengths, so this routes to each
+    // codec's length-agnostic free function instead.
+    let result = if expected_len == usize::MAX {
+        std::panic::catch_unwind(|| match name.as_str() {
+            "zstd" => omnizip_zstd::decompress(data, u32::MAX).map_err(|e| e.to_string()),
+            "bzip2" => omnizip_bzip2::decompress_framed(data).map_err(|e| e.to_string()),
+            "lzma" | "xz" => omnizip_lzma::xz_decompress(data).map_err(|e| e.to_string()),
+            other => Err(format!(
+                "unknown codec '{other}' (available: zstd, bzip2, lzma)"
+            )),
         })
-    });
+    } else {
+        let Ok(expected) = u32::try_from(expected_len) else {
+            set_last_error(format!("expected_len {expected_len} exceeds u32"));
+            return Err(());
+        };
+        std::panic::catch_unwind(|| {
+            codec_by_name(&name).and_then(|c| {
+                c.decompress(data, expected)
+                    .map_err(|e: OmnizipError| e.to_string())
+            })
+        })
+    };
     match result {
         Ok(Ok(out)) => {
             unsafe { *out_len = out.len() };
@@ -309,6 +327,31 @@ mod tests {
             .into_owned();
         assert!(err.contains("unknown codec 'nope'"), "{err}");
         assert!(err.contains("zstd"), "{err}");
+    }
+
+    #[test]
+    fn unknown_length_decodes_all_codecs() {
+        for codec in ["zstd", "bzip2", "lzma"] {
+            let name = CString::new(codec).unwrap();
+            let data = sample(5000);
+            let mut out_len = 0_usize;
+            let ptr =
+                unsafe { ozip_compress(name.as_ptr(), data.as_ptr(), data.len(), 6, &mut out_len) };
+            assert!(!ptr.is_null());
+            let mut dec_len = 0_usize;
+            let dec =
+                unsafe { ozip_decompress(name.as_ptr(), ptr, out_len, usize::MAX, &mut dec_len) };
+            assert!(!dec.is_null(), "{codec}: {}", unsafe {
+                std::ffi::CStr::from_ptr(ozip_last_error()).to_string_lossy()
+            });
+            assert_eq!(
+                unsafe { std::slice::from_raw_parts(dec, dec_len) },
+                data.as_slice(),
+                "{codec} unknown-length decode"
+            );
+            unsafe { ozip_free(ptr, out_len) };
+            unsafe { ozip_free(dec, dec_len) };
+        }
     }
 
     #[test]
