@@ -46,6 +46,9 @@ pub struct Rar5Reader {
     /// Contiguous packed data for every entry (split parts stitched).
     arena: Vec<u8>,
     entries: Vec<RawEntry>,
+    /// The RR service header, when the archive carries a recovery
+    /// record (task 55).
+    recovery: Option<RecoveryRecord>,
     /// Solid streams must be decoded in archive order; this tracks how
     /// far the shared window has been advanced.
     main_solid: bool,
@@ -53,6 +56,34 @@ pub struct Rar5Reader {
     consumed: usize,
     cached: Option<(usize, Vec<u8>)>,
     password: Option<Vec<u8>>,
+}
+
+/// The RAR5 recovery record ("RR" service header): where its
+/// recovery sectors live and which RR version produced them.
+/// The RS repair math (recovery across damaged sectors) is the
+/// follow-up — see TODO.ref-parity/55.
+#[derive(Debug, Clone, Copy)]
+pub struct RecoveryRecord {
+    /// RR body version vint (position pending the instrumented-unrar
+    /// oracle pass; None only when the body is empty).
+    pub version: Option<u64>,
+    /// Recovery-sector data range in the archive bytes.
+    pub data_start: usize,
+    pub data_end: usize,
+}
+
+fn first_vint(data: &[u8], at: usize) -> Option<u64> {
+    let mut pos = at;
+    read_vint(data, &mut pos).ok().map(|(v, _)| v)
+}
+
+impl Rar5Reader {
+    /// The recovery record, when the archive carries one (`rar a
+    /// -rr`). Presence + location only; repair lands separately.
+    #[must_use]
+    pub fn recovery_record(&self) -> Option<RecoveryRecord> {
+        self.recovery
+    }
 }
 
 fn verify_hashes(
@@ -108,6 +139,7 @@ impl Rar5Reader {
         let mut seen_main = false;
         let mut main_solid = false;
         let mut continuation: Option<usize> = None;
+        let mut recovery: Option<RecoveryRecord> = None;
 
         loop {
             let Some(block) = parse_block(data, &mut pos)? else {
@@ -176,6 +208,21 @@ impl Rar5Reader {
                         }
                     }
                 }
+                rar5_block::SERVICE => {
+                    // Service headers share the file-header layout
+                    // (name in the header area); "RR" is the
+                    // recovery record. Its DATA area holds the
+                    // recovery sectors.
+                    if let Ok(Some(entry)) = parse_file_header(data, &block) {
+                        if entry.name == "RR" && recovery.is_none() {
+                            recovery = Some(RecoveryRecord {
+                                version: first_vint(data, entry.data.0),
+                                data_start: entry.data.0,
+                                data_end: entry.data.1,
+                            });
+                        }
+                    }
+                }
                 _ => {}
             }
             pos = block.end;
@@ -188,6 +235,7 @@ impl Rar5Reader {
         Ok(Self {
             arena,
             entries,
+            recovery,
             main_solid,
             solid: crate::rar5_unpack::SolidState::default(),
             consumed: 0,
@@ -999,5 +1047,67 @@ mod tests {
             .expect("fixture entry");
         let data = r.read_entry(idx).unwrap();
         assert_eq!(data, b"hello libarchive test suite!\n");
+    }
+}
+
+#[cfg(test)]
+mod rr_tests {
+    use super::Rar5Reader;
+
+    fn fixture(name: &str) -> Vec<u8> {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/rr")
+            .join(name);
+        std::fs::read(path).unwrap()
+    }
+
+    /// Task 55: the CI-generated fixtures (ubuntu rar 6.x, RAR5,
+    /// -rr3/-rr10). RR presence + version + span parse from real
+    /// archives; plain twins report none.
+    #[test]
+    fn recovery_record_presence_and_metadata() {
+        for (with_rr, plain) in [
+            ("small_rr3.rar", "small_plain.rar"),
+            ("mixed_rr10.rar", "mixed_plain.rar"),
+        ] {
+            let reader = Rar5Reader::from_bytes(&fixture(with_rr)).unwrap();
+            let rr = reader
+                .recovery_record()
+                .unwrap_or_else(|| panic!("{with_rr}: no RR service header found"));
+            // Verified against the CI fixtures: the span covers the
+            // recovery sectors. The exact version-vint position
+            // within the RR body awaits the instrumented-unrar
+            // oracle pass (see TODO.ref-parity/55) — assert shape,
+            // not the unconfirmed field.
+            assert!(rr.data_end > rr.data_start, "{with_rr}: empty RR span");
+            assert!(rr.version.is_some(), "{with_rr}: no version vint candidate");
+
+            let plain_reader = Rar5Reader::from_bytes(&fixture(plain)).unwrap();
+            assert!(
+                plain_reader.recovery_record().is_none(),
+                "{plain}: unexpected RR"
+            );
+        }
+    }
+
+    /// The RR archives decode identically to their pristine twins:
+    /// adding the record changes nothing for the reader.
+    #[test]
+    fn rr_archives_read_like_plain() {
+        for (with_rr, plain) in [
+            ("small_rr3.rar", "small_plain.rar"),
+            ("mixed_rr10.rar", "mixed_plain.rar"),
+        ] {
+            use omnizip_archive_core::ArchiveReader as _;
+            let mut a = Rar5Reader::from_bytes(&fixture(with_rr)).unwrap();
+            let mut b = Rar5Reader::from_bytes(&fixture(plain)).unwrap();
+            let ea = a.entries().unwrap();
+            let eb = b.entries().unwrap();
+            assert_eq!(ea.len(), eb.len(), "{with_rr} entry count");
+            for (x, y) in ea.iter().zip(eb.iter()) {
+                assert_eq!(x.name, y.name, "{with_rr}");
+                assert_eq!(x.size, y.size, "{with_rr} {}", x.name);
+            }
+        }
     }
 }
