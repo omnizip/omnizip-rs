@@ -65,7 +65,7 @@ small-file T ~4x).)
 | 52 | checksum registry — pluggable crc32/crc64/digest family + verifier (feeds 55) | — | done 2026-09-19 (omnizip-checksum; crc64-xz verified vs xz CLI ground truth) |
 | 53 | xz/lzip/lzma-alone as first-class single-file formats (detect + ozip t/l/x/c + metadata parity) | — | done 2026-09-19 (single-file archive view + `c -f <codec>`; gzip FNAME-on-read follow-up) |
 | 54 | password provider abstraction — Static/Prompt/Env/File + validator; ZipCrypto-read gap check while wiring | — | done 2026-09-19 (providers + validator + CLI flags; ZipCrypto READ absent → follow-up task) |
-| 55 | ozip commands — verify/repair/parity/metadata/profile (clap subcommands, c/x/t/l aliased) | — | partial 2026-09-19 (verify+metadata shipped; parity/repair/profile-remaining) |
+| 55 | ozip commands — verify/repair/parity/metadata/profile (clap subcommands, c/x/t/l aliased) | — | partial 2026-09-19 (verify+metadata+parity-full-cycle+profile shipped; archive-repair remaining) |
 | 56 | implementation tiers — registry wire_format + impl_name (deflate/libdeflate the live pair; pure-Rust-only policy) | — | done 2026-09-19 (Codec defaults + codec_for_format/ImplPreference; libdeflate declares DEFLATE) |
 | 57 | chunked streaming — StreamingCompressor/Decompressor traits; block boundaries = f(input, declared chunk_size), NEVER push arrival; impl order zstd→deflate→bzip2→lzma/xz→brotli | — | partial 2026-09-19 (encoder leg + orphan cleanup; zstd oracle-verified; decoder leg remaining) |
 | 58 | generic parallel engine — generalize zstd compress_mt job-split to any codec + entry-level archive create/extract; thread-count-invariant output | — | partial 2026-09-19 (parallel_compress shipped; archive-level create/extract remaining) |

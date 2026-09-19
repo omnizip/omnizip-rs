@@ -1018,6 +1018,133 @@ pub(crate) fn convert(
     result
 }
 
+/// `ozip parity create|verify|repair` — CLI over the omnizip-par2
+/// crate (task 55, second slice; the Ruby parity_* commands).
+pub(crate) fn parity(args: &[String]) -> Result<(), String> {
+    let sub = args
+        .first()
+        .map(String::as_str)
+        .ok_or_else(|| "ozip parity: expected create|verify|repair".to_string())?;
+    let files: Vec<&String> = args[1..].iter().filter(|a| !a.starts_with('-')).collect();
+    let files = files.as_slice();
+    match sub {
+        "create" => {
+            let input = files
+                .first()
+                .map(|s| s.as_str())
+                .ok_or("ozip parity create: an input file is required")?;
+            let count: u32 = flag_value(args, "-n")
+                .map(|v| v.parse().map_err(|_| format!("bad -n '{v}'")))
+                .transpose()?
+                .unwrap_or(4);
+            let out =
+                flag_value(args, "-o").map_or_else(|| format!("{input}.par2"), |v| v.to_string());
+            let data = std::fs::read(input).map_err(|e| format!("{input}: {e}"))?;
+            let name = Path::new(input)
+                .file_name()
+                .map_or_else(|| input.to_string(), |n| n.to_string_lossy().into_owned());
+            let volume = omnizip_par2::verify::create(
+                &[(name, data)],
+                &omnizip_par2::verify::CreateOptions {
+                    recovery_count: count,
+                    ..omnizip_par2::verify::CreateOptions::default()
+                },
+            )
+            .map_err(|e| e.to_string())?;
+            std::fs::write(&out, &volume).map_err(|e| format!("{out}: {e}"))?;
+            println!("{out}: {} recovery slices", count);
+            Ok(())
+        }
+        "verify" => {
+            let [input, par2] = two_paths(files, "verify")?;
+            let (input, par2) = (input.as_str(), par2.as_str());
+            let set = load_par2(par2)?;
+            let data = std::fs::read(input).map_err(|e| format!("{input}: {e}"))?;
+            let name = Path::new(input)
+                .file_name()
+                .map_or_else(|| input.to_string(), |n| n.to_string_lossy().into_owned());
+            let tracked = set
+                .files
+                .iter()
+                .find(|f| f.name == name)
+                .ok_or_else(|| format!("'{name}' is not covered by {}", par2))?;
+            match omnizip_par2::verify::verify_file(tracked, Some(&data), set.block_size as usize) {
+                omnizip_par2::verify::FileStatus::Ok => {
+                    println!("{input}: OK");
+                    Ok(())
+                }
+                omnizip_par2::verify::FileStatus::Missing => Err(format!("{input}: file missing")),
+                omnizip_par2::verify::FileStatus::Damaged(slices) => Err(format!(
+                    "{input}: {} damaged slice(s): {:?}",
+                    slices.len(),
+                    slices
+                )),
+            }
+        }
+        "repair" => {
+            let [input, par2] = two_paths(files, "repair")?;
+            let (input, par2) = (input.as_str(), par2.as_str());
+            let set = load_par2(par2)?;
+            let data = std::fs::read(input).map_err(|e| format!("{input}: {e}"))?;
+            let name = Path::new(input)
+                .file_name()
+                .map_or_else(|| input.to_string(), |n| n.to_string_lossy().into_owned());
+            let (idx, tracked) = set
+                .files
+                .iter()
+                .enumerate()
+                .find(|(_, f)| f.name == name)
+                .ok_or_else(|| format!("'{name}' is not covered by {}", par2))?;
+            let others: Vec<(usize, Vec<u8>)> = set
+                .files
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| *i != idx)
+                .map(|(i, f)| {
+                    let sibling = std::fs::read(&f.name).unwrap_or_default();
+                    (i, sibling)
+                })
+                .collect();
+            let repaired = omnizip_par2::verify::repair_file(&set, tracked, &data, &others)
+                .map_err(|e| format!("repair: {e}"))?;
+            let out = flag_value(args, "-o").map_or_else(|| input.to_string(), str::to_string);
+            std::fs::write(&out, &repaired).map_err(|e| format!("{out}: {e}"))?;
+            println!("{out}: repaired {} bytes", repaired.len());
+            Ok(())
+        }
+        other => Err(format!(
+            "ozip parity: unknown subcommand '{other}' (create|verify|repair)"
+        )),
+    }
+}
+
+fn flag_value<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        if a == flag {
+            return it.next().map(String::as_str);
+        }
+    }
+    None
+}
+
+fn two_paths(files: &[&String], sub: &str) -> Result<[String; 2], String> {
+    let a = files.first().map(|s| s.as_str());
+    let b = files.get(1).map(|s| s.as_str());
+    match (a, b) {
+        (Some(a), Some(b)) => Ok([a.to_string(), b.to_string()]),
+        _ => Err(format!(
+            "ozip parity {sub}: FILE and PAR2 paths are required"
+        )),
+    }
+}
+
+fn load_par2(path: &str) -> Result<omnizip_par2::RecoverySet, String> {
+    let data = std::fs::read(path).map_err(|e| format!("{path}: {e}"))?;
+    let packets = omnizip_par2::packet::parse_packets(&data).map_err(|e| e.to_string())?;
+    omnizip_par2::packet::assemble(&packets).map_err(|e| e.to_string())
+}
+
 /// `ozip x ARCHIVE [-C DIR]` — extract under DIR (default `.`).
 pub fn extract(
     archive: &Path,

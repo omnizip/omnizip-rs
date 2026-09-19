@@ -16,6 +16,8 @@ name = "ozip"
 path = "src/main.rs"
 
 [dependencies]
+omnizip-par2.workspace = true
+omnizip-codecs.workspace = true
 omnizip-archive-core = { path = "../omnizip-archive-core" }
 omnizip-lzma = { path = "../omnizip-lzma" }
 omnizip-zstd = { path = "../omnizip-zstd" }
