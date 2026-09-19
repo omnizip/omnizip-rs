@@ -63,7 +63,7 @@ small-file T ~4x).)
 | 05 | csv2m time pathology — root cause 1: getenv in opt hot loop | csv2m zstd L6 I=137 | done 2026-09-07 (v0.21.66; T 202x→~112x est; re-score pending quiet box; residual = task 03) |
 | 51 | **Ruby⇄Rust alignment master plan** — the app-layer gap table (11 items, rubyzip_compat dropped by owner), 4 phases, dependency graph, cross-cutting invariants | — | open 2026-09-19 |
 | 52 | checksum registry — pluggable crc32/crc64/digest family + verifier (feeds 55) | — | done 2026-09-19 (omnizip-checksum; crc64-xz verified vs xz CLI ground truth) |
-| 53 | xz/lzip/lzma-alone as first-class single-file formats (detect + ozip t/l/x/c + metadata parity) | — | open 2026-09-19 |
+| 53 | xz/lzip/lzma-alone as first-class single-file formats (detect + ozip t/l/x/c + metadata parity) | — | done 2026-09-19 (single-file archive view + `c -f <codec>`; gzip FNAME-on-read follow-up) |
 | 54 | password provider abstraction — Static/Prompt/Env/File + validator; ZipCrypto-read gap check while wiring | — | open 2026-09-19 |
 | 55 | ozip commands — verify/repair/parity/metadata/profile (clap subcommands, c/x/t/l aliased) | — | open 2026-09-19 |
 | 56 | implementation tiers — registry wire_format + impl_name (deflate/libdeflate the live pair; pure-Rust-only policy) | — | done 2026-09-19 (Codec defaults + codec_for_format/ImplPreference; libdeflate declares DEFLATE) |

@@ -12,6 +12,165 @@ use omnizip_archive_core::{ArchiveEntry, ArchiveReader, ArchiveWriter, EntryKind
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+/// Single-file codec specification (the `ozip -d` / `-N` codec mode
+/// AND the single-file archive view below share this table — SSOT).
+pub(crate) struct CodecSpec {
+    pub(crate) name: &'static str,
+    pub(crate) suffix: &'static str,
+    /// (input, level) -> compressed bytes
+    pub(crate) compress: fn(&[u8], u8) -> Result<Vec<u8>, String>,
+    /// compressed -> plaintext
+    pub(crate) decompress: fn(&[u8]) -> Result<Vec<u8>, String>,
+    pub(crate) default_level: u8,
+    pub(crate) max_level: u8,
+}
+
+pub(crate) fn specs() -> Vec<CodecSpec> {
+    vec![
+        CodecSpec {
+            name: "xz",
+            suffix: ".xz",
+            compress: |data, lvl| {
+                omnizip_lzma::xz_compress_with_options(
+                    data,
+                    &omnizip_lzma::LzmaOptions {
+                        max_chain_length: lvl_factor(lvl),
+                        nice_match: u32::from(lvl.min(9)) * 30,
+                        ..omnizip_lzma::LzmaOptions::default()
+                    },
+                )
+                .map_err(|e| e.to_string())
+            },
+            decompress: |data| omnizip_lzma::xz_decompress(data).map_err(|e| e.to_string()),
+            default_level: 6,
+            max_level: 9,
+        },
+        CodecSpec {
+            name: "zstd",
+            suffix: ".zst",
+            compress: |data, lvl| {
+                omnizip_zstd::compress(data, zstd_level(lvl)).map_err(|e| e.to_string())
+            },
+            decompress: |data| omnizip_zstd::decompress(data, u32::MAX).map_err(|e| e.to_string()),
+            default_level: 6,
+            max_level: 22,
+        },
+        CodecSpec {
+            name: "gzip",
+            suffix: ".gz",
+            compress: |data, _| {
+                omnizip_archive_core::formats::gzip::compress(
+                    data,
+                    &omnizip_archive_core::formats::gzip::GzipOptions::default(),
+                )
+                .map_err(|e| e.to_string())
+            },
+            decompress: |data| {
+                omnizip_archive_core::formats::gzip::decompress(data).map_err(|e| e.to_string())
+            },
+            default_level: 6,
+            max_level: 9,
+        },
+        CodecSpec {
+            name: "bzip2",
+            suffix: ".bz2",
+            compress: |data, lvl| {
+                omnizip_archive_core::formats::bzip2_file::compress(data, lvl.max(1))
+                    .map_err(|e| e.to_string())
+            },
+            decompress: |data| {
+                omnizip_archive_core::formats::bzip2_file::decompress(data)
+                    .map_err(|e| e.to_string())
+            },
+            default_level: 9,
+            max_level: 9,
+        },
+        CodecSpec {
+            name: "lzip",
+            suffix: ".lz",
+            compress: |data, _| {
+                omnizip_archive_core::formats::lzip::compress(
+                    data,
+                    &omnizip_archive_core::formats::lzip::LzipOptions::default(),
+                )
+                .map_err(|e| e.to_string())
+            },
+            decompress: |data| {
+                omnizip_archive_core::formats::lzip::decompress(data).map_err(|e| e.to_string())
+            },
+            default_level: 6,
+            max_level: 9,
+        },
+        CodecSpec {
+            name: "lzma",
+            suffix: ".lzma",
+            compress: |data, _| {
+                omnizip_archive_core::formats::lzma_alone::compress(data).map_err(|e| e.to_string())
+            },
+            decompress: |data| {
+                omnizip_archive_core::formats::lzma_alone::decompress(data)
+                    .map_err(|e| e.to_string())
+            },
+            default_level: 6,
+            max_level: 9,
+        },
+    ]
+}
+
+pub(crate) fn zstd_level(lvl: u8) -> omnizip_zstd::ZstdLevel {
+    match lvl {
+        0..=2 => omnizip_zstd::ZstdLevel::Fastest,
+        3..=5 => omnizip_zstd::ZstdLevel::Fast,
+        6..=11 => omnizip_zstd::ZstdLevel::Default,
+        12..=21 => omnizip_zstd::ZstdLevel::Better,
+        _ => omnizip_zstd::ZstdLevel::Best,
+    }
+}
+
+fn lvl_factor(lvl: u8) -> u32 {
+    match lvl {
+        1 => 4,
+        2 => 8,
+        3 => 24,
+        4 => 24,
+        5 => 32,
+        _ => 48,
+    }
+}
+
+/// Strip a codec suffix for the single-file archive view's entry
+/// name (`notes.txt.gz` -> `notes.txt`, `archive.txz` ->
+/// `archive.tar`); unknown suffixes get `.out`.
+pub(crate) fn strip_codec_suffix(name: &str) -> String {
+    let lower = name.to_lowercase();
+    if lower.ends_with(".tar.gz") || lower.ends_with(".tgz") {
+        return stem(name, ".tar.gz", ".tgz");
+    }
+    if lower.ends_with(".tar.bz2") || lower.ends_with(".tbz2") {
+        return stem(name, ".tar.bz2", ".tbz2");
+    }
+    if lower.ends_with(".tar.xz") || lower.ends_with(".txz") {
+        return stem(name, ".tar.xz", ".txz");
+    }
+    if lower.ends_with(".tar.zst") {
+        return stem(name, ".tar.zst", ".tar.zst");
+    }
+    for suffix in [".gz", ".bz2", ".xz", ".zst", ".lz", ".lzma"] {
+        if lower.len() > suffix.len() && lower.ends_with(suffix) {
+            return name[..name.len() - suffix.len()].to_string();
+        }
+    }
+    format!("{name}.out")
+}
+
+fn stem(name: &str, a: &str, b: &str) -> String {
+    if name.len() >= a.len() && name.to_lowercase().ends_with(a) {
+        format!("{}tar", &name[..name.len() - a.len()])
+    } else {
+        format!("{}tar", &name[..name.len() - b.len()])
+    }
+}
+
 /// A registered archive format: how to identify it and its read/write
 /// capability. Adding a format is one row — command code never grows
 /// a format branch.
@@ -105,6 +264,12 @@ pub fn print_formats() {
 /// The container the user asked to create, by extension or `-f`.
 enum OutputFormat {
     Tar,
+    Gzip,
+    Bzip2,
+    Xz,
+    Zstd,
+    Lzip,
+    LzmaAlone,
     TarGzip,
     TarBzip2,
     TarXz,
@@ -121,6 +286,12 @@ fn infer_output(archive: &Path, explicit: Option<&str>) -> Result<OutputFormat, 
     if let Some(name) = explicit {
         return match name {
             "tar" => Ok(OutputFormat::Tar),
+            "gzip" | "gz" => Ok(OutputFormat::Gzip),
+            "bzip2" | "bz2" => Ok(OutputFormat::Bzip2),
+            "xz" => Ok(OutputFormat::Xz),
+            "zstd" | "zst" => Ok(OutputFormat::Zstd),
+            "lzip" | "lz" => Ok(OutputFormat::Lzip),
+            "lzma" | "lzma-alone" => Ok(OutputFormat::LzmaAlone),
             "tar.gz" | "tgz" => Ok(OutputFormat::TarGzip),
             "tar.bz2" | "tbz2" => Ok(OutputFormat::TarBzip2),
             "tar.xz" | "txz" => Ok(OutputFormat::TarXz),
@@ -147,7 +318,8 @@ fn infer_output(archive: &Path, explicit: Option<&str>) -> Result<OutputFormat, 
         .unwrap_or_default();
     for candidate in [
         "tar.gz", "tar.bz2", "tar.xz", "tar.zst", "tgz", "tbz2", "txz", "tar", "zip", "cpio", "7z",
-        "rpm", "iso", "rar",
+        "rpm", "iso", "rar", "gzip", "gz", "bzip2", "bz2", "xz", "zstd", "zst", "lzip", "lz",
+        "lzma",
     ] {
         if name.ends_with(candidate) {
             return match candidate {
@@ -156,6 +328,12 @@ fn infer_output(archive: &Path, explicit: Option<&str>) -> Result<OutputFormat, 
                 "tar.xz" | "txz" => Ok(OutputFormat::TarXz),
                 "tar.zst" => Ok(OutputFormat::TarZstd),
                 "tar" => Ok(OutputFormat::Tar),
+                "gzip" | "gz" => Ok(OutputFormat::Gzip),
+                "bzip2" | "bz2" => Ok(OutputFormat::Bzip2),
+                "xz" => Ok(OutputFormat::Xz),
+                "zstd" | "zst" => Ok(OutputFormat::Zstd),
+                "lzip" | "lz" => Ok(OutputFormat::Lzip),
+                "lzma" => Ok(OutputFormat::LzmaAlone),
                 "zip" => Ok(OutputFormat::Zip),
                 "cpio" => Ok(OutputFormat::Cpio),
                 "7z" => Ok(OutputFormat::SevenZip),
@@ -276,9 +454,48 @@ pub fn create(
     }
     let level = level.unwrap_or(6);
     let options = WriteOptions::deterministic();
+
+    // Single-file formats compress the FILE itself (Ruby
+    // compress_command semantics): one regular-file input only.
+    let single = match output {
+        OutputFormat::Gzip => Some("gzip"),
+        OutputFormat::Bzip2 => Some("bzip2"),
+        OutputFormat::Xz => Some("xz"),
+        OutputFormat::Zstd => Some("zstd"),
+        OutputFormat::Lzip => Some("lzip"),
+        OutputFormat::LzmaAlone => Some("lzma"),
+        _ => None,
+    };
+    if let Some(codec_name) = single {
+        if inputs.len() != 1 || !inputs[0].is_file() {
+            return Err(format!(
+                "format '{codec_name}' compresses a single file; \
+                 give one file input or use the tar.* container format"
+            ));
+        }
+        let spec = specs()
+            .into_iter()
+            .find(|s| s.name == codec_name)
+            .ok_or_else(|| format!("codec '{codec_name}' missing from the spec table"))?;
+        let data =
+            std::fs::read(&inputs[0]).map_err(|e| format!("{}: {e}", inputs[0].display()))?;
+        let clamped = level.min(spec.max_level);
+        let compressed = (spec.compress)(&data, clamped)?;
+        std::fs::write(archive, &compressed).map_err(|e| format!("{}: {e}", archive.display()))?;
+        return Ok(());
+    }
+
     let staged = stage(inputs, &options)?;
 
     let bytes = match output {
+        OutputFormat::Gzip
+        | OutputFormat::Bzip2
+        | OutputFormat::Xz
+        | OutputFormat::Zstd
+        | OutputFormat::Lzip
+        | OutputFormat::LzmaAlone => {
+            unreachable!("single-file formats return in the branch above")
+        }
         OutputFormat::Tar => {
             let mut w = omnizip_tar::TarWriter::new();
             write_all(&mut w, &staged, &options)?;
@@ -314,7 +531,7 @@ pub fn create(
         OutputFormat::TarZstd => tar_then(
             &staged,
             &options,
-            &|tar| omnizip_zstd::compress(tar, crate::zstd_level(level)).map_err(|e| e.to_string()),
+            &|tar| omnizip_zstd::compress(tar, zstd_level(level)).map_err(|e| e.to_string()),
             "zstd",
         )?,
         OutputFormat::Zip => {
@@ -424,6 +641,12 @@ fn tar_then(
 
 /// An opened archive, ready to list or extract.
 enum Opened {
+    /// A single-file codec payload viewed as a one-entry archive
+    /// (task 53: the Ruby format-handler semantics).
+    SingleFile {
+        name: String,
+        data: Vec<u8>,
+    },
     Tar(Box<omnizip_tar::TarReader>),
     Zip(Box<omnizip_zip::ZipReader>),
     Cpio(Box<omnizip_cpio::CpioReader>),
@@ -437,6 +660,9 @@ enum Opened {
 impl Opened {
     fn entries(&mut self) -> Result<Vec<ArchiveEntry>, String> {
         match self {
+            Self::SingleFile { name, data } => {
+                Ok(vec![ArchiveEntry::file(name.clone(), data.len() as u64)])
+            }
             Self::Tar(r) => r.entries().map_err(|e| e.to_string()),
             Self::Zip(r) => r.entries().map_err(|e| e.to_string()),
             Self::Cpio(r) => r.entries().map_err(|e| e.to_string()),
@@ -451,6 +677,13 @@ impl Opened {
     fn extract_to(&mut self, dir: &Path) -> Result<(), String> {
         let policy = SecurityPolicy::default();
         match self {
+            Self::SingleFile { name, data } => {
+                let target = dir.join(Path::new(name).file_name().ok_or_else(|| {
+                    format!("single-file entry name has no file component: {name}")
+                })?);
+                std::fs::write(&target, data).map_err(|e| format!("{}: {e}", target.display()))?;
+                Ok(())
+            }
             Self::Tar(r) => r.extract_to(dir, &policy).map_err(|e| e.to_string()),
             Self::Zip(r) => r.extract_to(dir, &policy).map_err(|e| e.to_string()),
             Self::Cpio(r) => r.extract_to(dir, &policy).map_err(|e| e.to_string()),
@@ -479,7 +712,7 @@ fn open_archive(archive: &Path, password: Option<&str>) -> Result<Opened, String
             };
             data.extend_from_slice(&bytes);
         }
-        return open_bytes(&data, password);
+        return open_bytes_named(&data, password, Some(&name));
     }
     // RAR volume sets (.partNN.rar numbering, or name.rar + name.rNN
     // siblings): concatenate the parts and open the concatenation —
@@ -498,13 +731,40 @@ fn open_archive(archive: &Path, password: Option<&str>) -> Result<Opened, String
                 &std::fs::read(part).map_err(|e| format!("{}: {e}", part.display()))?,
             );
         }
-        return open_bytes(&data, password);
+        return open_bytes_named(&data, password, Some(&name));
     }
     let data = std::fs::read(archive).map_err(|e| format!("{}: {e}", archive.display()))?;
-    open_bytes(&data, password)
+    open_bytes_named(&data, password, Some(&name))
 }
 
-fn open_bytes(data: &[u8], password: Option<&str>) -> Result<Opened, String> {
+/// A single-file codec payload: if the decompressed bytes are a tar,
+/// recurse into the container path (the historical `ozip x file.tgz`
+/// behavior); otherwise expose the payload itself as a one-entry
+/// archive (task 53: Ruby's format-handler view).
+fn payload_or_single(
+    data: &[u8],
+    hint: Option<&str>,
+    codec: &str,
+    decompress: fn(&[u8]) -> Result<Vec<u8>, String>,
+) -> Result<Opened, String> {
+    let inner = decompress(data)?;
+    if detect_format(&inner) == FormatKind::Tar {
+        return open_bytes_named(&inner, None, hint);
+    }
+    let name = match hint {
+        Some(h) => strip_codec_suffix(h),
+        None => format!("payload.{codec}"),
+    };
+    Ok(Opened::SingleFile { name, data: inner })
+}
+
+/// `hint`: the archive's file name, used to derive the entry name for
+/// single-file payload views (`notes.txt.gz` -> `notes.txt`).
+fn open_bytes_named(
+    data: &[u8],
+    password: Option<&str>,
+    hint: Option<&str>,
+) -> Result<Opened, String> {
     match detect_format(data) {
         FormatKind::Tar => omnizip_tar::TarReader::from_bytes(data)
             .map(|r| Opened::Tar(Box::new(r)))
@@ -547,37 +807,26 @@ fn open_bytes(data: &[u8], password: Option<&str>) -> Result<Opened, String> {
         // Compressed tar: unwrap the codec layer and parse the tar
         // inside — `ozip x` accepts what `ozip c` produces plus
         // anything the system tools emit.
-        FormatKind::Gzip => {
-            let inner = omnizip_archive_core::formats::gzip::decompress(data)
-                .map_err(|e| format!("gzip: {e}"))?;
-            match open_bytes(&inner, None)? {
-                opened @ Opened::Tar(_) => Ok(opened),
-                _ => Err("gzip payload is not a tar archive".into()),
-            }
-        }
-        FormatKind::Bzip2 => {
-            let inner = omnizip_archive_core::formats::bzip2_file::decompress(data)
-                .map_err(|e| format!("bzip2: {e}"))?;
-            match open_bytes(&inner, None)? {
-                opened @ Opened::Tar(_) => Ok(opened),
-                _ => Err("bzip2 payload is not a tar archive".into()),
-            }
-        }
-        FormatKind::Xz => {
-            let inner = omnizip_lzma::xz_decompress(data).map_err(|e| format!("xz: {e}"))?;
-            match open_bytes(&inner, None)? {
-                opened @ Opened::Tar(_) => Ok(opened),
-                _ => Err("xz payload is not a tar archive".into()),
-            }
-        }
-        FormatKind::Zstd => {
-            let inner =
-                omnizip_zstd::decompress(data, u32::MAX).map_err(|e| format!("zstd: {e}"))?;
-            match open_bytes(&inner, None)? {
-                opened @ Opened::Tar(_) => Ok(opened),
-                _ => Err("zstd payload is not a tar archive".into()),
-            }
-        }
+        FormatKind::Gzip => payload_or_single(data, hint, "gzip", |d| {
+            omnizip_archive_core::formats::gzip::decompress(d).map_err(|e| format!("gzip: {e}"))
+        }),
+        FormatKind::Bzip2 => payload_or_single(data, hint, "bzip2", |d| {
+            omnizip_archive_core::formats::bzip2_file::decompress(d)
+                .map_err(|e| format!("bzip2: {e}"))
+        }),
+        FormatKind::Xz => payload_or_single(data, hint, "xz", |d| {
+            omnizip_lzma::xz_decompress(d).map_err(|e| format!("xz: {e}"))
+        }),
+        FormatKind::Zstd => payload_or_single(data, hint, "zstd", |d| {
+            omnizip_zstd::decompress(d, u32::MAX).map_err(|e| format!("zstd: {e}"))
+        }),
+        FormatKind::Lzip => payload_or_single(data, hint, "lzip", |d| {
+            omnizip_archive_core::formats::lzip::decompress(d).map_err(|e| format!("lzip: {e}"))
+        }),
+        FormatKind::LzmaAlone => payload_or_single(data, hint, "lzma", |d| {
+            omnizip_archive_core::formats::lzma_alone::decompress(d)
+                .map_err(|e| format!("lzma: {e}"))
+        }),
         _ if data.starts_with(&[0xED, 0xAB, 0xEE, 0xDB]) => {
             omnizip_rpm::reader::RpmReader::from_bytes(data)
                 .map(|r| Opened::Rpm(Box::new(r)))
@@ -590,12 +839,10 @@ fn open_bytes(data: &[u8], password: Option<&str>) -> Result<Opened, String> {
                 .map(|r| Opened::Iso(Box::new(r)))
                 .map_err(|e| e.to_string())
         }
-        FormatKind::Lz4 | FormatKind::Lzip | FormatKind::LzmaAlone | FormatKind::Unknown => {
-            Err(format!(
-                "not a container archive (detected {:?}); use 'ozip -d' for single-file codecs",
-                detect_format(data)
-            ))
-        }
+        FormatKind::Lz4 | FormatKind::Unknown => Err(format!(
+            "not a container archive (detected {:?}); use 'ozip -d' for single-file codecs",
+            detect_format(data)
+        )),
         _ => Err("unsupported archive format".into()),
     }
 }
