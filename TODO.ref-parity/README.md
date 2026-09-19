@@ -71,7 +71,7 @@ small-file T ~4x).)
 | 58 | generic parallel engine — generalize zstd compress_mt job-split to any codec + entry-level archive create/extract; thread-count-invariant output | — | partial 2026-09-19 (parallel_compress shipped; archive-level create/extract remaining) |
 | 59 | progress/ETA — ProgressReporter trait (Silent default) + rate tracker; wires into 57/58; never on the data path | — | done 2026-09-19 (module + tests; wiring lands with 57/58) |
 | 60 | compression profiles + detector — port the 6 Ruby profiles field-by-field; content-class sniff → profile choice | — | done 2026-09-19 (5 presets + Custom + detect_profile in codecs::profile; SSOT: no new crate) |
-| 61 | format converter — ConversionRegistry + extract-repack strategy, entry-at-a-time bounded-memory repack, batch | — | done 2026-09-19 (extract-repack + deterministic output; entry-at-a-time/batch = follow-ups needing 57) |
+| 61 | format converter — ConversionRegistry + extract-repack strategy, entry-at-a-time bounded-memory repack, batch | — | done+batch 2026-09-19 (batch SOURCE... DIR with arity rule; Ruby strategies are extract-repack too — entry-at-a-time optional only) |
 | 62 | Ruby acceleration — native binding behind implementations/ tier, pure-Ruby fallback, byte-identical differential gate | — | partial 2026-09-19 (omnizip-ffi cdylib PROVEN from real Ruby via Fiddle; gem-side tier PR remaining) |
 
 ## Principles

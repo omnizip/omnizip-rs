@@ -1145,6 +1145,77 @@ fn load_par2(path: &str) -> Result<omnizip_par2::RecoverySet, String> {
     omnizip_par2::packet::assemble(&packets).map_err(|e| e.to_string())
 }
 
+/// `ozip convert` argument handling. Unambiguous arity rule:
+/// exactly two paths = single conversion (SRC DST); three or more =
+/// batch (SOURCE... DIR), where the last path is the output
+/// directory created on demand. A mistyped batch can never silently
+/// degrade into single mode and overwrite a source.
+pub(crate) fn convert_command(
+    paths: &[PathBuf],
+    format: Option<&str>,
+    level: Option<u8>,
+    password: Option<&str>,
+) -> Result<(), String> {
+    if paths.len() >= 3 {
+        if format.is_none() {
+            return Err("ozip convert batch mode needs -f <format>".into());
+        }
+        let (sources, dir) = paths.split_at(paths.len() - 1);
+        batch_convert(sources, &dir[0], format.expect("checked"), level, password)
+    } else if paths.len() == 2 {
+        convert(&paths[0], &paths[1], format, level, password)
+    } else {
+        Err("ozip convert: SRC DST (single) or SOURCE... DIR (batch, with -f)".into())
+    }
+}
+
+/// Ruby `batch_convert`: convert many sources into `out_dir`, each
+/// named `<source-stem>.<ext>` — `ext` is the canonical extension
+/// of the requested format. Deterministic per-source output (the
+/// single-source invariants carry over).
+pub(crate) fn batch_convert(
+    sources: &[PathBuf],
+    out_dir: &Path,
+    format: &str,
+    level: Option<u8>,
+    password: Option<&str>,
+) -> Result<(), String> {
+    if sources.is_empty() {
+        return Err("batch convert needs at least one source".into());
+    }
+    std::fs::create_dir_all(out_dir).map_err(|e| format!("{}: {e}", out_dir.display()))?;
+    for src in sources {
+        let stem = src.file_stem().map_or_else(
+            || "source".to_string(),
+            |s| s.to_string_lossy().into_owned(),
+        );
+        let ext = canonical_ext(format);
+        let dst = out_dir.join(format!("{stem}.{ext}"));
+        convert(src, &dst, Some(format), level, password)?;
+        println!("{} -> {}", src.display(), dst.display());
+    }
+    Ok(())
+}
+
+/// The canonical output extension per format name.
+fn canonical_ext(format: &str) -> &'static str {
+    match format {
+        "tar.gz" | "gzip" | "gz" => "tar.gz",
+        "tar.bz2" | "bzip2" | "bz2" => "tar.bz2",
+        "tar.xz" | "xz" => "tar.xz",
+        "tar.zst" | "zstd" | "zst" => "tar.zst",
+        "lzip" | "lz" => "lz",
+        "lzma" | "lzma-alone" => "lzma",
+        "zip" => "zip",
+        "cpio" => "cpio",
+        "7z" => "7z",
+        "rpm" => "rpm",
+        "iso" => "iso",
+        "rar" | "rar5" => "rar",
+        _ => "converted",
+    }
+}
+
 /// `ozip x ARCHIVE [-C DIR]` — extract under DIR (default `.`).
 pub fn extract(
     archive: &Path,
