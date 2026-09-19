@@ -29,6 +29,7 @@ fn usage(codecs: &[CodecSpec]) {
     println!("    ozip x ARCHIVE [-C DIR]               extract archive (auto-detect)");
     println!("    ozip t ARCHIVE                        list entry names");
     println!("    ozip verify ARCHIVE                   structural + checksum verification");
+    println!("    ozip convert SRC DST                  re-encode into another format");
     println!("    ozip metadata ARCHIVE                 entry table as JSON");
     println!("    ozip l ARCHIVE                        long listing (mode/size/mtime)");
     println!("    ozip --list-codecs                    codec registry");
@@ -104,7 +105,7 @@ fn run() -> Result<(), String> {
     // Container commands: c (create), x (extract), t (list), l (long).
     if matches!(
         args[0].as_str(),
-        "c" | "x" | "t" | "l" | "verify" | "metadata"
+        "c" | "x" | "t" | "l" | "verify" | "metadata" | "convert"
     ) {
         return run_container(&args);
     }
@@ -348,6 +349,19 @@ fn run_container(args: &[String]) -> Result<(), String> {
         "t" => container::list(&archive, false, password.as_deref()),
         "l" => container::list(&archive, true, password.as_deref()),
         "verify" => container::verify(&archive, password.as_deref()),
+        "convert" => {
+            let dst = paths
+                .first()
+                .cloned()
+                .ok_or_else(|| "ozip convert: a destination path is required".to_string())?;
+            container::convert(
+                &archive,
+                &dst,
+                format.as_deref(),
+                level,
+                password.as_deref(),
+            )
+        }
         "metadata" => container::metadata(&archive, password.as_deref()),
         _ => unreachable!(),
     }

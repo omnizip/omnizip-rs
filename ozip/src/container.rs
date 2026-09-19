@@ -979,6 +979,45 @@ pub(crate) fn metadata(archive: &Path, password: Option<&str>) -> Result<(), Str
     Ok(())
 }
 
+/// `ozip convert SRC DST` — the Ruby `ExtractRepackStrategy`: extract
+/// the source under a private temp dir, repack through the same
+/// deterministic create path. Metadata (mtimes, modes, symlinks,
+/// empty dirs) travels through the filesystem; lossy cells are the
+/// ones the fs cannot represent (hardlinks materialize, `Other`
+/// kinds skip) — the dedicated zip⇄7z entry-at-a-time strategies
+/// from the Ruby converter land separately (task 61 follow-up).
+pub(crate) fn convert(
+    src: &Path,
+    dst: &Path,
+    format: Option<&str>,
+    level: Option<u8>,
+    password: Option<&str>,
+) -> Result<(), String> {
+    // Staging name = source stem: deterministic (no pid/tmp randomness
+    // leaking into the archive), and the top-level dir reads sanely.
+    let stem = src.file_stem().map_or_else(
+        || "converted".to_string(),
+        |s| s.to_string_lossy().into_owned(),
+    );
+    let staging = std::env::temp_dir().join(format!("{stem}.converted"));
+    let _ = std::fs::remove_dir_all(&staging);
+    std::fs::create_dir_all(&staging).map_err(|e| format!("{}: {e}", staging.display()))?;
+    let result = (|| {
+        let mut opened = open_archive(src, password)?;
+        opened.extract_to(&staging)?;
+        create(
+            dst,
+            std::slice::from_ref(&staging),
+            format,
+            level,
+            password,
+            None,
+        )
+    })();
+    let _ = std::fs::remove_dir_all(&staging);
+    result
+}
+
 /// `ozip x ARCHIVE [-C DIR]` — extract under DIR (default `.`).
 pub fn extract(
     archive: &Path,

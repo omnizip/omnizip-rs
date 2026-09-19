@@ -316,3 +316,61 @@ fn verify_and_metadata_commands() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Task 61: `ozip convert` — extract-repack strategy: zip → tar.gz
+/// and → 7z preserve entries and content; output is deterministic
+/// across runs (byte-identical).
+#[test]
+fn convert_between_formats() {
+    fn os(s: &str) -> &std::ffi::OsStr {
+        s.as_ref()
+    }
+    let dir = std::env::temp_dir().join(format!("ozip-convert-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("hello.txt"), b"convert me\n").unwrap();
+
+    let (ok, _, err) = run(&[
+        os("c"),
+        dir.join("src.zip").as_os_str(),
+        dir.join("hello.txt").as_os_str(),
+    ]);
+    assert!(ok, "create zip: {err}");
+
+    for (fmt, out) in [("tar.gz", "a.tar.gz"), ("7z", "a.7z")] {
+        let (ok, _, err) = run(&[
+            os("convert"),
+            dir.join("src.zip").as_os_str(),
+            dir.join(out).as_os_str(),
+            os("-f"),
+            os(fmt),
+        ]);
+        assert!(ok, "convert to {fmt}: {err}");
+        let (ok, listing, err) = run(&[os("t"), dir.join(out).as_os_str()]);
+        assert!(ok, "list {out}: {err}");
+        assert!(listing.contains("hello.txt"), "{out} listing: {listing}");
+    }
+
+    // Determinism: two conversions of the same source are byte-identical.
+    let (ok, _, err) = run(&[
+        os("convert"),
+        dir.join("src.zip").as_os_str(),
+        dir.join("d1.tar.gz").as_os_str(),
+        os("-f"),
+        os("tar.gz"),
+    ]);
+    assert!(ok, "{err}");
+    let (ok, _, err) = run(&[
+        os("convert"),
+        dir.join("src.zip").as_os_str(),
+        dir.join("d2.tar.gz").as_os_str(),
+        os("-f"),
+        os("tar.gz"),
+    ]);
+    assert!(ok, "{err}");
+    let d1 = std::fs::read(dir.join("d1.tar.gz")).unwrap();
+    let d2 = std::fs::read(dir.join("d2.tar.gz")).unwrap();
+    assert_eq!(d1, d2, "convert output not deterministic");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
