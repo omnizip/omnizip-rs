@@ -9,7 +9,7 @@ repository.workspace = true
 description = "TAR container (ustar + GNU long names + pax read) on omnizip-archive-core"
 
 [dependencies]
-omnizip-archive-core = { path = "../omnizip-archive-core" }
+omnizip-archive-core = { path = "../omnizip-archive-core", version = "0.21.100" }
 
 [lints]
 workspace = true
