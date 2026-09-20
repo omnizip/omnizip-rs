@@ -209,17 +209,13 @@ pub fn decompress_raw_unknown_len(compressed: &[u8]) -> Result<Vec<u8>, OmnizipE
     loop {
         match inflate::inflate(compressed, hint) {
             Ok(out) => return Ok(out),
-            Err(e) => {
-                // A capacity shortfall surfaces as a mid-stream
-                // error; every other error is structural. The 4x
-                // safety cap bounds the retry loop.
-                if hint < (1 << 32) {
-                    hint = hint.saturating_mul(4);
-                    let _ = e;
-                } else {
-                    return Err(e);
-                }
-            }
+            // A capacity shortfall surfaces as a mid-stream error;
+            // every other error is structural. checked_mul bounds the
+            // retry loop on every pointer width (wasm32 included).
+            Err(e) => match hint.checked_mul(4) {
+                Some(h) if h > hint => hint = h,
+                _ => return Err(e),
+            },
         }
     }
 }
