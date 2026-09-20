@@ -800,15 +800,29 @@ fn payload_or_single(
     codec: &str,
     decompress: fn(&[u8]) -> Result<Vec<u8>, String>,
 ) -> Result<Opened, String> {
-    let inner = decompress(data)?;
+    payload_or_single_named(data, hint, codec, |d| {
+        Ok((decompress(d)?, None))
+    })
+}
+
+fn payload_or_single_named(
+    data: &[u8],
+    hint: Option<&str>,
+    codec: &str,
+    decompress: impl Fn(&[u8]) -> Result<(Vec<u8>, Option<String>), String>,
+) -> Result<Opened, String> {
+    let (inner, embedded) = decompress(data)?;
     if detect_format(&inner) == FormatKind::Tar {
         return open_bytes_named(&inner, None, hint);
     }
-    let name = match hint {
-        Some(h) => strip_codec_suffix(h),
-        None => format!("payload.{codec}"),
-    };
-    Ok(Opened::SingleFile { name, data: inner })
+    let name = embedded.or_else(|| {
+        hint.map(|h| strip_codec_suffix(h))
+            .or_else(|| Some(format!("payload.{codec}")))
+    });
+    Ok(Opened::SingleFile {
+        name: name.unwrap_or_else(|| format!("payload.{codec}")),
+        data: inner,
+    })
 }
 
 /// `hint`: the archive's file name, used to derive the entry name for
@@ -860,8 +874,14 @@ fn open_bytes_named(
         // Compressed tar: unwrap the codec layer and parse the tar
         // inside — `ozip x` accepts what `ozip c` produces plus
         // anything the system tools emit.
-        FormatKind::Gzip => payload_or_single(data, hint, "gzip", |d| {
-            omnizip_archive_core::formats::gzip::decompress(d).map_err(|e| format!("gzip: {e}"))
+        FormatKind::Gzip => payload_or_single_named(data, hint, "gzip", |d| {
+            // FNAME (RFC 1952 §2.3.1.2) is the original file name —
+            // authoritative for the entry view when present, like
+            // `gzip -N`. Falls back to the filename hint.
+            let (meta, inner) =
+                omnizip_archive_core::formats::gzip::decompress_with_metadata(d)
+                    .map_err(|e| format!("gzip: {e}"))?;
+            Ok((inner, meta.original_name))
         }),
         FormatKind::Bzip2 => payload_or_single(data, hint, "bzip2", |d| {
             omnizip_archive_core::formats::bzip2_file::decompress(d)
@@ -1008,6 +1028,80 @@ pub(crate) fn metadata(archive: &Path, password: Option<&str>) -> Result<(), Str
     println!("  ]");
     println!("}}");
     Ok(())
+}
+
+/// `ozip repair ARCHIVE` — the Ruby `ArchiveRepairCommand` parity:
+/// RAR-only routing (like Ruby), structural verification, per-entry
+/// CRC-checked decode, and a recovery-record audit.
+///
+/// True in-archive RS repair is impossible to implement faithfully:
+/// neither unrar (recvol*/rs* cover only the separate `.rev` volumes)
+/// nor the Ruby gem (its `recover_with_reed_solomon` is a documented
+/// placeholder) carries the format, whose RS parameters exist only in
+/// the proprietary rar binary. So the honest contract is exactly
+/// Ruby's: verify, audit the recovery record, and FAIL LOUDLY on
+/// corruption with the actionable par2 guidance.
+pub(crate) fn archive_repair(archive: &Path, password: Option<&str>) -> Result<(), String> {
+    let data = std::fs::read(archive).map_err(|e| format!("{}: {e}", archive.display()))?;
+    let kind = detect_format(&data);
+    let label = match kind {
+        FormatKind::Rar5 => "rar5",
+        FormatKind::Rar4 => "rar4",
+        other => {
+            return Err(format!(
+                "repair not supported for {} archives",
+                format_kind_name(other)
+            ));
+        }
+    };
+
+    let mut opened = open_bytes_named(&data, password, None)?;
+    let entries = opened.entries().map_err(|e| format!("{label}: {e}"))?;
+
+    // Recovery-record audit (RAR5 carries the integrated RR).
+    let rr = match &opened {
+        Opened::Rar5(r) => r.recovery_record(),
+        _ => None,
+    };
+    match &rr {
+        Some(rr) => {
+            let crc = rr
+                .crc32
+                .map_or("absent".into(), |c| format!("{c:08X}"));
+            println!(
+                "recovery record: present ({}% protection, header CRC {})",
+                rr.percent.map_or(0, |p| p),
+                crc
+            );
+        }
+        None => println!("recovery record: absent"),
+    }
+
+    // Per-entry CRC-checked decode: every readable entry passes, any
+    // decode error is the corruption report.
+    let mut bad = Vec::new();
+    for (i, entry) in entries.iter().enumerate() {
+        match opened.read_entry(i) {
+            Ok(_) => println!("entry {} '{}': OK", i, entry.name),
+            Err(e) => bad.push(format!("entry {} '{}': {e}", i, entry.name)),
+        }
+    }
+    if bad.is_empty() {
+        println!("{}: intact — no repair needed", archive.display());
+        return Ok(());
+    }
+    for b in &bad {
+        println!("{b}");
+    }
+    println!("in-archive RS repair requires the rar-proprietary record layout;");
+    println!("restore from backup or protect archives with `ozip parity create` instead.");
+    Err(format!(
+        "{}: {} unrecoverable entr{} ({} record scanned)",
+        archive.display(),
+        bad.len(),
+        if bad.len() == 1 { "y" } else { "ies" },
+        label
+    ))
 }
 
 /// `ozip convert SRC DST` — the Ruby `ExtractRepackStrategy`: extract
@@ -1229,6 +1323,27 @@ pub(crate) fn batch_convert(
 }
 
 /// The canonical output extension per format name.
+/// Display name for a detected format kind (repair guidance).
+fn format_kind_name(kind: FormatKind) -> &'static str {
+    match kind {
+        FormatKind::Tar => "tar",
+        FormatKind::Zip => "zip",
+        FormatKind::Cpio => "cpio",
+        FormatKind::SevenZip => "7z",
+        FormatKind::Rar5 => "rar5",
+        FormatKind::Rar4 => "rar4",
+        FormatKind::Gzip => "gzip",
+        FormatKind::Bzip2 => "bzip2",
+        FormatKind::Xz => "xz",
+        FormatKind::Zstd => "zstd",
+        FormatKind::Lz4 => "lz4",
+        FormatKind::Lzip => "lzip",
+        FormatKind::LzmaAlone => "lzma",
+        FormatKind::Unknown => "unknown",
+        _ => "unknown",
+    }
+}
+
 fn canonical_ext(format: &str) -> &'static str {
     match format {
         "tar.gz" | "gzip" | "gz" => "tar.gz",
