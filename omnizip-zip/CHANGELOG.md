@@ -9,4 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Legacy ZipCrypto (PKWARE) read path by @[object]
+
+### Other
+
+- Zipcrypto interop — per-test archive paths by @[object]
+
+### Added
+
 - Parallel_create_with_password — AES zips go parallel by @[object]
