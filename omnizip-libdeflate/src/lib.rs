@@ -100,9 +100,19 @@ impl Codec for LibdeflateCodec {
     fn compress(&self, plaintext: &[u8], level: CompressionLevel) -> Result<Vec<u8>, OmnizipError> {
         // Level 0 is zlib's "no compression": stored blocks only.
         if level.as_u8() == 0 {
-            return Ok(wrap_zlib(&deflate::deflate_stored(plaintext)?));
+            let stream = deflate::deflate_stored(plaintext)?;
+            let mut out = wrap_zlib_raw(&stream);
+            out.extend_from_slice(&adler32(plaintext).to_be_bytes());
+            return Ok(out);
         }
-        Ok(wrap_zlib(&deflate_wire(plaintext, level.as_u8())?))
+        // The zlib trailer is the ADLER-32 OF THE UNCOMPRESSED DATA
+        // (RFC 1950 §2.2) — adler over the compressed stream made
+        // every strict decoder reject our output.
+        let plaintext_adler = adler32(plaintext);
+        let stream = deflate_wire(plaintext, level.as_u8())?;
+        let mut out = wrap_zlib_raw(&stream);
+        out.extend_from_slice(&plaintext_adler.to_be_bytes());
+        Ok(out)
     }
 
     fn decompress(&self, compressed: &[u8], expected_len: u32) -> Result<Vec<u8>, OmnizipError> {
@@ -230,16 +240,15 @@ pub fn decompress_zlib_unknown_len(compressed: &[u8]) -> Result<Vec<u8>, Omnizip
     decompress_raw_unknown_len(strip_zlib_wrapper(compressed))
 }
 
-fn wrap_zlib(deflate_stream: &[u8]) -> Vec<u8> {
+/// Zlib wrapper: 2-byte header + the RAW deflate stream (the caller
+/// appends the adler32 of the UNCOMPRESSED data).
+fn wrap_zlib_raw(deflate_stream: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(deflate_stream.len() + 6);
     // CMF: CM=8 (deflate), CINFO=7 (32K window) → 0x78.
     // FLG: 0x9C = (CMF * 256 + FLG) % 31 == 0 with FCHECK.
-    // 0x78 0x9C is the standard zlib header for level 6 / default.
     out.push(0x78);
     out.push(0x9C);
     out.extend_from_slice(deflate_stream);
-    let checksum = adler32(deflate_stream);
-    out.extend_from_slice(&checksum.to_be_bytes());
     out
 }
 
