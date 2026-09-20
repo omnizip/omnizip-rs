@@ -546,3 +546,89 @@ fn threads_flag_is_byte_identical() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Task 53 follow-up: gzip's embedded FNAME (RFC 1952 §2.3.1.2) is the
+/// authoritative entry name when present (`gzip -N` semantics); without
+/// one, the filename hint is used.
+#[test]
+fn gzip_fname_is_the_entry_name_when_present() {
+    // A .gz whose FNAME differs from the archive's own file name.
+    let mut member = Vec::new();
+    let opts = omnizip_archive_core::formats::gzip::GzipOptions {
+        original_name: Some("ORIGINAL-NAME.txt".into()),
+        ..Default::default()
+    };
+    let gz = omnizip_archive_core::formats::gzip::compress(b"content\n", &opts).unwrap();
+    member.extend_from_slice(&gz);
+
+    let dir = std::env::temp_dir().join(format!("ozip-fname-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let arc = dir.join("whatever.gz");
+    std::fs::write(&arc, &member).unwrap();
+
+    // t lists the embedded name, not the archive file name.
+    let (ok, out, err) = run(&[os("t"), arc.as_os_str()]);
+    assert!(ok, "t failed: {err}");
+    assert!(out.contains("ORIGINAL-NAME.txt"), "t listed {out:?}");
+
+    // Without FNAME the stripped filename wins.
+    let plain = omnizip_archive_core::formats::gzip::compress(b"x\n", &Default::default()).unwrap();
+    let arc2 = dir.join("plain.txt.gz");
+    std::fs::write(&arc2, &plain).unwrap();
+    let (ok, out, err) = run(&[os("t"), arc2.as_os_str()]);
+    assert!(ok, "t plain failed: {err}");
+    assert!(out.contains("plain.txt"), "t plain listed {out:?}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Task 55 milestone 3: `ozip repair` mirrors the Ruby
+/// ArchiveRepairCommand — RAR-only routing, structural verification,
+/// per-entry CRC decode, and a recovery-record audit. Without an
+/// in-archive RS implementation (rar-proprietary), corruption fails
+/// LOUDLY with par2 guidance instead of faking success.
+#[test]
+fn repair_reports_intact_and_fails_loud_on_corruption() {
+    fn os(s: &str) -> &std::ffi::OsStr {
+        s.as_ref()
+    }
+    let dir = std::env::temp_dir().join(format!("ozip-repair-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let src = dir.join("data.bin");
+    std::fs::write(&src, (0..20_000u32).map(|i| (i % 7) as u8).collect::<Vec<u8>>()).unwrap();
+    let arc = dir.join("a.rar");
+    let (ok, _, err) = run(&[os("c"), os("-f"), os("rar"), arc.as_os_str(), src.as_os_str()]);
+    assert!(ok, "c -f rar failed: {err}");
+
+    // Intact archive: repair succeeds with the no-repair-needed report.
+    let (ok, out, err) = run(&[os("repair"), arc.as_os_str()]);
+    assert!(ok, "repair intact failed: {err}");
+    assert!(out.contains("intact"), "repair said {out:?}");
+
+    // Non-RAR routing mirrors Ruby's "not supported" behavior.
+    let zip_arc = dir.join("b.zip");
+    let (ok, _, err) = run(&[os("c"), zip_arc.as_os_str(), src.as_os_str()]);
+    assert!(ok, "c zip failed: {err}");
+    let (ok, _, err) = run(&[os("repair"), zip_arc.as_os_str()]);
+    assert!(!ok, "repair accepted a zip");
+    assert!(err.contains("not supported"), "repair error: {err:?}");
+
+    // Corruption: a flipped byte in the entry payload area must fail
+    // loudly (exit 1) and point at the par2 alternative.
+    let mut bytes = std::fs::read(&arc).unwrap();
+    let mid = bytes.len() / 2;
+    bytes[mid] ^= 0xFF;
+    let corrupt = dir.join("corrupt.rar");
+    std::fs::write(&corrupt, &bytes).unwrap();
+    let (ok, out, err) = run(&[os("repair"), corrupt.as_os_str()]);
+    assert!(!ok, "repair declared a corrupted archive intact: {out:?}");
+    assert!(
+        out.contains("parity create") || err.contains("unrecoverable"),
+        "corruption report missing guidance: {out:?} / {err:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

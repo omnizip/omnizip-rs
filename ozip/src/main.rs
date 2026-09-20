@@ -31,6 +31,7 @@ fn usage(codecs: &[CodecSpec]) {
     println!("    ozip verify ARCHIVE                   structural + checksum verification");
     println!("    ozip convert SRC DST                  re-encode into another format");
     println!("    ozip parity create|verify|repair      PAR2 recovery sets");
+    println!("    ozip repair ARCHIVE                   verify + recovery-record audit (RAR)");
     println!("    ozip profile list|show                named compression profiles");
     println!("    ozip metadata ARCHIVE                 entry table as JSON");
     println!("    ozip l ARCHIVE                        long listing (mode/size/mtime)");
@@ -108,7 +109,7 @@ fn run() -> Result<(), String> {
     // Container commands: c (create), x (extract), t (list), l (long).
     if matches!(
         args[0].as_str(),
-        "c" | "x" | "t" | "l" | "verify" | "metadata" | "convert"
+        "c" | "x" | "t" | "l" | "verify" | "metadata" | "convert" | "repair"
     ) {
         return run_container(&args);
     }
@@ -373,6 +374,7 @@ fn run_container(args: &[String]) -> Result<(), String> {
         "l" => container::list(&archive, true, password.as_deref()),
         "verify" => container::verify(&archive, password.as_deref()),
         "metadata" => container::metadata(&archive, password.as_deref()),
+        "repair" => container::archive_repair(&archive, password.as_deref()),
         _ => unreachable!(),
     }
 }
