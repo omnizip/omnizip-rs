@@ -50,11 +50,14 @@ jobs:
 
       - name: Run release-plz
         uses: MarcoIeni/release-plz-action@v0.5.131
-        with:
-          # release-pr creates PRs; the repo setting blocks
-          # workflow-token PRs, so that command rides the CI PAT
-          # through the same input (the action takes one token).
+        # The action has no GITHUB_TOKEN input: its shell reads the
+        # GITHUB_TOKEN env var. Step env overrides the workflow-level
+        # default, and propagates into the composite action's steps.
+        # release-pr creates PRs; the repo setting blocks workflow-
+        # token PRs, so that command rides the CI PAT.
+        env:
           GITHUB_TOKEN: ${{ inputs.command == 'release-pr' && secrets.OMNIZIP_CI_PAT_TOKEN || secrets.GITHUB_TOKEN }}
+        with:
           # Push to main always publishes (release_always in
           # release-plz.toml). The release-pr COMMAND is dispatch-
           # only: it opens the next version-bump PR through the PAT.
