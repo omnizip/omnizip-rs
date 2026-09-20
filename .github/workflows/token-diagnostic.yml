@@ -1,0 +1,42 @@
+name: Token diagnostic
+
+# One-shot: identifies which token the release-pr path actually
+# uses and which layer still blocks PR creation.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Token identities
+        run: |
+          echo "== workflow token identity:"
+          curl -s -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            -H "User-Agent: diag" https://api.github.com/user | jq -r '.login // .message'
+          echo "== PAT identity:"
+          curl -s -H "Authorization: Bearer ${{ secrets.OMNIZIP_CI_PAT_TOKEN }}" \
+            -H "User-Agent: diag" https://api.github.com/user | jq -r '.login // .message'
+
+      - name: PAT can create a PR?
+        run: |
+          git config user.name "omnizip-ci"
+          git config user.email "ci@omnizip.invalid"
+          BRANCH="diag/token-$(date +%s)"
+          git checkout -b "$BRANCH"
+          git commit --allow-empty -m "diag: PAT PR-creation probe"
+          git push origin "$BRANCH"
+          export GH_TOKEN="${{ secrets.OMNIZIP_CI_PAT_TOKEN }}"
+          if gh pr create --title "diag: PAT PR probe (auto-close)" \
+            --body "diagnostic — will close immediately" --base main --head "$BRANCH"; then
+            echo "PAT_PR_CREATE=OK"
+            gh pr close "$BRANCH" --delete-branch || true
+          else
+            echo "PAT_PR_CREATE=FAILED"
+          fi
