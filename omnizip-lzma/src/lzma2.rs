@@ -51,6 +51,13 @@ pub fn decode_lzma2_stream(input: &[u8]) -> Result<(Vec<u8>, usize), LzmaError> 
     let mut pb: u32 = 2;
     let dict_size: u32 = 1 << 24;
 
+    let mut first_chunk = true;
+    // Properties are established only by reset-level-2/3 LZMA chunks
+    // and FORGOTTEN after any uncompressed chunk (the dictionary and
+    // LZMA state are gone; liblzma demands new properties before the
+    // next state-reset-without-props chunk — xz-utils bad-1-lzma2-4
+    // and bad-1-lzma2-8 pin this).
+    let mut props_established = false;
     loop {
         if cursor >= input.len() {
             return Err(LzmaError::Corrupt {
@@ -63,6 +70,22 @@ pub fn decode_lzma2_stream(input: &[u8]) -> Result<(Vec<u8>, usize), LzmaError> 
         if control == 0 {
             break;
         }
+
+        // The FIRST chunk of a block must reset the dictionary:
+        // uncompressed control 0x01, or an LZMA control in
+        // 0xE0..=0xFF (bits 5-6 = 11: state + props + DICT reset;
+        // 0x80..=0x9F is the NO-reset continuation band). Anything
+        // else leaves the dictionary state undefined (liblzma rejects
+        // these; the xz-utils bad corpus pins the uncompressed
+        // variant as bad-1-lzma2-1).
+        if first_chunk && !(control == 0x01 || (0xE0..=0xFF).contains(&control)) {
+            return Err(LzmaError::Corrupt {
+                reason: format!(
+                    "LZMA2 first chunk control 0x{control:02X} does not reset the dictionary"
+                ),
+            });
+        }
+        first_chunk = false;
 
         if control <= 2 {
             // Uncompressed chunk.
@@ -84,6 +107,7 @@ pub fn decode_lzma2_stream(input: &[u8]) -> Result<(Vec<u8>, usize), LzmaError> 
             }
             output.extend_from_slice(&input[cursor..cursor + size]);
             cursor += size;
+            props_established = false;
             continue;
         }
 
@@ -112,6 +136,14 @@ pub fn decode_lzma2_stream(input: &[u8]) -> Result<(Vec<u8>, usize), LzmaError> 
             usize::from(u16::from_be_bytes([input[cursor + 2], input[cursor + 3]])) + 1;
         cursor += 4;
 
+        // A state reset (level 1) or a plain continuation (level 0)
+        // needs known properties.
+        if reset_level < 2 && !props_established {
+            return Err(LzmaError::Corrupt {
+                reason: "LZMA2 chunk resets state without established properties".into(),
+            });
+        }
+
         // Read new properties if reset level >= 2.
         if reset_level >= 2 {
             if cursor >= input.len() {
@@ -135,6 +167,7 @@ pub fn decode_lzma2_stream(input: &[u8]) -> Result<(Vec<u8>, usize), LzmaError> 
             lc = lc_in;
             lp = lp_in;
             pb = pb_in;
+            props_established = true;
         }
 
         if cursor + compressed_size > input.len() {
@@ -148,6 +181,9 @@ pub fn decode_lzma2_stream(input: &[u8]) -> Result<(Vec<u8>, usize), LzmaError> 
         let chunk_data = &input[cursor..cursor + compressed_size];
         cursor += compressed_size;
 
+        // LZMA2 chunks declare their exact uncompressed size: an
+        // LZMA-level end-of-payload marker inside one is corrupt
+        // (xz-utils bad-1-lzma2-7).
         // Manage decoder state based on reset level.
         match reset_level {
             0 => {
@@ -157,16 +193,20 @@ pub fn decode_lzma2_stream(input: &[u8]) -> Result<(Vec<u8>, usize), LzmaError> 
                 let d = decoder.as_mut().ok_or_else(|| LzmaError::Corrupt {
                     reason: "LZMA2 first chunk must reset state (level >= 1)".into(),
                 })?;
-                let start = output.len();
-                d.decode_continuation(chunk_data, &mut output, uncompressed_size)?;
-                let produced = output.len() - start;
-                let _ = produced;
+                let consumed = d.decode_continuation_with_consumed(
+                    chunk_data,
+                    &mut output,
+                    uncompressed_size,
+                )?;
+                check_chunk_fully_consumed(consumed, compressed_size)?;
             }
             1 => {
                 // Reset state (models + rep distances), keep lc/lp/pb.
                 let d = decoder.get_or_insert_with(|| Lzma1Decoder::new(lc, lp, pb, dict_size));
                 d.reset_state();
-                d.decode_continuation(chunk_data, &mut output, uncompressed_size)?;
+                let consumed =
+                    d.decode_continuation_with_consumed(chunk_data, &mut output, uncompressed_size)?;
+                check_chunk_fully_consumed(consumed, compressed_size)?;
             }
             2 | 3 => {
                 // Reset state + new properties. Recreate the decoder.
@@ -176,7 +216,9 @@ pub fn decode_lzma2_stream(input: &[u8]) -> Result<(Vec<u8>, usize), LzmaError> 
                 }
                 let mut d = Lzma1Decoder::new(lc, lp, pb, dict_size);
                 d.reset_state();
-                d.decode_continuation(chunk_data, &mut output, uncompressed_size)?;
+                let consumed =
+                    d.decode_continuation_with_consumed(chunk_data, &mut output, uncompressed_size)?;
+                check_chunk_fully_consumed(consumed, compressed_size)?;
                 decoder = Some(d);
             }
             _ => unreachable!("reset_level is masked to 2 bits"),
@@ -184,6 +226,22 @@ pub fn decode_lzma2_stream(input: &[u8]) -> Result<(Vec<u8>, usize), LzmaError> 
     }
 
     Ok((output, cursor))
+}
+
+/// A size-delimited LZMA2 chunk must leave no unconsumed compressed
+/// bytes beyond the range coder's 5-byte lookahead slack (liblzma's
+/// driver errors on leftovers — trailing junk or an LZMA-level EOPM;
+/// xz-utils bad-1-lzma2-7 pins the EOPM variant).
+fn check_chunk_fully_consumed(consumed: usize, compressed_size: usize) -> Result<(), LzmaError> {
+    let leftover = compressed_size.saturating_sub(consumed);
+    if leftover > 5 {
+        return Err(LzmaError::Corrupt {
+            reason: format!(
+                "LZMA2 chunk has {leftover} unconsumed compressed byte(s)"
+            ),
+        });
+    }
+    Ok(())
 }
 
 #[cfg(test)]

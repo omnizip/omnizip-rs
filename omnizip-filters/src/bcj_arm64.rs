@@ -23,18 +23,51 @@ impl Filter for BcjArm64Filter {
 
     fn encode(&self, input: &[u8]) -> Vec<u8> {
         let mut output = input.to_vec();
-        arm64_transform(&mut output, true);
+        arm64_transform(&mut output, true, 0);
         output
     }
 
     fn decode(&self, input: &[u8]) -> Vec<u8> {
         let mut output = input.to_vec();
-        arm64_transform(&mut output, false);
+        arm64_transform(&mut output, false, 0);
         output
     }
 }
 
-fn arm64_transform(data: &mut [u8], is_encoder: bool) {
+/// The arm64 filter with a non-zero start offset (the xz filter
+/// properties' 4-byte little-endian value): the stream's byte 0
+/// corresponds to address `offset`, so conversions use absolute
+/// instruction positions.
+pub struct BcjArm64StartOffset {
+    offset: u32,
+}
+
+impl BcjArm64StartOffset {
+    #[must_use]
+    pub const fn new(offset: u32) -> Self {
+        Self { offset }
+    }
+}
+
+impl Filter for BcjArm64StartOffset {
+    fn name(&self) -> &'static str {
+        "bcj-arm64+start"
+    }
+
+    fn encode(&self, input: &[u8]) -> Vec<u8> {
+        let mut output = input.to_vec();
+        arm64_transform(&mut output, true, self.offset);
+        output
+    }
+
+    fn decode(&self, input: &[u8]) -> Vec<u8> {
+        let mut output = input.to_vec();
+        arm64_transform(&mut output, false, self.offset);
+        output
+    }
+}
+
+fn arm64_transform(data: &mut [u8], is_encoder: bool, start_offset: u32) {
     let len = data.len() & !3usize;
     let mut i = 0usize;
     while i + 4 <= len {
@@ -42,7 +75,7 @@ fn arm64_transform(data: &mut [u8], is_encoder: bool) {
         if instr >> 26 == 0x25 {
             // BL: convert full 26-bit immediate.
             let src = instr;
-            let pc = (i as u32) >> 2;
+            let pc = (start_offset >> 2).wrapping_add((i as u32) >> 2);
             let pc = if is_encoder {
                 pc
             } else {
@@ -58,7 +91,7 @@ fn arm64_transform(data: &mut [u8], is_encoder: bool) {
                 i += 4;
                 continue;
             }
-            let pc = (i as u32) >> 12;
+            let pc = (start_offset >> 12).wrapping_add((i as u32) >> 12);
             let pc = if is_encoder {
                 pc
             } else {

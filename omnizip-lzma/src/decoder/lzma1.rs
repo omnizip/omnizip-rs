@@ -219,13 +219,28 @@ impl Lzma1Decoder {
         output: &mut Vec<u8>,
         uncompressed_size: u64,
     ) -> Result<(), LzmaError> {
+        self.decode_continuation_with_consumed(input, output, uncompressed_size)
+            .map(|_| ())
+    }
+
+    /// Like [`decode_continuation`] but reports how many input bytes
+    /// the range decoder consumed — the LZMA2 driver validates that a
+    /// size-delimited chunk leaves no unconsumed compressed bytes
+    /// beyond the coder's 5-byte lookahead slack.
+    pub fn decode_continuation_with_consumed(
+        &mut self,
+        input: &[u8],
+        output: &mut Vec<u8>,
+        uncompressed_size: u64,
+    ) -> Result<usize, LzmaError> {
         let cfg = DecodeConfig {
             uncompressed_size: Some(uncompressed_size),
             allow_eopm: false,
             start_output_len: output.len(),
         };
         let mut range_decoder = RangeDecoder::new(input)?;
-        self.run_decode_loop(&mut range_decoder, output, cfg)
+        self.run_decode_loop(&mut range_decoder, output, cfg)?;
+        Ok(range_decoder.position())
     }
 
     /// Decode `input` as an LZMA1 stream, producing the original bytes.

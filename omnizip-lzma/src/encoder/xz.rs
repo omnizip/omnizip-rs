@@ -204,14 +204,21 @@ fn write_xz_block(out: &mut Vec<u8>, lzma2_payload: &[u8], dict_size: u32, plain
     let block_header_len = (out.len() - block_header_start) as u64;
     out.extend_from_slice(lzma2_payload);
 
-    while out.len() % 4 != 0 {
+    // Block padding: zero bytes to 4-byte alignment counted from the
+    // BLOCK start (the block begins at a 4-aligned stream offset, so
+    // stream-relative alignment agrees here).
+    while (out.len() - block_header_start) % 4 != 0 {
         out.push(0x00);
     }
 
+    // Unpadded_Size (index record): header + compressed + CHECK,
+    // padding excluded — the convention the xz-utils corpus pins and
+    // the reference decoder validates.
     let check = crc32(plain);
+    let unpadded = block_header_len + lzma2_payload.len() as u64 + 4;
     out.extend_from_slice(&check.to_le_bytes());
 
-    block_header_len + lzma2_payload.len() as u64 + 4
+    unpadded
 }
 
 /// Map a `dict_size` in bytes to the LZMA2 1-byte dictionary code./// Map a `dict_size` in bytes to the LZMA2 1-byte dictionary code.
