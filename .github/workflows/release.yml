@@ -48,6 +48,19 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Publish omnizip-lz4 first (dev-dependency ordering)
+        # release-plz orders publishing by NORMAL dependencies only,
+        # but cargo publish resolves dev-dependencies too.
+        # omnizip-filters dev-depends on omnizip-lz4 (LZ4 compressibility
+        # test for byte-shuffle), so lz4 must already be in the crates.io
+        # index before filters' turn. Release it standalone first.
+        # Idempotent: an existing omnizip-lz4-v<version> tag makes this
+        # a no-op ("Already published").
+        uses: MarcoIeni/release-plz-action@v0.5.131
+        with:
+          command: release
+          manifest_path: omnizip-lz4/Cargo.toml
+
       - name: Run release-plz
         uses: MarcoIeni/release-plz-action@v0.5.131
         # The action has no GITHUB_TOKEN input: its shell reads the
