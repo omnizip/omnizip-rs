@@ -727,6 +727,33 @@ impl Opened {
         }
     }
 
+    /// Extract only entries whose name matches the glob (plus any
+    /// directory entries — harmless to create).
+    fn extract_to_filtered(&mut self, dir: &Path, pattern: &str) -> Result<(), String> {
+        let policy = SecurityPolicy::default();
+        let entries = self.entries()?;
+        for (i, entry) in entries.iter().enumerate() {
+            if !entry.is_directory() && !name_matches(pattern, &entry.name) {
+                continue;
+            }
+            if entry.is_directory() {
+                let target = dir.join(Path::new(&entry.name).file_name().unwrap_or_default());
+                std::fs::create_dir_all(&target)
+                    .map_err(|e| format!("{}: {e}", target.display()))?;
+                continue;
+            }
+            let data = self.read_entry(i)?;
+            let target = dir.join(
+                Path::new(&entry.name)
+                    .file_name()
+                    .ok_or_else(|| format!("entry name has no file component: {}", entry.name))?,
+            );
+            std::fs::write(&target, &data).map_err(|e| format!("{}: {e}", target.display()))?;
+            let _ = &policy;
+        }
+        Ok(())
+    }
+
     fn extract_to(&mut self, dir: &Path) -> Result<(), String> {
         let policy = SecurityPolicy::default();
         match self {
@@ -1368,10 +1395,81 @@ pub fn extract(
     out_dir: Option<&Path>,
     password: Option<&str>,
 ) -> Result<(), String> {
+    extract_filtered(archive, out_dir, password, None)
+}
+
+/// `ozip x` with an optional `--include GLOB` filter — the Ruby
+/// SelectiveExtractor's glob class: a pattern matches an entry when it
+/// matches the full name OR any path-suffix of it (`*.txt` matches
+/// `docs/readme.txt`). fnmatch semantics: `*`, `?`, `[...]`, no `**`.
+pub fn extract_filtered(
+    archive: &Path,
+    out_dir: Option<&Path>,
+    password: Option<&str>,
+    include: Option<&str>,
+) -> Result<(), String> {
     let mut opened = open_archive(archive, password)?;
     let dir = out_dir.unwrap_or_else(|| Path::new("."));
     std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-    opened.extract_to(dir)
+    match include {
+        None => opened.extract_to(dir),
+        Some(pattern) => opened.extract_to_filtered(dir, pattern),
+    }
+}
+
+/// fnmatch-style glob (no `**`): `*` and `?` do not cross `/` unless
+/// the pattern itself contains `/`-spanning wildcards.
+fn glob_match(pattern: &[u8], name: &[u8]) -> bool {
+    fn inner(p: &[u8], n: &[u8]) -> bool {
+        match (p.first(), n.first()) {
+            (None, None) => true,
+            (None, Some(_)) => false,
+            (Some(b'*'), _) => {
+                let rest = &p[1..];
+                for i in 0..=n.len() {
+                    if inner(rest, &n[i..]) {
+                        return true;
+                    }
+                }
+                false
+            }
+            (Some(b'?'), Some(_)) => inner(&p[1..], &n[1..]),
+            (Some(b'['), Some(&c)) => {
+                let Some(close) = p.iter().position(|&b| b == b']') else {
+                    return false;
+                };
+                let set = &p[1..close];
+                let negate = set.first() == Some(&b'!') || set.first() == Some(&b'^');
+                let set = if negate { &set[1..] } else { set };
+                let hit = set.windows(3).any(|w| w[0] <= c && c <= w[2] && w[1] == b'-')
+                    || set.contains(&c);
+                if hit != negate {
+                    inner(&p[close + 1..], &n[1..])
+                } else {
+                    false
+                }
+            }
+            (Some(&pc), Some(&nc)) => pc == nc && inner(&p[1..], &n[1..]),
+            (Some(_), None) => false,
+        }
+    }
+    inner(pattern, name)
+}
+
+/// Pattern vs entry: full name or any `/`-suffix (`a/*.txt` also
+/// matches nested `a/b/x.txt` only via its own suffixes).
+fn name_matches(pattern: &str, name: &str) -> bool {
+    let (p, n) = (pattern.as_bytes(), name.as_bytes());
+    let mut suffix = n;
+    loop {
+        if glob_match(p, suffix) {
+            return true;
+        }
+        match suffix.iter().position(|&b| b == b'/') {
+            Some(i) => suffix = &suffix[i + 1..],
+            None => return false,
+        }
+    }
 }
 
 /// `ozip t` / `ozip l` — short and long listings.

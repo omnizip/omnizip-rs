@@ -261,6 +261,7 @@ fn run_container(args: &[String]) -> Result<(), String> {
     let mut level: Option<u8> = None;
     let mut format: Option<String> = None;
     let mut out_dir: Option<PathBuf> = None;
+    let mut include: Option<String> = None;
     let mut paths: Vec<PathBuf> = Vec::new();
 
     let mut password: Option<String> = None;
@@ -276,6 +277,11 @@ fn run_container(args: &[String]) -> Result<(), String> {
         }
         if a == "-f" {
             format = args.get(i + 1).cloned();
+            i += 2;
+            continue;
+        }
+        if a == "--include" {
+            include = args.get(i + 1).cloned();
             i += 2;
             continue;
         }
@@ -369,7 +375,12 @@ fn run_container(args: &[String]) -> Result<(), String> {
             volume,
             threads,
         ),
-        "x" => container::extract(&archive, out_dir.as_deref(), password.as_deref()),
+        "x" => container::extract_filtered(
+            &archive,
+            out_dir.as_deref(),
+            password.as_deref(),
+            include.as_deref(),
+        ),
         "t" => container::list(&archive, false, password.as_deref()),
         "l" => container::list(&archive, true, password.as_deref()),
         "verify" => container::verify(&archive, password.as_deref()),
