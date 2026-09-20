@@ -430,13 +430,50 @@ pub fn dictionary_lookup(
     Some(())
 }
 
+/// First-4-bytes bucket index over the identity-transform words of
+/// lengths 4..=8, built once. Entries are inserted in ascending
+/// (length, word index) order — the same order the linear scan
+/// returned matches in — so the bucket lookup is byte-identical to
+/// the reference scan.
+static WORD_BUCKETS: std::sync::OnceLock<std::collections::HashMap<u32, Vec<(u8, u16)>>> =
+    std::sync::OnceLock::new();
+
+fn word_buckets() -> &'static std::collections::HashMap<u32, Vec<(u8, u16)>> {
+    WORD_BUCKETS.get_or_init(|| {
+        let mut map: std::collections::HashMap<u32, Vec<(u8, u16)>> =
+            std::collections::HashMap::new();
+        for len in 4u8..=8 {
+            let len_us = len as usize;
+            let shift = SIZE_BITS_BY_LENGTH[len_us];
+            if shift == 0 {
+                continue;
+            }
+            let num_words = 1u32 << shift;
+            let offset_base = OFFSETS_BY_LENGTH[len_us] as usize;
+            for word_idx in 0..num_words {
+                let dict_offset = offset_base + word_idx as usize * len_us;
+                if dict_offset + 4 > DICTIONARY_DATA.len() {
+                    break;
+                }
+                let key = u32::from_le_bytes([
+                    DICTIONARY_DATA[dict_offset],
+                    DICTIONARY_DATA[dict_offset + 1],
+                    DICTIONARY_DATA[dict_offset + 2],
+                    DICTIONARY_DATA[dict_offset + 3],
+                ]);
+                map.entry(key).or_default().push((len, word_idx as u16));
+            }
+        }
+        map
+    })
+}
+
 /// Try to find a dictionary word match at the given input position.
 /// Returns `(distance_code, copy_len)` if a match is found, or `None`.
 ///
-/// Uses identity transform only (transform 0). A fast first-byte check
-/// skips ~99.6% of dictionary words, making this O(1) amortized.
-/// Transform support (uppercase, etc.) requires a pre-computed hash
-/// table for acceptable performance — see TODO 202.
+/// Uses identity transform only (transform 0); O(1) amortized via the
+/// first-4-bytes bucket index. Transform support (uppercase, etc.)
+/// requires the transform-aware hash tables — see TODO 202.
 ///
 /// `max_distance` should be `min(output_len, (1 << window_bits) - 1)`.
 #[must_use]
@@ -444,34 +481,27 @@ pub fn find_dictionary_match(input: &[u8], pos: usize, max_distance: u32) -> Opt
     if pos + 4 > input.len() {
         return None;
     }
-
-    // Try word lengths 4..=8 (the most common in text).
-    for len in 4u32..=8u32 {
+    let key = u32::from_le_bytes([
+        input[pos],
+        input[pos + 1],
+        input[pos + 2],
+        input[pos + 3],
+    ]);
+    let Some(candidates) = word_buckets().get(&key) else {
+        return None;
+    };
+    for &(len, word_idx) in candidates {
         let len_us = len as usize;
         if pos + len_us > input.len() {
             break;
         }
-        let shift = SIZE_BITS_BY_LENGTH[len_us];
-        if shift == 0 {
-            continue;
+        let dict_offset = OFFSETS_BY_LENGTH[len_us] as usize + word_idx as usize * len_us;
+        if dict_offset + len_us > DICTIONARY_DATA.len() {
+            break;
         }
-        let num_words = 1usize << shift;
-        let offset_base = OFFSETS_BY_LENGTH[len_us] as usize;
-
-        for word_idx in 0..num_words {
-            let dict_offset = offset_base + word_idx * len_us;
-            if dict_offset + len_us > DICTIONARY_DATA.len() {
-                break;
-            }
-            // Fast first-byte check: skip 255/256 of words instantly.
-            if DICTIONARY_DATA[dict_offset] != input[pos] {
-                continue;
-            }
-            if DICTIONARY_DATA[dict_offset..dict_offset + len_us] == input[pos..pos + len_us] {
-                let address = word_idx as u32;
-                let distance = max_distance + 1 + address;
-                return Some((distance, len));
-            }
+        if DICTIONARY_DATA[dict_offset..dict_offset + len_us] == input[pos..pos + len_us] {
+            let address = u32::from(word_idx);
+            return Some((max_distance + 1 + address, u32::from(len)));
         }
     }
     None
@@ -569,5 +599,49 @@ mod tests {
             assert!(s + 1 + len <= 217, "map[{i}]={s}: len={len} overflows");
         }
         assert_eq!(PREFIX_SUFFIX[216], 0, "trailing slot must be empty (len=0)");
+    }
+
+    /// The bucket index must return the exact match the linear scan
+    /// (the pre-optimization reference) returned: first hit in
+    /// ascending (length, word index) order.
+    #[test]
+    fn find_dictionary_match_matches_linear_scan_reference() {
+        fn naive(input: &[u8], pos: usize, max_distance: u32) -> Option<(u32, u32)> {
+            if pos + 4 > input.len() {
+                return None;
+            }
+            for len in 4u32..=8u32 {
+                let len_us = len as usize;
+                if pos + len_us > input.len() {
+                    break;
+                }
+                let shift = SIZE_BITS_BY_LENGTH[len_us];
+                if shift == 0 {
+                    continue;
+                }
+                let offset_base = OFFSETS_BY_LENGTH[len_us] as usize;
+                for word_idx in 0..(1usize << shift) {
+                    let o = offset_base + word_idx * len_us;
+                    if o + len_us > DICTIONARY_DATA.len() {
+                        break;
+                    }
+                    if DICTIONARY_DATA[o..o + len_us] == input[pos..pos + len_us] {
+                        return Some((max_distance + 1 + word_idx as u32, len));
+                    }
+                }
+            }
+            None
+        }
+
+        let text: Vec<u8> = b"the quick brown fox time first work well even another people place right think where being under never still these those write water".to_vec();
+        for pos in 0..text.len() {
+            for maxd in [1u32, 1 << 16, 1 << 24] {
+                assert_eq!(
+                    find_dictionary_match(&text, pos, maxd),
+                    naive(&text, pos, maxd),
+                    "pos={pos} maxd={maxd}"
+                );
+            }
+        }
     }
 }
