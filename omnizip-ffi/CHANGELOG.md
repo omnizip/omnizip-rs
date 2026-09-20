@@ -9,4 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Ppmd7/ppmd8 param-carrying codec names by @[object]
+
+### Added
+
 - Ten-codec acceleration surface by @[object]
