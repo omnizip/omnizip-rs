@@ -28,5 +28,6 @@ omnizip-libdeflate.workspace = true
 omnizip-archive-core.workspace = true
 omnizip-deflate64.workspace = true
 omnizip-lzma.workspace = true
+omnizip-ppmd.workspace = true
 
 [dev-dependencies]

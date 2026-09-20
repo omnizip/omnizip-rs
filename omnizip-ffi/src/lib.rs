@@ -65,8 +65,15 @@ fn codec_by_name(name: &str) -> Result<Box<dyn Codec>, String> {
         "lzip" => Ok(Box::new(LzipAdapter)),
         "zlib" => Ok(Box::new(omnizip_libdeflate::LibdeflateCodec)),
         "gzip" => Ok(Box::new(GzipAdapter)),
+        name if name.starts_with("ppmd7:") || name.starts_with("ppmd8:") => {
+            let (variant, order, mem) = parse_ppmd_name(name)?;
+            match variant {
+                7 => Ok(Box::new(PpmdAdapter7 { order, mem })),
+                _ => Ok(Box::new(PpmdAdapter8 { order, mem })),
+            }
+        }
         other => Err(format!(
-            "unknown codec '{other}' (available: zstd, bzip2, lzma)"
+            "unknown codec '{other}' (available: zstd, bzip2, lzma, xz, deflate, deflate64, lzma-alone, lzip, zlib, gzip, ppmd7:*, ppmd8:*)"
         )),
     }
 }
@@ -224,8 +231,30 @@ unsafe fn try_decompress(
             "zlib" => omnizip_libdeflate::decompress_zlib_unknown_len(data)
                 .map_err(|e| e.to_string()),
             "gzip" => omnizip_archive_core::formats::gzip::decompress(data).map_err(|e| e.to_string()),
+            name if name.starts_with("ppmd7:") || name.starts_with("ppmd8:") => {
+                let (variant, _order, mem) = parse_ppmd_name(name)
+                    .map_err(|e| e.to_string())?;
+                // The container carries its own size (magic + order +
+                // u32 LE at bytes 6..10); expected_len is a cross-check
+                // there, so feed the container's value, not a sentinel.
+                if data.len() < 10 {
+                    return Err("ppmd container too short".to_string());
+                }
+                let expected =
+                    u32::from_le_bytes([data[6], data[7], data[8], data[9]]) as usize;
+                match variant {
+                    7 => omnizip_ppmd::ppmd7::codec::decompress_with_budget(
+                        data, expected, mem,
+                    )
+                    .map_err(|e| e.to_string()),
+                    _ => omnizip_ppmd::ppmd8::codec::decompress_with_budget(
+                        data, expected, mem,
+                    )
+                    .map_err(|e| e.to_string()),
+                }
+            }
             other => Err(format!(
-                "unknown codec '{other}' (available: zstd, bzip2, lzma, xz, deflate, deflate64, lzma-alone, lzip)"
+                "unknown codec '{other}' (available: zstd, bzip2, lzma, xz, deflate, deflate64, lzma-alone, lzip, zlib, gzip, ppmd7:*, ppmd8:*)"
             )),
         })
     } else {
@@ -272,6 +301,86 @@ fn ozip_take(mut v: Vec<u8>) -> *mut u8 {
     }
     std::mem::forget(v);
     ptr
+}
+
+/// `ppmd7:o{order}:m{mem}` / `ppmd8:o{order}:m{mem}` — the gem's
+/// PPMd algorithms carry their parameters in the codec name (the FFI
+/// ABI has no params argument); `mem` is bytes.
+fn parse_ppmd_name(name: &str) -> Result<(u8, u8, usize), String> {
+    let bad = || format!("invalid ppmd codec name '{name}'");
+    let mut parts = name.split(':');
+    let variant = match parts.next() {
+        Some("ppmd7") => 7,
+        Some("ppmd8") => 8,
+        _ => return Err(bad()),
+    };
+    let order = parts.next().and_then(|p| p.strip_prefix('o')).ok_or_else(bad)?;
+    let mem = parts.next().and_then(|p| p.strip_prefix('m')).ok_or_else(bad)?;
+    if parts.next().is_some() {
+        return Err(bad());
+    }
+    let order: u8 = order.parse().map_err(|_| bad())?;
+    let mem: usize = mem.parse().map_err(|_| bad())?;
+    Ok((variant, order, mem))
+}
+
+struct PpmdAdapter7 {
+    order: u8,
+    mem: usize,
+}
+
+impl Codec for PpmdAdapter7 {
+    fn id(&self) -> omnizip_codecs::CodecId {
+        omnizip_codecs::CodecId::PPMD7
+    }
+    fn name(&self) -> &'static str {
+        "ppmd7"
+    }
+    fn compress(&self, plaintext: &[u8], _level: CompressionLevel) -> Result<Vec<u8>, OmnizipError> {
+        omnizip_ppmd::ppmd7::codec::compress_with_budget(plaintext, self.order, self.mem)
+            .map_err(map_ppmd_err)
+    }
+    fn decompress(&self, compressed: &[u8], expected_len: u32) -> Result<Vec<u8>, OmnizipError> {
+        omnizip_ppmd::ppmd7::codec::decompress_with_budget(
+            compressed,
+            expected_len as usize,
+            self.mem,
+        )
+        .map_err(map_ppmd_err)
+    }
+}
+
+struct PpmdAdapter8 {
+    order: u8,
+    mem: usize,
+}
+
+impl Codec for PpmdAdapter8 {
+    fn id(&self) -> omnizip_codecs::CodecId {
+        omnizip_codecs::CodecId::PPMD8
+    }
+    fn name(&self) -> &'static str {
+        "ppmd8"
+    }
+    fn compress(&self, plaintext: &[u8], _level: CompressionLevel) -> Result<Vec<u8>, OmnizipError> {
+        omnizip_ppmd::ppmd8::codec::compress_with_budget(plaintext, self.order, self.mem)
+            .map_err(map_ppmd_err)
+    }
+    fn decompress(&self, compressed: &[u8], expected_len: u32) -> Result<Vec<u8>, OmnizipError> {
+        omnizip_ppmd::ppmd8::codec::decompress_with_budget(
+            compressed,
+            expected_len as usize,
+            self.mem,
+        )
+        .map_err(map_ppmd_err)
+    }
+}
+
+fn map_ppmd_err(e: impl std::fmt::Display) -> OmnizipError {
+    OmnizipError::DecodeFailed {
+        codec: omnizip_codecs::CodecId::PPMD8,
+        reason: e.to_string(),
+    }
 }
 
 /// The gzip container (RFC 1952): header + raw deflate + CRC/ISIZE
@@ -482,6 +591,9 @@ mod tests {
         roundtrip("lzma-alone", 6, &sample(50_000));
         roundtrip("zlib", 6, &sample(50_000));
         roundtrip("gzip", 6, &sample(50_000));
+        // Param-carrying PPMd names (order + mem bytes in the name).
+        roundtrip("ppmd7:o6:m16777216", 0, &sample(20_000));
+        roundtrip("ppmd8:o6:m16777216", 0, &sample(20_000));
     }
 
     #[test]
