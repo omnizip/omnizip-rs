@@ -632,3 +632,45 @@ fn repair_reports_intact_and_fails_loud_on_corruption() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Task matrix item: `ozip x --include GLOB` — the Ruby
+/// SelectiveExtractor's glob class (full name or path-suffix match).
+#[test]
+fn selective_extraction_include_glob() {
+    fn os(s: &str) -> &std::ffi::OsStr {
+        s.as_ref()
+    }
+    let dir = std::env::temp_dir().join(format!("ozip-include-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let src = dir.join("src");
+    std::fs::create_dir_all(src.join("sub")).unwrap();
+    std::fs::write(src.join("alpha.txt"), b"alpha").unwrap();
+    std::fs::write(src.join("beta.bin"), b"beta").unwrap();
+    std::fs::write(src.join("sub").join("gamma.txt"), b"gamma").unwrap();
+    let arc = dir.join("sel.zip");
+    let (ok, _, err) = run(&[os("c"), arc.as_os_str(), src.as_os_str()]);
+    assert!(ok, "c failed: {err}");
+
+    let out = dir.join("out");
+    std::fs::create_dir_all(&out).unwrap();
+    let (ok, _, err) = run(&[
+        os("x"),
+        arc.as_os_str(),
+        os("-C"),
+        out.as_os_str(),
+        os("--include"),
+        os("*.txt"),
+    ]);
+    assert!(ok, "x --include failed: {err}");
+    let files: Vec<String> = std::fs::read_dir(&out)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().map(|t| t.is_file()).unwrap_or(false))
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    assert!(files.contains(&"alpha.txt".to_string()), "{files:?}");
+    assert!(files.contains(&"gamma.txt".to_string()), "{files:?}");
+    assert!(!files.contains(&"beta.bin".to_string()), "{files:?}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
