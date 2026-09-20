@@ -6,6 +6,7 @@
 
 pub mod aes;
 mod reader;
+pub mod zipcrypto;
 mod writer;
 
 pub use reader::ZipReader;
