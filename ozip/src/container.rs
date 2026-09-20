@@ -445,6 +445,22 @@ pub fn create(
     password: Option<&str>,
     volume: Option<usize>,
 ) -> Result<(), String> {
+    create_with_threads(archive, inputs, format, level, password, volume, 1)
+}
+
+/// `threads > 1` + zip output routes through
+/// [`omnizip_zip::parallel_create`] (byte-identical to serial at any
+/// thread count — the task-58 guarantee).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn create_with_threads(
+    archive: &Path,
+    inputs: &[PathBuf],
+    format: Option<&str>,
+    level: Option<u8>,
+    password: Option<&str>,
+    volume: Option<usize>,
+    threads: usize,
+) -> Result<(), String> {
     if inputs.is_empty() {
         return Err("create needs at least one input file or directory".into());
     }
@@ -486,6 +502,21 @@ pub fn create(
     }
 
     let staged = stage(inputs, &options)?;
+
+    // Parallel zip path: identical bytes, concurrent compression.
+    if threads > 1 && matches!(output, OutputFormat::Zip) && password.is_none() {
+        let files: Vec<(omnizip_archive_core::NewEntry, Vec<u8>)> =
+            staged.into_iter().map(|s| (s.entry, s.data)).collect();
+        let method = if level == 0 {
+            omnizip_zip::ZipMethod::Store
+        } else {
+            omnizip_zip::ZipMethod::Deflate
+        };
+        let bytes =
+            omnizip_zip::parallel_create(&files, method, threads).map_err(|e| e.to_string())?;
+        std::fs::write(archive, &bytes).map_err(|e| format!("{}: {e}", archive.display()))?;
+        return Ok(());
+    }
 
     let bytes = match output {
         OutputFormat::Gzip

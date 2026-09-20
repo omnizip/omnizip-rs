@@ -510,3 +510,39 @@ fn batch_convert_converts_each_source() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Task 58 CLI integration: `ozip c --threads N` produces
+/// byte-identical zip output to the serial path.
+#[test]
+fn threads_flag_is_byte_identical() {
+    fn os(s: &str) -> &std::ffi::OsStr {
+        s.as_ref()
+    }
+    let dir = std::env::temp_dir().join(format!("ozip-threads-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let body: Vec<u8> = (0..100_000u32).map(|i| (i % 251) as u8).collect();
+    std::fs::write(dir.join("big.bin"), &body).unwrap();
+
+    let (ok, _, err) = run(&[
+        os("c"),
+        dir.join("s.zip").as_os_str(),
+        dir.join("big.bin").as_os_str(),
+    ]);
+    assert!(ok, "serial: {err}");
+    let (ok, _, err) = run(&[
+        os("c"),
+        dir.join("p.zip").as_os_str(),
+        dir.join("big.bin").as_os_str(),
+        os("--threads"),
+        os("8"),
+    ]);
+    assert!(ok, "parallel: {err}");
+    assert_eq!(
+        std::fs::read(dir.join("s.zip")).unwrap(),
+        std::fs::read(dir.join("p.zip")).unwrap(),
+        "--threads changed the output bytes"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
