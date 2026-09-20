@@ -9,5 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Exact chunk-tail rule closes the last xz corpus case by @[object]
+
+### Fixed
+
 - Bounds-check xz block padding on truncated input by @[object]
 - Xz container validation + zstd dictionary-ID gate by @[object]

@@ -14,9 +14,9 @@ name = "omnizip_xar"
 path = "src/lib.rs"
 
 [dependencies]
-omnizip-archive-core = { path = "../omnizip-archive-core", version = "0.21.105" }
-omnizip-libdeflate = { path = "../omnizip-libdeflate", version = "0.21.105" }
-omnizip-crypto = { path = "../omnizip-crypto", version = "0.21.105" }
+omnizip-archive-core = { path = "../omnizip-archive-core", version = "0.21.106" }
+omnizip-libdeflate = { path = "../omnizip-libdeflate", version = "0.21.106" }
+omnizip-crypto = { path = "../omnizip-crypto", version = "0.21.106" }
 # Task 10's XML decision, per the user's directive: a real XML library
 # handles the TOC in both directions. quick-xml is pure Rust, no unsafe
 # in its core, widely audited. The writer keeps a fixed element order
