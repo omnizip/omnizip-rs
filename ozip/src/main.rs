@@ -50,6 +50,7 @@ fn usage(codecs: &[CodecSpec]) {
     println!("    --password-file PATH       first line of PATH is the password");
     println!("    --password-env VAR         password from environment variable VAR");
     println!("    --volume N  split 7z output into N-byte .001/.002 parts (ozip c)");
+    println!("    --threads N  parallel zip creation (byte-identical output)");
     println!();
     println!("CODECS:");
     for c in codecs {
@@ -263,6 +264,7 @@ fn run_container(args: &[String]) -> Result<(), String> {
 
     let mut password: Option<String> = None;
     let mut volume: Option<usize> = None;
+    let mut threads: usize = 1;
     let mut i = 1usize;
     while i < args.len() {
         let a = &args[i];
@@ -320,6 +322,15 @@ fn run_container(args: &[String]) -> Result<(), String> {
             i += 2;
             continue;
         }
+        if a == "--threads" {
+            threads = args
+                .get(i + 1)
+                .ok_or_else(|| "--threads needs a count".to_string())?
+                .parse()
+                .map_err(|_| format!("bad thread count {}", args[i + 1]))?;
+            i += 2;
+            continue;
+        }
         if a == "--volume" {
             volume = Some(
                 args.get(i + 1)
@@ -348,13 +359,14 @@ fn run_container(args: &[String]) -> Result<(), String> {
     }
     let archive = paths.remove(0);
     match command {
-        "c" => container::create(
+        "c" => container::create_with_threads(
             &archive,
             &paths,
             format.as_deref(),
             level,
             password.as_deref(),
             volume,
+            threads,
         ),
         "x" => container::extract(&archive, out_dir.as_deref(), password.as_deref()),
         "t" => container::list(&archive, false, password.as_deref()),
