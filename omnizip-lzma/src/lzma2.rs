@@ -228,13 +228,16 @@ pub fn decode_lzma2_stream(input: &[u8]) -> Result<(Vec<u8>, usize), LzmaError> 
     Ok((output, cursor))
 }
 
-/// A size-delimited LZMA2 chunk must leave no unconsumed compressed
-/// bytes beyond the range coder's 5-byte lookahead slack (liblzma's
-/// driver errors on leftovers — trailing junk or an LZMA-level EOPM;
-/// xz-utils bad-1-lzma2-7 pins the EOPM variant).
+/// A size-delimited LZMA2 chunk must consume its compressed bytes
+/// exactly (liblzma's driver requires compressed_size == 0 after the
+/// LZMA decoder finishes, with a one-byte overread allowance). Our
+/// range coder's final pending normalize leaves it at most ONE byte
+/// behind the reference at chunk end, so the equivalent bound here is
+/// leftover <= 1; the xz-utils corpus pins both sides: every good
+/// file leaves 0-1, and bad-1-lzma2-7's LZMA-level EOPM leaves 5.
 fn check_chunk_fully_consumed(consumed: usize, compressed_size: usize) -> Result<(), LzmaError> {
     let leftover = compressed_size.saturating_sub(consumed);
-    if leftover > 5 {
+    if leftover > 1 {
         return Err(LzmaError::Corrupt {
             reason: format!(
                 "LZMA2 chunk has {leftover} unconsumed compressed byte(s)"
