@@ -25,8 +25,8 @@ acceleration status of the Ruby→Rust tier. Legend:
 | deflate (raw RFC 1951) | — (zip-internal) | omnizip-libdeflate | `deflate` | — | `compress_raw`/`decompress_raw_unknown_len`; zip/tar.gz paths use it in Rust |
 | deflate64 | deflate64.rb (zlib-framed) | omnizip-deflate64 | `deflate64` | — | real wire deflate64 in Rust (zip method 9); the Ruby algorithm class is zlib-framed → rides the `zlib` name |
 | gzip (container) | formats/gzip.rb | archive-core formats::gzip | `gzip` | auto | Ruby writer FIXED (was double-headered, nonstandard); reader keeps decoding legacy files |
-| ppmd7 | ppmd7.rb | omnizip-ppmd | — | — | **streams incompatible**: Ruby rides the LZMA range coder, Rust uses its own arithmetic coder (plus different model internals) — acceleration = a Ruby-exact PPMd port (its own task, like the lzma/zstd ports) |
-| ppmd8 | ppmd8.rb | omnizip-ppmd | — | — | same disposition as ppmd7 |
+| ppmd7 | ppmd7.rb | omnizip-ppmd | `ppmd7:o{order}:m{mem}` | auto (both) | tier-implemented 2026-09-21; the pure-Ruby core cannot decode its own output (root-only decoder, 100-symbol cap) — fallback only |
+| ppmd8 | ppmd8.rb | omnizip-ppmd | `ppmd8:o{order}:m{mem}` | auto (both) | tier-implemented 2026-09-21; the pure-Ruby core raises NotImplementedError — fallback only |
 | brotli | — | omnizip-brotli | — | — | Rust-only (in-house from RFC); the gem has no brotli |
 | lz4 / snappy / fsst / glza / flac / blosc / zpaq / ricepp | — | respective crates | — | — | Rust-only codecs |
 | filters: BCJ x86/ARM/ARMThumb/ARM64/IA64/PPC/SPARC, BCJ2, delta, shuffle | filters/ | omnizip-filters | — | — | Rust side used by the xz container (all IDs incl. ARM64 start-offset); the gem's filter pipeline stays Ruby |
@@ -96,13 +96,13 @@ poisoned the memo).
 
 ## 6. Open items (ranked)
 
-1. **Ruby-exact PPMd port** — the only remaining codec-level
-   acceleration gap (see the ppmd rows; incompatible coders, not a
-   wiring problem).
-2. Archive-level acceleration (whole zip/tar entries through the tier)
-   — bigger contract than codec-by-name.
+1. Archive-level acceleration beyond entry codecs (whole-archive
+   create/extract through the tier) — a bigger contract than
+   codec-by-name; the zip reader's raw-deflate already rides the tier
+   (2026-09-21).
 
-Closed since the last revision: bad-1-lzma2-7 — the xz-utils corpus is
-now 42/42 rejected (the LZMA2 chunk tail rule: compressed bytes must be
-consumed exactly, with our range coder's one-byte trailing-normalize
-lag; the EOPM file leaves 5).
+Closed since the last revision: PPMd (tier-implemented with
+param-carrying names — the Ruby cores were provably non-functional);
+bad-1-lzma2-7 (xz-utils corpus 42/42); the StringIO#to_s corruption
+trap (inspect text was being compressed) and the prepare_output
+StringIO-discard bug.
