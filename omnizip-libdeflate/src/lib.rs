@@ -102,26 +102,7 @@ impl Codec for LibdeflateCodec {
         if level.as_u8() == 0 {
             return Ok(wrap_zlib(&deflate::deflate_stored(plaintext)?));
         }
-        // LZ77 tier follows zlib's level table (1-3 greedy, 4-9
-        // lazy); the smallest of dynamic / fixed / stored emission
-        // wins, mirroring what gzip does per block.
-        let tier = level.as_u8().min(9);
-        let mut best: Option<Vec<u8>> = None;
-        let mut pick = |candidate: Option<Vec<u8>>| {
-            if let Some(c) = candidate {
-                match &best {
-                    None => best = Some(c),
-                    Some(prev) if c.len() < prev.len() => best = Some(c),
-                    _ => {}
-                }
-            }
-        };
-        pick(deflate_dynamic::deflate_dynamic_huffman_at(
-            plaintext, tier,
-        )?);
-        pick(deflate_lz77::deflate_fixed_huffman_at(plaintext, tier)?);
-        pick(Some(deflate::deflate_stored(plaintext)?));
-        Ok(wrap_zlib(&best.expect("at least stored always succeeds")))
+        Ok(wrap_zlib(&deflate_wire(plaintext, level.as_u8())?))
     }
 
     fn decompress(&self, compressed: &[u8], expected_len: u32) -> Result<Vec<u8>, OmnizipError> {
@@ -179,6 +160,80 @@ fn strip_zlib_wrapper(data: &[u8]) -> &[u8] {
 /// Wrap a raw DEFLATE stream in a zlib header + adler32 trailer
 /// (RFC 1950). The result is decodable by `gzip -d`, Python's
 /// `zlib.decompress`, and any other zlib-aware tool.
+/// The raw RFC 1951 wire pick shared by every entry point: LZ77 tier
+/// follows zlib's level table (1-3 greedy, 4-9 lazy); the smallest of
+/// dynamic / fixed / stored emission wins, mirroring what gzip does
+/// per block.
+fn deflate_wire(plaintext: &[u8], level: u8) -> Result<Vec<u8>, OmnizipError> {
+    let tier = level.min(9);
+    let mut best: Option<Vec<u8>> = None;
+    let mut pick = |candidate: Option<Vec<u8>>| {
+        if let Some(c) = candidate {
+            match &best {
+                None => best = Some(c),
+                Some(prev) if c.len() < prev.len() => best = Some(c),
+                _ => {}
+            }
+        }
+    };
+    pick(deflate_dynamic::deflate_dynamic_huffman_at(
+        plaintext, tier,
+    )?);
+    pick(deflate_lz77::deflate_fixed_huffman_at(plaintext, tier)?);
+    pick(Some(deflate::deflate_stored(plaintext)?));
+    best.ok_or_else(|| {
+        OmnizipError::EncodeFailed {
+            codec: CodecId::LIBDEFLATE,
+            reason: "no wire candidate".into(),
+        }
+    })
+}
+
+/// Compress to a RAW RFC 1951 stream (no zlib wrapper) — the format
+/// the Ruby gem's Deflate algorithm and the ZIP/GZIP containers use.
+///
+/// # Errors
+///
+/// See [`LibdeflateCodec::compress`].
+pub fn compress_raw(plaintext: &[u8], level: u8) -> Result<Vec<u8>, OmnizipError> {
+    deflate_wire(plaintext, level)
+}
+
+/// Inflate a RAW RFC 1951 stream of unknown length (growing hint).
+///
+/// # Errors
+///
+/// [`omnizip_codecs::OmnizipError::Corrupt`] on malformed input.
+pub fn decompress_raw_unknown_len(compressed: &[u8]) -> Result<Vec<u8>, OmnizipError> {
+    let mut hint = (compressed.len() * 6).max(64);
+    loop {
+        match inflate::inflate(compressed, hint) {
+            Ok(out) => return Ok(out),
+            Err(e) => {
+                // A capacity shortfall surfaces as a mid-stream
+                // error; every other error is structural. The 4x
+                // safety cap bounds the retry loop.
+                if hint < (1 << 32) {
+                    hint = hint.saturating_mul(4);
+                    let _ = e;
+                } else {
+                    return Err(e);
+                }
+            }
+        }
+    }
+}
+
+/// Inflate a possibly-zlib-wrapped stream of unknown length (the
+/// wrapper is stripped when present, raw streams pass through).
+///
+/// # Errors
+///
+/// [`omnizip_codecs::OmnizipError::Corrupt`] on malformed input.
+pub fn decompress_zlib_unknown_len(compressed: &[u8]) -> Result<Vec<u8>, OmnizipError> {
+    decompress_raw_unknown_len(strip_zlib_wrapper(compressed))
+}
+
 fn wrap_zlib(deflate_stream: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(deflate_stream.len() + 6);
     // CMF: CM=8 (deflate), CINFO=7 (32K window) → 0x78.

@@ -45,6 +45,10 @@ pub struct ZstdDecoder {
     previous_huffman_table: Option<HuffmanTable>,
     previous_fse_tables: SeqTableState,
     executor: SequenceExecutor,
+    /// Whether the caller supplied a dictionary (even an empty one)
+    /// for this decode — distinguishes "no dictionary" from "empty
+    /// dictionary content" in the Dictionary_ID check.
+    dict_supplied: bool,
 }
 
 impl ZstdDecoder {
@@ -61,6 +65,10 @@ impl ZstdDecoder {
     /// Returns [`ZstdError::Corrupt`] on structural problems and
     /// [`ZstdError::Unsupported`] on not-yet-implemented features.
     pub fn decode_stream(&mut self, input: &[u8]) -> Result<Vec<u8>, ZstdError> {
+        // Plain decode supplies no dictionary (an empty CONTENT is
+        // still a supplied dictionary, so the distinction is a flag,
+        // not the prefix length).
+        self.dict_supplied = false;
         self.decode_stream_with_prefix(input, &[])
     }
 
@@ -78,6 +86,7 @@ impl ZstdDecoder {
         input: &[u8],
         prefix: &[u8],
     ) -> Result<Vec<u8>, ZstdError> {
+        self.dict_supplied = true;
         let mut output = Vec::new();
         let mut remaining = input;
 
@@ -146,6 +155,19 @@ impl ZstdDecoder {
         self.executor = SequenceExecutor::new();
 
         let (header, after_header) = FrameHeader::parse(input)?;
+        // A frame declaring a Dictionary_ID requires that dictionary;
+        // decoding without it is undefined (RFC 8878 §3.1.1.1.3).
+        // Our own dictionary frames are standalone (prefix-embedded,
+        // DID 0), so any non-zero DID is a foreign frame we cannot
+        // honor — reject instead of producing garbage.
+        if header.dictionary_id.is_some() && !self.dict_supplied {
+            return Err(ZstdError::Corrupt {
+                reason: format!(
+                    "frame requires dictionary 0x{:08X}",
+                    header.dictionary_id.unwrap_or(0)
+                ),
+            });
+        }
         // Prime the output window with the dictionary prefix. Sequences
         // may back-reference positions in [0, prefix.len()). The prefix
         // is stripped from the returned value and excluded from the

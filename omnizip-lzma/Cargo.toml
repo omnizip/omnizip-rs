@@ -14,6 +14,9 @@ name = "omnizip_lzma"
 path = "src/lib.rs"
 
 [dependencies]
+omnizip-checksum.workspace = true
+omnizip-crypto.workspace = true
+omnizip-filters.workspace = true
 omnizip-codecs = { workspace = true }
 
 [lints]
