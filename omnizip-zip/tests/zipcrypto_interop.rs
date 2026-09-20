@@ -13,9 +13,11 @@ fn zip_available() -> bool {
         .is_ok_and(|o| o.status.success() || !o.stdout.is_empty())
 }
 
-fn make_encrypted_zip(level: &str, content: &[u8]) -> Option<Vec<u8>> {
+fn make_encrypted_zip(tag: &str, level: &str, content: &[u8]) -> Option<Vec<u8>> {
     use std::io::Write as _;
-    let dir = std::env::temp_dir().join(format!("zipcrypto-{}", std::process::id()));
+    // Tests in this binary run in parallel and each needs its own
+    // archive — key the temp dir by test tag, not just the pid.
+    let dir = std::env::temp_dir().join(format!("zipcrypto-{}-{tag}", std::process::id()));
     std::fs::create_dir_all(&dir).ok()?;
     let src = dir.join("secret.txt");
     let archive = dir.join("a.zip");
@@ -44,7 +46,7 @@ fn reads_infozip_zipcrypto_entries() {
         .collect();
     // STORE (-0) and DEFLATE (default) entries, both under ZipCrypto.
     for level in ["-0", "-6"] {
-        let Some(bytes) = make_encrypted_zip(level, &content) else {
+        let Some(bytes) = make_encrypted_zip("entries", level, &content) else {
             eprintln!("skipping {level}: zip -P failed");
             return;
         };
@@ -63,7 +65,7 @@ fn zipcrypto_wrong_password_is_security_error() {
         eprintln!("skipping: Info-ZIP zip not found");
         return;
     }
-    let Some(bytes) = make_encrypted_zip("-6", b"protected content") else {
+    let Some(bytes) = make_encrypted_zip("wrong-pw", "-6", b"protected content") else {
         eprintln!("skipping: zip -P failed");
         return;
     };
@@ -82,7 +84,7 @@ fn zipcrypto_without_password_is_security_error() {
         eprintln!("skipping: Info-ZIP zip not found");
         return;
     }
-    let Some(bytes) = make_encrypted_zip("-6", b"protected content") else {
+    let Some(bytes) = make_encrypted_zip("no-pw", "-6", b"protected content") else {
         eprintln!("skipping: zip -P failed");
         return;
     };
