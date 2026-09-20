@@ -195,7 +195,8 @@ fn find_eocd(data: &[u8]) -> Option<usize> {
 }
 
 impl ZipReader {
-    fn raw_entry(&self, index: usize) -> Result<(usize, usize, u16), ArchiveError> {
+    #[expect(clippy::type_complexity, reason = "pos/len/method/flags tuple")]
+    fn raw_entry(&self, index: usize) -> Result<(usize, usize, u16, u16), ArchiveError> {
         let st = self
             .entries
             .get(index)
@@ -221,7 +222,7 @@ impl ZipReader {
         } else {
             u32::from_le_bytes(lh[18..22].try_into().expect("4")) as usize
         };
-        Ok((data_start, csize, st.method))
+        Ok((data_start, csize, st.method, flags))
     }
 }
 
@@ -275,12 +276,13 @@ impl ZipReader {
     /// The single decode path (SSOT): `ArchiveReader::read_entry`
     /// and `ParallelReader::read_entry_shared` both delegate here.
     fn read_entry_inner(&self, index: usize) -> Result<Vec<u8>, ArchiveError> {
-        let (data_start, csize, method) = self.raw_entry(index)?;
+        let (data_start, csize, method, flags) = self.raw_entry(index)?;
         let raw = self
             .data
             .get(data_start..data_start + csize)
             .ok_or_else(|| ArchiveError::InvalidArchive("truncated entry data".into()))?;
 
+        let st_ref = &self.entries[index];
         let (method, buffer): (u16, Vec<u8>) = if method == crate::aes::METHOD_AES {
             let info = self.entries[index].aes.ok_or_else(|| {
                 ArchiveError::InvalidArchive("AES entry missing the 0x9901 extra field".into())
@@ -298,6 +300,25 @@ impl ZipReader {
                 &self.entries[index].entry.name,
             )?;
             (info.real_method, plain)
+        } else if flags & 0x0001 != 0 {
+            // Legacy PKWARE ZipCrypto (flag bit 0): 12-byte header +
+            // the real method's payload, key-verified by the CRC's top
+            // byte (or the mtime's when a data descriptor is in use).
+            let password = self.password.as_deref().ok_or_else(|| {
+                ArchiveError::Security(format!(
+                    "entry '{}' is ZipCrypto encrypted; supply a password",
+                    self.entries[index].entry.name
+                ))
+            })?;
+            let plain = crate::zipcrypto::decrypt(
+                password.as_bytes(),
+                raw,
+                st_ref.crc32,
+                st_ref.entry.mtime.unwrap_or(0) as u32,
+                flags,
+                &st_ref.entry.name,
+            )?;
+            (method, plain)
         } else {
             (method, raw.to_vec())
         };
