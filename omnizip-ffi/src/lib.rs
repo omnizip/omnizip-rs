@@ -59,6 +59,12 @@ fn codec_by_name(name: &str) -> Result<Box<dyn Codec>, String> {
         "zstd" => Ok(Box::new(omnizip_zstd::ZstdCodec)),
         "bzip2" => Ok(Box::new(omnizip_bzip2::Bzip2Codec)),
         "lzma" | "xz" => Ok(Box::new(omnizip_lzma::LzmaCodec)),
+        "deflate" => Ok(Box::new(RawDeflateAdapter)),
+        "deflate64" => Ok(Box::new(omnizip_deflate64::Deflate64Codec)),
+        "lzma-alone" => Ok(Box::new(LzmaAloneAdapter)),
+        "lzip" => Ok(Box::new(LzipAdapter)),
+        "zlib" => Ok(Box::new(omnizip_libdeflate::LibdeflateCodec)),
+        "gzip" => Ok(Box::new(GzipAdapter)),
         other => Err(format!(
             "unknown codec '{other}' (available: zstd, bzip2, lzma)"
         )),
@@ -208,8 +214,18 @@ unsafe fn try_decompress(
             "zstd" => omnizip_zstd::decompress(data, u32::MAX).map_err(|e| e.to_string()),
             "bzip2" => omnizip_bzip2::decompress_framed(data).map_err(|e| e.to_string()),
             "lzma" | "xz" => omnizip_lzma::xz_decompress(data).map_err(|e| e.to_string()),
+            "deflate" => omnizip_libdeflate::decompress_raw_unknown_len(data)
+                .map_err(|e| e.to_string()),
+            "deflate64" => omnizip_deflate64::Deflate64Codec
+                .decompress(data, u32::MAX)
+                .map_err(|e| e.to_string()),
+            "lzma-alone" => omnizip_lzma::lzma_alone_decompress(data).map_err(|e| e.to_string()),
+            "lzip" => omnizip_lzma::lzip_decompress(data).map_err(|e| e.to_string()),
+            "zlib" => omnizip_libdeflate::decompress_zlib_unknown_len(data)
+                .map_err(|e| e.to_string()),
+            "gzip" => omnizip_archive_core::formats::gzip::decompress(data).map_err(|e| e.to_string()),
             other => Err(format!(
-                "unknown codec '{other}' (available: zstd, bzip2, lzma)"
+                "unknown codec '{other}' (available: zstd, bzip2, lzma, xz, deflate, deflate64, lzma-alone, lzip)"
             )),
         })
     } else {
@@ -258,6 +274,159 @@ fn ozip_take(mut v: Vec<u8>) -> *mut u8 {
     ptr
 }
 
+/// The gzip container (RFC 1952): header + raw deflate + CRC/ISIZE
+/// trailer — the Ruby gzip format wraps Zlib streams, and this name
+/// accelerates that whole-container path.
+struct GzipAdapter;
+
+impl Codec for GzipAdapter {
+    fn id(&self) -> omnizip_codecs::CodecId {
+        omnizip_codecs::CodecId::DEFLATE
+    }
+    fn name(&self) -> &'static str {
+        "gzip"
+    }
+    fn compress(
+        &self,
+        plaintext: &[u8],
+        level: CompressionLevel,
+    ) -> Result<Vec<u8>, OmnizipError> {
+        let opts = omnizip_archive_core::formats::gzip::GzipOptions {
+            level: level.as_u8().min(9),
+            ..Default::default()
+        };
+        omnizip_archive_core::formats::gzip::compress(plaintext, &opts).map_err(map_gzip_err)
+    }
+    fn decompress(&self, compressed: &[u8], expected_len: u32) -> Result<Vec<u8>, OmnizipError> {
+        let out =
+            omnizip_archive_core::formats::gzip::decompress(compressed).map_err(map_gzip_err)?;
+        let want = usize::try_from(expected_len).unwrap_or(usize::MAX);
+        if out.len() != want {
+            return Err(OmnizipError::LengthMismatch {
+                codec: omnizip_codecs::CodecId::DEFLATE,
+                expected: expected_len,
+                actual: out.len(),
+            });
+        }
+        Ok(out)
+    }
+}
+
+fn map_gzip_err(e: omnizip_archive_core::ArchiveError) -> OmnizipError {
+    OmnizipError::DecodeFailed {
+        codec: omnizip_codecs::CodecId::DEFLATE,
+        reason: e.to_string(),
+    }
+}
+
+/// The Ruby gem's Deflate algorithm speaks RAW RFC 1951 (its gzip
+/// format wraps the same raw stream in Ruby) — distinct from
+/// `DeflateCodec`, which wraps in zlib.
+struct RawDeflateAdapter;
+
+impl Codec for RawDeflateAdapter {
+    fn id(&self) -> omnizip_codecs::CodecId {
+        omnizip_codecs::CodecId::DEFLATE
+    }
+    fn name(&self) -> &'static str {
+        "deflate"
+    }
+    fn compress(
+        &self,
+        plaintext: &[u8],
+        level: CompressionLevel,
+    ) -> Result<Vec<u8>, OmnizipError> {
+        omnizip_libdeflate::compress_raw(plaintext, level.as_u8())
+    }
+    fn decompress(&self, compressed: &[u8], expected_len: u32) -> Result<Vec<u8>, OmnizipError> {
+        let out = omnizip_libdeflate::decompress_raw_unknown_len(compressed)?;
+        let want = usize::try_from(expected_len).unwrap_or(usize::MAX);
+        if out.len() != want {
+            return Err(OmnizipError::LengthMismatch {
+                codec: omnizip_codecs::CodecId::DEFLATE,
+                expected: expected_len,
+                actual: out.len(),
+            });
+        }
+        Ok(out)
+    }
+}
+
+/// The Ruby gem's LZMA algorithm emits LZMA1-alone streams (the
+/// 13-byte header carries lc/lp/pb/dict) — distinct from the XZ
+/// container that `LzmaCodec` speaks, hence a dedicated FFI name.
+struct LzmaAloneAdapter;
+
+impl Codec for LzmaAloneAdapter {
+    fn id(&self) -> omnizip_codecs::CodecId {
+        omnizip_codecs::CodecId::LZMA
+    }
+    fn name(&self) -> &'static str {
+        "lzma-alone"
+    }
+    fn compress(
+        &self,
+        plaintext: &[u8],
+        level: CompressionLevel,
+    ) -> Result<Vec<u8>, OmnizipError> {
+        let lv = level.as_u8().min(9);
+        let dict_size: u32 = [1 << 16, 1 << 20, 1 << 21, 1 << 22, 1 << 22, 1 << 23, 1 << 23, 1 << 24, 1 << 25, 1 << 26]
+            [usize::from(lv)];
+        let opts = omnizip_lzma::LzmaOptions {
+            dict_size,
+            ..Default::default()
+        };
+        omnizip_lzma::lzma_alone_compress_with_options(plaintext, &opts).map_err(map_lzma_err)
+    }
+    fn decompress(&self, compressed: &[u8], expected_len: u32) -> Result<Vec<u8>, OmnizipError> {
+        let out = omnizip_lzma::lzma_alone_decompress(compressed).map_err(map_lzma_err)?;
+        check_expected(out.len(), expected_len, "lzma-alone")?;
+        Ok(out)
+    }
+}
+
+/// lzip member decode (the trailer carries the plaintext size);
+/// compression is not offered through the FFI.
+struct LzipAdapter;
+
+impl Codec for LzipAdapter {
+    fn id(&self) -> omnizip_codecs::CodecId {
+        omnizip_codecs::CodecId::LZMA
+    }
+    fn name(&self) -> &'static str {
+        "lzip"
+    }
+    fn compress(&self, _plaintext: &[u8], _level: CompressionLevel) -> Result<Vec<u8>, OmnizipError> {
+        Err(OmnizipError::Unsupported {
+            codec: omnizip_codecs::CodecId::LZMA,
+            reason: "lzip compression is not available through the FFI".into(),
+        })
+    }
+    fn decompress(&self, compressed: &[u8], expected_len: u32) -> Result<Vec<u8>, OmnizipError> {
+        let out = omnizip_lzma::lzip_decompress(compressed).map_err(map_lzma_err)?;
+        check_expected(out.len(), expected_len, "lzip")?;
+        Ok(out)
+    }
+}
+
+fn map_lzma_err(e: omnizip_lzma::LzmaError) -> OmnizipError {
+    OmnizipError::DecodeFailed {
+        codec: omnizip_codecs::CodecId::LZMA,
+        reason: e.to_string(),
+    }
+}
+
+fn check_expected(got: usize, expected: u32, codec: &str) -> Result<(), OmnizipError> {
+    let want = usize::try_from(expected).unwrap_or(usize::MAX);
+    if got != want {
+        return Err(OmnizipError::Corrupt {
+            codec: omnizip_codecs::CodecId::LZMA,
+            reason: format!("{codec}: expected {want} bytes, decoded {got}"),
+        });
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 #[allow(unsafe_code)]
 mod tests {
@@ -303,11 +472,84 @@ mod tests {
     }
 
     #[test]
-    fn roundtrips_all_three_codecs() {
+    fn roundtrips_all_codecs() {
         roundtrip("zstd", 6, &sample(50_000));
         roundtrip("bzip2", 9, &sample(50_000));
         roundtrip("lzma", 6, &sample(50_000));
         roundtrip("xz", 6, &sample(1000)); // alias
+        roundtrip("deflate", 6, &sample(50_000));
+        roundtrip("deflate64", 6, &sample(50_000));
+        roundtrip("lzma-alone", 6, &sample(50_000));
+        roundtrip("zlib", 6, &sample(50_000));
+        roundtrip("gzip", 6, &sample(50_000));
+    }
+
+    #[test]
+    fn lzip_decodes_unknown_length() {
+        use std::ffi::CStr;
+        // The good-1-v1 fixture from the lzip conformance set (the
+        // same corpus omnizip-lzma's own lzip tests decode).
+        let lzip_stream = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../tests/fixtures/lzma/good-1-v1.lz"
+        ))
+        .unwrap();
+        let expected = omnizip_lzma::lzip_decompress(&lzip_stream).unwrap();
+        assert!(!expected.is_empty());
+        let name = CString::new("lzip").unwrap();
+        let mut dec_len = 0_usize;
+        let dec = unsafe {
+            ozip_decompress(
+                name.as_ptr(),
+                lzip_stream.as_ptr(),
+                lzip_stream.len(),
+                usize::MAX,
+                &mut dec_len,
+            )
+        };
+        assert!(
+            !dec.is_null(),
+            "lzip decode failed: {}",
+            unsafe { CStr::from_ptr(ozip_last_error()).to_string_lossy() }
+        );
+        let restored = unsafe { std::slice::from_raw_parts(dec, dec_len) };
+        assert_eq!(restored, &expected[..]);
+        unsafe { ozip_free(dec, dec_len) };
+    }
+
+    #[test]
+    fn unknown_length_paths_cover_new_codecs() {
+        use std::ffi::CStr;
+        for (name, encoded) in [
+            ("deflate", omnizip_libdeflate::compress_raw(&sample(20_000), 6).unwrap()),
+            ("deflate64", omnizip_deflate64::Deflate64Codec.compress(&sample(20_000), CompressionLevel::new(6)).unwrap()),
+            ("lzma-alone", omnizip_lzma::lzma_alone_compress_with_options(&sample(20_000), &omnizip_lzma::LzmaOptions::default()).unwrap()),
+            ("zlib", omnizip_libdeflate::LibdeflateCodec.compress(&sample(20_000), CompressionLevel::new(6)).unwrap()),
+            ("gzip", {
+                let opts = omnizip_archive_core::formats::gzip::GzipOptions::default();
+                omnizip_archive_core::formats::gzip::compress(&sample(20_000), &opts).unwrap()
+            }),
+        ] {
+            let cname = CString::new(name).unwrap();
+            let mut dec_len = 0_usize;
+            let dec = unsafe {
+                ozip_decompress(
+                    cname.as_ptr(),
+                    encoded.as_ptr(),
+                    encoded.len(),
+                    usize::MAX,
+                    &mut dec_len,
+                )
+            };
+            assert!(
+                !dec.is_null(),
+                "{name} unknown-length decode failed: {}",
+                unsafe { CStr::from_ptr(ozip_last_error()).to_string_lossy() }
+            );
+            let restored = unsafe { std::slice::from_raw_parts(dec, dec_len) };
+            assert_eq!(restored.len(), 20_000, "{name} length");
+            unsafe { ozip_free(dec, dec_len) };
+        }
     }
 
     #[test]
