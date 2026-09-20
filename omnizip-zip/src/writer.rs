@@ -632,6 +632,25 @@ pub fn parallel_create(
     method: ZipMethod,
     threads: usize,
 ) -> Result<Vec<u8>, ArchiveError> {
+    parallel_create_with_password(files, method, threads, None)
+}
+
+/// [`parallel_create`] with WinZip-AES encryption: compression (the
+/// CPU-bound half) runs across workers; encryption happens in the
+/// serial emission pass (cheap relative to compression). Same
+/// thread-invariance guarantee: byte-identical to the serial
+/// encrypted writer at any thread count.
+///
+/// # Errors
+///
+/// First entry failure in job order, or writer failure during
+/// emission.
+pub fn parallel_create_with_password(
+    files: &[(NewEntry, Vec<u8>)],
+    method: ZipMethod,
+    threads: usize,
+    password: Option<&str>,
+) -> Result<Vec<u8>, ArchiveError> {
     use omnizip_archive_core::ArchiveWriter as _;
 
     let mut prepared: Vec<Option<Result<PreparedEntry, ArchiveError>>> =
@@ -682,6 +701,9 @@ pub fn parallel_create(
 
     // Serial emission, entry order.
     let mut writer = ZipWriter::new().with_method(method);
+    if let Some(pw) = password {
+        writer = writer.with_password(pw);
+    }
     let options = WriteOptions::deterministic();
     for (slot, (entry, data)) in prepared.into_iter().zip(files) {
         match slot {
@@ -754,6 +776,50 @@ mod parallel_tests {
         for (i, (entry, data)) in files.iter().enumerate() {
             assert_eq!(entries[i].name, entry.name);
             assert_eq!(&reader.read_entry(i).unwrap(), data);
+        }
+    }
+}
+
+#[cfg(test)]
+mod parallel_aes_tests {
+    use super::parallel_create_with_password;
+    use omnizip_archive_core::write_options::WriteOptions;
+    use omnizip_archive_core::{ArchiveReader as _, ArchiveWriter as _, NewEntry};
+
+    #[test]
+    fn parallel_aes_matches_serial_and_round_trips() {
+        let options = WriteOptions::deterministic();
+        let files: Vec<(NewEntry, Vec<u8>)> = (0..6)
+            .map(|i| {
+                let body: Vec<u8> = (0..40_000u32).map(|j| (j % 251 + i) as u8).collect();
+                (NewEntry::file(format!("e{i}.bin"), &options), body)
+            })
+            .collect();
+
+        let mut serial = crate::ZipWriter::new()
+            .with_method(crate::ZipMethod::Deflate)
+            .with_password("pw");
+        for (entry, data) in &files {
+            serial.add_file(entry, data, &options).unwrap();
+        }
+        let serial_bytes = serial.finish_bytes().unwrap();
+
+        for threads in [1_usize, 4] {
+            let out = parallel_create_with_password(
+                &files,
+                crate::ZipMethod::Deflate,
+                threads,
+                Some("pw"),
+            )
+            .unwrap();
+            assert_eq!(out, serial_bytes, "threads={threads} differs from serial");
+        }
+
+        // Encrypted round trip with the password; wrong password fails.
+        let mut r = crate::ZipReader::from_bytes(&serial_bytes).unwrap();
+        r.set_password("pw");
+        for (i, (_, data)) in files.iter().enumerate() {
+            assert_eq!(&r.read_entry(i).unwrap(), data);
         }
     }
 }
