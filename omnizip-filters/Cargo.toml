@@ -18,7 +18,10 @@ path = "src/lib.rs"
 omnizip-codecs.workspace = true
 
 [dev-dependencies]
-omnizip-lz4 = { path = "../omnizip-lz4", version = "0.21.103" }
+# Path-only: a `version` pin makes cargo publish require that exact
+# omnizip-lz4 release in the crates.io index, but release-plz orders
+# publishing by normal deps only, so lz4 may not be published yet.
+omnizip-lz4 = { path = "../omnizip-lz4" }
 
 [lints]
 workspace = true
