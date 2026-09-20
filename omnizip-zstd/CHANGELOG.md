@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Xz container validation + zstd dictionary-ID gate by @[object]
+
 ### Other
 
 - Memoize split trials; OMNIZIP_ZSTD_SEQ_SPLIT opt-in for low strategies by @[object]
