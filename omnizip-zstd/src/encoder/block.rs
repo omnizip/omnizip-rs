@@ -935,10 +935,29 @@ fn write_block(
     // Post-parse block splitting (C gate: strategy >= btopt &&
     // windowLog >= 17). Tried first because its partitions reuse
     // tables across boundaries; kept only when smaller.
-    let split_eligible = matches!(
-        params.strategy,
-        Strategy::Btopt | Strategy::Btultra | Strategy::Btultra2
-    ) && params.window_log >= 17
+    // The reference runs the sequence splitter from Greedy up; here it
+    // stays opt-in for the low strategies (OMNIZIP_ZSTD_SEQ_SPLIT=1)
+    // until the trial cost is paid for on the L5-L12 sweep (task 21).
+    let low_strategy_split =
+        std::env::var("OMNIZIP_ZSTD_SEQ_SPLIT").is_ok_and(|v| v == "1");
+    let split_strategies = if low_strategy_split {
+        matches!(
+            params.strategy,
+            Strategy::Btopt
+                | Strategy::Btultra
+                | Strategy::Btultra2
+                | Strategy::Greedy
+                | Strategy::Lazy
+                | Strategy::Lazy2
+        )
+    } else {
+        matches!(
+            params.strategy,
+            Strategy::Btopt | Strategy::Btultra | Strategy::Btultra2
+        )
+    };
+    let split_eligible = split_strategies
+        && params.window_log >= 17
         && seq_store.sequences.len() >= MIN_SEQUENCES_BLOCK_SPLITTING;
 
     let mut compressed_content = Vec::new();
@@ -1145,10 +1164,29 @@ fn write_block_cross(
     // Post-parse block splitting (C gate: strategy >= btopt &&
     // windowLog >= 17). Tried first because its partitions reuse
     // tables across boundaries; kept only when smaller.
-    let split_eligible = matches!(
-        params.strategy,
-        Strategy::Btopt | Strategy::Btultra | Strategy::Btultra2
-    ) && params.window_log >= 17
+    // The reference runs the sequence splitter from Greedy up; here it
+    // stays opt-in for the low strategies (OMNIZIP_ZSTD_SEQ_SPLIT=1)
+    // until the trial cost is paid for on the L5-L12 sweep (task 21).
+    let low_strategy_split =
+        std::env::var("OMNIZIP_ZSTD_SEQ_SPLIT").is_ok_and(|v| v == "1");
+    let split_strategies = if low_strategy_split {
+        matches!(
+            params.strategy,
+            Strategy::Btopt
+                | Strategy::Btultra
+                | Strategy::Btultra2
+                | Strategy::Greedy
+                | Strategy::Lazy
+                | Strategy::Lazy2
+        )
+    } else {
+        matches!(
+            params.strategy,
+            Strategy::Btopt | Strategy::Btultra | Strategy::Btultra2
+        )
+    };
+    let split_eligible = split_strategies
+        && params.window_log >= 17
         && seq_store.sequences.len() >= MIN_SEQUENCES_BLOCK_SPLITTING;
 
     let mut compressed_content = Vec::new();
@@ -1272,6 +1310,13 @@ fn estimate_partition(
     Some((scratch.len() + 3, SplitEntropyState { reps, huf, tables }))
 }
 
+/// Partition estimates memoized across the recursion: each (start,
+/// end) pair is always entered with the same deterministic entropy
+/// state (the state that results from the accepted left-path trials),
+/// so caching by range alone is exact — every overlap the binary
+/// search revisits is computed once instead of re-trial-encoded.
+type SplitMemo = std::collections::HashMap<(usize, usize), Option<(usize, SplitEntropyState)>>;
+
 /// Recursive split search: records ascending midpoints in `splits`.
 #[allow(clippy::too_many_arguments)]
 fn derive_splits(
@@ -1283,6 +1328,8 @@ fn derive_splits(
     end: usize,
     state: &SplitEntropyState,
     splits: &mut Vec<usize>,
+    memo: &mut SplitMemo,
+    scratch: &mut Vec<u8>,
 ) {
     if end - start < MIN_SEQUENCES_BLOCK_SPLITTING || splits.len() >= MAX_NB_BLOCK_SPLITS {
         return;
@@ -1298,41 +1345,35 @@ fn derive_splits(
                 0
             }
     };
-    let mut scratch = Vec::with_capacity(1 << 17);
-    let Some((whole, _)) = estimate_partition(
-        literals,
-        sequences,
-        lit_at(start),
-        lit_at(end),
-        start,
-        end,
-        state,
-        &mut scratch,
-    ) else {
+    let mut memoized = |from: usize,
+                        to: usize,
+                        st: &SplitEntropyState,
+                        memo: &mut SplitMemo,
+                        scratch: &mut Vec<u8>|
+     -> Option<(usize, SplitEntropyState)> {
+        if let Some(cached) = memo.get(&(from, to)) {
+            return cached.clone();
+        }
+        let est = estimate_partition(
+            literals,
+            sequences,
+            lit_at(from),
+            lit_at(to),
+            from,
+            to,
+            st,
+            scratch,
+        );
+        memo.insert((from, to), est.clone());
+        est
+    };
+    let Some((whole, _)) = memoized(start, end, state, memo, scratch) else {
         return;
     };
-    let Some((first, first_state)) = estimate_partition(
-        literals,
-        sequences,
-        lit_at(start),
-        lit_at(mid),
-        start,
-        mid,
-        state,
-        &mut scratch,
-    ) else {
+    let Some((first, first_state)) = memoized(start, mid, state, memo, scratch) else {
         return;
     };
-    let Some((second, _)) = estimate_partition(
-        literals,
-        sequences,
-        lit_at(mid),
-        lit_at(end),
-        mid,
-        end,
-        &first_state,
-        &mut scratch,
-    ) else {
+    let Some((second, _)) = memoized(mid, end, &first_state, memo, scratch) else {
         return;
     };
     if first + second < whole {
@@ -1345,6 +1386,8 @@ fn derive_splits(
             mid,
             state,
             splits,
+            memo,
+            scratch,
         );
         splits.push(mid);
         derive_splits(
@@ -1356,6 +1399,8 @@ fn derive_splits(
             end,
             &first_state,
             splits,
+            memo,
+            scratch,
         );
     }
 }
@@ -1392,6 +1437,8 @@ fn write_split_blocks(
         tables: last_seq_tables.clone(),
     };
     let mut splits = Vec::new();
+    let mut memo: SplitMemo = std::collections::HashMap::new();
+    let mut scratch = Vec::with_capacity(1 << 17);
     derive_splits(
         literals,
         sequences,
@@ -1401,6 +1448,8 @@ fn write_split_blocks(
         n,
         &state,
         &mut splits,
+        &mut memo,
+        &mut scratch,
     );
     if splits.is_empty() {
         return Ok(None);
