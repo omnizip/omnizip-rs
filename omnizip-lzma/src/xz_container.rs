@@ -464,9 +464,16 @@ fn decode_block(
     }
 
     let after_lzma2 = header_size + lzma2_consumed;
-    // Padding to 4-byte alignment must be zeros.
+    // Padding to 4-byte alignment must be zeros. The padding (and
+    // check) can run past a truncated input — bounds-check before
+    // slicing (fuzz seed 1592648897 pinned the panic).
     let padded = (after_lzma2 + 3) & !3;
-    if input[after_lzma2..padded].iter().any(|&b| b != 0) {
+    let padding = input
+        .get(after_lzma2..padded)
+        .ok_or_else(|| LzmaError::Corrupt {
+            reason: "XZ block padding truncated".into(),
+        })?;
+    if padding.iter().any(|&b| b != 0) {
         return Err(LzmaError::Corrupt {
             reason: "XZ block padding is non-zero".into(),
         });
