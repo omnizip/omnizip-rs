@@ -139,14 +139,18 @@ impl RpmReader {
         for i in 0..entries.len() {
             bodies.push(cpio.read_entry(i)?);
         }
-        // cpio payload paths are conventionally "./usr/…" — the Ruby
-        // handler contract (and GNU cpio extraction semantics) strip
-        // the "./" prefix, so normalize here where the names become
-        // user-facing.
+        // cpio payload paths are conventionally "./usr/…"; the Ruby
+        // handler contract (paths built from the header's DIRNAMES +
+        // BASENAMES) is ABSOLUTE — "/usr/…". Normalize the cpio names
+        // to that shape: strip the "./" prefix, ensure one leading
+        // "/".
         for entry in &mut entries {
-            if let Some(stripped) = entry.name.strip_prefix("./") {
-                entry.name = stripped.to_string();
-            }
+            let name = entry.name.strip_prefix("./").unwrap_or(&entry.name);
+            entry.name = if name.starts_with('/') {
+                name.to_string()
+            } else {
+                format!("/{name}")
+            };
         }
         self.payload = Some((entries, bodies));
         Ok(())
@@ -201,8 +205,9 @@ mod tests {
     }
 
     /// Real-world rpms carry "./usr/…" cpio names; the user-facing
-    /// entry contract (Ruby handler, GNU cpio semantics) strips the
-    /// "./" prefix. Regression gate for the payload normalization.
+    /// entry contract (the Ruby handler, built from the header's
+    /// DIRNAMES/BASENAMES) is ABSOLUTE "/usr/…". Regression gate for
+    /// the payload normalization.
     #[test]
     fn payload_names_strip_dot_slash_prefix() {
         use crate::writer::{PayloadCompression, RpmWriter};
@@ -220,7 +225,7 @@ mod tests {
         let mut r = RpmReader::from_bytes(&bytes).unwrap();
         let names: Vec<String> = r.entries().unwrap().into_iter().map(|e| e.name).collect();
         assert!(
-            names.contains(&"usr/lib/dotted.txt".to_string()),
+            names.contains(&"/usr/lib/dotted.txt".to_string()),
             "expected stripped name, got {names:?}"
         );
         assert!(
@@ -229,7 +234,7 @@ mod tests {
         );
         let idx = names
             .iter()
-            .position(|n| n == "usr/lib/dotted.txt")
+            .position(|n| n == "/usr/lib/dotted.txt")
             .unwrap();
         assert_eq!(r.read_entry(idx).unwrap(), b"dotted payload\n");
     }

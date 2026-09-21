@@ -603,13 +603,16 @@ mod tests {
             assert_eq!(info.version, "1.0.0");
             let entries = r.entries().unwrap();
             let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
+            // The reader normalizes payload names to the user-facing
+            // ABSOLUTE contract (Ruby handler: header DIRNAMES +
+            // BASENAMES), whatever form the cpio stored.
             assert!(
-                names.contains(&"usr/share/hello/hello.txt"),
+                names.contains(&"/usr/share/hello/hello.txt"),
                 "{c:?}: {names:?}"
             );
             let idx = names
                 .iter()
-                .position(|n| *n == "usr/share/hello/hello.txt")
+                .position(|n| *n == "/usr/share/hello/hello.txt")
                 .unwrap();
             assert_eq!(r.read_entry(idx).unwrap(), b"hello rpm\n");
         }
