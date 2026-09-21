@@ -14,8 +14,8 @@ name = "omnizip_rar"
 path = "src/lib.rs"
 
 [dependencies]
-omnizip-archive-core = { path = "../omnizip-archive-core", version = "0.21.108" }
-omnizip-crypto = { path = "../omnizip-crypto", version = "0.21.108" }
+omnizip-archive-core = { path = "../omnizip-archive-core", version = "0.21.109" }
+omnizip-crypto = { path = "../omnizip-crypto", version = "0.21.109" }
 
 [lints]
 workspace = true
