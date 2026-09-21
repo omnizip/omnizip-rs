@@ -71,6 +71,12 @@ jobs:
           - x86_64-unknown-linux-musl
           - aarch64-unknown-linux-musl
           - arm-unknown-linux-musleabihf
+    env:
+      # musl defaults to crt-static, and rustc then silently drops
+      # the cdylib ("unsupported crate type") — disable it so the
+      # shared object links against Alpine's libc, which is exactly
+      # what the platform gem's consumers run.
+      RUSTFLAGS: ${{ contains(matrix.target, 'musl') && '-C target-feature=-crt-static' || '' }}
     steps:
       - uses: actions/checkout@v4
         with:

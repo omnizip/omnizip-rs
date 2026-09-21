@@ -91,14 +91,13 @@ pub fn zlib_decompress(data: &[u8]) -> Result<Vec<u8>, omnizip_archive_core::Arc
 
 fn inflate_all(data: &[u8]) -> Result<Vec<u8>, omnizip_archive_core::ArchiveError> {
     use omnizip_archive_core::ArchiveError;
-    let mut hint = (data.len() * 6).max(64);
-    loop {
-        match omnizip_libdeflate::inflate::inflate(data, hint) {
-            Ok(d) => return Ok(d),
-            Err(_) if hint < (1 << 32) => hint = hint.saturating_mul(4),
-            Err(e) => return Err(ArchiveError::InvalidArchive(format!("inflate: {e}"))),
-        }
-    }
+    // The hint only sizes the first allocation; inflate's expansion
+    // cap (1032× the input) is unreachable by valid streams, so one
+    // call suffices (no growing-hint ladder — it was also a 32-bit
+    // compile error: `1usize << 32` overflows on arm).
+    let hint = (data.len() * 6).max(64);
+    omnizip_libdeflate::inflate::inflate(data, hint)
+        .map_err(|e| ArchiveError::InvalidArchive(format!("inflate: {e}")))
 }
 
 /// RFC 1950 adler32.

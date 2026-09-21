@@ -407,14 +407,13 @@ fn decode_coder(
         method::BZIP2 => omnizip_bzip2::decompress_framed(&data)
             .map_err(|e| ArchiveError::InvalidArchive(format!("7z BZip2: {e}"))),
         method::DEFLATE => {
-            let mut hint = (data.len() * 6).max(64);
-            loop {
-                match omnizip_libdeflate::inflate::inflate(&data, hint) {
-                    Ok(d) => return Ok(d),
-                    Err(_) if hint < (1 << 32) => hint = hint.saturating_mul(4),
-                    Err(e) => return Err(ArchiveError::InvalidArchive(format!("7z Deflate: {e}"))),
-                }
-            }
+            // The hint only sizes the first allocation; inflate's
+            // expansion cap is unreachable by valid streams, so no
+            // growing-hint ladder (it also broke 32-bit compiles:
+            // `1usize << 32` overflows on arm).
+            let hint = (data.len() * 6).max(64);
+            omnizip_libdeflate::inflate::inflate(&data, hint)
+                .map_err(|e| ArchiveError::InvalidArchive(format!("7z Deflate: {e}")))
         }
         method::DELTA => {
             let distance = coder.properties.first().copied().unwrap_or(0) as usize + 1;
