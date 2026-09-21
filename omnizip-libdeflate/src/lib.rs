@@ -191,11 +191,9 @@ fn deflate_wire(plaintext: &[u8], level: u8) -> Result<Vec<u8>, OmnizipError> {
     )?);
     pick(deflate_lz77::deflate_fixed_huffman_at(plaintext, tier)?);
     pick(Some(deflate::deflate_stored(plaintext)?));
-    best.ok_or_else(|| {
-        OmnizipError::EncodeFailed {
-            codec: CodecId::LIBDEFLATE,
-            reason: "no wire candidate".into(),
-        }
+    best.ok_or_else(|| OmnizipError::EncodeFailed {
+        codec: CodecId::LIBDEFLATE,
+        reason: "no wire candidate".into(),
     })
 }
 
@@ -209,25 +207,18 @@ pub fn compress_raw(plaintext: &[u8], level: u8) -> Result<Vec<u8>, OmnizipError
     deflate_wire(plaintext, level)
 }
 
-/// Inflate a RAW RFC 1951 stream of unknown length (growing hint).
+/// Inflate a RAW RFC 1951 stream of unknown length.
+///
+/// The hint only sizes the first allocation; inflate's expansion cap
+/// (1032× the input) is unreachable by valid streams, so there is no
+/// retry ladder to grow through.
 ///
 /// # Errors
 ///
 /// [`omnizip_codecs::OmnizipError::Corrupt`] on malformed input.
 pub fn decompress_raw_unknown_len(compressed: &[u8]) -> Result<Vec<u8>, OmnizipError> {
-    let mut hint = (compressed.len() * 6).max(64);
-    loop {
-        match inflate::inflate(compressed, hint) {
-            Ok(out) => return Ok(out),
-            // A capacity shortfall surfaces as a mid-stream error;
-            // every other error is structural. checked_mul bounds the
-            // retry loop on every pointer width (wasm32 included).
-            Err(e) => match hint.checked_mul(4) {
-                Some(h) if h > hint => hint = h,
-                _ => return Err(e),
-            },
-        }
-    }
+    let hint = (compressed.len() * 6).max(64);
+    inflate::inflate(compressed, hint)
 }
 
 /// Inflate a possibly-zlib-wrapped stream of unknown length (the

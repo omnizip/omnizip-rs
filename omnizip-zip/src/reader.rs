@@ -327,16 +327,19 @@ impl ZipReader {
         let out = match method {
             METHOD_STORE => raw.to_vec(),
             METHOD_DEFLATE => {
-                let mut hint = (raw.len() * 6).max(64);
-                loop {
-                    match omnizip_libdeflate::inflate::inflate(raw, hint) {
-                        Ok(d) => break d,
-                        Err(_) if hint < (1 << 32) => hint = hint.saturating_mul(4),
-                        Err(e) => {
-                            return Err(ArchiveError::InvalidArchive(format!("inflate: {e}")));
-                        }
-                    }
-                }
+                // The declared size only sizes the first allocation.
+                // inflate detects truncation at the bit level and caps
+                // expansion at 1032× the input (unreachable by valid
+                // streams), so corrupt data fails fast instead of
+                // retrying with ever-larger buffers.
+                let declared = usize::try_from(st_ref.entry.size.unwrap_or(0)).unwrap_or(0);
+                let hint = if declared > 0 {
+                    declared
+                } else {
+                    (raw.len() * 6).max(64)
+                };
+                omnizip_libdeflate::inflate::inflate(raw, hint)
+                    .map_err(|e| ArchiveError::InvalidArchive(format!("inflate: {e}")))?
             }
             METHOD_BZIP2 => omnizip_bzip2::decompress_framed(raw)
                 .map_err(|e| ArchiveError::InvalidArchive(format!("bzip2: {e}")))?,

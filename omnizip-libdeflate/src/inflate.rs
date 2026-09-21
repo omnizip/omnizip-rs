@@ -47,18 +47,24 @@ pub fn inflate(input: &[u8], expected_len: usize) -> Result<Vec<u8>, Error> {
 /// stream consumed (the caller's trailer/next-member starts there;
 /// bits already read from the final byte are not re-consumed).
 ///
+/// `expected_len` only sizes the initial allocation; it is untrusted
+/// (archive headers lie) and is capped at the ratio bound.
+///
 /// # Errors
 ///
-/// Returns [`Error`] on malformed DEFLATE data or when the output
-/// exceeds 4x `expected_len` (the safety cap).
+/// Returns [`Error`] on malformed/truncated input, or when the output
+/// exceeds the DEFLATE expansion bound (1032× the input — the cheapest
+/// possible match is 2 bits for 258 bytes, so valid streams can never
+/// reach it; only bombs and corrupt streams do).
 pub fn inflate_with_consumed(input: &[u8], expected_len: usize) -> Result<(Vec<u8>, usize), Error> {
     let mut reader = BitReader::new(input);
-    let mut out = Vec::with_capacity(expected_len);
-    // Safety cap: if the decoder produces more than 4× the expected
-    // output (or 1 MB minimum), something is wrong. Prevents
-    // infinite loops from corrupt/truncated input with zero-padded
-    // refill.
-    let max_out = expected_len.saturating_mul(4).max(1_000_000);
+    // Safety cap: a valid stream cannot expand beyond 1032× its input
+    // (1-bit length code + 1-bit distance code buys at most 258 output
+    // bytes; stored blocks are 1:1). The slack covers alignment
+    // rounding. Unlike a caller-supplied bound this one cannot be
+    // scaled by a lying archive header.
+    let max_out = input.len().saturating_mul(1032).saturating_add(4096);
+    let mut out = Vec::with_capacity(expected_len.min(max_out));
 
     loop {
         let bfinal = reader.read_bits(1)?;
@@ -93,6 +99,12 @@ pub(crate) struct BitReader<'a> {
     pos: usize,
     bits: u64,
     nbits: u32,
+    /// Where the real bits end once the buffer has been zero-extended
+    /// past end-of-input (`None` while every buffered bit is real).
+    /// Bits above this mark are phantom padding: peeking at them is
+    /// fine (the lookup needs a fixed window), consuming them is
+    /// truncation.
+    real_nbits: Option<u32>,
 }
 
 impl<'a> BitReader<'a> {
@@ -102,6 +114,7 @@ impl<'a> BitReader<'a> {
             pos: 0,
             bits: 0,
             nbits: 0,
+            real_nbits: None,
         }
     }
 
@@ -109,11 +122,13 @@ impl<'a> BitReader<'a> {
     fn refill(&mut self, n: u32) -> Result<(), Error> {
         while self.nbits < n {
             if self.pos >= self.data.len() {
-                // Not enough input bytes. Zero-extend: the high bits
-                // of `bits` are already zero, so we just pretend we
-                // have more bits available. The Huffman lookup will
-                // either find a valid code (short codes match zero-
-                // padded extensions) or report a table miss.
+                // Not enough input bytes. Zero-extend so a Huffman
+                // lookup can still probe short codes near the end;
+                // consuming beyond the real bits is rejected in
+                // read_bits/decode, so phantom zeros can never turn
+                // into output (the old behavior of decoding an
+                // endless zero-stream was a decompression bomb).
+                self.real_nbits.get_or_insert(self.nbits);
                 self.nbits = n;
                 return Ok(());
             }
@@ -123,6 +138,15 @@ impl<'a> BitReader<'a> {
             self.nbits += 8;
         }
         Ok(())
+    }
+
+    /// Real (non-phantom) bits currently consumable.
+    #[inline]
+    fn available_real(&self) -> u32 {
+        match self.real_nbits {
+            Some(real) => self.nbits.min(real),
+            None => self.nbits,
+        }
     }
 
     #[inline]
@@ -138,6 +162,9 @@ impl<'a> BitReader<'a> {
             return Ok(0);
         }
         self.refill(n)?;
+        if n > self.available_real() {
+            return Err(corrupt("DEFLATE: unexpected end of input"));
+        }
         let mask = (1u64 << n) - 1;
         let value = (self.bits & mask) as u32;
         self.bits >>= n;
@@ -408,6 +435,11 @@ impl HuffmanTable {
                 "DEFLATE: Huffman lookup miss (peek={peek:#012b})"
             )));
         }
+        if u32::from(len) > reader.available_real() {
+            return Err(corrupt(
+                "DEFLATE: unexpected end of input (truncated Huffman code)",
+            ));
+        }
         reader.consume(u32::from(len));
         Ok(sym)
     }
@@ -567,5 +599,62 @@ mod tests {
         assert_eq!(br.read_bits(3).unwrap(), 0b011);
         // Next 3 bits = 110
         assert_eq!(br.read_bits(3).unwrap(), 0b110);
+    }
+
+    #[test]
+    fn bit_reader_rejects_phantom_bits() {
+        // Reading past the end must error, not invent zero bits —
+        // the phantom zero-stream was the decompression-bomb root
+        // cause (2026-09-21 archive FFI fuzz).
+        let data = [0b11111111u8];
+        let mut br = BitReader::new(&data);
+        assert_eq!(br.read_bits(8).unwrap(), 0xff);
+        assert!(br.read_bits(1).is_err());
+        // Peeking is still allowed (fixed lookup window)…
+        assert!(br.peek_bits(9).is_ok());
+        // …but every real bit is gone.
+        assert_eq!(br.available_real(), 0);
+    }
+
+    /// Truncated streams must fail fast, not decode an endless
+    /// zero-extension into gigabytes of output. This is the pinned
+    /// shape of the fuzz hang: a mutated zip's deflate payload cut
+    /// mid-stream.
+    #[test]
+    fn truncated_stream_errors_instead_of_bombing() {
+        let plain = vec![b'a'; 300_000];
+        let deflated = crate::deflate_wire(&plain, 6).expect("deflate");
+        // Cut the stream well before its end (an end-of-block symbol
+        // lives at the tail): every length must be an error, quickly.
+        for cut in [deflated.len() / 2, deflated.len() / 4, 10] {
+            let started = std::time::Instant::now();
+            let res = inflate(&deflated[..cut], 1 << 40);
+            assert!(res.is_err(), "cut at {cut} should error");
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(2),
+                "cut at {cut} took too long — bomb behavior is back"
+            );
+        }
+    }
+
+    /// The expansion cap is 1032× the input + slack: no valid stream
+    /// can reach it (cheapest match = 2 bits per 258 bytes), and it
+    /// must not false-positive on highly compressible data either.
+    #[test]
+    fn ratio_cap_bounds_bombs_without_false_positives() {
+        // False-positive check: all-zeros is near the theoretical
+        // max ratio a real encoder produces.
+        let plain = vec![0u8; 1 << 20];
+        let deflated = crate::deflate_wire(&plain, 6).expect("deflate");
+        let ratio = plain.len() / deflated.len().max(1);
+        assert!(ratio < 1032, "test premise: encoder stays under the bound");
+        let out = inflate(&deflated, 0).expect("valid max-ratio stream decodes");
+        assert_eq!(out, plain);
+
+        // Bomb check: same stream, header claiming a gigantic size —
+        // the claim must not scale the allocation or the cap.
+        let huge_hint = usize::MAX;
+        let out = inflate(&deflated, huge_hint).expect("declared size is only a hint");
+        assert_eq!(out.len(), plain.len());
     }
 }

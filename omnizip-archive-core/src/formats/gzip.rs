@@ -191,21 +191,17 @@ fn decompress_member(input: &[u8], start: usize, out: &mut Vec<u8>) -> Result<us
 /// Inflate the raw DEFLATE stream at the front of `input`, appending
 /// the output to `out` and returning `(output, consumed_input_bytes)`.
 fn inflate_prefix(input: &[u8], out: &mut Vec<u8>) -> Result<(Vec<u8>, usize), ArchiveError> {
-    // The in-house inflate needs an expected-length hint; DEFLATE
-    // streams do not carry one. Retry with a growing hint until it
-    // succeeds — the hint only needs to bound the output.
-    let mut hint = (input.len() * 4).max(64);
-    loop {
-        match omnizip_libdeflate::inflate::inflate_with_consumed(input, hint) {
-            Ok((data, consumed)) => {
-                out.extend_from_slice(&data);
-                return Ok((data, consumed));
-            }
-            Err(_) if hint < (1 << 34) => hint = hint.saturating_mul(4),
-            Err(e) => {
-                return Err(ArchiveError::InvalidArchive(format!("inflate: {e}")));
-            }
+    // The hint only sizes the first allocation; inflate's expansion
+    // cap (1032× the input) is unreachable by valid streams, so one
+    // pass suffices — corrupt input fails fast with a real error
+    // instead of retrying with ever-larger buffers.
+    let hint = (input.len() * 4).max(64);
+    match omnizip_libdeflate::inflate::inflate_with_consumed(input, hint) {
+        Ok((data, consumed)) => {
+            out.extend_from_slice(&data);
+            Ok((data, consumed))
         }
+        Err(e) => Err(ArchiveError::InvalidArchive(format!("inflate: {e}"))),
     }
 }
 
