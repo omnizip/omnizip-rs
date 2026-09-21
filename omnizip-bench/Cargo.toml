@@ -20,28 +20,28 @@ name = "omnizip_bench"
 path = "src/lib.rs"
 
 [dependencies]
-omnizip-iso = { path = "../omnizip-iso", version = "0.21.111" }
-omnizip-rar = { path = "../omnizip-rar", version = "0.21.111" }
-omnizip-rpm = { path = "../omnizip-rpm", version = "0.21.111" }
-omnizip-xar = { path = "../omnizip-xar", version = "0.21.111" }
-omnizip-sevenzip = { path = "../omnizip-sevenzip", version = "0.21.111" }
-omnizip-cpio = { path = "../omnizip-cpio", version = "0.21.111" }
-omnizip-zip = { path = "../omnizip-zip", version = "0.21.111" }
-omnizip-tar = { path = "../omnizip-tar", version = "0.21.111" }
-omnizip-archive-core = { path = "../omnizip-archive-core", version = "0.21.111" }
-omnizip-codecs = { path = "../omnizip-codecs", version = "0.21.111" }
-omnizip-lzma = { path = "../omnizip-lzma", version = "0.21.111" }
-omnizip-zstd = { path = "../omnizip-zstd", version = "0.21.111" }
-omnizip-snappy = { path = "../omnizip-snappy", version = "0.21.111" }
-omnizip-lz4 = { path = "../omnizip-lz4", version = "0.21.111" }
-omnizip-deflate = { path = "../omnizip-deflate", version = "0.21.111" }
-omnizip-deflate64 = { path = "../omnizip-deflate64", version = "0.21.111" }
-omnizip-brotli = { path = "../omnizip-brotli", version = "0.21.111" }
-omnizip-bzip2 = { path = "../omnizip-bzip2", version = "0.21.111" }
-omnizip-ppmd = { path = "../omnizip-ppmd", version = "0.21.111" }
-omnizip-zpaq = { path = "../omnizip-zpaq", version = "0.21.111" }
-omnizip-glza = { path = "../omnizip-glza", version = "0.21.111" }
-omnizip-flac = { path = "../omnizip-flac", version = "0.21.111" }
+omnizip-iso = { path = "../omnizip-iso", version = "0.21.112" }
+omnizip-rar = { path = "../omnizip-rar", version = "0.21.112" }
+omnizip-rpm = { path = "../omnizip-rpm", version = "0.21.112" }
+omnizip-xar = { path = "../omnizip-xar", version = "0.21.112" }
+omnizip-sevenzip = { path = "../omnizip-sevenzip", version = "0.21.112" }
+omnizip-cpio = { path = "../omnizip-cpio", version = "0.21.112" }
+omnizip-zip = { path = "../omnizip-zip", version = "0.21.112" }
+omnizip-tar = { path = "../omnizip-tar", version = "0.21.112" }
+omnizip-archive-core = { path = "../omnizip-archive-core", version = "0.21.112" }
+omnizip-codecs = { path = "../omnizip-codecs", version = "0.21.112" }
+omnizip-lzma = { path = "../omnizip-lzma", version = "0.21.112" }
+omnizip-zstd = { path = "../omnizip-zstd", version = "0.21.112" }
+omnizip-snappy = { path = "../omnizip-snappy", version = "0.21.112" }
+omnizip-lz4 = { path = "../omnizip-lz4", version = "0.21.112" }
+omnizip-deflate = { path = "../omnizip-deflate", version = "0.21.112" }
+omnizip-deflate64 = { path = "../omnizip-deflate64", version = "0.21.112" }
+omnizip-brotli = { path = "../omnizip-brotli", version = "0.21.112" }
+omnizip-bzip2 = { path = "../omnizip-bzip2", version = "0.21.112" }
+omnizip-ppmd = { path = "../omnizip-ppmd", version = "0.21.112" }
+omnizip-zpaq = { path = "../omnizip-zpaq", version = "0.21.112" }
+omnizip-glza = { path = "../omnizip-glza", version = "0.21.112" }
+omnizip-flac = { path = "../omnizip-flac", version = "0.21.112" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 clap = { version = "4.5", features = ["derive"] }

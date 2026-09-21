@@ -9,4 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Normalize payload names to the ABSOLUTE user-facing contract by @[object]
+
+### Fixed
+
 - Strip the cpio './' prefix from payload entry names by @[object]

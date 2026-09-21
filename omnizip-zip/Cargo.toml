@@ -8,11 +8,11 @@ repository.workspace = true
 description = "ZIP container (store/deflate/bzip2/zstd methods, ZIP64) on omnizip-archive-core"
 
 [dependencies]
-omnizip-archive-core = { path = "../omnizip-archive-core", version = "0.21.111" }
-omnizip-libdeflate = { path = "../omnizip-libdeflate", version = "0.21.111" }
-omnizip-bzip2 = { path = "../omnizip-bzip2", version = "0.21.111" }
-omnizip-zstd = { path = "../omnizip-zstd", version = "0.21.111" }
-omnizip-crypto = { path = "../omnizip-crypto", version = "0.21.111" }
+omnizip-archive-core = { path = "../omnizip-archive-core", version = "0.21.112" }
+omnizip-libdeflate = { path = "../omnizip-libdeflate", version = "0.21.112" }
+omnizip-bzip2 = { path = "../omnizip-bzip2", version = "0.21.112" }
+omnizip-zstd = { path = "../omnizip-zstd", version = "0.21.112" }
+omnizip-crypto = { path = "../omnizip-crypto", version = "0.21.112" }
 
 [lints]
 workspace = true
