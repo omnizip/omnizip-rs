@@ -119,3 +119,30 @@ block-form `open`), `Backends.archive_entry_names` /
 `ZipHandler#list` (names path) and `#read_entry`. Generic over every
 format the handle probes — other handlers can adopt the same two seam
 calls.
+
+## 8. Prebuilt-binary distribution (2026-09-21, parsanol model)
+
+Ruby users get Rust acceleration with **zero compilation**:
+
+- **Rust side** — `.github/workflows/release-binary.yml`
+  cross-builds the cdylib for 11 targets (x86_64/aarch64/arm Linux
+  gnu+musl via docker `cross`, arm64/x86_64 macOS native, x64+aarch64
+  Windows MSVC with static CRT, x64-mingw32 via mingw-w64), strips
+  and checksums each, and attaches the tarballs to the
+  `omnizip-ffi-v*` release. `ozip_version()` exports the crate semver
+  so the smoke gate can pin the vendored build. (GITHUB_TOKEN tag
+  pushes don't self-trigger workflows — dispatch manually per tag.)
+- **Gem side** — `gem-build.yml` downloads the artifacts, builds
+  platform gems (full gem + one cdylib at `vendor/`, `spec.platform`
+  flipped), smoke-tests each installed gem on a matching runner
+  (tier active + archive tier + pure-Ruby path with
+  `OMNIZIP_NO_RUST=1`), then pushes on explicit opt-in. The plain
+  `ruby` gem keeps shipping via the cimas release; every platform
+  without a binary — JRuby, TruffleRuby, anything else — stays on
+  the pure-Ruby core, and `OMNIZIP_NO_RUST=1` disables the tier
+  anywhere.
+- **Loader precedence** — `Library.resolve_path`: OMNIZIP_NO_RUST
+  kill switch → OMNIZIP_FFI_DYLIB → `vendor/` (platform gem's
+  prebuilt cdylib; RubyGems matched the platform at install time) →
+  `ext/` → sibling checkout. `Library.dylib_version` reads
+  `ozip_version`.
