@@ -217,7 +217,8 @@ unsafe fn try_decompress(
     // Codec trait enforces exact lengths, so this routes to each
     // codec's length-agnostic free function instead.
     let result = if expected_len == usize::MAX {
-        std::panic::catch_unwind(|| match name.as_str() {
+        std::panic::catch_unwind(|| {
+            match name.as_str() {
             "zstd" => omnizip_zstd::decompress(data, u32::MAX).map_err(|e| e.to_string()),
             "bzip2" => omnizip_bzip2::decompress_framed(data).map_err(|e| e.to_string()),
             "lzma" | "xz" => omnizip_lzma::xz_decompress(data).map_err(|e| e.to_string()),
@@ -256,6 +257,7 @@ unsafe fn try_decompress(
             other => Err(format!(
                 "unknown codec '{other}' (available: zstd, bzip2, lzma, xz, deflate, deflate64, lzma-alone, lzip, zlib, gzip, ppmd7:*, ppmd8:*)"
             )),
+        }
         })
     } else {
         let Ok(expected) = u32::try_from(expected_len) else {
@@ -303,6 +305,251 @@ fn ozip_take(mut v: Vec<u8>) -> *mut u8 {
     ptr
 }
 
+/// An opened archive: one `ArchiveReader` (any supported format,
+/// auto-detected) plus its materialized entry list. Opaque handle for
+/// the archive-level FFI surface — the gem's whole-archive
+/// operations (list entries, read entry) ride this instead of
+/// decoding entry-by-entry through codec names.
+pub struct ArchHandle {
+    reader: Box<dyn omnizip_archive_core::ArchiveReader>,
+    entries: Vec<omnizip_archive_core::ArchiveEntry>,
+    last_name: CString,
+}
+
+fn open_archive_reader(
+    data: &[u8],
+    password: Option<&str>,
+) -> Result<Box<dyn omnizip_archive_core::ArchiveReader>, String> {
+    use omnizip_archive_core::detect::{detect_format, FormatKind};
+    let pw = password;
+    match detect_format(data) {
+        FormatKind::Zip => Ok(Box::new(
+            omnizip_zip::ZipReader::from_bytes(data).map_err(|e| e.to_string())?,
+        )),
+        FormatKind::Tar => Ok(Box::new(
+            omnizip_tar::TarReader::from_bytes(data).map_err(|e| e.to_string())?,
+        )),
+        FormatKind::Cpio => Ok(Box::new(
+            omnizip_cpio::CpioReader::from_bytes(data).map_err(|e| e.to_string())?,
+        )),
+        FormatKind::SevenZip => Ok(Box::new(
+            omnizip_sevenzip::reader::SevenZipReader::from_bytes_with_password(data, pw)
+                .map_err(|e| e.to_string())?,
+        )),
+        FormatKind::Rar5 => match pw {
+            Some(p) => omnizip_rar::rar5::Rar5Reader::from_bytes_with_password(data, p)
+                .map(|r| Box::new(r) as Box<dyn omnizip_archive_core::ArchiveReader>)
+                .map_err(|e| e.to_string()),
+            None => omnizip_rar::rar5::Rar5Reader::from_bytes(data)
+                .map(|r| Box::new(r) as Box<dyn omnizip_archive_core::ArchiveReader>)
+                .map_err(|e| e.to_string()),
+        },
+        FormatKind::Rar4 => match pw {
+            Some(p) => omnizip_rar::rar3::Rar4Reader::from_bytes_with_password(data, p)
+                .map(|r| Box::new(r) as Box<dyn omnizip_archive_core::ArchiveReader>)
+                .map_err(|e| e.to_string()),
+            None => omnizip_rar::rar3::Rar4Reader::from_bytes(data)
+                .map(|r| Box::new(r) as Box<dyn omnizip_archive_core::ArchiveReader>)
+                .map_err(|e| e.to_string()),
+        },
+        // ISO/RPM/XAR/OLE have magic sniffing in their own crates'
+        // readers; detect_format's enum predates them. Try them in a
+        // fixed order for kinds the enum cannot express.
+        _ => {
+            for probe in [
+                omnizip_iso::reader::IsoReader::from_bytes(data)
+                    .ok()
+                    .map(|r| Box::new(r) as Box<dyn omnizip_archive_core::ArchiveReader>),
+                omnizip_rpm::reader::RpmReader::from_bytes(data)
+                    .ok()
+                    .map(|r| Box::new(r) as Box<dyn omnizip_archive_core::ArchiveReader>),
+                omnizip_xar::reader::XarReader::from_bytes(data)
+                    .ok()
+                    .map(|r| Box::new(r) as Box<dyn omnizip_archive_core::ArchiveReader>),
+                omnizip_ole::reader::OleReader::from_bytes(data)
+                    .ok()
+                    .map(|r| Box::new(r) as Box<dyn omnizip_archive_core::ArchiveReader>),
+            ] {
+                if let Some(reader) = probe {
+                    return Ok(reader);
+                }
+            }
+            Err("unsupported archive format kind".into())
+        }
+    }
+}
+
+/// Open an archive from raw bytes (format auto-detected; optional
+/// NUL-terminated password). Returns NULL on error
+/// ([`ozip_last_error`]). Free with [`ozip_arch_close`].
+#[allow(unsafe_code)]
+#[no_mangle]
+pub unsafe extern "C" fn ozip_arch_open(
+    data: *const u8,
+    len: usize,
+    password: *const c_char,
+) -> *mut ArchHandle {
+    #[allow(unsafe_code)]
+    match unsafe { try_arch_open(data, len, password) } {
+        Ok(h) => Box::into_raw(h),
+        Err(()) => std::ptr::null_mut(),
+    }
+}
+
+#[allow(unsafe_code)]
+unsafe fn try_arch_open(
+    data: *const u8,
+    len: usize,
+    password: *const c_char,
+) -> Result<Box<ArchHandle>, ()> {
+    if data.is_null() {
+        set_last_error("arch data pointer is null".into());
+        return Err(());
+    }
+    // SAFETY: caller guarantees readability for `len` bytes.
+    let bytes = unsafe { std::slice::from_raw_parts(data, len) };
+    let pw = if password.is_null() {
+        None
+    } else {
+        // SAFETY: caller guarantees NUL termination.
+        Some(
+            unsafe { std::ffi::CStr::from_ptr(password) }
+                .to_string_lossy()
+                .into_owned(),
+        )
+    };
+    let result = std::panic::catch_unwind(|| {
+        let mut reader = open_archive_reader(bytes, pw.as_deref())?;
+        let entries = reader.entries().map_err(|e| format!("entries: {e}"))?;
+        Ok::<_, String>(ArchHandle {
+            reader,
+            entries,
+            last_name: CString::new("no entry").expect("static"),
+        })
+    });
+    match result {
+        Ok(Ok(mut h)) => {
+            h.last_name = CString::new("ok").expect("static");
+            Ok(Box::new(h))
+        }
+        Ok(Err(msg)) => {
+            set_last_error(msg);
+            Err(())
+        }
+        Err(_) => {
+            set_last_error("archive open panicked".into());
+            Err(())
+        }
+    }
+}
+
+/// Number of entries in the opened archive. 0 on NULL handle.
+#[allow(unsafe_code)]
+#[no_mangle]
+pub unsafe extern "C" fn ozip_arch_count(handle: *const ArchHandle) -> usize {
+    if handle.is_null() {
+        return 0;
+    }
+    // SAFETY: handle came from ozip_arch_open and was not closed.
+    (unsafe { &*handle }).entries.len()
+}
+
+/// Entry name (NUL-terminated, valid until the next call on this
+/// handle). NULL on out-of-range index.
+#[allow(unsafe_code)]
+#[no_mangle]
+pub unsafe extern "C" fn ozip_arch_entry_name(
+    handle: *mut ArchHandle,
+    index: usize,
+) -> *const c_char {
+    if handle.is_null() {
+        return std::ptr::null();
+    }
+    // SAFETY: handle came from ozip_arch_open and was not closed.
+    let h = unsafe { &mut *handle };
+    match h.entries.get(index) {
+        Some(e) => {
+            h.last_name = CString::new(e.name.clone())
+                .unwrap_or_else(|_| CString::new("bad name").expect("static"));
+            h.last_name.as_ptr()
+        }
+        None => std::ptr::null(),
+    }
+}
+
+/// Entry uncompressed size (u64). 0 on out-of-range.
+#[allow(unsafe_code)]
+#[no_mangle]
+pub unsafe extern "C" fn ozip_arch_entry_size(handle: *const ArchHandle, index: usize) -> u64 {
+    if handle.is_null() {
+        return 0;
+    }
+    // SAFETY: handle from ozip_arch_open.
+    (unsafe { &*handle })
+        .entries
+        .get(index)
+        .and_then(|e| e.size)
+        .unwrap_or(0)
+}
+
+/// Read one entry's uncompressed bytes; free the buffer with
+/// [`ozip_free`]. NULL on error.
+#[allow(unsafe_code)]
+#[no_mangle]
+pub unsafe extern "C" fn ozip_arch_read_entry(
+    handle: *mut ArchHandle,
+    index: usize,
+    out_len: *mut usize,
+) -> *mut u8 {
+    #[allow(unsafe_code)]
+    match unsafe { try_arch_read_entry(handle, index, out_len) } {
+        Ok(ptr) => ptr,
+        Err(()) => std::ptr::null_mut(),
+    }
+}
+
+#[allow(unsafe_code)]
+unsafe fn try_arch_read_entry(
+    handle: *mut ArchHandle,
+    index: usize,
+    out_len: *mut usize,
+) -> Result<*mut u8, ()> {
+    if handle.is_null() || out_len.is_null() {
+        set_last_error("arch read: null handle or out_len".into());
+        return Err(());
+    }
+    // SAFETY: handle from ozip_arch_open.
+    let h = unsafe { &mut *handle };
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        h.reader.read_entry(index).map_err(|e| e.to_string())
+    }));
+    match result {
+        Ok(Ok(out)) => {
+            // SAFETY: caller-provided writable slot.
+            unsafe { *out_len = out.len() };
+            Ok(ozip_take(out))
+        }
+        Ok(Err(msg)) => {
+            set_last_error(msg);
+            Err(())
+        }
+        Err(_) => {
+            set_last_error("entry read panicked".into());
+            Err(())
+        }
+    }
+}
+
+/// Close an archive handle (freeing it). NULL is a no-op.
+#[allow(unsafe_code)]
+#[no_mangle]
+pub unsafe extern "C" fn ozip_arch_close(handle: *mut ArchHandle) {
+    if !handle.is_null() {
+        // SAFETY: ownership transfers back exactly once.
+        drop(unsafe { Box::from_raw(handle) });
+    }
+}
+
 /// `ppmd7:o{order}:m{mem}` / `ppmd8:o{order}:m{mem}` — the gem's
 /// PPMd algorithms carry their parameters in the codec name (the FFI
 /// ABI has no params argument); `mem` is bytes.
@@ -314,8 +561,14 @@ fn parse_ppmd_name(name: &str) -> Result<(u8, u8, usize), String> {
         Some("ppmd8") => 8,
         _ => return Err(bad()),
     };
-    let order = parts.next().and_then(|p| p.strip_prefix('o')).ok_or_else(bad)?;
-    let mem = parts.next().and_then(|p| p.strip_prefix('m')).ok_or_else(bad)?;
+    let order = parts
+        .next()
+        .and_then(|p| p.strip_prefix('o'))
+        .ok_or_else(bad)?;
+    let mem = parts
+        .next()
+        .and_then(|p| p.strip_prefix('m'))
+        .ok_or_else(bad)?;
     if parts.next().is_some() {
         return Err(bad());
     }
@@ -336,7 +589,11 @@ impl Codec for PpmdAdapter7 {
     fn name(&self) -> &'static str {
         "ppmd7"
     }
-    fn compress(&self, plaintext: &[u8], _level: CompressionLevel) -> Result<Vec<u8>, OmnizipError> {
+    fn compress(
+        &self,
+        plaintext: &[u8],
+        _level: CompressionLevel,
+    ) -> Result<Vec<u8>, OmnizipError> {
         omnizip_ppmd::ppmd7::codec::compress_with_budget(plaintext, self.order, self.mem)
             .map_err(map_ppmd_err)
     }
@@ -362,7 +619,11 @@ impl Codec for PpmdAdapter8 {
     fn name(&self) -> &'static str {
         "ppmd8"
     }
-    fn compress(&self, plaintext: &[u8], _level: CompressionLevel) -> Result<Vec<u8>, OmnizipError> {
+    fn compress(
+        &self,
+        plaintext: &[u8],
+        _level: CompressionLevel,
+    ) -> Result<Vec<u8>, OmnizipError> {
         omnizip_ppmd::ppmd8::codec::compress_with_budget(plaintext, self.order, self.mem)
             .map_err(map_ppmd_err)
     }
@@ -395,11 +656,7 @@ impl Codec for GzipAdapter {
     fn name(&self) -> &'static str {
         "gzip"
     }
-    fn compress(
-        &self,
-        plaintext: &[u8],
-        level: CompressionLevel,
-    ) -> Result<Vec<u8>, OmnizipError> {
+    fn compress(&self, plaintext: &[u8], level: CompressionLevel) -> Result<Vec<u8>, OmnizipError> {
         let opts = omnizip_archive_core::formats::gzip::GzipOptions {
             level: level.as_u8().min(9),
             ..Default::default()
@@ -440,11 +697,7 @@ impl Codec for RawDeflateAdapter {
     fn name(&self) -> &'static str {
         "deflate"
     }
-    fn compress(
-        &self,
-        plaintext: &[u8],
-        level: CompressionLevel,
-    ) -> Result<Vec<u8>, OmnizipError> {
+    fn compress(&self, plaintext: &[u8], level: CompressionLevel) -> Result<Vec<u8>, OmnizipError> {
         omnizip_libdeflate::compress_raw(plaintext, level.as_u8())
     }
     fn decompress(&self, compressed: &[u8], expected_len: u32) -> Result<Vec<u8>, OmnizipError> {
@@ -473,14 +726,20 @@ impl Codec for LzmaAloneAdapter {
     fn name(&self) -> &'static str {
         "lzma-alone"
     }
-    fn compress(
-        &self,
-        plaintext: &[u8],
-        level: CompressionLevel,
-    ) -> Result<Vec<u8>, OmnizipError> {
+    fn compress(&self, plaintext: &[u8], level: CompressionLevel) -> Result<Vec<u8>, OmnizipError> {
         let lv = level.as_u8().min(9);
-        let dict_size: u32 = [1 << 16, 1 << 20, 1 << 21, 1 << 22, 1 << 22, 1 << 23, 1 << 23, 1 << 24, 1 << 25, 1 << 26]
-            [usize::from(lv)];
+        let dict_size: u32 = [
+            1 << 16,
+            1 << 20,
+            1 << 21,
+            1 << 22,
+            1 << 22,
+            1 << 23,
+            1 << 23,
+            1 << 24,
+            1 << 25,
+            1 << 26,
+        ][usize::from(lv)];
         let opts = omnizip_lzma::LzmaOptions {
             dict_size,
             ..Default::default()
@@ -505,7 +764,11 @@ impl Codec for LzipAdapter {
     fn name(&self) -> &'static str {
         "lzip"
     }
-    fn compress(&self, _plaintext: &[u8], _level: CompressionLevel) -> Result<Vec<u8>, OmnizipError> {
+    fn compress(
+        &self,
+        _plaintext: &[u8],
+        _level: CompressionLevel,
+    ) -> Result<Vec<u8>, OmnizipError> {
         Err(OmnizipError::Unsupported {
             codec: omnizip_codecs::CodecId::LZMA,
             reason: "lzip compression is not available through the FFI".into(),
@@ -619,11 +882,9 @@ mod tests {
                 &mut dec_len,
             )
         };
-        assert!(
-            !dec.is_null(),
-            "lzip decode failed: {}",
-            unsafe { CStr::from_ptr(ozip_last_error()).to_string_lossy() }
-        );
+        assert!(!dec.is_null(), "lzip decode failed: {}", unsafe {
+            CStr::from_ptr(ozip_last_error()).to_string_lossy()
+        });
         let restored = unsafe { std::slice::from_raw_parts(dec, dec_len) };
         assert_eq!(restored, &expected[..]);
         unsafe { ozip_free(dec, dec_len) };
@@ -633,10 +894,30 @@ mod tests {
     fn unknown_length_paths_cover_new_codecs() {
         use std::ffi::CStr;
         for (name, encoded) in [
-            ("deflate", omnizip_libdeflate::compress_raw(&sample(20_000), 6).unwrap()),
-            ("deflate64", omnizip_deflate64::Deflate64Codec.compress(&sample(20_000), CompressionLevel::new(6)).unwrap()),
-            ("lzma-alone", omnizip_lzma::lzma_alone_compress_with_options(&sample(20_000), &omnizip_lzma::LzmaOptions::default()).unwrap()),
-            ("zlib", omnizip_libdeflate::LibdeflateCodec.compress(&sample(20_000), CompressionLevel::new(6)).unwrap()),
+            (
+                "deflate",
+                omnizip_libdeflate::compress_raw(&sample(20_000), 6).unwrap(),
+            ),
+            (
+                "deflate64",
+                omnizip_deflate64::Deflate64Codec
+                    .compress(&sample(20_000), CompressionLevel::new(6))
+                    .unwrap(),
+            ),
+            (
+                "lzma-alone",
+                omnizip_lzma::lzma_alone_compress_with_options(
+                    &sample(20_000),
+                    &omnizip_lzma::LzmaOptions::default(),
+                )
+                .unwrap(),
+            ),
+            (
+                "zlib",
+                omnizip_libdeflate::LibdeflateCodec
+                    .compress(&sample(20_000), CompressionLevel::new(6))
+                    .unwrap(),
+            ),
             ("gzip", {
                 let opts = omnizip_archive_core::formats::gzip::GzipOptions::default();
                 omnizip_archive_core::formats::gzip::compress(&sample(20_000), &opts).unwrap()
@@ -668,6 +949,87 @@ mod tests {
     fn empty_and_tiny_inputs() {
         roundtrip("zstd", 3, &[]);
         roundtrip("bzip2", 1, b"x");
+    }
+
+    fn zip_archive() -> Vec<u8> {
+        use omnizip_archive_core::{NewEntry, WriteOptions};
+        use omnizip_zip::{ZipMethod, ZipWriter};
+        let mut w = ZipWriter::new();
+        let opts = WriteOptions::default();
+        let body: Vec<u8> = (0..30_000u32).map(|i| (i % 251) as u8).collect();
+        let p = ZipWriter::prepare(ZipMethod::Deflate, &body).unwrap();
+        w.add_file_prepared(&NewEntry::file("a.bin", &opts), &p, &opts)
+            .unwrap();
+        let p2 = ZipWriter::prepare(ZipMethod::Deflate, b"hello archive tier").unwrap();
+        w.add_file_prepared(&NewEntry::file("b.txt", &opts), &p2, &opts)
+            .unwrap();
+        w.finish_bytes().unwrap()
+    }
+
+    #[test]
+    fn archive_handle_round_trips() {
+        use std::ffi::CStr;
+        let bytes = zip_archive();
+        let h = unsafe { ozip_arch_open(bytes.as_ptr(), bytes.len(), std::ptr::null()) };
+        assert!(!h.is_null(), "arch open failed: {}", unsafe {
+            CStr::from_ptr(ozip_last_error()).to_string_lossy()
+        });
+        assert_eq!(unsafe { ozip_arch_count(h) }, 2);
+        let n = unsafe { ozip_arch_entry_name(h, 0) };
+        assert_eq!(unsafe { CStr::from_ptr(n) }.to_bytes(), b"a.bin");
+        assert_eq!(unsafe { ozip_arch_entry_size(h, 0) }, 30_000);
+        let mut out_len = 0usize;
+        let buf = unsafe { ozip_arch_read_entry(h, 0, &mut out_len) };
+        assert!(!buf.is_null());
+        assert_eq!(out_len, 30_000);
+        let restored = unsafe { std::slice::from_raw_parts(buf, out_len) };
+        assert_eq!(restored.len(), 30_000);
+        unsafe { ozip_free(buf, out_len) };
+        let mut l2 = 0usize;
+        let b2 = unsafe { ozip_arch_read_entry(h, 1, &mut l2) };
+        assert_eq!(
+            unsafe { std::slice::from_raw_parts(b2, l2) },
+            b"hello archive tier"
+        );
+        unsafe { ozip_free(b2, l2) };
+        unsafe { ozip_arch_close(h) };
+    }
+
+    #[test]
+    fn archive_handle_fuzz_no_panics() {
+        let bytes = zip_archive();
+        let mut rng = 0xC0DE_AAAAu64;
+        let mut next = move || {
+            rng ^= rng << 13;
+            rng ^= rng >> 7;
+            rng ^= rng << 17;
+            rng
+        };
+        for case in 0..600 {
+            let mut input = bytes.clone();
+            let flips = 1 + (next() % 8) as usize;
+            for _ in 0..flips {
+                let pos = (next() as usize) % input.len();
+                input[pos] ^= (next() % 255 + 1) as u8;
+            }
+            let r = std::panic::catch_unwind(|| {
+                let h = unsafe { ozip_arch_open(input.as_ptr(), input.len(), std::ptr::null()) };
+                if !h.is_null() {
+                    unsafe {
+                        let count = ozip_arch_count(h);
+                        for i in 0..count.min(4) {
+                            let mut l = 0usize;
+                            let b = ozip_arch_read_entry(h, i, &mut l);
+                            if !b.is_null() {
+                                ozip_free(b, l);
+                            }
+                        }
+                        ozip_arch_close(h);
+                    }
+                }
+            });
+            assert!(r.is_ok(), "case {case} panicked");
+        }
     }
 
     #[test]
