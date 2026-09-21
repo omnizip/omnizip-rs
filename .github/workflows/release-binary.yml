@@ -94,8 +94,16 @@ jobs:
       - name: Package
         run: |
           mkdir -p dist
-          llvm-strip "target/${{ matrix.target }}/release/libomnizip_ffi.so"
-          cp "target/${{ matrix.target }}/release/libomnizip_ffi.so" dist/
+          # cross may place the cdylib under the triple dir or a
+          # container-mounted layout — locate it rather than assume.
+          so=$(find "target/${{ matrix.target }}" -name 'libomnizip_ffi.so' -print -quit 2>/dev/null)
+          if [ -z "$so" ]; then
+            so=$(find target -name 'libomnizip_ffi.so' -print -quit 2>/dev/null)
+          fi
+          test -n "$so" || { ls -R "target/${{ matrix.target }}" | head -40; exit 1; }
+          echo "cdylib: $so"
+          llvm-strip "$so"
+          cp "$so" dist/
           tar -czf "dist/libomnizip_ffi-${{ matrix.target }}.tar.gz" \
             -C dist libomnizip_ffi.so
           rm dist/libomnizip_ffi.so
@@ -133,7 +141,10 @@ jobs:
       - name: Package
         run: |
           mkdir -p dist
-          strip "target/${{ matrix.target }}/release/libomnizip_ffi.dylib"
+          # -x strips local symbols only: plain strip refuses dylibs
+          # whose indirect symbol table entries reference symbols it
+          # cannot strip (Rust cdylibs hit this on Xcode 15).
+          strip -x "target/${{ matrix.target }}/release/libomnizip_ffi.dylib"
           cp "target/${{ matrix.target }}/release/libomnizip_ffi.dylib" dist/
           tar -czf "dist/libomnizip_ffi-${{ matrix.target }}.tar.gz" \
             -C dist libomnizip_ffi.dylib
