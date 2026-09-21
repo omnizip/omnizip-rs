@@ -115,10 +115,6 @@ formats (gzip/bzip2/xz/zstd/lzip/lzma-alone) stay on the codec-level
 tier — they have one implicit entry, which the codec name already
 covers. Ruby side: `Implementations::Rust::Archive` (Fiddle bindings,
 block-form `open`), `Backends.archive_entry_names` /
-`archive_read_entry` (nil → Ruby fallback), wired into
-`ZipHandler#list` (names path) and `#read_entry`. Generic over every
-format the handle probes — other handlers can adopt the same two seam
-calls.
 
 ## 8. Prebuilt-binary distribution (2026-09-21, parsanol model)
 
@@ -146,3 +142,20 @@ Ruby users get Rust acceleration with **zero compilation**:
   prebuilt cdylib; RubyGems matched the platform at install time) →
   `ext/` → sibling checkout. `Library.dylib_version` reads
   `ozip_version`.
+`archive_read_entry` (nil → Ruby fallback; `password:` for rar/7z).
+
+Per-handler wiring (list = names path only; details stays Ruby;
+tier-first with Ruby fallback everywhere; differential-pinned by the
+gem's `rust_tier_handlers_spec.rb`):
+
+| Handler | list | read_entry | note |
+|---|---|---|---|
+| zip | tier | tier | pilot |
+| tar | tier | tier | tar.gz/bz2/xz/zst fall back (single-file wrapper, not probeable) |
+| cpio | tier | tier | |
+| 7z | tier | tier | `password:` passthrough |
+| rar3/4/5 | tier | tier | `password:` passthrough; encrypted-rar fixture in the spec |
+| iso | tier | tier | |
+| xar | tier | tier | |
+| rpm | Ruby | tier | Rust ≥ 0.21.111 strips the cpio `./` prefix (705); read-by-name falls back harmlessly on older dylibs |
+| ole | Ruby | Ruby | pinned model divergence: Ruby lists top-level entries, Rust flattens the storage tree — wiring would change user-visible names |
