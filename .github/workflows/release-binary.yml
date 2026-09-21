@@ -1,0 +1,245 @@
+# Cross-build the omnizip-ffi cdylib for every platform the Ruby gem
+# ships prebuilt gems for (the parsanol distribution model, adopted
+# 2026-09-21). Pure-Rust workspace — no C dependencies — so each
+# target needs only a linker. Artifacts attach to the omnizip-ffi-v*
+# release; the gem's gem-build workflow downloads them to vendor into
+# platform gems, so `gem install omnizip` needs no compilation.
+#
+# Target → rubygems platform map (kept in sync with the gem repo's
+# rakelib/platform_gems.rake):
+#   x86_64-unknown-linux-gnu      → x86_64-linux
+#   aarch64-unknown-linux-gnu     → aarch64-linux
+#   arm-unknown-linux-gnueabihf   → arm-linux
+#   x86_64-unknown-linux-musl     → x86_64-linux-musl
+#   aarch64-unknown-linux-musl    → aarch64-linux-musl
+#   arm-unknown-linux-musleabihf  → arm-linux-musl
+#   aarch64-apple-darwin          → arm64-darwin
+#   x86_64-apple-darwin           → x86_64-darwin
+#   x86_64-pc-windows-msvc        → x64-mingw-ucrt
+#   aarch64-pc-windows-msvc       → aarch64-mingw-ucrt
+#   x86_64-pc-windows-gnu         → x64-mingw32
+
+name: Release Binaries
+
+on:
+  push:
+    tags: ["omnizip-ffi-v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to build and attach to (default: latest omnizip-ffi-v*)"
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  resolve:
+    name: Resolve tag
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+    steps:
+      - id: tag
+        run: |
+          if [ -n "${{ inputs.tag }}" ]; then
+            t="${{ inputs.tag }}"
+          elif [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            t="${GITHUB_REF#refs/tags/}"
+          else
+            t=$(git ls-remote --tags --sort=-v:refname origin 'omnizip-ffi-v*' \
+              | head -1 | sed 's#.*refs/tags/##')
+          fi
+          echo "tag=$t" >> "$GITHUB_OUTPUT"
+          test -n "$t"
+
+  linux:
+    name: Linux (${{ matrix.target }})
+    needs: resolve
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - x86_64-unknown-linux-gnu
+          - aarch64-unknown-linux-gnu
+          - arm-unknown-linux-gnueabihf
+          - x86_64-unknown-linux-musl
+          - aarch64-unknown-linux-musl
+          - arm-unknown-linux-musleabihf
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.tag }}
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      # multi-target strip for every ELF this matrix produces
+      - name: Install llvm tools
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends llvm
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cross
+
+      - name: Build
+        run: cross build --release -p omnizip-ffi --target ${{ matrix.target }}
+
+      - name: Package
+        run: |
+          mkdir -p dist
+          llvm-strip "target/${{ matrix.target }}/release/libomnizip_ffi.so"
+          cp "target/${{ matrix.target }}/release/libomnizip_ffi.so" dist/
+          tar -czf "dist/libomnizip_ffi-${{ matrix.target }}.tar.gz" \
+            -C dist libomnizip_ffi.so
+          rm dist/libomnizip_ffi.so
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: libomnizip_ffi-${{ matrix.target }}
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  macos:
+    name: macOS (${{ matrix.target }})
+    needs: resolve
+    runs-on: macos-14
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - aarch64-apple-darwin
+          - x86_64-apple-darwin
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.tag }}
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Build
+        run: cargo build --release -p omnizip-ffi --target ${{ matrix.target }}
+        env:
+          MACOSX_DEPLOYMENT_TARGET: "11.0"
+
+      - name: Package
+        run: |
+          mkdir -p dist
+          strip "target/${{ matrix.target }}/release/libomnizip_ffi.dylib"
+          cp "target/${{ matrix.target }}/release/libomnizip_ffi.dylib" dist/
+          tar -czf "dist/libomnizip_ffi-${{ matrix.target }}.tar.gz" \
+            -C dist libomnizip_ffi.dylib
+          rm dist/libomnizip_ffi.dylib
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: libomnizip_ffi-${{ matrix.target }}
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  windows-msvc:
+    name: Windows MSVC (${{ matrix.target }})
+    needs: resolve
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - x86_64-pc-windows-msvc
+          - aarch64-pc-windows-msvc
+    env:
+      # Static CRT: the DLL must load on machines without the MSVC
+      # redistributable (RubyInstaller ships the UCRT runtime, not the
+      # MSVC one).
+      RUSTFLAGS: -C target-feature=+crt-static
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.tag }}
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Build
+        run: cargo build --release -p omnizip-ffi --target ${{ matrix.target }}
+
+      - name: Package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/omnizip_ffi.dll" dist/libomnizip_ffi.dll
+          tar -czf "dist/libomnizip_ffi-${{ matrix.target }}.tar.gz" -C dist libomnizip_ffi.dll
+          Remove-Item dist/libomnizip_ffi.dll
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: libomnizip_ffi-${{ matrix.target }}
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  windows-gnu:
+    name: Windows GNU (x86_64-pc-windows-gnu)
+    needs: resolve
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.tag }}
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-gnu
+
+      - name: Install mingw-w64
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends mingw-w64 llvm
+
+      - name: Build
+        run: cargo build --release -p omnizip-ffi --target x86_64-pc-windows-gnu
+        env:
+          CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER: x86_64-w64-mingw32-gcc
+
+      - name: Package
+        run: |
+          mkdir -p dist
+          llvm-strip "target/x86_64-pc-windows-gnu/release/omnizip_ffi.dll"
+          cp "target/x86_64-pc-windows-gnu/release/omnizip_ffi.dll" dist/libomnizip_ffi.dll
+          tar -czf dist/libomnizip_ffi-x86_64-pc-windows-gnu.tar.gz \
+            -C dist libomnizip_ffi.dll
+          rm dist/libomnizip_ffi.dll
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: libomnizip_ffi-x86_64-pc-windows-gnu
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  release:
+    name: Attach to release
+    needs: [resolve, linux, macos, windows-msvc, windows-gnu]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Checksums
+        working-directory: dist
+        run: sha256sum *.tar.gz > SHA256SUMS
+
+      - name: Attach
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.resolve.outputs.tag }}
+          files: |
+            dist/*.tar.gz
+            dist/SHA256SUMS
