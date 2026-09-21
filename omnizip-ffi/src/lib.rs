@@ -86,6 +86,16 @@ pub extern "C" fn ozip_last_error() -> *const c_char {
     LAST_ERROR.with(|e| e.borrow().as_ptr())
 }
 
+/// The library's semver (`env!("CARGO_PKG_VERSION")`) as a
+/// NUL-terminated C string. Static for the process lifetime — the
+/// gem's platform-gem smoke gate asserts the vendored dylib matches
+/// the gem's expected Rust release.
+#[allow(unsafe_code)]
+#[no_mangle]
+pub extern "C" fn ozip_version() -> *const c_char {
+    concat!(env!("CARGO_PKG_VERSION"), "\0").as_ptr().cast()
+}
+
 /// Free a buffer returned by `ozip_compress`/`ozip_decompress`.
 ///
 /// # Safety
@@ -804,6 +814,20 @@ fn check_expected(got: usize, expected: u32, codec: &str) -> Result<(), OmnizipE
 mod tests {
     use super::*;
     use std::ffi::CString;
+
+    #[test]
+    fn version_is_nul_terminated_semver() {
+        let p = ozip_version();
+        assert!(!p.is_null());
+        let s = unsafe { std::ffi::CStr::from_ptr(p) }
+            .to_string_lossy()
+            .into_owned();
+        assert_eq!(s, env!("CARGO_PKG_VERSION"));
+        assert!(
+            s.split('.').count() >= 3,
+            "semver, not a pointer-to-garbage"
+        );
+    }
 
     fn roundtrip(codec_name: &str, level: u8, data: &[u8]) {
         let name = CString::new(codec_name).unwrap();
