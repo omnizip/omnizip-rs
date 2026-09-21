@@ -96,13 +96,26 @@ poisoned the memo).
 
 ## 6. Open items (ranked)
 
-1. Archive-level acceleration beyond entry codecs (whole-archive
-   create/extract through the tier) — a bigger contract than
-   codec-by-name; the zip reader's raw-deflate already rides the tier
-   (2026-09-21).
+None. The last open item — archive-level acceleration — shipped
+2026-09-21 (see §7).
 
 Closed since the last revision: PPMd (tier-implemented with
 param-carrying names — the Ruby cores were provably non-functional);
 bad-1-lzma2-7 (xz-utils corpus 42/42); the StringIO#to_s corruption
 trap (inspect text was being compressed) and the prepare_output
 StringIO-discard bug.
+
+## 7. Archive-level tier (2026-09-21)
+
+`ozip_arch_open/count/entry_name/entry_size/read_entry/close` on the
+cdylib: an `ArchHandle` over any multi-entry `ArchiveReader` (zip,
+tar, cpio, 7z, rar3/4/5, plus iso/rpm/xar/ole via a probe chain),
+with passwords via `from_bytes_with_password`. Single-file compressed
+formats (gzip/bzip2/xz/zstd/lzip/lzma-alone) stay on the codec-level
+tier — they have one implicit entry, which the codec name already
+covers. Ruby side: `Implementations::Rust::Archive` (Fiddle bindings,
+block-form `open`), `Backends.archive_entry_names` /
+`archive_read_entry` (nil → Ruby fallback), wired into
+`ZipHandler#list` (names path) and `#read_entry`. Generic over every
+format the handle probes — other handlers can adopt the same two seam
+calls.

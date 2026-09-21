@@ -26,8 +26,17 @@ omnizip-bzip2.workspace = true
 omnizip-deflate.workspace = true
 omnizip-libdeflate.workspace = true
 omnizip-archive-core.workspace = true
+omnizip-zip.workspace = true
 omnizip-deflate64.workspace = true
 omnizip-lzma.workspace = true
 omnizip-ppmd.workspace = true
+omnizip-tar.workspace = true
+omnizip-cpio.workspace = true
+omnizip-sevenzip.workspace = true
+omnizip-rar.workspace = true
+omnizip-iso.workspace = true
+omnizip-rpm.workspace = true
+omnizip-xar.workspace = true
+omnizip-ole.workspace = true
 
 [dev-dependencies]
