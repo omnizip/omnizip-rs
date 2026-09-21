@@ -25,7 +25,7 @@ exclude = [
 resolver = "2"
 
 [workspace.package]
-version = "0.21.111"
+version = "0.21.112"
 edition = "2021"
 rust-version = "1.75"
 license = "MIT OR Apache-2.0"
@@ -43,29 +43,29 @@ unsafe_code = "forbid"
 [workspace.lints.clippy]
 
 [workspace.dependencies]
-omnizip-codecs = { path = "omnizip-codecs", version = "0.21.111" }
-omnizip-ppmd = { path = "omnizip-ppmd", version = "0.21.111" }
-omnizip-tar = { path = "omnizip-tar", version = "0.21.111" }
-omnizip-cpio = { path = "omnizip-cpio", version = "0.21.111" }
-omnizip-sevenzip = { path = "omnizip-sevenzip", version = "0.21.111" }
-omnizip-rar = { path = "omnizip-rar", version = "0.21.111" }
-omnizip-iso = { path = "omnizip-iso", version = "0.21.111" }
-omnizip-rpm = { path = "omnizip-rpm", version = "0.21.111" }
-omnizip-xar = { path = "omnizip-xar", version = "0.21.111" }
-omnizip-ole = { path = "omnizip-ole", version = "0.21.111" }
-omnizip-lzma = { path = "omnizip-lzma", version = "0.21.111" }
-omnizip-bzip2 = { path = "omnizip-bzip2", version = "0.21.111" }
-omnizip-zstd = { path = "omnizip-zstd", version = "0.21.111" }
-omnizip-lz4 = { path = "omnizip-lz4", version = "0.21.111" }
-omnizip-deflate = { path = "omnizip-deflate", version = "0.21.111" }
-omnizip-deflate64 = { path = "omnizip-deflate64", version = "0.21.111" }
-omnizip-libdeflate = { path = "omnizip-libdeflate", version = "0.21.111" }
-omnizip-archive-core = { path = "omnizip-archive-core", version = "0.21.111" }
-omnizip-zip = { path = "omnizip-zip", version = "0.21.111" }
-omnizip-checksum = { path = "omnizip-checksum", version = "0.21.111" }
-omnizip-par2 = { path = "omnizip-par2", version = "0.21.111" }
-omnizip-crypto = { path = "omnizip-crypto", version = "0.21.111" }
-omnizip-filters = { path = "omnizip-filters", version = "0.21.111" }
+omnizip-codecs = { path = "omnizip-codecs", version = "0.21.112" }
+omnizip-ppmd = { path = "omnizip-ppmd", version = "0.21.112" }
+omnizip-tar = { path = "omnizip-tar", version = "0.21.112" }
+omnizip-cpio = { path = "omnizip-cpio", version = "0.21.112" }
+omnizip-sevenzip = { path = "omnizip-sevenzip", version = "0.21.112" }
+omnizip-rar = { path = "omnizip-rar", version = "0.21.112" }
+omnizip-iso = { path = "omnizip-iso", version = "0.21.112" }
+omnizip-rpm = { path = "omnizip-rpm", version = "0.21.112" }
+omnizip-xar = { path = "omnizip-xar", version = "0.21.112" }
+omnizip-ole = { path = "omnizip-ole", version = "0.21.112" }
+omnizip-lzma = { path = "omnizip-lzma", version = "0.21.112" }
+omnizip-bzip2 = { path = "omnizip-bzip2", version = "0.21.112" }
+omnizip-zstd = { path = "omnizip-zstd", version = "0.21.112" }
+omnizip-lz4 = { path = "omnizip-lz4", version = "0.21.112" }
+omnizip-deflate = { path = "omnizip-deflate", version = "0.21.112" }
+omnizip-deflate64 = { path = "omnizip-deflate64", version = "0.21.112" }
+omnizip-libdeflate = { path = "omnizip-libdeflate", version = "0.21.112" }
+omnizip-archive-core = { path = "omnizip-archive-core", version = "0.21.112" }
+omnizip-zip = { path = "omnizip-zip", version = "0.21.112" }
+omnizip-checksum = { path = "omnizip-checksum", version = "0.21.112" }
+omnizip-par2 = { path = "omnizip-par2", version = "0.21.112" }
+omnizip-crypto = { path = "omnizip-crypto", version = "0.21.112" }
+omnizip-filters = { path = "omnizip-filters", version = "0.21.112" }
 # Dev-only: used for cross-compat tests, not in the hot path.
 lz4_flex = { version = "0.11", default-features = false, features = ["std", "frame"] }
 snap = "1.1"
