@@ -6,8 +6,8 @@
 
 pub mod aes;
 mod reader;
-pub mod zipcrypto;
 mod writer;
+pub mod zipcrypto;
 
 pub use reader::ZipReader;
 pub use writer::{parallel_create, ZipMethod, ZipWriter};
