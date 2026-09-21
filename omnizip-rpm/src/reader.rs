@@ -134,10 +134,19 @@ impl RpmReader {
             }
         };
         let mut cpio = CpioReader::from_bytes(&decompressed)?;
-        let entries = cpio.entries()?;
+        let mut entries = cpio.entries()?;
         let mut bodies = Vec::with_capacity(entries.len());
         for i in 0..entries.len() {
             bodies.push(cpio.read_entry(i)?);
+        }
+        // cpio payload paths are conventionally "./usr/…" — the Ruby
+        // handler contract (and GNU cpio extraction semantics) strip
+        // the "./" prefix, so normalize here where the names become
+        // user-facing.
+        for entry in &mut entries {
+            if let Some(stripped) = entry.name.strip_prefix("./") {
+                entry.name = stripped.to_string();
+            }
         }
         self.payload = Some((entries, bodies));
         Ok(())
@@ -184,9 +193,44 @@ impl ArchiveReader for RpmReader {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use omnizip_archive_core::{ArchiveReader as _, ArchiveWriter as _, WriteOptions};
 
     #[test]
     fn rejects_non_rpm() {
         assert!(RpmReader::from_bytes(b"definitely not an rpm").is_err());
+    }
+
+    /// Real-world rpms carry "./usr/…" cpio names; the user-facing
+    /// entry contract (Ruby handler, GNU cpio semantics) strips the
+    /// "./" prefix. Regression gate for the payload normalization.
+    #[test]
+    fn payload_names_strip_dot_slash_prefix() {
+        use crate::writer::{PayloadCompression, RpmWriter};
+
+        let opts = WriteOptions::deterministic().with_mtime(1_700_000_000);
+        let mut w = RpmWriter::new("dotted", "1.0", "1");
+        w.add_file(
+            &omnizip_archive_core::NewEntry::file("./usr/lib/dotted.txt", &opts),
+            b"dotted payload\n",
+            &opts,
+        )
+        .unwrap();
+        let bytes = w.finish_bytes(&opts).unwrap();
+
+        let mut r = RpmReader::from_bytes(&bytes).unwrap();
+        let names: Vec<String> = r.entries().unwrap().into_iter().map(|e| e.name).collect();
+        assert!(
+            names.contains(&"usr/lib/dotted.txt".to_string()),
+            "expected stripped name, got {names:?}"
+        );
+        assert!(
+            !names.iter().any(|n| n.starts_with("./")),
+            "no entry name may keep the ./ prefix: {names:?}"
+        );
+        let idx = names
+            .iter()
+            .position(|n| n == "usr/lib/dotted.txt")
+            .unwrap();
+        assert_eq!(r.read_entry(idx).unwrap(), b"dotted payload\n");
     }
 }
