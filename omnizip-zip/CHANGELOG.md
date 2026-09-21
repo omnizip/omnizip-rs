@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- EOF-checked inflate + 1032:1 expansion cap close a decompression bomb by @[object]
+
 ### Added
 
 - Legacy ZipCrypto (PKWARE) read path by @[object]

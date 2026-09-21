@@ -14,7 +14,7 @@ name = "omnizip_ole"
 path = "src/lib.rs"
 
 [dependencies]
-omnizip-archive-core = { path = "../omnizip-archive-core", version = "0.21.107" }
+omnizip-archive-core = { path = "../omnizip-archive-core", version = "0.21.108" }
 
 [lints]
 workspace = true
