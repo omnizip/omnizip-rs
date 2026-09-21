@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- EOF-checked inflate + 1032:1 expansion cap close a decompression bomb by @[object]
+
+### Fixed
+
 - Exact chunk-tail rule closes the last xz corpus case by @[object]
 
 ### Fixed
