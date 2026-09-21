@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Other
+
+- Cross-build the cdylib for 11 platforms + ozip_version symbol by @[object]
+
 ### Added
 
 - Archive-level tier — ArchHandle over every multi-entry reader by @[object]
