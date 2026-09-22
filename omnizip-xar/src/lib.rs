@@ -1,4 +1,4 @@
-//! XAR archive container — TODO.containers task 10: the 28-byte
+//! XAR archive container — : the 28-byte
 //! header (`xar!` magic, both-endian tolerant size/version, BE u64
 //! TOC lengths, checksum algorithm), the zlib-compressed XML table of
 //! contents parsed and generated through quick-xml (the task's XML

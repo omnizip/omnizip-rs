@@ -18,8 +18,9 @@ across runs, machines, and Rust versions.**
 
 Three source-of-truth docs you must read before any porting work:
 - [`PLAN.md`](PLAN.md) — Ruby → Rust module map and phased delivery for LZMA + ZSTD.
-- [`TODO.omnizip-rs/README.md`](TODO.omnizip-rs/README.md) — MECE task breakdown
-  for the entire workspace, with priorities and dependencies.
+- GitHub issues — open work tracked at
+  https://github.com/omnizip/omnizip-rs/issues (TODO boards are local-only,
+  gitignored, never committed; their history lives in git).
 - [`CONTEXT.md`](CONTEXT.md) — domain glossary (codec families, containers,
   parity/ratio/sweep/tier/bank vocabulary) with ADR cross-references.
 
@@ -75,10 +76,11 @@ time, returning `OmnizipError::LevelOutOfRange` for out-of-range values.
 
 ## Porting LZMA / ZSTD — the workflow that matters
 
-The user's current priority is fully porting `../omnizip`'s Ruby LZMA and ZSTD
-to Rust. The phased plan lives in `PLAN.md` and per-task files in
-`TODO.omnizip-rs/`. Phases must ship in order — each one is the next one's
-oracle:
+The original priority — porting `../omnizip`'s Ruby codecs to Rust — is
+complete: every codec family is ported and released. The phase discipline
+that governed the port (decode parity first — the decoder is the encoder
+port's oracle — then encoder core, then optimal parsing and containers) is
+how NEW codecs should land:
 
 - **Phase A — decoder + range coder + match finder.** Decode parity with the
   Ruby first. The decoder is the encoder port's oracle, so porting it first
@@ -87,13 +89,10 @@ oracle:
 - **Phase C — optimal parser + LZMA2 chunking + XZ container (LZMA) /
   FSE + multi-block (ZSTD).**
 
-Task files:
-- LZMA: [`10`](TODO.omnizip-rs/10-lzma-phase-a-decoder.md) →
-  [`11`](TODO.omnizip-rs/11-lzma-phase-b-encoder.md) →
-  [`12`](TODO.omnizip-rs/12-lzma-phase-c-optimal-xz.md)
-- ZSTD: [`13`](TODO.omnizip-rs/13-zstd-phase-a-decoder.md) →
-  [`14`](TODO.omnizip-rs/14-zstd-phase-b-encoder.md) →
-  [`15`](TODO.omnizip-rs/15-zstd-phase-c-fse.md)
+All phases shipped: every codec family is ported and released. Historical
+phase records live in git history; current architecture notes:
+[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md), format specs:
+[`docs/specs/`](docs/specs/).
 
 ### Ruby source layout (the authoritative reference)
 
@@ -117,14 +116,12 @@ Task files:
 ```
 
 The per-task files (`10-…`, `13-…`) contain the precise Ruby → Rust module
-mapping with LOC counts and phase assignments. Use them as the work checklist.
-The Rust-side module structure for each phase is also documented in
-[`TODO.omnizip-rs/00-architecture.md`](TODO.omnizip-rs/00-architecture.md).
+See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the current
+module structure.
 
 ### Differential conformance gate (release blocker)
 
-[`TODO.omnizip-rs/02-cross-language-differential-harness.md`](TODO.omnizip-rs/02-cross-language-differential-harness.md)
-defines the harness. Once wired (location: `tests/differential/`):
+The harness (location: `tests/differential/`) works as follows:
 
 1. CI clones `omnizip/omnizip` at a pinned Ruby ref (recorded in
    `tests/differential/ruby-ref.txt` so a Ruby change can't silently break Rust).
@@ -171,19 +168,17 @@ These are the traps noted in the task files:
    fixture class belongs in our regression tests before shipping.
 2. **`#![forbid(unsafe_code)]` is workspace-wide** and pre-existing in every
    crate. Don't add `unsafe` blocks; if a hot path genuinely needs SIMD, use
-   `std::simd` (task [`32`](TODO.omnizip-rs/32-simd-acceleration.md)).
+   `std::simd` (see `.github/workflows/simd-gate.yml`).
 3. **Determinism is a hard requirement.** No thread-scheduling-dependent block
    boundaries, no `HashSet` iteration in encode paths, no time-seeded RNGs.
-4. **One `in_progress` task per crate at a time.** Move task status in the
-   TODO file header from `pending` → `in_progress` → `done` — done means its
-   acceptance criteria pass in CI on linux + macOS + stable Rust with the
-   differential harness green.
+4. **One in-flight task per crate at a time.** Track work in GitHub
+   issues; done means acceptance criteria pass in CI on linux + macOS +
+   stable Rust with the differential harness green.
 5. **No shims, no stubs.** Placeholder functions (like the current
    `lzma2_compress` returning `LevelUnavailable`) are scaffolding to keep the
    crate compiling between phases; replace them with the real implementation
    when the corresponding phase ships.
-6. **Spec-first.** Wire-format and codec-id changes update `PLAN.md` +
-   `TODO.omnizip-rs/README.md` before code.
+6. **Spec-first.** Wire-format changes update `docs/specs/` before code.
 7. **Rebase-merge all PRs.** No direct pushes to `main` (also enforced by the
    user's global git rules — never push tags, never push to main, never merge
    to main without explicit approval).

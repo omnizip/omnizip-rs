@@ -43,7 +43,7 @@ This document maps recent compression research onto actionable enhancements for 
 - Gap: only 4 sub-models today (order-0/1/2 + match)
 - Enhancement: add more models — order-3, word-level, hash-context, run-length
 
-**Concrete TODOs:** see `TODO.complete/80-zpaq-more-models.md`
+**Concrete TODOs:** task record \1 in git history
 
 ---
 
@@ -60,7 +60,7 @@ This document maps recent compression research onto actionable enhancements for 
 - Gap: no dictionary TRAINER in omnizip-rs — only consumes pre-built dicts
 - Enhancement: implement `dict_trainer` (already skeleton'd at `omnizip-zstd/src/dict_trainer.rs` but incomplete) using FastCover algorithm
 
-**Concrete TODOs:** see `TODO.complete/81-zstd-dict-trainer.md`
+**Concrete TODOs:** task record \1 in git history
 
 ---
 
@@ -71,7 +71,7 @@ This document maps recent compression research onto actionable enhancements for 
 
 **Finding:** Four approaches ordered by effort: (1) auto-vectorization, (2) fancy iterators, (3) `std::simd` portable SIMD, (4) raw intrinsics. For compression specifically, **zlib-rs** demonstrates 2-3x speedup over stock zlib using explicit intrinsics + auto-vectorization combo.
 
-**Fit for omnizip-rs: ✅ Already on roadmap (`TODO.omnizip-rs/32-simd-acceleration.md`)**
+**Fit for omnizip-rs: ✅ tracked (`.github/workflows/simd-gate.yml`)**
 - `#![forbid(unsafe_code)]` is workspace-wide — `std::simd` is the only path
 - Highest-ROI targets:
   - **CRC-32 / Adler-32** — table-based; trivial to SIMD
@@ -82,7 +82,7 @@ This document maps recent compression research onto actionable enhancements for 
   - BWT (bzip2) — suffix sort is hard to SIMD
   - LZ77/LZMA literal decoder — branch-heavy
 
-**Concrete TODOs:** see `TODO.complete/82-simd-crc32-xxhash.md` and `TODO.complete/83-simd-huffman-decode.md`
+**Concrete TODOs:** task record \1 in git history
 
 ---
 
@@ -98,7 +98,7 @@ This document maps recent compression research onto actionable enhancements for 
 - Multi-byte variant would speed up sequence-table decoding
 - Requires careful renormalization math
 
-**Concrete TODOs:** see `TODO.complete/84-multibyte-fse.md`
+**Concrete TODOs:** task record \1 in git history
 
 ---
 
@@ -128,7 +128,7 @@ This document maps recent compression research onto actionable enhancements for 
 - But: documenting this in the omnizip-rs README clarifies the architectural split
 - LimniFS already uses `DropId = BLAKE3(plaintext)` which IS convergent in spirit
 
-**Action:** document the relationship in CLAUDE.md and `TODO.complete/85-convergent-encryption-note.md`
+**Action:** document the relationship in CLAUDE.md (task record 85 in git history)
 
 ---
 
@@ -154,11 +154,11 @@ This document maps recent compression research onto actionable enhancements for 
 **Finding:** Comprehensive 2025 evaluation of LZMA, ZSTD, Brotli, BZip2 — exactly omnizip-rs's portfolio. Uses standard corpora (Silesia, Enwik8, Calgary).
 
 **Fit for omnizip-rs: ✅ Critical**
-- **omnizip-rs has no benchmark suite today** (`TODO.omnizip-rs/30-benchmark-suite.md` is still open)
+- **omnizip-rs has no benchmark suite today** (the benchmark suite now lives in `tests/benchmarks`)
 - Without benchmarks, we cannot demonstrate we're competitive
 - Action: build `omnizip-bench/` crate that runs Silesia + Enwik8 + Calgary across all 17 codecs and produces a CSV report
 
-**Concrete TODOs:** see `TODO.complete/86-benchmark-suite.md`
+**Concrete TODOs:** task record \1 in git history
 
 ---
 

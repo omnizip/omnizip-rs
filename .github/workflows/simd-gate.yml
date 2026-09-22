@@ -1,4 +1,4 @@
-# Task 30 (TODO.ref-parity/30-simd-toolchain-gate.md): a canary for
+# Task 30: a canary for
 # `portable_simd` stabilization. The job is continue-on-error today;
 # when Rust ships std::simd stable this goes green — flip it to a
 # required check and reopen the SIMD program (matcher scan, FSE state
@@ -26,7 +26,7 @@ jobs:
       - name: std::simd canary (red = stabilized, act on it)
         run: |
           if rustc --edition 2021 -o /tmp/canary tools/simd_canary.rs 2>/tmp/canary_err.txt; then
-            echo "::error::std::simd COMPILED on stable rustc — portable_simd stabilized! Reopen task 30 (TODO.ref-parity/30-simd-toolchain-gate.md) and the SIMD program: the ~15 hot loops it unlocks are catalogued there; the remaining 21 board cells are gated on exactly this."
+            echo "::error::std::simd COMPILED on stable rustc — portable_simd stabilized! Reopen task 30 and the SIMD program: the ~15 hot loops it unlocks are catalogued there; the remaining 21 board cells are gated on exactly this."
             /tmp/canary
             exit 1
           fi

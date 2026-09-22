@@ -1,14 +1,11 @@
-//! Crypto primitives for the omnizip container formats — TODO.containers
-//! task 05's decision crate. The codecs' "no dependencies" rule exists
+//! Crypto primitives for the omnizip container formats. The codecs' "no dependencies" rule exists
 //! to keep the wire-format crates minimal; crypto is a different domain
 //! where hand-rolling is exactly the wrong move, so the vetted
 //! RustCrypto implementations (all `#![forbid(unsafe_code)]` cores)
 //! are wrapped here behind narrow, format-facing functions:
-//!
 //! - WinZip AES (AE-1/AE-2): AES-CTR + HMAC-SHA1/SHA2 + PBKDF2
 //! - RPM file digests (MD5 hex, per the rpm header format)
 //! - PAR2 slice hashing (MD5) — see task 13
-//!
 //! Codec crates never depend on this; only container crates do.
 
 #![forbid(unsafe_code)]

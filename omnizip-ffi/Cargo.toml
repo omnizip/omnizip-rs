@@ -6,7 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
-description = "C-ABI cdylib exposing the omnizip codecs — the Ruby gem's Rust-accelerated path (TODO.ref-parity/62)"
+description = "C-ABI cdylib exposing the omnizip codecs — the Ruby gem's Rust-accelerated path"
 keywords = ["compression", "ffi", "ruby", "bindings"]
 categories = ["compression", "external-ffi-bindings"]
 

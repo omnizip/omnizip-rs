@@ -1,7 +1,7 @@
 //! omnizip-checksum — pluggable checksum family + registry + verifier.
 //!
 //! Port of the Ruby gem's `ChecksumRegistry` + `checksums/` layer
-//! (`TODO.ref-parity/52`): name-keyed registry with duplicate
+//! (`omnizip-rs #711`): name-keyed registry with duplicate
 //! rejection and `available()`, streaming checksums, and a verifier
 //! for stored digests. Feeds `ozip verify` (task 55).
 //!

@@ -1,4 +1,4 @@
-//! Container commands (TODO.containers task 15): `ozip c/x/t/l` over
+//! Container commands: `ozip c/x/t/l` over
 //! the shipped format crates — tar (+ gzip/bzip2/xz/zstd wrappers),
 //! zip, cpio — with format inference by extension or magic, the
 //! shared extraction security boundary, and deterministic creation

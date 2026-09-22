@@ -1,13 +1,9 @@
 //! omnizip-zstd — Pure-Rust Zstandard.
-//!
 //! Rust port of omnizip's Ruby ZSTD reference at
 //! `omnizip/lib/omnizip/algorithms/zstandard/` (3,150 LOC).
-//!
 //! See the workspace [`PLAN.md`](../../PLAN.md) for the Ruby → Rust module
 //! map and the phased delivery plan.
-//!
 //! ## Status
-//!
 //! **Phase A: foundation + RAW/RLE block decode working.** Constants,
 //! frame header parser, FSE bitstream + table, block header, and the
 //! top-level [`decoder::ZstdDecoder`] are ported. End-to-end decode
@@ -237,7 +233,7 @@ pub fn compress(plaintext: &[u8], level: ZstdLevel) -> Result<Vec<u8>, ZstdError
 /// Cross-job matches are lost at job boundaries, so multi-job output
 /// can be slightly larger than [`compress`] on highly redundant
 /// inputs — measure the delta for your workload
-/// (`TODO.remaining/19` records the corpus numbers).
+/// (`` records the corpus numbers).
 ///
 /// # Errors
 ///
@@ -410,7 +406,7 @@ mod tests {
 
     #[test]
     fn decodes_reference_cli_frames() {
-        // Regression (BUGREPORT-zstd-0.1.0): the offset-code table
+        // Regression (the zstd 0.1.0 offset-table regression (task record in git history)): the offset-code table
         // (OF_BASE/OF_BITS) didn't match the C reference, so any frame
         // produced by the real `zstd` CLI decoded to garbage. These blobs
         // are `zstd -1` output of a 1000-byte CSV prefix — with and
@@ -533,7 +529,7 @@ mod tests {
         assert_eq!(decompressed, input);
     }
 
-    /// Regression (BUGREPORT-zstd-315-residual, issue #315): the
+    /// Regression (zstd issue #315): the
     /// 8-symbol batching in `HuffmanDecoder::decode_into` over-consumed
     /// the 64-bit container — when eight code lengths summed past the
     /// bits available after a reload, the trailing symbols of the batch

@@ -2,8 +2,8 @@
 //! headers, block headers, and the lzip trailing checksum.
 //!
 //! Delegates to the shared slice-by-8 implementation in
-//! `omnizip_codecs::checksum`. See `TODO.complete/82-simd-crc32-xxhash.md`
-//! and `TODO.complete/94-dry-crc32-migration.md`.
+//! `omnizip_codecs::checksum`. (task record in git history).
+//! and (task record in git history).
 
 #![forbid(unsafe_code)]
 

@@ -22,7 +22,7 @@
 //! parallelism but does not gain from `std::simd` lanes — the table
 //! lookups need gather loads, which `std::simd` lacks on stable.
 //!
-//! See `TODO.complete/82-simd-crc32-xxhash.md` for the path to a
+//! (task record in git history). for the path to a
 //! `PCLMULQDQ`-backed impl (would require an opt-in `unsafe-simd`
 //! feature, gated off by default to preserve `#![forbid(unsafe_code)]`).
 //!

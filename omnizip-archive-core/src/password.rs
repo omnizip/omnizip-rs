@@ -1,5 +1,5 @@
 //! Password layer — port of the Ruby gem's `password/` subsystem
-//! (`TODO.ref-parity/54`).
+//! (omnizip-rs #711).
 //!
 //! [`PasswordProvider`] resolves the password for an archive open;
 //! [`PasswordValidator`] ports `password_validator.rb`'s policy and

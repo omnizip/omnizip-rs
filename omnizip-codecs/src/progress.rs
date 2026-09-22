@@ -1,5 +1,5 @@
 //! Progress / ETA reporting — port of the Ruby gem's `progress/` +
-//! `eta/` subsystems (`TODO.ref-parity/59`).
+//! `eta/` subsystems (omnizip-rs #711).
 //!
 //! [`ProgressReporter`] is the single seam long-running operations
 //! (streaming in task 57, the parallel engine in task 58, archive

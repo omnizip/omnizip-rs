@@ -690,7 +690,7 @@ pub(crate) fn collect_matches(
         // and wrapped in release — where the follow-up lookup computed
         // a negative address and rejected every candidate, so the
         // feature never actually fired. Activating it correctly is
-        // tracked in TODO.remaining/18-q11-dict-candidates.md: the DP
+        // tracked in the q11 dict-candidates record (git history): the DP
         // rep relaxation treats dictionary distances as in-window
         // copy sources (distance-cache pollution), which desyncs the
         // command walk; it needs dict-aware cache handling first.
@@ -1180,7 +1180,7 @@ pub(crate) fn parse_hq_with(
     // family through the same relaxation as LZ matches. Faithful port
     // via find_all_static_dictionary_matches (the old task-18 variant
     // was scope-limited to tl==wl single words and env-gated OFF —
-    // numbers in TODO.remaining/18). q11 only: q10's btopt contest
+    // numbers in the dict-candidates record). q11 only: q10's btopt contest
     // candidate keeps its own dict_at path.
     // BROTLI_HQ_DICT=1 enables the full dictionary candidate set.
     // Default OFF: the parse is sound (identity + omit-transform
@@ -1189,7 +1189,7 @@ pub(crate) fn parse_hq_with(
     // table's wire bits desync writer-vs-reader (tree LENGTHS match;
     // bit positions after the table differ; the "space break"
     // mirroring in write_huffman_table is the suspect). Trail in
-    // TODO.remaining/27. Measured when enabled: hq 64,197 -> 55,835
+    // the rfc.txt q11 record (git history). Measured when enabled: hq 64,197 -> 55,835
     // bits on rfc.txt (7,205 -> ~6,980 B shipped).
     let (dict_flat, dict_off) = if quality >= 11
         && (dict_enabled || crate::from_spec_encoder::env_flag!("BROTLI_HQ_DICT"))

@@ -1,4 +1,4 @@
-//! RPM package format — TODO.containers task 09's RPM half: the
+//! RPM package format: the
 //! 96-byte lead, signature + main header regions (tag entries over a
 //! data blob, 8-byte alignment), and the CPIO payload with its
 //! compressor selection (gzip/bzip2/xz/zstd). Port of the Ruby

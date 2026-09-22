@@ -1,4 +1,4 @@
-//! 7z writer — Phase B/C of TODO.containers task 06: non-solid and
+//! 7z writer — Phase B/C of : non-solid and
 //! solid archives (one folder for the whole archive, concatenated
 //! unpacked streams with per-file substream sizes and CRCs), folder
 //! coders Copy / Deflate / BZip2 / LZMA2, 7zAES-encrypted streams and

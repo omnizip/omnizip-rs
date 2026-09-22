@@ -85,7 +85,7 @@ def decode_offset(symbol, _bitstream)
 end
 ```
 
-See `../omnizip/BUGREPORT.05-offset-extra-bits-ignored.md`.
+See the corresponding Ruby-side bug report (omnizip git history).
 
 ## Why the divergence exists
 

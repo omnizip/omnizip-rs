@@ -159,7 +159,7 @@ mod tests {
 
 // ============================================================================
 // Named profiles — the Ruby gem's profile/ subsystem, ported
-// field-by-field (TODO.ref-parity/60). The intent-based `Profile`
+// field-by-field. The intent-based `Profile`
 // above stays the codec-facing API; these are the user-facing
 // presets the gem's CLI exposes.
 // ============================================================================

@@ -3,7 +3,7 @@
 //! Ported with substantial rework from
 //! `omnizip/lib/omnizip/algorithms/zstandard/literals.rb` (174 LOC, MIT,
 //! Ribose Inc.). The Ruby uses `header1 & 0x1F` for the size, which is
-//! wrong per the spec — see `../../../../../omnizip/BUGREPORT.08-literals-size-format-wrong.md`.
+//! wrong per the spec — see `the literals size-format fix (git history)`.
 //! The implementation here reads the size-format bits correctly.
 //!
 //! ## Section layout

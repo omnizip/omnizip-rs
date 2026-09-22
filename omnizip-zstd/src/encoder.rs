@@ -1,7 +1,5 @@
 //! ZSTD frame encoder — delegates to [`block::encode_frame_compressed`].
-//!
 //! ## Frame layout
-//!
 //! ```text
 //! Magic_Bytes         4 bytes: 0x28 0xB5 0x2F 0xFD (LE = 0xFD2FB528)
 //! Frame_Header        1-5 bytes (descriptor + optional fields)
@@ -52,7 +50,7 @@ pub fn encode_frame(plaintext: &[u8], level: ZstdLevel) -> Result<Vec<u8>, ZstdE
 /// Ratio note: matches cannot cross job boundaries, so multi-job
 /// output is slightly larger than single-frame on inputs whose
 /// redundancy spans more than one job; the delta is documented in
-/// `TODO.remaining/19`.
+/// ``.
 ///
 /// # Errors
 ///

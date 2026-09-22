@@ -1,4 +1,4 @@
-//! WinZip AES encryption (TODO.containers task 05) — AE-1/AE-2 per
+//! WinZip AES encryption — AE-1/AE-2 per
 //! the WinZip AES APPNOTE: PBKDF2-HMAC-SHA1 (1000 iterations) key
 //! schedule, AES-CTR with a 16-byte big-endian counter starting at 1,
 //! and a 10-byte HMAC-SHA1 authenticator. Entries carry compression

@@ -1,4 +1,4 @@
-//! ISO 9660 image container — TODO.containers task 11: volume
+//! ISO 9660 image container — : volume
 //! descriptors (PVD + terminator), directory records with the
 //! both-endian fields, recursive tree walk, Rock Ridge SUSP read (NM
 //! names, PX modes) and Joliet supplementary descriptors, plus a

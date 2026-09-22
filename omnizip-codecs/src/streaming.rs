@@ -68,7 +68,7 @@ pub trait StreamingDecoder {
 
 // ============================================================================
 // ChunkedStreamEncoder — bounded-memory streaming over ANY codec
-// (TODO.ref-parity/57, encoder leg).
+// (omnizip-rs #712, encoder leg).
 //
 // The determinism rule: the output is a pure function of (input
 // bytes, input length, declared chunk_size) — the implementation

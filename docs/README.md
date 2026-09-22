@@ -52,5 +52,5 @@ the deviation is documented here with:
 ## Bug reports
 
 Ruby-side bugs discovered during porting are filed at
-`../omnizip/BUGREPORT.{01..10}-*.md` in the Ruby repository. The
+the bug reports in the Ruby repository's git history. The
 compliance docs here reference those bug reports where relevant.

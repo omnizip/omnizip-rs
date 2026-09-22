@@ -1,4 +1,4 @@
-//! Archive-mode differential checks (TODO.containers task 20): our
+//! Archive-mode differential checks: our
 //! writers' outputs re-read through OUR readers must produce an
 //! identical canonical manifest (name, size, content hash), and the
 //! cross-tool oracle tier verifies the same archives extract

@@ -146,7 +146,7 @@ mod tests {
         assert_eq!(decompressed, input);
     }
 
-    /// omnizip issue #315 residual (BUGREPORT-zstd-315-residual.md): the
+    /// omnizip issue #315 residual (the zstd #315 residual (task record in git history)): the
     /// 163-byte mixed text+binary input whose frame (identical 172 B at
     /// levels 1/3/5/9) our own decoder mis-reconstructed at 0.16.78.
     /// Fixed by the 0.16.87-0.16.96 sequence/literal section rewrites;
@@ -189,7 +189,7 @@ mod tests {
     }
 }
 
-/// Streaming zstd decoder (TODO.ref-parity/57, decoder leg): v1
+/// Streaming zstd decoder (omnizip-rs #712, decoder leg): v1
 /// buffers the compressed stream and decodes at `finish`
 /// (`expected_len = u32::MAX` uses the length-agnostic path).
 /// Output equals the one-shot [`decompress`] exactly.
@@ -274,7 +274,7 @@ impl Codec for LenientZstdCodec {
     }
 }
 
-/// Bounded-memory streaming zstd encoder (TODO.ref-parity/57): one
+/// Bounded-memory streaming zstd encoder (omnizip-rs #712): one
 /// independent frame per `chunk_size` plaintext bytes, concatenated
 /// (multi-frame output — decodes with [`decompress`] and any zstd
 /// CLI). Output is a pure function of (input, chunk_size): push

@@ -1,4 +1,4 @@
-//! Deterministic malformed-input smoke gate (TODO.remaining/17).
+//! Deterministic malformed-input smoke gate.
 //!
 //! Every PR runs this: seeded mutation of valid compressed streams
 //! (bit flips, byte substitutions, truncations, splices, range

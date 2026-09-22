@@ -1,5 +1,5 @@
 //! Chunked IO — port of the Ruby gem's `chunked/` subsystem
-//! (`TODO.ref-parity/57`): a bounded-memory writer that splits
+//! (`omnizip-rs #712`): a bounded-memory writer that splits
 //! output into fixed-size chunks (`Writer::DEFAULT_CHUNK_SIZE` =
 //! 64 MiB) plus a memory budget manager (`MemoryManager`,
 //! 256 MiB default) with allocate/release accounting.

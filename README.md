@@ -1,53 +1,74 @@
-# omnizip-rs — Pure-Rust compression codecs
+# omnizip-rs — pure-Rust compression codecs and containers
 
-Pure-Rust implementations of LZMA, ZSTD, Brotli, DEFLATE, bzip2, and PPMd,
-ported from the [omnizip](https://github.com/omnizip/omnizip) Ruby reference
-implementations. MIT OR Apache-2.0.
+A 35-crate workspace of pure-Rust compression codecs and archive containers,
+ported line-by-line from the [omnizip](https://github.com/omnizip/omnizip)
+Ruby reference implementations (the C references — xz, zstd — were consulted
+for performance tuning only, never as the porting basis). MIT OR Apache-2.0.
 
-## Why this repo exists
+Every encoder is **byte-deterministic**: the same input + level produces
+byte-identical output across runs, machines, and Rust versions. The
+workspace is `#![forbid(unsafe_code)]` (sole exception: the raw-pointer shim
+inside `omnizip-ffi`).
 
-[omnizip](https://github.com/omnizip/omnizip) ships pure-Ruby implementations
-of the major compression codecs. Ruby is too slow for production codec use,
-but the **algorithms are correct and tested**. This repo ports them to Rust
-for production-grade speed, keeping the Ruby as the authoritative reference.
+## Usage
 
-Every Rust module is a line-by-line translation of the corresponding Ruby
-file. The file-level mapping lives in [`PLAN.md`](PLAN.md).
+### The `ozip` CLI
 
-## Cross-language verification
+```sh
+ozip c archive.tar.zst dir/          # create (deterministic by default)
+ozip x archive.tar.zst               # extract
+ozip t archive.zip                   # list
+ozip l file.xz                       # single-file codecs: xz zstd gzip bzip2 lzip lzma-alone
+```
 
-The Rust crates' test suites run the same fixtures as the Ruby specs and
-assert byte-identical output. CI clones the omnizip Ruby repo and runs both
-implementations against the `.xz` / `.zst` / `.lzma` vectors under
-`omnizip/spec/fixtures/`. A divergence between Ruby and Rust is a release
-blocker.
+### From Ruby
+
+The Ruby gem rides this workspace through prebuilt platform gems — `gem
+install omnizip` picks a cdylib for your OS/arch with zero compilation
+(`omnizip-ffi` exports a C ABI over the codecs and containers). See the
+[omnizip gem](https://github.com/omnizip/omnizip).
+
+### From Rust
+
+Codecs implement the `Codec` trait from `omnizip-codecs` and register on a
+`CodecRegistry`; dispatch never branches per codec:
+
+```rust
+use omnizip_codecs::{Codec, CodecRegistry, CompressionLevel};
+
+let registry = CodecRegistry::new(); // codecs self-register
+let zstd = registry.get("zstd")?;
+let compressed = zstd.compress(data, CompressionLevel::new(6))?;
+assert_eq!(zstd.decompress(&compressed, data.len())?, data);
+```
 
 ## Crates
 
-| Crate | Status | Ruby reference | C reference (perf tuning only) |
-|---|---|---|---|
-| `omnizip-lzma` | porting | `omnizip/lib/omnizip/algorithms/lzma/` (7,558 LOC) | `tukaani-project/xz` liblzma (0BSD) |
-| `omnizip-zstd` | porting | `omnizip/lib/omnizip/algorithms/zstandard/` (3,150 LOC) | `facebook/zstd` (BSD-3-Clause) |
-| `omnizip-brotli` | planned | — | `brotli` crate (already pure Rust) |
-| `omnizip-deflate` | planned | `omnizip/lib/omnizip/algorithms/deflate/` | `miniz_oxide` (already pure Rust) |
-| `omnizip-bzip2` | planned | `omnizip/lib/omnizip/algorithms/bzip2/` | — |
-| `omnizip-ppmd` | planned | `omnizip/lib/omnizip/algorithms/ppmd7/`, `ppmd8/` | — |
+| Group | Crates |
+|---|---|
+| Codecs | `omnizip-lzma` (LZMA/LZMA2/XZ) · `omnizip-zstd` · `omnizip-brotli` · `omnizip-deflate` · `omnizip-deflate64` · `omnizip-libdeflate` · `omnizip-bzip2` · `omnizip-ppmd` (PPMd7/8) · `omnizip-lz4` · `omnizip-snappy` · `omnizip-glza` · `omnizip-zpaq` · `omnizip-flac` · `omnizip-fsst` · `omnizip-ricepp` · `omnizip-blosc` |
+| Shared | `omnizip-codecs` (trait + registry + streaming/chunked/profiles/checksums) · `omnizip-filters` (BCJ x86/ARM/ARM64/IA64/PPC/SPARC, delta, shuffle) · `omnizip-checksum` · `omnizip-crypto` |
+| Containers | `omnizip-tar` · `omnizip-zip` (incl. AES, zip64) · `omnizip-sevenzip` · `omnizip-rar` (RAR3/4/5 read, RAR4 LZ/PPMd/AES, RAR5 LZ/AES) · `omnizip-cpio` · `omnizip-iso` · `omnizip-xar` · `omnizip-rpm` · `omnizip-ole` · `omnizip-par2` · `omnizip-archive-core` |
+| App / FFI | `ozip` (CLI) · `omnizip-ffi` (C-ABI cdylib for the Ruby gem) · `omnizip-bench` |
+| Test crates | `tests/differential` · `tests/determinism` · `tests/property` · `tests/benchmarks` · `tests/conformance` · `tests/security` · `tests/fuzz_smoke` |
+
+Bit-level format specifications live in [`docs/specs/`](docs/specs/);
+architecture notes in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+
+## Conformance
+
+A divergence between Rust and the Ruby reference — or between Rust and the
+`xz`/`zstd`/`7zz` CLI oracles — is a release blocker. CI runs:
+
+- **Differential** (`tests/differential`): every codec against the Ruby
+  reference on shared fixtures, both decode and encode directions.
+- **Determinism** (`tests/determinism`): archive creation byte-stability.
+- **Property + fuzz**: malformed-input safety across all decoders
+  (including the extraction-security corpus in `tests/security`).
+- **Downstream**: the LimniFS consumer's suite runs against every PR.
+- **Performance**: the codec sweep board gates regressions per codec/level.
 
 ## License
 
-MIT OR Apache-2.0, matching the per-file headers in omnizip's Ruby source.
-The Ruby code is MIT-licensed by Ribose Inc.; this Rust port inherits that
-license. See [`LICENSE-NOTICE.md`](LICENSE-NOTICE.md) for full attribution.
-
-## Consumers
-
-- [LimniFS](https://github.com/limnifs/limnifs) — content-addressed filesystem
-  image format; consumes `omnizip-lzma` and `omnizip-zstd` as codec plugins
-  via the `Codec` trait registry.
-
-## Status
-
-**Phase A (decode) ships for LZMA and ZSTD.** Both crates decode their
-respective formats against the reference `xz -d` / `zstd -d` oracles on
-every fixture under `tests/fixtures/`. Encoders and optimal parsers
-(Phases B/C) per [`PLAN.md`](PLAN.md).
+MIT OR Apache-2.0. The Ruby ports inherit Ribose Inc.'s MIT headers; see
+[`LICENSE-NOTICE.md`](LICENSE-NOTICE.md) for attribution.

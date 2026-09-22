@@ -1,4 +1,4 @@
-//! ZIP64 acceptance (TODO.containers task 04): the >65,535-entry
+//! ZIP64 acceptance: the >65,535-entry
 //! archive exercises the zip64 EOCD (entry-count overflow) and our
 //! reader's zip64 central-directory parsing end to end.
 use omnizip_archive_core::write_options::WriteOptions;

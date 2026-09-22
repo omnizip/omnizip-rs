@@ -73,7 +73,7 @@ fn decode_size_format_raw_rle(header0: u8, input: &[u8]) -> Result<(u32, usize),
 The Ruby's `decode_raw` uses `header1 & 0x1F` (bits 0-4, 5 bits),
 which includes the size-format selector bit in the size value and
 uses the wrong bit slice. See
-`../omnizip/BUGREPORT.08-literals-size-format-wrong.md`.
+the corresponding Ruby-side bug report (omnizip git history).
 
 ## Why the divergence exists
 

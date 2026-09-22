@@ -134,7 +134,7 @@ mod tests {
     }
 }
 
-/// Bounded-memory streaming deflate encoder (TODO.ref-parity/57):
+/// Bounded-memory streaming deflate encoder (omnizip-rs #712):
 /// one independent zlib stream per `chunk_size` plaintext bytes,
 /// concatenated. Output is a pure function of (input, chunk_size);
 /// push partitioning never affects the bytes.

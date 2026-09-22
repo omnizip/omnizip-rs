@@ -436,7 +436,7 @@ mod tests {
     }
 }
 
-/// Bounded-memory streaming bzip2 encoder (TODO.ref-parity/57): one
+/// Bounded-memory streaming bzip2 encoder (omnizip-rs #712): one
 /// independent bzip2 stream per `chunk_size` plaintext bytes —
 /// concatenated bzip2 streams are a standard, `bzip2 -d` handles
 /// them. Output is a pure function of (input, chunk_size).
