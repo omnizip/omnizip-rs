@@ -1,4 +1,4 @@
-//! PAR2 parity archives — TODO.containers task 13: the packet framing
+//! PAR2 parity archives — : the packet framing
 //! (`PAR2\0PKT` + length + MD5-of-set+type+body + set id + type),
 //! main / file-description / input-slice-check packets, slice-level
 //! verify (MD5 + CRC-64), recovery-slice creation and repair through

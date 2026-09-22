@@ -3,7 +3,7 @@
 ## Status
 
 **Resolved in Rust.** The Ruby port still has the bug (see
-`../omnizip/BUGREPORT.10-reverse-bitstream-wrong-bit-order.md`).
+the corresponding Ruby-side bug report (omnizip git history)).
 
 ## Affected code
 
@@ -57,7 +57,7 @@ sets `@bit_position = data.bytesize * 8 - 1`, so `bit_index =
 (data.bytesize * 8 - 1) % 8 = 7` — the **MSB** of the last byte. This
 inverts every FSE state initialisation.
 
-See `../omnizip/BUGREPORT.10-reverse-bitstream-wrong-bit-order.md`
+See the corresponding Ruby-side bug report (omnizip git history)
 for the Ruby-side fix proposal.
 
 ## Why the divergence exists

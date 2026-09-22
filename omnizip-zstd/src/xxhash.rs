@@ -1,7 +1,7 @@
 //! `XXHash` — re-export from `omnizip_codecs::xxhash`.
 //!
 //! The canonical implementation now lives in `omnizip-codecs` so
-//! other codecs can share it. See `TODO.complete/96-shared-xxhash.md`.
+//! other codecs can share it. (task record in git history).
 
 #![forbid(unsafe_code)]
 

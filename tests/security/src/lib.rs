@@ -1,4 +1,4 @@
-//! Extraction-security corpus (TODO.containers task 21): every threat
+//! Extraction-security corpus: every threat
 //! row gets a crafted malicious archive that MUST be rejected by the
 //! shared SecurityPolicy at the extraction boundary — never a
 //! per-format branch. The corpus generates the archives in-memory

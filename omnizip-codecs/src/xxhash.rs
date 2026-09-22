@@ -9,7 +9,7 @@
 //! ambiguously suggests.
 //!
 //! Verified against `~/src/external/zstd/lib/common/xxhash.h`.
-//! See `TODO.complete/96-shared-xxhash.md`.
+//! (task record in git history).
 
 #![forbid(unsafe_code)]
 

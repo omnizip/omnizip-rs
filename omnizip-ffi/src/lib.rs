@@ -1,5 +1,5 @@
 //! omnizip-ffi — the C ABI over the omnizip codecs: the Rust side of
-//! the Ruby gem's Rust-accelerated path (`TODO.ref-parity/62`).
+//! the Ruby gem's Rust-accelerated path.
 //!
 //! The surface is deliberately tiny and stable: three codecs
 //! (zstd, bzip2, lzma/xz), explicit lengths, one call each way, a

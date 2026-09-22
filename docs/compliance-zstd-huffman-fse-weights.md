@@ -47,7 +47,7 @@ is not yet implemented. `literals::decode_compressed` returns
 
 The Ruby's `HuffmanTableReader.read_fse_compressed_weights` returns
 an all-zero weight array as a "fallback" without reading any data.
-See `../omnizip/BUGREPORT.01-huffman-fse-weights-stub.md`.
+See the corresponding Ruby-side bug report (omnizip git history).
 
 ## Why the divergence exists
 

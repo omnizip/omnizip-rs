@@ -11,7 +11,7 @@
 //! - The CLI fails to decode (framing mismatch — Rust codec produces
 //!   raw streams, CLI expects file-format framing).
 //!
-//! The second case is a parity gap tracked in `TODO.complete/87-differential-harness.md`.
+//! The second case is a parity gap tracked in (task record in git history).
 //! Removing the gap = fixing the codec to emit the CLI-compatible
 //! framing, then removing the skip-on-error branch.
 

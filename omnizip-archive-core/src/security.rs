@@ -1,4 +1,4 @@
-//! Extraction security boundary (TODO.containers task 21): path
+//! Extraction security boundary: path
 //! traversal, absolute paths, drive letters, symlink escapes, and
 //! decompression-bomb budgets — enforced once, in `ArchiveReader::
 //! extract_to`, never per-format.

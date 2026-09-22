@@ -1,7 +1,7 @@
 # Audio corpus — FLAC LPC verification (TODO 105)
 
 This directory hosts the FLAC LPC verification corpus described in
-`TODO.complete/105-flac-lpc-finish.md`. It is **not** part of the
+`-flac-lpc-finish.md`. It is **not** part of the
 omnizip-rs source tree; LimniFS contributes the corpus-fetching
 script and runs the differential harness here.
 

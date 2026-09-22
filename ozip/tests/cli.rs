@@ -1,4 +1,4 @@
-//! CLI-level container tests (TODO.containers task 15): `ozip c` →
+//! CLI-level container tests: `ozip c` →
 //! reference tool verify → `ozip x` byte-exact, plus the determinism
 //! double-create check, for every registered write format.
 

@@ -1,7 +1,7 @@
 //! Encoder differential parity tests.
 //!
 //! Currently tests round-trip via our own decoder. The xz interop
-//! path is documented as a known gap (TODO.complete/13) — the EOPM
+//! path is documented as a known gap — the EOPM
 //! marker encoding has a residual bit-pattern issue that xz rejects
 //! but our decoder accepts.
 

@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Extraction-security corpus tests (TODO.containers task 21)"
+description = "Extraction-security corpus tests"
 publish = false
 
 [dependencies]

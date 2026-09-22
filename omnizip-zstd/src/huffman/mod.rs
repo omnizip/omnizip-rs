@@ -3,7 +3,7 @@
 //! Ported with substantial rework from
 //! `omnizip/lib/omnizip/algorithms/zstandard/huffman.rb` (269 LOC, MIT,
 //! Ribose Inc.). The Ruby's FSE-compressed-weights path is stubbed
-//! (see `../../../../../omnizip/BUGREPORT.01-huffman-fse-weights-stub.md`);
+//! (see `the huffman FSE weights fix (git history)`);
 //! the implementation here reads the table correctly.
 //!
 //! ## Architecture

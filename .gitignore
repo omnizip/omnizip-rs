@@ -19,3 +19,10 @@ tests/fuzz/target/
 
 # Local-only notes / scratch
 BUGREPORT-local-*.md
+
+# Task boards and bug reports are LOCAL working state only — never
+# committed or published. Real open work lives in GitHub issues.
+TODO/
+TODO.*
+TODO.docs/
+BUGREPORT-*

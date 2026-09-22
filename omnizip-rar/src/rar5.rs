@@ -63,7 +63,7 @@ pub struct Rar5Reader {
 /// recovery percent) and validated against the CI fixtures: the
 /// `{RB}` magic + header CRC32 follow, then the RS recovery
 /// sectors. The RS repair math needs the rar.archiver layout
-/// (unrar only verifies presence) — see TODO.ref-parity/55.
+/// (unrar only verifies presence) — see .
 #[derive(Debug, Clone, Copy)]
 pub struct RecoveryRecord {
     /// Recovery percent vint (how much redundancy `rar a -rrN`

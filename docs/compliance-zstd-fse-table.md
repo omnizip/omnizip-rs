@@ -83,7 +83,7 @@ remain empty. Those empty cells all decode to symbol 0.
 The Rust port was written before the `-1` sentinel semantics were
 understood. The initial implementation matched the Ruby port, which
 also uses `[u8]` and has the same limitation (see
-`../omnizip/BUGREPORT.09-predefined-distributions-wrong-sum.md`).
+the corresponding Ruby-side bug report (omnizip git history)).
 
 ## Impact
 

@@ -54,7 +54,7 @@ fn map_encode_error(e: LzmaError) -> OmnizipError {
 ///
 /// Level 1 keeps the fast parse (its tier exists for speed); levels 2+
 /// measure smaller through the optimal parser on every corpus swept
-/// (TODO.remaining/01).
+///.
 const OPTIMAL_PARSER_LEVEL_THRESHOLD: u8 = 2;
 
 /// Map a compression level to match-finder tuning knobs.
@@ -333,7 +333,7 @@ mod tests {
     }
 }
 
-/// Bounded-memory streaming xz encoder (TODO.ref-parity/57): one
+/// Bounded-memory streaming xz encoder (omnizip-rs #712): one
 /// independent .xz stream per `chunk_size` plaintext bytes — xz
 /// multistream concatenation is standard (`xz -d` handles it).
 /// Output is a pure function of (input, chunk_size).

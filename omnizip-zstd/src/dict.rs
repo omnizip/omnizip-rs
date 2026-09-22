@@ -16,7 +16,7 @@
 //!
 //! Phase 1 uses a **simplified** format: magic + ID + raw content.
 //! Entropy-table preloading lands in Phase C alongside the FSE encoder
-//! port (see `TODO.omnizip-rs/15-zstd-phase-c-fse.md`). The simplified
+//! port. The simplified
 //! form round-trips through this crate's own (de)serializer and is
 //! sufficient for the dictionary-prefix match-finder path.
 

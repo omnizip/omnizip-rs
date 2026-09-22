@@ -68,8 +68,8 @@ open/closed principle applied to codecs.
 The single place that DOES require editing when adding a codec is
 `omnizip-codecs/src/codec.rs` — to allocate a new `CodecId` constant.
 This is a known minor OCP violation; it's only a few lines per codec
-and centralises ID assignment (preventing collisions). See
-`TODO.complete/88-architecture-audit.md` for discussion.
+and centralises ID assignment (preventing collisions). The
+architecture-audit record in git history has the full discussion.
 
 ## Shared utilities (DRY)
 
@@ -122,7 +122,7 @@ storage (LimniFS `DropId = BLAKE3(plaintext)`).
 
 ## Known smells (audit pending)
 
-See `TODO.complete/88-architecture-audit.md` for the full list.
+The full audit list is in git history.
 Current status:
 
 - **PPMd7 / PPMd8 context-trie duplication** — still separate
@@ -183,5 +183,5 @@ agnostic to which CE variant the storage layer picks.
 - `CLAUDE.md` — project invariants and workflow
 - `TUNABLE.md` — user-facing tunability reference
 - `RESEARCH.md` — 2024–2026 academic compression literature review
-- `TODO.complete/README.md` — enhancement backlog
 - `PLAN.md` — original Ruby → Rust port plan
+- GitHub issues — the enhancement backlog

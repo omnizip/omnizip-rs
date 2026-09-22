@@ -1,4 +1,4 @@
-//! 7z archive container — TODO.containers task 06: the 6-byte
+//! 7z archive container — : the 6-byte
 //! signature + 32-byte start header (with CRC verification), the
 //! property-encoded metadata header (pack/unpack/substreams/files
 //! infos), folder coder chains mapped onto the in-house codecs (Copy,
@@ -6,7 +6,6 @@
 //! extraction with caching, and deterministic writing (fixed FILETIME
 //! mtimes, sorted entries, non-solid or one solid folder, 7zAES
 //! stream/header encryption, multi-volume splits).
-//!
 //! Phases A (read), B (non-solid write) and C (solid write,
 //! multi-volume, encrypted-header writing) are complete; reading
 //! AES-encrypted archives is supported.

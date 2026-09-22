@@ -73,5 +73,5 @@ Dual MIT OR Apache-2.0.
 
 - [RFC 7932](https://www.rfc-editor.org/rfc/rfc7932)
 - [google/brotli](https://github.com/google/brotli)
-- [TODO 244](../TODO.complete/244-brotli-decoder-wire-format-bugs.md)
-- [TODO 263](../TODO.complete/263-brotli-cross-decoder-fix.md)
+- TODO 244 (git history)
+- TODO 263 (git history)

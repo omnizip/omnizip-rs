@@ -1,9 +1,7 @@
-//! `ozip` — the unified codec + container CLI (TODO.containers tasks
-//! 18 and 15): xz / zstd / gzip / bzip2 / lzip / lzma-alone single-file
+//! `ozip` — the unified codec + container CLI: xz / zstd / gzip / bzip2 / lzip / lzma-alone single-file
 //! codecs with gzip(1)-style handling, plus `c/x/t/l` archive commands
 //! over tar/zip/cpio (and compressed tar) with deterministic creation
 //! by default.
-//!
 //! Pure Rust, no argument-parsing dependency: the codec set maps onto
 //! a fixed table — adding a codec is one row, never a new flag branch.
 #![forbid(unsafe_code)]

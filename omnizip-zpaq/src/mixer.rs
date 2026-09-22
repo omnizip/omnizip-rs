@@ -51,7 +51,7 @@
 /// match, run-length, and word. Adding more models requires updating
 /// this constant plus every callsite that builds a `[u16; NUM_MODELS]`
 /// array — kept deliberately small for that reason. See
-/// `TODO.complete/80-zpaq-more-models.md`.
+/// (task record in git history).
 pub const NUM_MODELS: usize = 7;
 
 /// Probability scale (matches the arithmetic coder's `PROB_SCALE`).

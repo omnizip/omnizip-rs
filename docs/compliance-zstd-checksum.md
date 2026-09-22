@@ -49,7 +49,7 @@ if header.has_checksum() {
 The Ruby computes a hash, but uses a DJB2 polynomial
 (`hash = hash * 33 + byte`) instead of XXH32. The check always
 fails (or always passes on short inputs that hash to zero). See
-`../omnizip/BUGREPORT.06-xxhash32-wrong-algorithm.md`.
+the corresponding Ruby-side bug report (omnizip git history).
 
 ## Why the divergence exists
 

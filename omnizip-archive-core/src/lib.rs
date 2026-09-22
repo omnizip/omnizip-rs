@@ -5,7 +5,7 @@
 //!
 //! Ported from the Ruby reference (`omnizip/entry.rb`,
 //! `archive_handler.rb`, `error.rb`, `io.rb`, `file_type.rb`,
-//! `extraction/`) per TODO.containers task 01; the gzip/bzip2
+//! `extraction/`) per the container extraction design; the gzip/bzip2
 //! single-file formats (task 03) live in [`formats`].
 
 #![forbid(unsafe_code)]

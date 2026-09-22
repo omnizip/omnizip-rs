@@ -1,4 +1,4 @@
-//! Archive-level benchmark cases (TODO.containers task 16):
+//! Archive-level benchmark cases:
 //! create/extract a fixed in-memory tree per format, reporting size,
 //! encode and decode throughput, and the determinism double-run
 //! assert — the four columns the comparison table needs.

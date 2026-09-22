@@ -1,4 +1,4 @@
-//! RAR archives — TODO.containers tasks 07/08: RAR5 (VINT block
+//! RAR archives — : RAR5 (VINT block
 //! headers, STORE-method read + deterministic write) and RAR4
 //! (read-only, marker/file/comment/end blocks, STORE extraction).
 //! Both verify CRC32 on extraction. LZ-compressed entries surface a

@@ -1,4 +1,4 @@
-//! Archive determinism (TODO.containers task 17): the same tree + the
+//! Archive determinism: the same tree + the
 //! same options produce byte-identical archives regardless of the
 //! order entries are staged in — the shuffled-walk property. Also
 //! covers the ctime-variation rule: touching files between writes

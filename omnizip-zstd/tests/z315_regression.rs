@@ -8,7 +8,7 @@
 use omnizip_codecs::CompressionLevel;
 use omnizip_zstd::ZstdLevel;
 
-/// The 163-byte repro from BUGREPORT-zstd-315-residual.md (base64 in
+/// The 163-byte repro from the zstd #315 residual (task record in git history) (base64 in
 /// the report; bytes inlined here). Text with repeats + binary tail +
 /// nul padding.
 const Z315_BLOB: [u8; 163] = [

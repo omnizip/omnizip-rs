@@ -1,5 +1,4 @@
-//! OLE2 compound files (CFB, MS-CFB) — TODO.containers task 12's OLE
-//! half: header, DIFAT/FAT sector chains, the 128-byte directory
+//! OLE2 compound files (CFB, MS-CFB): header, DIFAT/FAT sector chains, the 128-byte directory
 //! entries (name/UTF-16, object type, red-black sibling ids), and the
 //! mini-FAT stream for sub-4096-byte streams; plus a valid writer
 //! (balanced directory trees, mini stream). The MSI half lives in

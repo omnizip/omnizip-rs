@@ -1,4 +1,4 @@
-//! Deterministic-write rules (TODO.containers task 17): the same
+//! Deterministic-write rules: the same
 //! input tree + options must produce a byte-identical archive across
 //! runs, machines, and Rust versions. Normalization lives here;
 //! format crates consume [`WriteOptions`], never invent their own.

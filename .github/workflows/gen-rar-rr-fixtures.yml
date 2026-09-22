@@ -1,6 +1,6 @@
 name: Generate RAR5 RR fixtures
 
-# Task 55 (TODO.ref-parity): RAR5 recovery-record repair is blocked
+# CLI parity (omnizip-rs #711): RAR5 recovery-record repair is blocked
 # on fixtures — the local `rar` binary is Gatekeeper-killed, so
 # recovery-record archives cannot be created on macOS. This job
 # generates them on Linux (rar is in Ubuntu multiverse) and opens a
