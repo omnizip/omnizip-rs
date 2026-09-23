@@ -54,13 +54,24 @@ jobs:
 
       - name: Check if code changed
         id: check
+        env:
+          HEAD_REF: ${{ github.head_ref }}
         run: |
+          # Release-plz PRs and their merge commits are version + changelog
+          # bumps only; the code they carry was already fully verified, and
+          # re-running the ~40-leg matrix per release duplicated CI for zero
+          # signal. Skip both (release.yml publishes independently of CI).
+          subject="$(git log -1 --format=%s)"
+          if [[ "$HEAD_REF" == release-plz* ]] || [[ "$subject" == "chore: release v"* ]]; then
+            echo "should_run=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           if [[ "${{ github.event_name }}" == "push" ]]; then
-            echo "should_run=true" >> $GITHUB_OUTPUT
+            echo "should_run=true" >> "$GITHUB_OUTPUT"
           elif git diff --name-only HEAD^ HEAD | grep -qE '\.(rs|cpp|h|hpp|toml|cmake)$|CMakeLists\.txt'; then
-            echo "should_run=true" >> $GITHUB_OUTPUT
+            echo "should_run=true" >> "$GITHUB_OUTPUT"
           else
-            echo "should_run=false" >> $GITHUB_OUTPUT
+            echo "should_run=false" >> "$GITHUB_OUTPUT"
           fi
 
   # ============================================================================
