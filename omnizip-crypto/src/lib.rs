@@ -91,8 +91,9 @@ pub fn pbkdf2_hmac_sha256(password: &[u8], salt: &[u8], iterations: u32, out: &m
 /// HMAC-SHA1 over `data` with `key` (WinZip AE-1 authentication).
 #[must_use]
 pub fn hmac_sha1(key: &[u8], data: &[u8]) -> [u8; 20] {
-    use hmac::{KeyInit, Mac};
-    let mut mac = <hmac::Hmac<sha1::Sha1>>::new_from_slice(key).expect("any key length");
+    use digest::KeyInit;
+    use hmac::Mac;
+    let mut mac = <hmac::Hmac<sha1::Sha1> as Mac>::new_from_slice(key).expect("any key length");
     mac.update(data);
     let out: [u8; 20] = mac.finalize().into_bytes().into();
     out
@@ -101,8 +102,9 @@ pub fn hmac_sha1(key: &[u8], data: &[u8]) -> [u8; 20] {
 /// HMAC-SHA256 over `data` with `key` (WinZip AE-2 authentication).
 #[must_use]
 pub fn hmac_sha256(key: &[u8], data: &[u8]) -> [u8; 32] {
-    use hmac::{KeyInit, Mac};
-    let mut mac = <hmac::Hmac<sha2::Sha256>>::new_from_slice(key).expect("any key length");
+    use digest::KeyInit;
+    use hmac::Mac;
+    let mut mac = <hmac::Hmac<sha2::Sha256> as Mac>::new_from_slice(key).expect("any key length");
     mac.update(data);
     mac.finalize().into_bytes().into()
 }
@@ -226,7 +228,7 @@ pub struct AesCbc256 {
 // RustCrypto cbc crate split; provide a minimal CBC wrapper over aes's
 // block cipher to avoid pulling the `cbc` crate's encryptor traits.
 mod ecb_mode_encrypt_adapter {
-    use aes::cipher::BlockCipherEncrypt;
+    use aes::cipher::BlockEncrypt;
 
     /// CBC encryption over 16-byte blocks, IV prepended by the caller.
     pub struct Aes256CbcEncrypt {
@@ -289,7 +291,7 @@ impl AesCbc256Decrypt {
 
     /// Decrypt whole blocks in place (len must be a multiple of 16).
     pub fn decrypt(&mut self, data: &mut [u8]) {
-        use aes::cipher::BlockCipherDecrypt;
+        use aes::cipher::BlockDecrypt;
         assert_eq!(data.len() % 16, 0, "CBC input must be block-aligned");
         for chunk in data.chunks_exact_mut(16) {
             let cipher_block: [u8; 16] = chunk.try_into().expect("16 bytes");
@@ -322,7 +324,7 @@ impl AesCbc128Decrypt {
 
     /// Decrypt whole blocks in place (len must be a multiple of 16).
     pub fn decrypt(&mut self, data: &mut [u8]) {
-        use aes::cipher::BlockCipherDecrypt;
+        use aes::cipher::BlockDecrypt;
         assert_eq!(data.len() % 16, 0, "CBC input must be block-aligned");
         for chunk in data.chunks_exact_mut(16) {
             let cipher_block: [u8; 16] = chunk.try_into().expect("16 bytes");

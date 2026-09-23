@@ -297,13 +297,14 @@ jobs:
   # MSRV — the declared rust-version (workspace 1.75) must stay true.
   # Issue #638: the floor was violated by post-1.75 language features
   # (inline-const in statics, is_none_or) and only surfaced as a
-  # downstream MSRV-CI failure. This leg compiles the codec crates
-  # (the published set consumers resolve) at the declared floor with
-  # the committed lock. The container/bench/harness crates are out of
-  # scope: their dependency closures (ureq→idna_adapter, clap_lex,
-  # aes→cipher→block-buffer) contain edition2024 manifests that cargo
-  # 1.75 cannot even parse, so their real floor is cargo-capability
-  # bound, not language bound.
+  # downstream MSRV-CI failure. Issue #715: an x86_64-only leg is blind
+  # to target-gated deps — aes 0.9's aarch64-gated cpubits
+  # (edition2024) shipped silently and broke every 1.75 consumer on
+  # aarch64 hosts. The codec + crypto + AES-container set is now
+  # checked at the declared floor on BOTH the host target and
+  # aarch64-unknown-linux-gnu (cross-resolve catches cfg-gated
+  # edition2024 edges). The bench/harness crates remain out of scope:
+  # their closures (ureq→idna_adapter, clap_lex) carry edition2024.
   # ============================================================================
   msrv:
     name: MSRV (1.75)
@@ -315,12 +316,15 @@ jobs:
 
       - name: Install Rust 1.75
         uses: dtolnay/rust-toolchain@1.75.0
+        with:
+          targets: aarch64-unknown-linux-gnu
 
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@v2
-        key: msrv-1.75
+        with:
+          key: msrv-1.75
 
-      - name: Check codec crates at the declared floor
+      - name: Check codec + crypto crates at the declared floor (host)
         run: >
           cargo check --locked --lib --tests
           -p omnizip-codecs -p omnizip-brotli -p omnizip-zstd -p omnizip-lzma
@@ -328,6 +332,14 @@ jobs:
           -p omnizip-snappy -p omnizip-ppmd -p omnizip-glza -p omnizip-zpaq
           -p omnizip-fsst -p omnizip-ricepp -p omnizip-flac -p omnizip-filters
           -p omnizip-libdeflate -p omnizip-blosc
+          -p omnizip-crypto -p omnizip-zip -p omnizip-rar
+          -p omnizip-sevenzip -p omnizip-par2
+
+      - name: Check the same set cross-target aarch64 (cfg-gated dep edges)
+        run: >
+          cargo check --locked --lib --tests --target aarch64-unknown-linux-gnu
+          -p omnizip-codecs -p omnizip-lzma -p omnizip-crypto -p omnizip-zip
+          -p omnizip-rar -p omnizip-sevenzip -p omnizip-par2
 
   # ============================================================================
   # Semver Compatibility Check
