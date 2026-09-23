@@ -44,11 +44,37 @@ pub const REP_NUM: usize = 3;
 /// probes at min_match >= 5 (mirrors the closure's mm branch; kept
 /// standalone so seeding and probing agree byte-for-byte).
 pub(crate) fn hash_mls(data: &[u8], pos: usize, mm: usize, h_bits: u32) -> u32 {
-    let mut buf = [0u8; 8];
     let avail = (data.len() - pos).min(mm.max(4));
     if avail < 4 {
         return 0;
     }
+    // Full 8-byte load when readable: identical product for mm 5/6/7
+    // (the shift drops exactly the bytes zero-padding never had); only
+    // the cold tail takes the zero-padded partial path.
+    if pos + 8 <= data.len() {
+        let v64 = u64::from_le_bytes(data[pos..pos + 8].try_into().unwrap());
+        return match mm {
+            5 => {
+                (((v64 << 24).wrapping_mul(889_523_592_379) >> (64 - h_bits)) as u32)
+                    & ((1u32 << h_bits.min(32)) - 1)
+            }
+            6 => {
+                (((v64 << 16).wrapping_mul(227_718_039_650_203) >> (64 - h_bits)) as u32)
+                    & ((1u32 << h_bits.min(32)) - 1)
+            }
+            7 => {
+                (((v64 << 8).wrapping_mul(58_295_818_150_454_627) >> (64 - h_bits)) as u32)
+                    & ((1u32 << h_bits.min(32)) - 1)
+            }
+            _ => {
+                return (((u32::from_le_bytes(data[pos..pos + 4].try_into().unwrap())
+                    .wrapping_mul(2_654_435_761))
+                    >> (32 - h_bits.min(32))) as u32)
+                    & ((1u32 << h_bits.min(32)) - 1)
+            }
+        };
+    }
+    let mut buf = [0u8; 8];
     buf[..avail].copy_from_slice(&data[pos..pos + avail]);
     let v64 = match mm {
         5 => (u64::from_le_bytes(buf) << 24).wrapping_mul(889_523_592_379),
@@ -950,6 +976,36 @@ pub fn compress_block_fast4_with_prefix(
         let avail = (src.len() - p).min(mm.max(4));
         if avail < 4 {
             return 0;
+        }
+        // Issue #710: this closure showed ~7/9 CPU samples under
+        // platform_memmove — the zero-padded copy_from_slice lowered to a
+        // memmove per hash. C instantiates ZSTD_fast per-mls with plain
+        // fixed-width loads. For mm 5/6/7 the hash shifts left by
+        // (64 - mm*8), so a full 8-byte load is bit-identical whenever
+        // 8 bytes are readable; only the cold tail keeps the zero-padded
+        // partial copy.
+        if p + 8 <= src.len() {
+            let v64 = u64::from_le_bytes(src[p..p + 8].try_into().unwrap());
+            return match mm {
+                5 => {
+                    (((v64 << 24).wrapping_mul(889_523_592_379) >> (64 - h_bits)) as usize)
+                        & ((1usize << h_bits) - 1)
+                }
+                6 => {
+                    (((v64 << 16).wrapping_mul(227_718_039_650_203) >> (64 - h_bits)) as usize)
+                        & ((1usize << h_bits) - 1)
+                }
+                7 => {
+                    (((v64 << 8).wrapping_mul(58_295_818_150_454_627) >> (64 - h_bits)) as usize)
+                        & ((1usize << h_bits) - 1)
+                }
+                _ => {
+                    return (((u32::from_le_bytes(src[p..p + 4].try_into().unwrap())
+                        .wrapping_mul(2_654_435_761))
+                        >> (32 - h_bits.min(32))) as usize)
+                        & ((1usize << h_bits.min(32)) - 1)
+                }
+            };
         }
         let mut buf = [0u8; 8];
         buf[..avail].copy_from_slice(&src[p..p + avail]);
