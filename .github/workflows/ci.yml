@@ -324,6 +324,9 @@ jobs:
         with:
           key: msrv-1.75
 
+      - name: Generate the lock at the floor toolchain
+        run: cargo generate-lockfile
+
       - name: Check codec + crypto crates at the declared floor (host)
         run: >
           cargo check --locked --lib --tests

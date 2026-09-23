@@ -204,8 +204,11 @@ pub fn decode_lzma2_stream(input: &[u8]) -> Result<(Vec<u8>, usize), LzmaError> 
                 // Reset state (models + rep distances), keep lc/lp/pb.
                 let d = decoder.get_or_insert_with(|| Lzma1Decoder::new(lc, lp, pb, dict_size));
                 d.reset_state();
-                let consumed =
-                    d.decode_continuation_with_consumed(chunk_data, &mut output, uncompressed_size)?;
+                let consumed = d.decode_continuation_with_consumed(
+                    chunk_data,
+                    &mut output,
+                    uncompressed_size,
+                )?;
                 check_chunk_fully_consumed(consumed, compressed_size)?;
             }
             2 | 3 => {
@@ -216,8 +219,11 @@ pub fn decode_lzma2_stream(input: &[u8]) -> Result<(Vec<u8>, usize), LzmaError> 
                 }
                 let mut d = Lzma1Decoder::new(lc, lp, pb, dict_size);
                 d.reset_state();
-                let consumed =
-                    d.decode_continuation_with_consumed(chunk_data, &mut output, uncompressed_size)?;
+                let consumed = d.decode_continuation_with_consumed(
+                    chunk_data,
+                    &mut output,
+                    uncompressed_size,
+                )?;
                 check_chunk_fully_consumed(consumed, compressed_size)?;
                 decoder = Some(d);
             }
@@ -239,9 +245,7 @@ fn check_chunk_fully_consumed(consumed: usize, compressed_size: usize) -> Result
     let leftover = compressed_size.saturating_sub(consumed);
     if leftover > 1 {
         return Err(LzmaError::Corrupt {
-            reason: format!(
-                "LZMA2 chunk has {leftover} unconsumed compressed byte(s)"
-            ),
+            reason: format!("LZMA2 chunk has {leftover} unconsumed compressed byte(s)"),
         });
     }
     Ok(())

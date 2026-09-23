@@ -481,12 +481,7 @@ pub fn find_dictionary_match(input: &[u8], pos: usize, max_distance: u32) -> Opt
     if pos + 4 > input.len() {
         return None;
     }
-    let key = u32::from_le_bytes([
-        input[pos],
-        input[pos + 1],
-        input[pos + 2],
-        input[pos + 3],
-    ]);
+    let key = u32::from_le_bytes([input[pos], input[pos + 1], input[pos + 2], input[pos + 3]]);
     let Some(candidates) = word_buckets().get(&key) else {
         return None;
     };

@@ -4,7 +4,7 @@
 //! slots 0..=13 (short distances) and the align-tree path for slots
 //! ≥14. The direct-bits path for slots ≥14 is incomplete — full
 //! EOPM encoding requires the exact bit-by-bit reconstruction used
-//! by `decode_direct_bits_with_base`. 
+//! by `decode_direct_bits_with_base`.
 
 #![forbid(unsafe_code)]
 

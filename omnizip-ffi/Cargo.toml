@@ -23,7 +23,6 @@ crate-type = ["cdylib", "lib"]
 omnizip-codecs.workspace = true
 omnizip-zstd.workspace = true
 omnizip-bzip2.workspace = true
-omnizip-deflate.workspace = true
 omnizip-libdeflate.workspace = true
 omnizip-archive-core.workspace = true
 omnizip-zip.workspace = true

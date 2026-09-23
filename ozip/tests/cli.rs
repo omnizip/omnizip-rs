@@ -598,9 +598,19 @@ fn repair_reports_intact_and_fails_loud_on_corruption() {
     std::fs::create_dir_all(&dir).unwrap();
 
     let src = dir.join("data.bin");
-    std::fs::write(&src, (0..20_000u32).map(|i| (i % 7) as u8).collect::<Vec<u8>>()).unwrap();
+    std::fs::write(
+        &src,
+        (0..20_000u32).map(|i| (i % 7) as u8).collect::<Vec<u8>>(),
+    )
+    .unwrap();
     let arc = dir.join("a.rar");
-    let (ok, _, err) = run(&[os("c"), os("-f"), os("rar"), arc.as_os_str(), src.as_os_str()]);
+    let (ok, _, err) = run(&[
+        os("c"),
+        os("-f"),
+        os("rar"),
+        arc.as_os_str(),
+        src.as_os_str(),
+    ]);
     assert!(ok, "c -f rar failed: {err}");
 
     // Intact archive: repair succeeds with the no-repair-needed report.
