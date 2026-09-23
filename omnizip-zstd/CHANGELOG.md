@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Other
+
+- Kill the per-hash memmove in the mls=5/6/7 hash by @[object]
+
 ### Fixed
 
 - Self-sufficient MSRV leg, dead ffi dep, fmt by @[object]
