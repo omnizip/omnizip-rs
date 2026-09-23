@@ -195,7 +195,8 @@ fn find_eocd(data: &[u8]) -> Option<usize> {
 }
 
 impl ZipReader {
-    #[expect(clippy::type_complexity, reason = "pos/len/method/flags tuple")]
+    // pos/len/method/flags tuple
+    #[allow(clippy::type_complexity)]
     fn raw_entry(&self, index: usize) -> Result<(usize, usize, u16, u16), ArchiveError> {
         let st = self
             .entries
