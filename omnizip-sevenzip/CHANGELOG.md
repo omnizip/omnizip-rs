@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Other
+
+- Remove TODO boards from git — local-only policy; open work to GitHub issues by @[object]
+
 ### Fixed
 
 - 32-bit arm compile + musl cdylib emission by @[object]
