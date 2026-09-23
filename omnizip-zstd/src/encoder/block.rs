@@ -938,8 +938,7 @@ fn write_block(
     // The reference runs the sequence splitter from Greedy up; here it
     // stays opt-in for the low strategies (OMNIZIP_ZSTD_SEQ_SPLIT=1)
     // until the trial cost is paid for on the L5-L12 sweep (task 21).
-    let low_strategy_split =
-        std::env::var("OMNIZIP_ZSTD_SEQ_SPLIT").is_ok_and(|v| v == "1");
+    let low_strategy_split = std::env::var("OMNIZIP_ZSTD_SEQ_SPLIT").is_ok_and(|v| v == "1");
     let split_strategies = if low_strategy_split {
         matches!(
             params.strategy,
@@ -1167,8 +1166,7 @@ fn write_block_cross(
     // The reference runs the sequence splitter from Greedy up; here it
     // stays opt-in for the low strategies (OMNIZIP_ZSTD_SEQ_SPLIT=1)
     // until the trial cost is paid for on the L5-L12 sweep (task 21).
-    let low_strategy_split =
-        std::env::var("OMNIZIP_ZSTD_SEQ_SPLIT").is_ok_and(|v| v == "1");
+    let low_strategy_split = std::env::var("OMNIZIP_ZSTD_SEQ_SPLIT").is_ok_and(|v| v == "1");
     let split_strategies = if low_strategy_split {
         matches!(
             params.strategy,

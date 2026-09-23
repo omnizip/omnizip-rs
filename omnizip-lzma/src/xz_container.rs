@@ -169,7 +169,11 @@ fn decode_stream(input: &[u8]) -> Result<(Vec<u8>, usize), LzmaError> {
 /// Validate the Index at `index_start`: indicator + record count +
 /// (unpadded size, uncompressed size) per record + zero padding to
 /// 4-byte alignment + CRC32. Returns the index end offset.
-fn validate_index(input: &[u8], index_start: usize, records: &[(u64, u64)]) -> Result<usize, LzmaError> {
+fn validate_index(
+    input: &[u8],
+    index_start: usize,
+    records: &[(u64, u64)],
+) -> Result<usize, LzmaError> {
     let mut cursor = index_start;
     if input.get(cursor) != Some(&0x00) {
         return Err(LzmaError::Corrupt {
@@ -356,7 +360,10 @@ fn decode_block(
                 }
                 if props[0] > 40 {
                     return Err(LzmaError::Corrupt {
-                        reason: format!("XZ LZMA2 dictionary size property {} is reserved", props[0]),
+                        reason: format!(
+                            "XZ LZMA2 dictionary size property {} is reserved",
+                            props[0]
+                        ),
                     });
                 }
                 saw_lzma2 = true;
@@ -449,9 +456,7 @@ fn decode_block(
     if let Some(declared) = declared_compressed {
         if declared != lzma2_consumed as u64 {
             return Err(LzmaError::Corrupt {
-                reason: format!(
-                    "XZ block compressed size {declared} != actual {lzma2_consumed}"
-                ),
+                reason: format!("XZ block compressed size {declared} != actual {lzma2_consumed}"),
             });
         }
     }
@@ -481,11 +486,11 @@ fn decode_block(
     let total = padded + check_size;
 
     if check_size > 0 {
-        let stored = input.get(padded..padded + check_size).ok_or_else(|| {
-            LzmaError::Corrupt {
+        let stored = input
+            .get(padded..padded + check_size)
+            .ok_or_else(|| LzmaError::Corrupt {
                 reason: "XZ block check truncated".into(),
-            }
-        })?;
+            })?;
         let ok = match check_type {
             1 => stored == crc32(&final_output).to_le_bytes(),
             4 => {
@@ -544,8 +549,7 @@ fn apply_bcj_reverse(bcj_id: u64, data: Vec<u8>, start_offset: u32) -> Vec<u8> {
     }
     if start_offset != 0 {
         // Only ARM64 reaches here with an offset (validated above).
-        return omnizip_filters::bcj_arm64::BcjArm64StartOffset::new(start_offset)
-            .decode(&data);
+        return omnizip_filters::bcj_arm64::BcjArm64StartOffset::new(start_offset).decode(&data);
     }
     match bcj_id {
         // xz filter IDs (spec §5.3): 0x04 x86, 0x05 PowerPC, 0x06 IA64,

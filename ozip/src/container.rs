@@ -827,9 +827,7 @@ fn payload_or_single(
     codec: &str,
     decompress: fn(&[u8]) -> Result<Vec<u8>, String>,
 ) -> Result<Opened, String> {
-    payload_or_single_named(data, hint, codec, |d| {
-        Ok((decompress(d)?, None))
-    })
+    payload_or_single_named(data, hint, codec, |d| Ok((decompress(d)?, None)))
 }
 
 fn payload_or_single_named(
@@ -905,9 +903,8 @@ fn open_bytes_named(
             // FNAME (RFC 1952 §2.3.1.2) is the original file name —
             // authoritative for the entry view when present, like
             // `gzip -N`. Falls back to the filename hint.
-            let (meta, inner) =
-                omnizip_archive_core::formats::gzip::decompress_with_metadata(d)
-                    .map_err(|e| format!("gzip: {e}"))?;
+            let (meta, inner) = omnizip_archive_core::formats::gzip::decompress_with_metadata(d)
+                .map_err(|e| format!("gzip: {e}"))?;
             Ok((inner, meta.original_name))
         }),
         FormatKind::Bzip2 => payload_or_single(data, hint, "bzip2", |d| {
@@ -1092,9 +1089,7 @@ pub(crate) fn archive_repair(archive: &Path, password: Option<&str>) -> Result<(
     };
     match &rr {
         Some(rr) => {
-            let crc = rr
-                .crc32
-                .map_or("absent".into(), |c| format!("{c:08X}"));
+            let crc = rr.crc32.map_or("absent".into(), |c| format!("{c:08X}"));
             println!(
                 "recovery record: present ({}% protection, header CRC {})",
                 rr.percent.map_or(0, |p| p),
@@ -1441,7 +1436,9 @@ fn glob_match(pattern: &[u8], name: &[u8]) -> bool {
                 let set = &p[1..close];
                 let negate = set.first() == Some(&b'!') || set.first() == Some(&b'^');
                 let set = if negate { &set[1..] } else { set };
-                let hit = set.windows(3).any(|w| w[0] <= c && c <= w[2] && w[1] == b'-')
+                let hit = set
+                    .windows(3)
+                    .any(|w| w[0] <= c && c <= w[2] && w[1] == b'-')
                     || set.contains(&c);
                 if hit != negate {
                     inner(&p[close + 1..], &n[1..])
