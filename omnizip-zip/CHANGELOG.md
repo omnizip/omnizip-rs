@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- #[expect(..., reason=)] is post-1.75 syntax — restore the floor by @[object]
+
+### Other
+
+- Remove TODO boards from git — local-only policy; open work to GitHub issues by @[object]
+
+### Fixed
+
 - EOF-checked inflate + 1032:1 expansion cap close a decompression bomb by @[object]
 
 ### Added

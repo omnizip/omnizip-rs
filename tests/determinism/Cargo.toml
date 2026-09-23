@@ -16,18 +16,18 @@ name = "archive_determinism"
 path = "archive_determinism.rs"
 
 [dev-dependencies]
-omnizip-codecs = { path = "../../omnizip-codecs", version = "0.21.112" }
-omnizip-lzma = { path = "../../omnizip-lzma", version = "0.21.112" }
-omnizip-zstd = { path = "../../omnizip-zstd", version = "0.21.112" }
-omnizip-brotli = { path = "../../omnizip-brotli", version = "0.21.112" }
-omnizip-bzip2 = { path = "../../omnizip-bzip2", version = "0.21.112" }
-omnizip-lz4 = { path = "../../omnizip-lz4", version = "0.21.112" }
-omnizip-deflate = { path = "../../omnizip-deflate", version = "0.21.112" }
-omnizip-flac = { path = "../../omnizip-flac", version = "0.21.112" }
-omnizip-libdeflate = { path = "../../omnizip-libdeflate", version = "0.21.112" }
-omnizip-ppmd = { path = "../../omnizip-ppmd", version = "0.21.112" }
-omnizip-snappy = { path = "../../omnizip-snappy", version = "0.21.112" }
-omnizip-ricepp = { path = "../../omnizip-ricepp", version = "0.21.112" }
+omnizip-codecs = { path = "../../omnizip-codecs", version = "0.21.113" }
+omnizip-lzma = { path = "../../omnizip-lzma", version = "0.21.113" }
+omnizip-zstd = { path = "../../omnizip-zstd", version = "0.21.113" }
+omnizip-brotli = { path = "../../omnizip-brotli", version = "0.21.113" }
+omnizip-bzip2 = { path = "../../omnizip-bzip2", version = "0.21.113" }
+omnizip-lz4 = { path = "../../omnizip-lz4", version = "0.21.113" }
+omnizip-deflate = { path = "../../omnizip-deflate", version = "0.21.113" }
+omnizip-flac = { path = "../../omnizip-flac", version = "0.21.113" }
+omnizip-libdeflate = { path = "../../omnizip-libdeflate", version = "0.21.113" }
+omnizip-ppmd = { path = "../../omnizip-ppmd", version = "0.21.113" }
+omnizip-snappy = { path = "../../omnizip-snappy", version = "0.21.113" }
+omnizip-ricepp = { path = "../../omnizip-ricepp", version = "0.21.113" }
 omnizip-bench = { path = "../../omnizip-bench", version = "0.21.102" }
 
 [lints]

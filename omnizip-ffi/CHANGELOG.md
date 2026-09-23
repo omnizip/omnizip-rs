@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Self-sufficient MSRV leg, dead ffi dep, fmt by @[object]
+
+### Other
+
+- Remove TODO boards from git — local-only policy; open work to GitHub issues by @[object]
+
 ### Other
 
 - Cross-build the cdylib for 11 platforms + ozip_version symbol by @[object]

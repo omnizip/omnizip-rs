@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Self-sufficient MSRV leg, dead ffi dep, fmt by @[object]
+
+### Other
+
+- Remove TODO boards from git — local-only policy; open work to GitHub issues by @[object]
+
+### Fixed
+
 - Exact chunk-tail rule closes the last xz corpus case by @[object]
 
 ### Fixed
