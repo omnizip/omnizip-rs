@@ -17,14 +17,23 @@ path = "src/lib.rs"
 # The task-05 decision: vetted pure-Rust RustCrypto crates, never
 # hand-rolled primitives. All are #![forbid(unsafe_code)] in their
 # core implementations; versions pinned for auditability.
-digest = "0.11"
-md5 = { package = "md-5", version = "0.11" }
-sha1 = "0.11"
-sha2 = "0.11"
-hmac = "0.13"
-pbkdf2 = { version = "0.13", default-features = false, features = ["hmac"] }
-aes = "0.9"
-ctr = "0.10"
+# Same floor discipline as aes below: the 0.11 digest generation
+# (block-buffer 0.12) is edition2024 / rust-version 1.85 — unparseable
+# by cargo 1.75. The 0.10 generation is edition2018/2021.
+digest = "0.10"
+md5 = { package = "md-5", version = "0.10" }
+sha1 = "0.10"
+sha2 = "0.10"
+hmac = "0.12"
+pbkdf2 = { version = "0.12", default-features = false, features = ["hmac"] }
+# aes is held at 0.8.x deliberately (issue #715): the 0.9 line rides
+# cipher 0.5 / inout 0.2 / cpubits — edition2024 manifests with
+# rust-version 1.85 that cargo 1.75 (the declared floor) cannot even
+# parse; on aarch64 hosts the cpubits edge is target-gated IN, breaking
+# every 1.75 consumer. 0.8 pairs with cipher 0.4 / inout 0.1
+# (edition2021) and keeps the floor honest everywhere.
+aes = "0.8"
+ctr = "0.9"
 
 [lints]
 workspace = true
