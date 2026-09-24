@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Bounded file reader, file writer, disk-spill budget ([#712](https://github.com/omnizip/omnizip-rs/pull/712)) by @[object]
+
 ### Other
 
 - Remove TODO boards from git — local-only policy; open work to GitHub issues by @[object]
