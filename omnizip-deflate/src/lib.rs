@@ -12,6 +12,10 @@
 #![forbid(unsafe_code)]
 #![warn(clippy::pedantic)]
 
+mod streaming;
+
+pub use streaming::DeflateStreamingDecoder;
+
 use omnizip_codecs::{Codec, CodecId, CompressionLevel, OmnizipError};
 
 /// DEFLATE codec. Uses [`omnizip_libdeflate`] internally.

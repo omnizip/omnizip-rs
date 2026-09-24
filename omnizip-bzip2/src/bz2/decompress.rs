@@ -102,14 +102,26 @@ impl HufTable {
 }
 
 /// Decompress a complete `.bz2` stream (single member; multi-stream
-/// files are the caller's concatenation loop). Verifies block CRCs
-/// and the combined stream CRC.
+/// files are the caller's concatenation loop — see
+/// [`decompress_multi_stream`]). Verifies block CRCs and the combined
+/// stream CRC.
 ///
 /// # Errors
 ///
 /// [`OmnizipError::DecodeFailed`] on any malformed structure or CRC
 /// mismatch.
 pub fn decompress_framed(input: &[u8]) -> Result<Vec<u8>, OmnizipError> {
+    decompress_one_stream(input).map(|(out, _)| out)
+}
+
+/// Like [`decompress_framed`] but also reports how many input bytes the
+/// stream consumed (a following concatenated member starts there).
+///
+/// # Errors
+///
+/// [`OmnizipError::DecodeFailed`] on any malformed structure or CRC
+/// mismatch.
+pub fn decompress_one_stream(input: &[u8]) -> Result<(Vec<u8>, usize), OmnizipError> {
     // Stream header: "BZh" + level digit (exactly 32 bits, so the
     // body is byte-aligned at offset 4).
     if input.len() < 4 || &input[..3] != b"BZh" || !input[3].is_ascii_digit() {
@@ -128,7 +140,11 @@ pub fn decompress_framed(input: &[u8]) -> Result<Vec<u8>, OmnizipError> {
                     "combined CRC mismatch: stored {stored:08X}, computed {combined:08X}"
                 )));
             }
-            return Ok(out);
+            // Members are byte-aligned: the final byte's unread bits are
+            // member padding, so the next member starts at `r.pos` — NOT
+            // at `r.consumed()`, which steps back onto the pad byte.
+            let consumed = 4 + r.pos;
+            return Ok((out, consumed));
         }
         if magic != BLOCK_MAGIC {
             return Err(err(format!("bad block magic {magic:012X}")));
@@ -266,6 +282,26 @@ pub fn decompress_framed(input: &[u8]) -> Result<Vec<u8>, OmnizipError> {
         combined = combined.rotate_left(1) ^ block_crc;
         out.extend_from_slice(&data);
     }
+}
+
+/// Decode every `.bz2` member of a concatenated multi-stream file
+/// (the `bzip2 -d` semantics the streaming encoder's output relies
+/// on), concatenating the plaintexts. Trailing bytes that do not
+/// start a new member are an error.
+///
+/// # Errors
+///
+/// [`OmnizipError::DecodeFailed`] on any malformed structure or CRC
+/// mismatch, or on trailing garbage.
+pub fn decompress_multi_stream(input: &[u8]) -> Result<Vec<u8>, OmnizipError> {
+    let mut out = Vec::new();
+    let mut rest = input;
+    while !rest.is_empty() {
+        let (part, consumed) = decompress_one_stream(rest)?;
+        out.extend_from_slice(&part);
+        rest = &rest[consumed..];
+    }
+    Ok(out)
 }
 
 /// Malformed RUNA/RUNB chain (run length overflowed any legal block).
