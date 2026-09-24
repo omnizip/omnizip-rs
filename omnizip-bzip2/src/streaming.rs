@@ -1,11 +1,10 @@
 //! Streaming bzip2 decoder (omnizip-rs #712).
 //!
-//! Buffers compressed input and decodes on `finish`, handling the
-//! concatenated multi-stream form the crate's [`streaming_encoder`]
-//! emits (one independent `.bz2` member per chunk — `bzip2 -d`
-//! semantics). Per-member incremental emission is a possible
-//! follow-up: a stream's span is walkable the same way zstd's
-//! `frame_span` is, but v1 keeps the decode-at-finish contract.
+//! Handles the concatenated multi-stream form the crate's
+//! [`streaming_encoder`] emits (one independent `.bz2` member per
+//! chunk — `bzip2 -d` semantics), emitting each member's plaintext
+//! the moment that member's last byte arrives (zstd
+//! `IncrementalDecoder`'s per-frame contract).
 //!
 //! [`streaming_encoder`]: crate::codec::streaming_encoder
 
@@ -13,9 +12,9 @@
 
 use omnizip_codecs::{CodecId, OmnizipError, StreamingDecoder};
 
-use crate::bz2::decompress::decompress_multi_stream;
+use crate::bz2::decompress::{decompress_multi_stream, decompress_one_stream};
 
-/// Streaming bzip2 decoder. Buffers input, decodes on finish.
+/// Streaming bzip2 decoder with per-member incremental emission.
 pub struct Bzip2StreamingDecoder {
     buf: Vec<u8>,
     finished: bool,
@@ -47,9 +46,22 @@ impl StreamingDecoder for Bzip2StreamingDecoder {
             });
         }
         self.buf.extend_from_slice(input);
-        // v1 contract: no member-level framing walk yet — the whole
-        // multi-stream file decodes on finish.
-        Ok(Vec::new())
+        // Emit every member that decodes completely from the buffer.
+        // An Err here means "not all buffered bytes form a complete
+        // member yet" (truncated tail) OR corruption — both defer to
+        // `finish`, which decodes the remainder strictly and reports
+        // either condition loudly.
+        let mut out = Vec::new();
+        while !self.buf.is_empty() {
+            match decompress_one_stream(&self.buf) {
+                Ok((part, consumed)) => {
+                    out.extend_from_slice(&part);
+                    self.buf.drain(..consumed);
+                }
+                Err(_) => break,
+            }
+        }
+        Ok(out)
     }
 
     fn finish(self) -> Result<Vec<u8>, OmnizipError> {
@@ -74,13 +86,15 @@ mod tests {
         let compressed = e.finish().unwrap();
 
         let mut d = Bzip2StreamingDecoder::new();
+        let mut got = Vec::new();
         let mut i = 0;
         while i < compressed.len() {
             let n = 97.min(compressed.len() - i);
-            d.write(&compressed[i..i + n]).unwrap();
+            got.extend_from_slice(&d.write(&compressed[i..i + n]).unwrap());
             i += n;
         }
-        assert_eq!(d.finish().unwrap(), input);
+        got.extend_from_slice(&d.finish().unwrap());
+        assert_eq!(got, input);
     }
 
     #[test]
@@ -90,9 +104,11 @@ mod tests {
             .compress(&input, CompressionLevel::default())
             .unwrap();
         let mut d = Bzip2StreamingDecoder::new();
-        d.write(&compressed[..compressed.len() / 2]).unwrap();
-        d.write(&compressed[compressed.len() / 2..]).unwrap();
-        assert_eq!(d.finish().unwrap(), input);
+        let mut got = Vec::new();
+        got.extend_from_slice(&d.write(&compressed[..compressed.len() / 2]).unwrap());
+        got.extend_from_slice(&d.write(&compressed[compressed.len() / 2..]).unwrap());
+        got.extend_from_slice(&d.finish().unwrap());
+        assert_eq!(got, input);
     }
 
     #[test]
@@ -105,8 +121,10 @@ mod tests {
             .compress(&[], CompressionLevel::default())
             .unwrap();
         let mut d = Bzip2StreamingDecoder::new();
-        d.write(&compressed).unwrap();
-        assert!(d.finish().unwrap().is_empty());
+        let mut got = Vec::new();
+        got.extend_from_slice(&d.write(&compressed).unwrap());
+        got.extend_from_slice(&d.finish().unwrap());
+        assert!(got.is_empty());
     }
 
     #[test]

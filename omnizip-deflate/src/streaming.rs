@@ -1,10 +1,11 @@
 //! Streaming deflate decoder (omnizip-rs #712).
 //!
-//! Buffers compressed input and decodes on `finish`, inflating every
-//! DEFLATE member of a concatenated stream — the form the crate's
-//! [`streaming_encoder`] emits (one independent member per chunk).
-//! Raw DEFLATE has no resync framing, so the walk relies on
-//! `inflate_with_consumed` reporting each member's byte count.
+//! Handles the concatenated zlib-framed form the crate's
+//! [`streaming_encoder`] emits (one independent member per chunk),
+//! emitting each member's plaintext the moment that member's last
+//! byte arrives. Raw DEFLATE has no resync framing, so the walk
+//! relies on `inflate_with_consumed` reporting each member's byte
+//! count.
 //!
 //! [`streaming_encoder`]: crate::streaming_encoder
 
@@ -14,7 +15,7 @@ use omnizip_codecs::{CodecId, OmnizipError, StreamingDecoder};
 
 use omnizip_libdeflate::inflate::inflate_with_consumed;
 
-/// Streaming deflate decoder. Buffers input, decodes on finish.
+/// Streaming deflate decoder with per-member incremental emission.
 pub struct DeflateStreamingDecoder {
     buf: Vec<u8>,
     finished: bool,
@@ -46,9 +47,28 @@ impl StreamingDecoder for DeflateStreamingDecoder {
             });
         }
         self.buf.extend_from_slice(input);
-        // v1 contract: DEFLATE has no framing to walk — the whole
-        // concatenated stream decodes on finish.
-        Ok(Vec::new())
+        // Emit every member that inflates completely from the buffer.
+        // An Err means "incomplete tail" or corruption — both defer to
+        // `finish`, which decodes the remainder strictly.
+        let mut out = Vec::new();
+        loop {
+            if self.buf.is_empty() {
+                break;
+            }
+            let (header, trailer) = zlib_framing(&self.buf);
+            if header + trailer > self.buf.len() {
+                break; // too short to even hold framing — wait for more
+            }
+            let body = &self.buf[header..self.buf.len() - trailer];
+            match inflate_with_consumed(body, body.len().saturating_mul(6)) {
+                Ok((part, consumed)) => {
+                    out.extend_from_slice(&part);
+                    self.buf.drain(..header + consumed + trailer);
+                }
+                Err(_) => break,
+            }
+        }
+        Ok(out)
     }
 
     fn finish(self) -> Result<Vec<u8>, OmnizipError> {
@@ -118,13 +138,15 @@ mod tests {
         let compressed = e.finish().unwrap();
 
         let mut d = DeflateStreamingDecoder::new();
+        let mut got = Vec::new();
         let mut i = 0;
         while i < compressed.len() {
             let n = 89.min(compressed.len() - i);
-            d.write(&compressed[i..i + n]).unwrap();
+            got.extend_from_slice(&d.write(&compressed[i..i + n]).unwrap());
             i += n;
         }
-        assert_eq!(d.finish().unwrap(), input);
+        got.extend_from_slice(&d.finish().unwrap());
+        assert_eq!(got, input);
     }
 
     #[test]
@@ -134,9 +156,34 @@ mod tests {
             .compress(&input, CompressionLevel::default())
             .unwrap();
         let mut d = DeflateStreamingDecoder::new();
-        d.write(&compressed[..compressed.len() / 2]).unwrap();
-        d.write(&compressed[compressed.len() / 2..]).unwrap();
-        assert_eq!(d.finish().unwrap(), input);
+        let mut got = Vec::new();
+        got.extend_from_slice(&d.write(&compressed[..compressed.len() / 2]).unwrap());
+        got.extend_from_slice(&d.write(&compressed[compressed.len() / 2..]).unwrap());
+        got.extend_from_slice(&d.finish().unwrap());
+        assert_eq!(got, input);
+    }
+
+    #[test]
+    fn emits_each_member_as_its_last_byte_arrives() {
+        let m1 = DeflateCodec
+            .compress(b"first member payload", CompressionLevel::default())
+            .unwrap();
+        let m2 = DeflateCodec
+            .compress(b"second member payload", CompressionLevel::default())
+            .unwrap();
+        let mut d = DeflateStreamingDecoder::new();
+
+        let out = d.write(&m1).unwrap();
+        assert_eq!(
+            out, b"first member payload",
+            "member 1 not emitted on completion"
+        );
+
+        let mid = m2.len() / 2;
+        assert!(d.write(&m2[..mid]).unwrap().is_empty());
+        let out = d.write(&m2[mid..]).unwrap();
+        assert_eq!(out, b"second member payload");
+        assert!(d.finish().unwrap().is_empty());
     }
 
     #[test]
