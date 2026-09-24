@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Other
 
+- Entropy-model table selection for large blocks ([#710](https://github.com/omnizip/omnizip-rs/pull/710)) by @[object]
+
+### Other
+
 - U32 wrapping state transitions in the FSE writer by @[object]
 
 ### Other
