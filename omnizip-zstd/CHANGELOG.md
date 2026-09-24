@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Other
 
+- U32 wrapping state transitions in the FSE writer by @[object]
+
+### Other
+
 - Kill the per-hash memmove in the mls=5/6/7 hash by @[object]
 
 ### Fixed
