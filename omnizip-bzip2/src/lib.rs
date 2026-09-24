@@ -34,6 +34,7 @@ mod crc32;
 mod huffman;
 mod mtf;
 mod rle;
+pub mod streaming;
 
 pub use codec::{Bzip2Codec, Bzip2Compressor};
 
