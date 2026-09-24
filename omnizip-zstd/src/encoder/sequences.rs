@@ -831,14 +831,17 @@ fn encode_sequences_bitstream(
     );
 
     for n in (0..nb_seq - 1).rev() {
-        // Inline FSE state steps (3 per sequence).
+        // Inline FSE state steps (3 per sequence). The state transition is
+        // u32 wrapping arithmetic — `(state >> nb) + delta_find_state`
+        // modulo 2^32, exactly C's U32 add — avoiding two i64 widenings
+        // per step (issue #710).
         let sym_of = of_codes[n] as usize;
         let tt_of = &of_ctable.symbol_tt[sym_of];
         let nb_of = (st_of + tt_of.delta_nb_bits) >> 16;
         add_bits!(u64::from(st_of), nb_of);
         st_of = u32::from(
             of_ctable.state_table
-                [((i64::from(st_of >> nb_of) + i64::from(tt_of.delta_find_state)) as usize)],
+                [(st_of >> nb_of).wrapping_add_signed(tt_of.delta_find_state) as usize],
         );
 
         let sym_ml = ml_codes[n] as usize;
@@ -847,7 +850,7 @@ fn encode_sequences_bitstream(
         add_bits!(u64::from(st_ml), nb_ml);
         st_ml = u32::from(
             ml_ctable.state_table
-                [((i64::from(st_ml >> nb_ml) + i64::from(tt_ml.delta_find_state)) as usize)],
+                [(st_ml >> nb_ml).wrapping_add_signed(tt_ml.delta_find_state) as usize],
         );
 
         let sym_ll = ll_codes[n] as usize;
@@ -856,7 +859,7 @@ fn encode_sequences_bitstream(
         add_bits!(u64::from(st_ll), nb_ll);
         st_ll = u32::from(
             ll_ctable.state_table
-                [((i64::from(st_ll >> nb_ll) + i64::from(tt_ll.delta_find_state)) as usize)],
+                [(st_ll >> nb_ll).wrapping_add_signed(tt_ll.delta_find_state) as usize],
         );
 
         add_bits!(
