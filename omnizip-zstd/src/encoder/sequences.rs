@@ -31,6 +31,12 @@ const MODE_RLE: u8 = 1;
 const MODE_FSE: u8 = 2;
 const MODE_REPEAT: u8 = 3;
 
+/// Blocks below this sequence count keep the exact cost simulation
+/// (cheap at that size, preserves historical small-stream bytes);
+/// larger blocks select table modes with the entropy model alone
+/// (issue #710 — the simulation walks dominated encode_section).
+const MODELS_MIN_SEQS: usize = 1024;
+
 /// The effective table per symbol type as a decoder holds it after
 /// the last emitted block. `Repeat_Mode` re-sends this table with
 /// zero header bytes, which is what makes the reference's
@@ -302,6 +308,42 @@ pub fn encode_section(
         let bits = ll.payload_bits + ml.payload_bits + of.payload_bits + k_extras;
         header_bits + 8 * ((bits + 1 + 7) / 8)
     };
+    // Model-cost variants (issue #710): histogram × entropy-model, no
+    // state-machine walk, no ctable build. FSE carries its ncount
+    // header; RLE carries one header byte and a ZERO-bit payload (the
+    // single symbol is implicit on the wire — the exact simulation
+    // models this as ~0 through the single-state walk); Predefined
+    // and Repeat carry no header.
+    fn stream_payload_model(count: &[u32], choice: &TableChoice) -> StreamCost {
+        match choice.mode {
+            MODE_FSE => StreamCost {
+                payload_bits: estimate_cost(count, &choice.norm, choice.table_log, choice.max_sym),
+                header_bytes: estimate_ncount_size(&choice.norm, choice.max_sym, choice.table_log)
+                    as u32,
+                valid: true,
+            },
+            MODE_RLE => StreamCost {
+                payload_bits: 0,
+                header_bytes: 1,
+                valid: true,
+            },
+            _ => StreamCost {
+                payload_bits: estimate_cost(count, &choice.norm, choice.table_log, choice.max_sym),
+                header_bytes: 0,
+                valid: true,
+            },
+        }
+    }
+    fn stream_payload_pair_model(
+        count: &[u32],
+        ca: &TableChoice,
+        cb: &TableChoice,
+    ) -> (StreamCost, StreamCost) {
+        (
+            stream_payload_model(count, ca),
+            stream_payload_model(count, cb),
+        )
+    }
 
     let ll_fse = choose_table_mode(&ll_count, ll_max, &LL_DEFAULT_NORM, 6, 35, 9, nb_seq as u64);
     let ml_fse = choose_table_mode(&ml_count, ml_max, &ML_DEFAULT_NORM, 6, 52, 9, nb_seq as u64);
@@ -379,15 +421,56 @@ pub fn encode_section(
             )
         };
 
-    let (ll_pre_c, ll_fse_c) = stream_payload_pair(&ll_codes, &ll_pre, &ll_fse, ll_max);
-    let (ml_pre_c, ml_fse_c) = stream_payload_pair(&ml_codes, &ml_pre, &ml_fse, ml_max);
-    let (of_pre_c, of_fse_c) = stream_payload_pair(&of_codes, &of_pre, &of_fse, of_max);
+    // Cost model selection (issue #710): the exact-simulation costs
+    // (build both candidate ctables, walk every symbol through the
+    // state machine) were the top encode_section profile cost — 3
+    // fused pair-walks plus per-candidate walks over ALL sequences,
+    // rivaling the final bitstream write. C selects with the
+    // count×bits entropy model and never simulates. Hybrid: small
+    // blocks (< MODELS_MIN_SEQS) keep the exact simulation — cheap
+    // at that size and it preserves the historical small-stream
+    // bytes; large blocks pay model cost only.
+    let exact_costs = nb_seq < MODELS_MIN_SEQS;
+
+    let (ll_pre_c, ll_fse_c) = if exact_costs {
+        stream_payload_pair(&ll_codes, &ll_pre, &ll_fse, ll_max)
+    } else {
+        stream_payload_pair_model(&ll_count, &ll_pre, &ll_fse)
+    };
+    let (ml_pre_c, ml_fse_c) = if exact_costs {
+        stream_payload_pair(&ml_codes, &ml_pre, &ml_fse, ml_max)
+    } else {
+        stream_payload_pair_model(&ml_count, &ml_pre, &ml_fse)
+    };
+    let (of_pre_c, of_fse_c) = if exact_costs {
+        stream_payload_pair(&of_codes, &of_pre, &of_fse, of_max)
+    } else {
+        stream_payload_pair_model(&of_count, &of_pre, &of_fse)
+    };
 
     // Single-table cost for the pick_table RLE/Repeat evaluation
     // (one candidate at a time — not fusable).
-    let ll_cost = |c: &TableChoice| stream_payload(&ll_codes, c, ll_max);
-    let ml_cost = |c: &TableChoice| stream_payload(&ml_codes, c, ml_max);
-    let of_cost = |c: &TableChoice| stream_payload(&of_codes, c, of_max);
+    let ll_cost = |c: &TableChoice| {
+        if exact_costs {
+            stream_payload(&ll_codes, c, ll_max)
+        } else {
+            stream_payload_model(&ll_count, c)
+        }
+    };
+    let ml_cost = |c: &TableChoice| {
+        if exact_costs {
+            stream_payload(&ml_codes, c, ml_max)
+        } else {
+            stream_payload_model(&ml_count, c)
+        }
+    };
+    let of_cost = |c: &TableChoice| {
+        if exact_costs {
+            stream_payload(&of_codes, c, of_max)
+        } else {
+            stream_payload_model(&of_count, c)
+        }
+    };
 
     let (ll_choice, ll_wire) = pick_table(
         ll_fse.mode == MODE_FSE && {
@@ -668,13 +751,12 @@ fn choose_table_mode(
     }
 }
 
-/// Actual encoded size (in bits) of the sequences-section header +
-/// payload for a given (LL, ML, OF) table triple: modes byte, ncount
-/// headers for FSE tables, and the FSE bitstream written with those
-/// ctables. Measurement, not estimation — the entropy approximation
-/// regressed small streams by a byte.
-#[allow(clippy::too_many_arguments)]
-/// Estimate FSE payload cost (in bits) for a given distribution.
+/// Entropy-model cost (in bits) of a table candidate over a symbol
+/// histogram: Σ count[s] · log2(table_size / p_s). C's
+/// ZSTD_selectEncodingType decides with this model and never
+/// simulates the state walk. The exact simulation is kept for small
+/// blocks (< MODELS_MIN_SEQS), where it is cheap and preserves the
+/// historical small-stream bytes.
 fn estimate_cost(count: &[u32], norm: &[i16], table_log: u8, max_sym: u8) -> u64 {
     let table_size = 1u64 << table_log;
     let mut total_bits = 0u64;
