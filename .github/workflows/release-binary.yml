@@ -44,6 +44,10 @@ jobs:
     outputs:
       tag: ${{ steps.tag.outputs.tag }}
     steps:
+      - uses: actions/checkout@v4
+        # the no-input fallback resolves the latest tag via
+        # `git ls-remote origin`, which needs the origin remote
+        # (missing without a checkout)
       - id: tag
         run: |
           if [ -n "${{ inputs.tag }}" ]; then
